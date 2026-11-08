@@ -2,8 +2,8 @@
  *  @file test/tiny_checkpoint.cpp
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief Writes a seeded, tiny but structurally complete UForm checkpoint, so the C suite and the bindings
- *      load a real tower on any machine without a training run.
+ *  @brief Writes a seeded, tiny but structurally complete UForm checkpoint, so the C suite and the
+ *      bindings load a real tower on any machine without a training run.
  *
  *  The checkpoint is safetensors in BFloat16: every tensor the tower reads, under the names
  *  training saves, and the full geometry in the safetensors metadata with every value a string. The
@@ -127,7 +127,8 @@ int main(int argc, char **argv) {
         offset = end;
     }
     header += '}';
-    // Readers align the payload to 8 bytes, and the format pads the header with spaces to get there.
+    // Readers align the payload to 8 bytes, and the format pads the header with spaces
+    // to get there.
     while (header.size() % 8) header += ' ';
 
     std::vector<std::uint16_t> payload;

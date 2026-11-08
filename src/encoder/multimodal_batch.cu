@@ -6,9 +6,9 @@
  *      @ref fill_coords ) and the batch mixer's routing bijection and two exchange kernels —
  *      compiled once into the @c uform_train library.
  *
- *  Everything stays on the GPU: peer addresses travel as kernel arguments, and every kernel re-derives its
- *  routes in-register from the keyed bijection, so the mixer owns no memory at all; the coordinate adapter
- *  is equally a pure enqueue.
+ *  Everything stays on the GPU: peer addresses travel as kernel arguments, and every kernel
+ *  re-derives its routes in-register from the keyed bijection, so the mixer owns no memory at all;
+ *  the coordinate adapter is equally a pure enqueue.
  */
 #include "uform/encoder/multimodal_batch.cuh"
 
@@ -182,13 +182,13 @@ struct batch_sources_t_ {
  *  permutation, and identical on every GPU so routing needs no exchange), records every mixed
  *  segment's world source into @p mixed_sources for the gather pass, and jumps the cursor past any
  *  row boundary a segment would cross. The routing granularity is the segment when
- *  @p max_bags_per_gpu is zero and the @b bag otherwise, over a world axis of @c max_bags·world
- *  bags: a source bag's live segments (the contiguous run tagged with its index) land together, its
- *  anchors in a trailing band after every other role's segments, and @p mixed_bags renumbers them
- *  to the destination-local bag. A bag that would overflow the destination rectangle or the segment
- *  table is dropped @b whole — never split — so a surviving bag is always intact; the packer's
- *  budgets make any drop a bug, not a case. Answers how many live segments found no room, every
- *  lane alike.
+ *  @p max_bags_per_gpu is zero and the @b bag otherwise, over a world axis of @c max_bags · world
+ *  bags: a source bag's live segments (the contiguous run tagged with its index) land together,
+ *  its anchors in a trailing band after every other role's segments, and @p mixed_bags renumbers
+ *  them to the destination-local bag. A bag that would overflow the destination rectangle or the
+ *  segment table is dropped @b whole — never split — so a surviving bag is always intact; the
+ *  packer's budgets make any drop a bug, not a case. Answers how many live segments found no room,
+ *  every lane alike.
  *
  *  Empty @p mixed_offsets and @p mixed_bags route a destination for its lengths and sources
  *  alone, the way @ref batch_world_geometry_kernel_ derives every other GPU's mix, which lands
@@ -206,8 +206,8 @@ static __device__ u32_t route_destination_(sources_type_ const &sources, u32r1_s
     u32_t cursor = 0, dropped = 0;
 
     if (max_bags_per_gpu == 0u) {
-        // Per-segment routing — the masked pipeline's degenerate case: one segment per bag, the world
-        // axis is the segment axis, and every destination claims exactly one source.
+        // Per-segment routing — the masked pipeline's degenerate case: one segment per bag, the
+        // world axis is the segment axis, and every destination claims exactly one source.
         std::size_t const world_segments = static_cast<std::size_t>(segments_per_gpu) * sources.count;
         for (u32_t segment = 0; segment != segments_per_gpu; ++segment) {
             std::size_t const destination = static_cast<std::size_t>(member_index) * segments_per_gpu + segment;
@@ -290,7 +290,8 @@ static __device__ u32_t route_destination_(sources_type_ const &sources, u32r1_s
         }
     }
     if (!leader) return dropped;
-    // The unclaimed tail is PAD: zero length, no source, and the one-past-the-last-bag `end` sentinel.
+    // The unclaimed tail is PAD: zero length, no source, and the
+    // one-past-the-last-bag `end` sentinel.
     u32_t const end = trail_segments != 0u ? trail_begin + trail_cursor : lead_cursor;
     for (u32_t segment = lead_segments + trail_segments; segment != segments_per_gpu; ++segment) {
         if (lands) mixed_offsets[segment] = end, mixed_bags[segment] = max_bags_per_gpu;
@@ -327,8 +328,8 @@ static __global__ void batch_geometry_kernel_(sources_type_ sources, u32r1_span_
  *      @b [world_gpus,segments_per_gpu] , since every GPU routes from the same loaded batches
  *      through the same keyed bijection.
  *
- *  __grid_size__ @c [world_gpus,1,1] of one warp each; CTA @c g routes world GPU @c g ; no dynamic
- *  shared memory.
+ *  __grid_size__ @c [world_gpus,1,1] of one warp each; CTA @c g routes world GPU @c g ; no
+ *  dynamic shared memory.
  */
 template <typename sources_type_>
 static __global__ void batch_world_geometry_kernel_(sources_type_ sources, u32r2_span_t world_lengths,
@@ -343,9 +344,9 @@ static __global__ void batch_world_geometry_kernel_(sources_type_ sources, u32r2
 }
 
 /**
- *  @brief Gather one routed segment: CTA @c s reads route @c s 's world source from the geometry pass's
- *      @p mixed_sources table (with variable-degree bags a destination's source is not derivable per
- *      segment).
+ *  @brief Gather one routed segment: CTA @c s reads route @c s 's world source from the geometry
+ *      pass's @p mixed_sources table (with variable-degree bags a destination's source is not
+ *      derivable per segment).
  *
  *  It copies the peer's per-segment descriptors ( @ref batch_source_t_::segment_modality , the
  *  role, prefix, key and side, the choice and target rows, and the image / video @c *_shapes rows —
@@ -356,7 +357,8 @@ static __global__ void batch_world_geometry_kernel_(sources_type_ sources, u32r2
  *  interaction that makes no choice and carries nothing, and every PAD is keyless. The destination
  *  geometry is what @ref batch_geometry_kernel_ wrote.
  *
- *  __grid_size__ @c [segments_per_gpu,1,1] , threads stripe the content run; no dynamic shared memory.
+ *  __grid_size__ @c [segments_per_gpu,1,1] , threads stripe the content run; no
+ *  dynamic shared memory.
  */
 template <typename sources_type_>
 static __global__ void batch_gather_kernel_(sources_type_ sources, batch_dest_t_ dest, u32r1_view_t mixed_offsets,
@@ -380,7 +382,8 @@ static __global__ void batch_gather_kernel_(sources_type_ sources, batch_dest_t_
     batch_source_t_ const &peer = sources[source / segments_per_gpu];
     u32_t const source_segment = source % segments_per_gpu;
 
-    // Descriptors travel for every routed segment, PAD included, so the mixed batch stays fully typed.
+    // Descriptors travel for every routed segment, PAD included, so the mixed batch
+    // stays fully typed.
     if (threadIdx.x == 0u) {
         if (!dest.segment_modality.empty() && !peer.segment_modality.empty())
             dest.segment_modality[segment] = peer.segment_modality[source_segment];
@@ -450,9 +453,9 @@ static __global__ void batch_world_keys_kernel_(sources_type_ sources, u32r2_vie
 }
 
 /** The sixteen batch tensors, in their fixed block-serialization order — the index into a
- *  @ref batch_block_layout_t_ . A fixed family, so it is an enum, not a run of constants; every GPU
- *  shares one shape, so the order (and thus every landing's byte layout) is identical across
- *  multimem_domains. */
+ *  @ref batch_block_layout_t_ . A fixed family, so it is an enum, not a run of constants;
+ *  every GPU shares one shape, so the order (and thus every landing's byte layout) is
+ *  identical across multimem_domains. */
 enum batch_block_tensor_t_ : u32_t {
     block_segment_offsets_k = 0,
     block_segment_lengths_k = 1,
@@ -480,9 +483,9 @@ static constexpr u32_t block_tensor_count_k = block_segment_choice_targets_k + 1
  *      cache-line-aligned byte offset and a byte count per tensor, packed back to back in
  *      @ref batch_block_tensor_t_ order.
  *
- *  A dead modality (its content tensor unallocated) still gets an offset but a zero byte count, so it
- *  contributes nothing and its offset is never dereferenced. @ref total_bytes is the whole block — the
- *  @c block_scalars an @c infiniband_all_gather<b8_t> is wired with.
+ *  A dead modality (its content tensor unallocated) still gets an offset but a zero byte count, so
+ *  it contributes nothing and its offset is never dereferenced. @ref total_bytes is the whole block
+ *  — the @c block_scalars an @c infiniband_all_gather<b8_t> is wired with.
  */
 struct batch_block_layout_t_ {
 
@@ -518,8 +521,8 @@ struct batch_block_layout_t_ {
     layout.byte_counts[block_segment_offsets_k] = (segments + 1u) * sizeof(u32_t);
     layout.byte_counts[block_segment_lengths_k] = segments * sizeof(u32_t);
     layout.byte_counts[block_segment_modality_k] = segments * sizeof(modality_t);
-    // The bag column rides the block even when bags are off (the layout is fixed shape math) — those
-    // bytes are dead on the masked path and small: one u32 per segment.
+    // The bag column rides the block even when bags are off (the layout is fixed shape math) —
+    // those bytes are dead on the masked path and small: one u32 per segment.
     layout.byte_counts[block_segment_bag_k] = segments * sizeof(u32_t);
     layout.byte_counts[block_segment_role_k] = segments * sizeof(segment_role_t);
     layout.byte_counts[block_segment_prefix_length_k] = segments * sizeof(u32_t);
@@ -577,9 +580,10 @@ static batch_source_t_ source_from_loaded_(multimodal_batch_on_gpu_t const &load
     return source;
 }
 
-/** Every world GPU's packed batch in the multimem_domain's symmetric windows: world GPU @c domain·members+member
- *  is block @c domain of that member's window. Resolved arithmetically in-kernel, so no table bounds the world;
- *  a dead modality's zero-byte region reads as null, exactly as the gather kernels expect. */
+/** Every world GPU's packed batch in the multimem_domain's symmetric windows: world GPU @c domain ·
+ *  members+member is block @c domain of that member's window. Resolved arithmetically in-kernel, so
+ *  no table bounds the world; a dead modality's zero-byte region reads as null, exactly as the
+ *  gather kernels expect. */
 struct batch_windows_t_ {
     b8_t const *first_window = nullptr; // device-boundary
     std::size_t member_stride = 0;
@@ -628,9 +632,9 @@ struct block_copy_t_ {
 };
 
 /** Serialize a member's loaded batch into its outgoing block: one device → device copy per live
- *  tensor into that tensor's shared block offset, enqueued on @p stream ahead of the exchange. A dead
- *  modality's zero-byte tensor (and any null source) is skipped; the landing's source view nulls the same
- *  modality, so those bytes are never read. */
+ *  tensor into that tensor's shared block offset, enqueued on @p stream ahead of the exchange. A
+ *  dead modality's zero-byte tensor (and any null source) is skipped; the landing's source view
+ *  nulls the same modality, so those bytes are never read. */
 static expected_t pack_batch_into_block_(multimodal_batch_on_gpu_t const &loaded, b8r1_span_t destination,
                                          batch_block_layout_t_ const &layout, gpu_stream_t &stream) noexcept {
     block_copy_t_ const copies[block_tensor_count_k] = {
@@ -654,8 +658,9 @@ static expected_t pack_batch_into_block_(multimodal_batch_on_gpu_t const &loaded
     for (block_copy_t_ const &copy : copies) {
         std::size_t const bytes = layout.byte_count(copy.tensor);
         if (bytes == 0u || copy.source == nullptr) continue;
-        // vendor-boundary: device → device pack of one batch tensor into its block region — the tensors' `data()`
-        // pointers are raw CUdeviceptr sources, not views, so the driver copy is spelled by hand here.
+        // vendor-boundary: device → device pack of one batch tensor into its block region — the
+        // tensors' `data()` pointers are raw CUdeviceptr sources, not views, so the driver copy is
+        // spelled by hand here.
         CUdeviceptr const target = device_address(destination.data() + layout.offset(copy.tensor));
         CUdeviceptr const source = device_address(copy.source);
         if (CUresult packed = cuMemcpyDtoDAsync(target, source, bytes, stream.get()); packed != CUDA_SUCCESS)
@@ -842,12 +847,12 @@ expected_t multimodal_batch_mixer_t::operator()(std::size_t local, data_epoch_t 
         if (!packed) return packed;
     }
 
-    // The step's first barrier orders "everyone loaded" before any peer read; the round is the member's
-    // own, self-advanced inside the barrier kernel.
+    // The step's first barrier orders "everyone loaded" before any peer read; the round is the
+    // member's own, self-advanced inside the barrier kernel.
     if (expected_t arrived = multimem_->barrier(member_index, stream); !arrived) return arrived;
 
-    // The routing destination is this member's world coordinate — the multimem_domains claim disjoint
-    // destination ranges in the members·domains world (a single domain's base is 0).
+    // The routing destination is this member's world coordinate — the multimem_domains claim
+    // disjoint destination ranges in the members·domains world (a single domain's base is 0).
     u32_t const gpu_index_in_colocated_domain = first_gpu_index_in_colocated_domain_ + static_cast<u32_t>(member_index);
     u32r2_span_t const world_lengths = world_lengths_[local].span(), world_sources = world_sources_[local].span();
     u64r2_span_t const world_keys = world_keys_[local].span();

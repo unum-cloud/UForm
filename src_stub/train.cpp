@@ -2,12 +2,12 @@
  *  @file src_stub/train.cpp
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief A stand-in for the @c uform_mesh_* and @c uform_trainer_* C ABI, where training needs a GPU this
- *      library never carries.
+ *  @brief A stand-in for the @c uform_mesh_* and @c uform_trainer_* C ABI, where training needs a
+ *      GPU this library never carries.
  *
- *  The constructors refuse with @c uform_status_device_k, as the engine does on a machine without NVIDIA
- *  devices, so no mesh or trainer handle ever exists here; the verbs taking one refuse a null handle, and the
- *  frees stay callable. The names answer as the engine's do.
+ *  The constructors refuse with @c uform_status_device_k, as the engine does on a machine without
+ *  NVIDIA devices, so no mesh or trainer handle ever exists here; the verbs taking one refuse a
+ *  null handle, and the frees stay callable. The names answer as the engine's do.
  */
 #include "lib.hpp"
 

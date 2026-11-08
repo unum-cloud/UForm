@@ -1,7 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = []
-# ///
 """Thin, cuDF-free reader over the per-mixture training JSONs (one flat `scripts/mixtures/<mixture>.json`).
 
 A mixture JSON is the language-neutral recipe both Python acquisition and C++ training read: a weighted
@@ -18,23 +14,35 @@ view (`dataset_spec`, `dataset_glob`, `dataset_columns`, `dataset_media_column`)
 across every mixture it appears in, asserting the declared column fields agree, and supplies the column
 contract the `acquire` assert and `acquire_manifest` / `mine_hard_negatives` read. Stdlib `json` + `glob`
 only, so importing it stays cheap enough that those tools read it instead of re-inlining glob strings.
+
+File: scripts/data/mixtures.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
 
 import json
 from functools import cache
 from pathlib import Path
 
-#: The repo root a relative `glob` anchors under, and the `scripts/mixtures/` directory holding the mixture JSONs.
+#: The repo root a relative `glob` anchors under, and the `scripts/mixtures/` directory holding
+#: the mixture JSONs.
 project_root = Path(__file__).resolve().parents[2]
 mixtures_dir = project_root / "scripts" / "mixtures"
 
-#: The dataset-entry keys whose VALUES are actual parquet column names; their union is a dataset's column
-#: contract. `text` is the MLM document column; the other four are the contrastive relation columns.
+#: The dataset-entry keys whose VALUES are actual parquet column names; their union is a
+#: dataset's column contract. `text` is the MLM document column; the other four are the
+#: contrastive relation columns.
 column_fields = ("text", "anchor", "positive", "negative", "media")
 
-#: Per-mixture (not per-dataset) keys, excluded from the cross-mixture agreement check in `dataset_spec`: the
-#: draw share, and the optional `epochs` cap, the most passes over the dataset's rows a run draws before the
-#: trainer retires it and spreads its weight over the live datasets of its modality.
+#: Per-mixture (not per-dataset) keys, excluded from the cross-mixture agreement check in
+#: `dataset_spec`: the draw share, and the optional `epochs` cap, the most passes over the
+#: dataset's rows a run draws before the trainer retires it and spreads its weight over the live
+#: datasets of its modality.
 _per_mixture_dataset_keys = ("weight", "epochs")
 
 

@@ -1,3 +1,10 @@
+"""Download FineWiki: 325-language Wikipedia MLM corpus (`text`) used by text_masked.
+
+File: scripts/data/download_finewiki.py
+Author: Ash Vardanian
+Date: July 5, 2026
+"""
+
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -5,11 +12,11 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download FineWiki: 325-language Wikipedia MLM corpus (`text`) used by text_masked."""
 from acquire import acquire
 
 if __name__ == "__main__":
-    # Per-language `data/<code>wiki/*.parquet` shards already carry a `text` column — pure passthrough.
+    # Per-language `data/<code>wiki/*.parquet` shards already carry a `text` column
+    # — pure passthrough.
     raise SystemExit(
         acquire(
             "finewiki_i18n",

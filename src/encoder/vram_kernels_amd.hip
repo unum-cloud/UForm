@@ -2,9 +2,9 @@
  *  @file src/encoder/vram_kernels_amd.hip
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief The AMD kernels of the tower steps NumKong has no kernel for, compiled device-only by
- *      HIP-Clang into the @c uform_encoder_amd bundle, which @c vram_entries_amd.cpp launches by
- *      name.
+ *  @brief The AMD kernels of the tower steps NumKong has no kernel for, compiled device-only
+ *      by HIP-Clang into the @c uform_encoder_amd bundle, which @c vram_entries_amd.cpp
+ *      launches by name.
  *
  *  The HIP twin of @c vram_kernels_nvidia.cu , kernel for kernel: every kernel runs a body of
  *  @ref tower_kernels.cuh , the one the training kernels run, with NumKong's SIMT conversions,

@@ -1,3 +1,10 @@
+"""Download Civil Comments: real toxic/benign comments into a flat safety schema (`text`).
+
+File: scripts/data/download_civil_comments.py
+Author: Ash Vardanian
+Date: July 5, 2026
+"""
+
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -5,12 +12,12 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download Civil Comments: real toxic/benign comments into a flat safety schema (`text`)."""
 import pyarrow as pa
 import pyarrow.compute as pc
 from acquire import acquire
 
-#: A continuous `toxicity` annotator fraction at or above this is labelled toxic (the standard 0.5 cut).
+#: A continuous `toxicity` annotator fraction at or above this is labelled toxic (the
+#: standard 0.5 cut).
 _TOXIC_THRESHOLD = 0.5
 
 

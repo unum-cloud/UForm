@@ -6,9 +6,9 @@
  *
  *  Two artifacts every step loop keys on:
  *
- *      1. @ref gpu_stream_t — a move-only owning wrapper over a real (non-null) @c CUstream , holding the
- *         device's primary context retained, so ordering is explicit and capture is legal (stream capture
- *         rejects the legacy null stream).
+ *      1. @ref gpu_stream_t — a move-only owning wrapper over a real (non-null) @c CUstream ,
+ *         holding the device's primary context retained, so ordering is explicit and capture is
+ *         legal (stream capture rejects the legacy null stream).
  *      2. @ref unum::uform::utilities::gpu_replay_graph_t — the capture-once / replay-forever
  *         contract: @c make captures a body of kernel launches into a @c CUgraph , instantiates it,
  *         uploads the executable, and keeps only that; every later step is one @c cuGraphLaunch
@@ -16,10 +16,10 @@
  *
  *  @section schedule_contract The capture contract
  *
- *  A captured body must be a pure enqueue program: no host synchronization, no device-to-host reads, and
- *  @b no allocation. Per-step host-varying values travel through device memory the body reads at replay
- *  (learnable scalars, staged relation columns) — never through re-captured code. The
- *  contract is enforced, not trusted: after capture the graph's nodes are walked, and any
+ *  A captured body must be a pure enqueue program: no host synchronization, no device-to-host
+ *  reads, and @b no allocation. Per-step host-varying values travel through device memory the body
+ *  reads at replay (learnable scalars, staged relation columns) — never through re-captured code.
+ *  The contract is enforced, not trusted: after capture the graph's nodes are walked, and any
  *  allocation / free node is a @b loud failure — an allocating body escapes every arena budget and
  *  deadlocks device-local multi-GPU worlds at first launch, and there is no correct fallback.
  *
@@ -30,23 +30,24 @@
  *
  *  @section schedule_regions The captured region is model math only
  *
- *  A captured graph holds @b model math only — entry / embedding, the block stack, the final RMSNorm, the
- *  @b local loss, and backward. The distributed work — cross-GPU loss exchange, the gradient reduce, the
- *  @ref unum::uform::utilities::barrier_round_t barriers, and the optimizer's world step — is
- *  @b never fused into it; it is its own region the parent scope sequences after the model region.
- *  UForm is a distributed-loss training stack, so a monolithic all-in-one graph welds the pure math
- *  to world state, and the round, the reduce, and the loss exchange can no longer be reasoned about
- *  — or replayed — independently. Forward and backward stay together (one contiguous, shape-stable
- *  computation); the only boundary is model-vs-collective.
+ *  A captured graph holds @b model math only — entry / embedding, the block stack, the final
+ *  RMSNorm, the @b local loss, and backward. The distributed work — cross-GPU loss exchange, the
+ *  gradient reduce, the @ref unum::uform::utilities::barrier_round_t barriers, and the optimizer's
+ *  world step — is @b never fused into it; it is its own region the parent scope sequences after
+ *  the model region. UForm is a distributed-loss training stack, so a monolithic all-in-one graph
+ *  welds the pure math to world state, and the round, the reduce, and the loss exchange can no
+ *  longer be reasoned about — or replayed — independently. Forward and backward stay together (one
+ *  contiguous, shape-stable computation); the only boundary is model-vs-collective.
  *
  *  @section schedule_fork Multi-GPU capture — fork / join
  *
- *  Launching one graph per GPU serializes at the driver when the bodies touch shared resources, and
- *  serialized launches deadlock the moment rank 0 parks at a cross-rank barrier its peers never reach.
- *  The multi-stream @c make therefore records @b one graph across all ranks: the trunk stream
- *  records a fork event, every branch stream waits only on the fork (never on a sibling, so branch
- *  kernels stay mutually independent and co-resident at replay), and the trunk joins on every branch
- *  before ending the capture. One @c cuGraphLaunch then makes every rank's work resident together.
+ *  Launching one graph per GPU serializes at the driver when the bodies touch shared resources,
+ *  and serialized launches deadlock the moment rank 0 parks at a cross-rank barrier its peers
+ *  never reach. The multi-stream @c make therefore records @b one graph across all ranks: the
+ *  trunk stream records a fork event, every branch stream waits only on the fork (never on a
+ *  sibling, so branch kernels stay mutually independent and co-resident at replay), and the trunk
+ *  joins on every branch before ending the capture. One @c cuGraphLaunch then makes every rank's
+ *  work resident together.
  */
 #pragma once
 
@@ -104,9 +105,10 @@ struct differentiable_weights_t {
 /**
  *  @brief A move-only owning wrapper over a real (non-null) @c CUstream on one device.
  *
- *  Creation retains the device's primary context and creates the stream inside it, so a caller never
- *  juggles contexts to use the stream; destruction destroys the stream and releases the retained context.
- *  Non-blocking by default: an explicit stream never implicitly synchronizes with the legacy stream.
+ *  Creation retains the device's primary context and creates the stream inside it, so a caller
+ *  never juggles contexts to use the stream; destruction destroys the stream and releases the
+ *  retained context. Non-blocking by default: an explicit stream never implicitly synchronizes with
+ *  the legacy stream.
  */
 struct gpu_stream_t {
 
@@ -214,12 +216,12 @@ template <typename value_type_>
     return {};
 }
 
-/** The mirror of @ref unum::uform::utilities::copy_host_to_device : enqueue a device → host copy of
- *  a rank-1 view into a same-typed host span on @p stream — the typed spelling of
+/** The mirror of @ref unum::uform::utilities::copy_host_to_device : enqueue a device → host copy
+ *  of a rank-1 view into a same-typed host span on @p stream — the typed spelling of
  *  @c cuMemcpyDtoHAsync , device source first, host destination second, which converts from a
- *  @c std::span as the source names the type. An empty @p device_source is a no-op; a source longer
- *  than the destination is a loud failure. The host span must stay alive until the stream reaches
- *  the copy. */
+ *  @c std::span as the source names the type. An empty @p device_source is a no-op; a source
+ *  longer than the destination is a loud failure. The host span must stay alive until the stream
+ *  reaches the copy. */
 template <typename value_type_>
 [[nodiscard]] inline expected_t copy_device_to_host(
     nk::tensor_view<value_type_, 1> device_source,
@@ -256,8 +258,8 @@ template <typename value_type_>
     return {};
 }
 
-/** Enqueue zeroing every scalar of the contiguous device @p destination on @p stream — the typed spelling of
- *  @c cuMemsetD8Async . A strided @p destination is a loud failure. */
+/** Enqueue zeroing every scalar of the contiguous device @p destination on @p stream — the typed
+ *  spelling of @c cuMemsetD8Async . A strided @p destination is a loud failure. */
 template <typename value_type_, std::size_t rank_>
 [[nodiscard]] inline expected_t zero_async(nk::tensor_span<value_type_, rank_> destination,
                                            gpu_stream_t &stream) noexcept {
@@ -271,7 +273,8 @@ template <typename value_type_, std::size_t rank_>
     return {};
 }
 
-/** The NumKong C ABI spelling of BFloat16 @p scalars — the one place UForm's CUDA scalar becomes NumKong's. */
+/** The NumKong C ABI spelling of BFloat16 @p scalars — the one place UForm's CUDA
+ *  scalar becomes NumKong's. */
 [[nodiscard]] inline nk_bf16_t const *numkong_scalars(bf16_t const *scalars) noexcept {
     return reinterpret_cast<nk_bf16_t const *>(scalars);
 }
@@ -288,8 +291,8 @@ template <typename value_type_, std::size_t rank_>
 
 #pragma region Numerics
 
-/** NumKong's per-capability kernel shapes the training engine calls, where they take typed
- *  scalars. */
+/** NumKong's per-capability kernel shapes the training engine calls, where they
+ *  take typed scalars. */
 using dots_pack_bf16_kernel_t = nk_status_t (*)(nk_bf16_t const *b, nk_size_t columns, nk_size_t depth,
                                                 nk_size_t b_stride, void *b_packed, nk_size_t columns_begin,
                                                 nk_size_t columns_end, nk_stream_t stream);
@@ -425,8 +428,8 @@ template <typename... arg_types_>
 
 /**
  *  @brief Launch a compiled-in kernel through the Driver API — the checked replacement for the
- *      triple-chevron syntax, which returns no error code, fails silently on impossible configurations,
- *      and drags a hidden CUDA Runtime dependency behind every launch.
+ *      triple-chevron syntax, which returns no error code, fails silently on impossible
+ *      configurations, and drags a hidden CUDA Runtime dependency behind every launch.
  *
  *  The case against the triple-chevron syntax: https://ashvardanian.com/posts/less-wrong-cuda-hello-world/
  *
@@ -438,8 +441,8 @@ template <typename... arg_types_>
  *  Arguments bind by const reference (temporaries included — the driver copies their bytes out
  *  before returning), and every argument's type must match the kernel's parameter type @b exactly:
  *  the driver copies raw bytes, so the implicit conversions a triple-chevron call would perform do
- *  not apply — convert spans to views at the call site. @ref launch_function launches what a loaded
- *  module resolved.
+ *  not apply — convert spans to views at the call site. @ref launch_function launches what a
+ *  loaded module resolved.
  */
 template <typename... arg_types_>
 [[nodiscard]] inline expected_t launch_kernel(void const *kernel_symbol, dim3 grid_size, dim3 block_size,
@@ -450,9 +453,9 @@ template <typename... arg_types_>
     return launch_function(function, grid_size, block_size, stream, args...);
 }
 
-/** The typed spelling of @ref launch_kernel : takes the @c __global__ function itself, so every argument
- *  converts to its parameter's exact type before the driver copies its bytes — spans become views, and an
- *  argument no parameter accepts fails to compile. */
+/** The typed spelling of @ref launch_kernel : takes the @c __global__ function itself, so every
+ *  argument converts to its parameter's exact type before the driver copies its bytes — spans
+ *  become views, and an argument no parameter accepts fails to compile. */
 template <typename... parameter_types_>
 [[nodiscard]] inline expected_t launch_kernel(void (*kernel)(parameter_types_...), dim3 grid_size, dim3 block_size,
                                               gpu_stream_t &stream,
@@ -461,14 +464,16 @@ template <typename... parameter_types_>
 }
 
 /**
- *  @brief The BFloat16 matrix transpose @c destination=sourceᵀ , tiled 64x64 through shared memory with 16-byte
- *      global accesses on both sides; either operand may be a strided view into a wider buffer.
+ *  @brief The BFloat16 matrix transpose @c destination=sourceᵀ , tiled 64x64 through shared
+ *      memory with 16-byte global accesses on both sides; either operand may be a strided view
+ *      into a wider buffer.
  *
- *  Each thread loads two neighbouring source rows, so the pair packs into 32-bit words that make the transposed
- *  rows contiguous in shared memory. Edge tiles are masked, and operands whose pointers or row strides are not
- *  16-byte multiples fall back to element accesses.
+ *  Each thread loads two neighbouring source rows, so the pair packs into 32-bit words that make
+ *  the transposed rows contiguous in shared memory. Edge tiles are masked, and operands whose
+ *  pointers or row strides are not 16-byte multiples fall back to element accesses.
  *
- *  Launches a @c [ceil(columns/64),ceil(rows/64),1] grid of @c [256,1,1] blocks with 8.4 KB of static shared memory.
+ *  Launches a @c [ceil(columns/64),ceil(rows/64),1] grid of @c [256,1,1] blocks with 8.4 KB of
+ *  static shared memory.
  */
 __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destination);
 
@@ -495,7 +500,8 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
 [[nodiscard]] expected<std::size_t> pack_bytes_bf16(std::size_t columns, std::size_t depth,
                                                     gpu_numerics_t const &numerics) noexcept;
 
-/** Allocate off @p arena a buffer for the NumKong pack of a @b [columns,depth] BFloat16 B operand. */
+/** Allocate off @p arena a buffer for the NumKong pack of a @b [columns,depth]
+ *  BFloat16 B operand. */
 [[nodiscard]] expected<b8r1_tensor_arena_t> allocate_pack_bf16(std::size_t columns, std::size_t depth,
                                                                gpu_numerics_t const &numerics,
                                                                gpu_arena_t &arena) noexcept;
@@ -505,8 +511,9 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
 [[nodiscard]] expected_t pack_bf16(bf16r2_view_t b, b8r1_span_t packed, gpu_numerics_t const &numerics,
                                    gpu_stream_t &stream) noexcept;
 
-/** Enqueue the Float32 product @c c=a·Bᵀ against @p packed_b , the pack of a @b [columns,depth] B with
- *  @c columns=c.extent(1) and @c depth=a.extent(1) . NumKong products replay bit-identically. */
+/** Enqueue the Float32 product @c c=a · Bᵀ against @p packed_b , the pack of a
+ *  @b [columns,depth] B with @c columns=c.extent(1) and @c depth=a.extent(1) . NumKong
+ *  products replay bit-identically. */
 [[nodiscard]] expected_t multiply_bf16(bf16r2_view_t a, b8r1_view_t packed_b, f32r2_span_t c,
                                        gpu_numerics_t const &numerics, gpu_stream_t &stream) noexcept;
 
@@ -514,32 +521,32 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
  *  @brief Pack @p weight @b [outputs,inputs] as the B operand of its forward product into @p packed , and its
  *      transpose, staged in @p transposed with rows padded to 8 for NumKong's 16-byte stride rule, as that of its
  *      data gradient into @p packed_transposed . Call once per optimizer step, after the weights change.
- *  @param[in] transposed At least @c inputs·round_up(outputs,8) scalars of scratch.
+ *  @param[in] transposed At least @c inputs · round_up(outputs,8) scalars of scratch.
  */
 [[nodiscard]] expected_t pack_weight_bf16(bf16r2_view_t weight, bf16r1_span_t transposed, b8r1_span_t packed,
                                           b8r1_span_t packed_transposed, gpu_numerics_t const &numerics,
                                           gpu_stream_t &stream) noexcept;
 
 /** The workspace bytes @ref weight_gradient_bf16 takes for a @b [outputs,inputs] weight over
- *  @p tokens under @p numerics , where NumKong splits the token depth into slices it sums in a
- *  fixed order. */
+ *  @p tokens under @p numerics , where NumKong splits the token depth into slices it sums in
+ *  a fixed order. */
 [[nodiscard]] expected<std::size_t> weight_gradient_workspace_bytes_bf16(std::size_t outputs, std::size_t inputs,
                                                                          std::size_t tokens,
                                                                          gpu_numerics_t const &numerics) noexcept;
 
 /**
- *  @brief One weight gradient @c dW=dYᵀ·X : transposes @p output_grad and @p input with token rows padded to 8,
- *      since NumKong reads A row-major and packs B row-major, multiplies @c dYᵀ by the packed @c Xᵀ , and narrows
- *      the Float32 product into @p weight_grad .
+ *  @brief One weight gradient @c dW=dYᵀ · X : transposes @p output_grad and @p input with token
+ *      rows padded to 8, since NumKong reads A row-major and packs B row-major, multiplies @c dYᵀ
+ *      by the packed @c Xᵀ , and narrows the Float32 product into @p weight_grad .
  *  @param[in] output_grad @b [tokens,outputs] the product's BFloat16 output gradient.
  *  @param[in] input @b [tokens,inputs] the product's forward A operand.
  *  @param[out] weight_grad @b [outputs,inputs] the contiguous BFloat16 weight gradient.
  *  @param[in] transposed_grad,transposed_input At least @c outputs·round_up(tokens,8) and
  *      @c inputs·round_up(tokens,8) scalars of scratch.
  *  @param[in] packed_input At least @ref pack_bytes_bf16 of @c [inputs,tokens] .
- *  @param[in] product At least @c outputs·inputs Float32 scalars of scratch.
- *  @param[in] workspace At least @ref weight_gradient_workspace_bytes_bf16 , or empty for the
- *      unsplit product.
+ *  @param[in] product At least @c outputs · inputs Float32 scalars of scratch.
+ *  @param[in] workspace At least @ref weight_gradient_workspace_bytes_bf16 , or empty for
+ *      the unsplit product.
  *  @param[in,out] stream The stream every launch enqueues on.
  */
 [[nodiscard]] expected_t weight_gradient_bf16(bf16r2_view_t output_grad, bf16r2_view_t input, bf16r2_span_t weight_grad,
@@ -548,14 +555,14 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
                                               gpu_numerics_t const &numerics, gpu_stream_t &stream) noexcept;
 
 /**
- *  @brief All-lanes-get-the-total shuffle sum of one warp — the fixed-order tree every deterministic
- *      reduction in the cell builds on.
+ *  @brief All-lanes-get-the-total shuffle sum of one warp — the fixed-order tree every
+ *      deterministic reduction in the cell builds on.
  *
- *  Hand-rolled rather than @c cub::WarpReduce deliberately: the XOR-shuffle butterfly already delivers
- *  the total to @b every lane with zero shared memory, while CUB's warp reduction returns the total in
- *  lane 0 only and asks for a @c TempStorage — the broadcast we need back costs exactly the shuffle we
- *  started with. CUB stays the tool for the primitives it genuinely owns (device-wide sorts, scans,
- *  @c LowerBound ).
+ *  Hand-rolled rather than @c cub::WarpReduce deliberately: the XOR-shuffle butterfly already
+ *  delivers the total to @b every lane with zero shared memory, while CUB's warp reduction returns
+ *  the total in lane 0 only and asks for a @c TempStorage — the broadcast we need back costs
+ *  exactly the shuffle we started with. CUB stays the tool for the primitives it genuinely owns
+ *  (device-wide sorts, scans, @c LowerBound ).
  */
 [[nodiscard]] __device__ inline f32_t warp_reduce_broadcast(f32_t value) noexcept {
     for (unsigned delta = warp_size_k / 2u; delta != 0u; delta /= 2u)
@@ -609,11 +616,11 @@ enum capture_t : u32_t {
  *  @brief The capture-once / replay-forever graph: @c make turns a body of enqueues into one
  *      uploaded @c CUgraphExec , and every later step is a single @c cuGraphLaunch .
  *
- *  Move-only, and @b always launchable when it exists: construction captures, enforces the no-allocation
- *  contract, instantiates, destroys the source graph, and uploads the executable on the capture stream —
- *  there is no half-built state to query and no deferred work hiding behind the first launch. The capture
- *  body is a template parameter returning @ref expected_t — no type-erased callable, no heap, no
- *  exceptions.
+ *  Move-only, and @b always launchable when it exists: construction captures, enforces the
+ *  no-allocation contract, instantiates, destroys the source graph, and uploads the executable on
+ *  the capture stream — there is no half-built state to query and no deferred work hiding behind
+ *  the first launch. The capture body is a template parameter returning @ref expected_t — no
+ *  type-erased callable, no heap, no exceptions.
  */
 struct gpu_replay_graph_t {
 
@@ -634,9 +641,10 @@ struct gpu_replay_graph_t {
     /**
      *  @brief Capture @p body 's enqueues on the single @p stream into a replay-ready executable.
      *
-     *  @param[in] stream A real (non-null) stream; the legacy null stream cannot capture. The executable
-     *      is also uploaded on it before returning.
-     *  @param[in] body A callable returning @ref expected_t whose only effect is enqueuing onto @p stream .
+     *  @param[in] stream A real (non-null) stream; the legacy null stream cannot capture. The
+     *      executable is also uploaded on it before returning.
+     *  @param[in] body A callable returning @ref expected_t whose only effect is enqueuing onto
+     *      @p stream .
      */
     template <typename body_type_>
     [[nodiscard]] static expected<gpu_replay_graph_t> make(CUstream stream, body_type_ &&body) noexcept {
@@ -660,14 +668,16 @@ struct gpu_replay_graph_t {
     }
 
     /**
-     *  @brief Capture a multi-GPU step across @p streams into @b one replay-ready executable — the fork /
-     *      join topology from the file header, keeping every rank's kernels co-resident at replay.
+     *  @brief Capture a multi-GPU step across @p streams into @b one replay-ready executable —
+     *      the fork / join topology from the file header, keeping every rank's kernels
+     *      co-resident at replay.
      *
-     *  @param[in] streams One real stream per rank; @c streams[0] is the trunk that begins and ends the
-     *      capture and carries the upload. Each stream may live on a different device; peer access must
-     *      already be wired.
-     *  @param[in] body A callable invoked once per rank as @c body(rank) returning @ref expected_t ,
-     *      enqueuing rank-local work onto @c streams[rank] . Branch bodies must not depend on each other.
+     *  @param[in] streams One real stream per rank; @c streams[0] is the trunk that begins and ends
+     *      the capture and carries the upload. Each stream may live on a different device; peer
+     *      access must already be wired.
+     *  @param[in] body A callable invoked once per rank as @c body(rank) returning
+     *      @ref expected_t , enqueuing rank-local work onto @c streams[rank] . Branch bodies must
+     *      not depend on each other.
      */
     template <typename body_type_>
     [[nodiscard]] static expected<gpu_replay_graph_t> make(std::span<CUstream const> streams,
@@ -763,8 +773,9 @@ struct gpu_replay_graph_t {
         return expected<gpu_replay_graph_t> {std::move(replay)};
     }
 
-    /** The no-allocation contract, enforced: any allocation / free node in the captured graph is a
-     *  loud failure — it escapes the arena budget and deadlocks device-local multi-GPU first launch. */
+    /** The no-allocation contract, enforced: any allocation / free node in the captured
+     *  graph is a loud failure — it escapes the arena budget and deadlocks device-local
+     *  multi-GPU first launch. */
     [[nodiscard]] static expected_t guard_alloc_nodes_(CUgraph graph) noexcept {
         std::size_t node_count = 0;
         if (CUresult result = cuGraphGetNodes(graph, nullptr, &node_count); result != CUDA_SUCCESS)
@@ -856,12 +867,12 @@ struct gpu_event_t {
  *  @brief The monotonic step counter of one collective surface — the device round scalar @b is
  *      the count, and it is the sole source of truth (no host shadow, no pinned cell).
  *
- *  One behavior: @ref advance enqueues a one-thread device increment, @c round += increment followed by a
- *  @c __threadfence_system() , once per step on the surface's lead stream before any barrier.
- *  Because the bump lives on the device, a captured collective region self-advances the round
- *  on every @c cuGraphLaunch replay with no host intervention. The scalar is seeded @c 0u-increment
- *  at @c make so the first advance yields round 0. Counts never reset; a replayed barrier's target
- *  only grows.
+ *  One behavior: @ref advance enqueues a one-thread device increment, @c round += increment
+ *  followed by a @c __threadfence_system() , once per step on the surface's lead stream before any
+ *  barrier. Because the bump lives on the device, a captured collective region self-advances the
+ *  round on every @c cuGraphLaunch replay with no host intervention. The scalar is seeded
+ *  @c 0u-increment at @c make so the first advance yields round 0. Counts never reset; a replayed
+ *  barrier's target only grows.
  */
 struct barrier_round_t {
 
@@ -873,16 +884,19 @@ struct barrier_round_t {
 
     /**
      *  @brief Seed the device round scalar — once, at setup, with a current context.
-     *  @param[in] device_round The one-scalar device destination, borrowed for this object's lifetime.
+     *  @param[in] device_round The one-scalar device destination, borrowed for
+     *      this object's lifetime.
      *  @param[in] increment How far one step advances the count (a member count, a round count).
-     *  @param[in] stream The lead stream the seed is enqueued on, ordered before the first @ref advance.
+     *  @param[in] stream The lead stream the seed is enqueued on, ordered before the
+     *      first @ref advance.
      */
     [[nodiscard]] static expected<barrier_round_t> make(u32r1_span_t device_round, u32_t increment,
                                                         gpu_stream_t &stream) noexcept {
         barrier_round_t counter;
         counter.device_round_ = device_round;
         counter.increment_ = increment;
-        // Seed one increment below zero so the first advance yields round 0 (device is the sole source of truth).
+        // Seed one increment below zero so the first advance yields round 0 (device is the sole
+        // source of truth).
         if (CUresult result = cuMemsetD32Async(device_address(device_round.data()), 0u - increment, 1, stream.get());
             result != CUDA_SUCCESS)
             return cuda_failure<barrier_round_t>(result, "round seed failed");
@@ -895,7 +909,8 @@ struct barrier_round_t {
 
   private:
 
-    /** The borrowed one-scalar device destination the barriers spin against and @ref advance bumps. */
+    /** The borrowed one-scalar device destination the barriers spin against and
+     *  @ref advance bumps. */
     u32r1_span_t device_round_ {};
 
     /** One step's advance — the arrivals a barrier waits for. */
@@ -903,13 +918,13 @@ struct barrier_round_t {
 };
 
 /**
- *  @brief For this scope, the calling thread switches to @p stream 's GPU — and switches back at scope
- *      end.
+ *  @brief For this scope, the calling thread switches to @p stream 's GPU — and switches back
+ *      at scope end.
  *
- *  The Driver API needs a current context for every allocation, module load, and launch, and
- *  one process drives many GPUs from one thread, so per-device work must enter that device's
- *  context for its duration; the context comes from the object that already owns it (the stream),
- *  never from a separate retain path. Check @ref ok() before relying on the scope.
+ *  The Driver API needs a current context for every allocation, module load, and launch, and one
+ *  process drives many GPUs from one thread, so per-device work must enter that device's context
+ *  for its duration; the context comes from the object that already owns it (the stream), never
+ *  from a separate retain path. Check @ref ok() before relying on the scope.
  */
 struct switch_to_gpu_t {
     explicit switch_to_gpu_t(gpu_stream_t &stream) noexcept : ok_(cuCtxPushCurrent(stream.context()) == CUDA_SUCCESS) {}
@@ -926,12 +941,12 @@ struct switch_to_gpu_t {
     bool ok_ = false;
 };
 
-/** The unifying shape across the collective tiers — a typed handle bundling specialized symmetric memory
- *  with an enqueue-only collective op. Every buffer names its element type and is invocable on a stream
- *  (multimem or infiniband); the per-buffer typed memory accessors ( @c payload / @c own_block /
- *  @c send_block / @c recv_block ) expose the specialized memory. Each buffer @c static_assert s it, so a
- *  drifted signature fails at compile time and generic code (mixer, telemetry, tests) can name any collective
- *  uniformly. */
+/** The unifying shape across the collective tiers — a typed handle bundling specialized symmetric
+ *  memory with an enqueue-only collective op. Every buffer names its element type and is invocable
+ *  on a stream (multimem or infiniband); the per-buffer typed memory accessors ( @c payload /
+ *  @c own_block / @c send_block / @c recv_block ) expose the specialized memory. Each buffer
+ *  @c static_assert s it, so a drifted signature fails at compile time and generic code (mixer,
+ *  telemetry, tests) can name any collective uniformly. */
 template <typename buffer_type_>
 concept collective_buffer = requires(buffer_type_ buffer, gpu_stream_t &stream) {
     typename buffer_type_::value_type;

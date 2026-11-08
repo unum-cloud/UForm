@@ -5,8 +5,8 @@
  *  @brief Host image decoding: triage a compressed blob, decode it to RGBA, and Lanczos-resize its
  *      center crop into the batch's patch layout.
  *
- *  JPEG decodes through libjpeg-turbo's TurboJPEG, PNG through libpng and WebP through libwebp, all to interleaved RGBA, JPEG
- *  with a constant @c 255 alpha. The RAM and AMD executors run the whole
+ *  JPEG decodes through libjpeg-turbo's TurboJPEG, PNG through libpng and WebP through libwebp, all
+ *  to interleaved RGBA, JPEG with a constant @c 255 alpha. The RAM and AMD executors run the whole
  *  @ref unum::uform::media::decode_image ; the NVIDIA loader takes only
  *  @ref unum::uform::media::probe_image and @ref unum::uform::media::decode_image_rgba for the
  *  blobs nvJPEG cannot, and resizes on the device with NPP.
@@ -43,8 +43,9 @@ using pixel_image_span_t = nk::tensor_span<pixel_t, 3>;
 /** A read-only @b [height,width,4] RGBA picture, the source of @ref resize_image . */
 using pixel_image_view_t = nk::tensor_view<pixel_t, 3>;
 
-/** A patch-arranged pixel grid @b [rows,columns,patch_side,patch_side,channels] . For one image it is the
- *  @c rows·columns cells of its segment, which sit contiguously in a batch row in exactly this order. */
+/** A patch-arranged pixel grid @b [rows,columns,patch_side,patch_side,channels] . For one image
+ *  it is the @c rows · columns cells of its segment, which sit contiguously in a batch row in
+ *  exactly this order. */
 using pixel_patches_span_t = nk::tensor_span<pixel_t, 5>;
 
 /** The compressed formats a blob can be, decided by its magic bytes. */
@@ -110,8 +111,8 @@ struct image_plan_t {
 /**
  *  @brief Decode one blob to interleaved RGBA at @p out 's extent.
  *
- *  PNG and WebP must decode at their native extent. A JPEG lands on @p out exactly through the @c 1/2ᵏ DCT scale
- *  whose output matches it, so a plan's @c decoded extent fits.
+ *  PNG and WebP must decode at their native extent. A JPEG lands on @p out exactly through the
+ *  @c 1/2ᵏ DCT scale whose output matches it, so a plan's @c decoded extent fits.
  *
  *  @param[in] encoded The whole compressed blob.
  *  @param[in] format The blob's format, from @ref unum::uform::media::probe_image .
@@ -124,8 +125,9 @@ struct image_plan_t {
                                            pixel_image_span_t out) noexcept;
 
 /**
- *  @brief Crop @p source to the aspect of @p out 's patch grid, Lanczos-3 resize it to @c (columns·P,rows·P) , and
- *      write the result patch by patch, as the NVIDIA loader's NPP resize and tile kernel do.
+ *  @brief Crop @p source to the aspect of @p out 's patch grid, Lanczos-3 resize it to
+ *  @c (columns · P,rows · P) , and write the result patch by patch, as the NVIDIA loader's NPP
+ *      resize and tile kernel do.
  *
  *  @param[in] source The decoded @b [height,width,4] picture.
  *  @param[out] out The image's @b [rows,columns,P,P,4] cells.

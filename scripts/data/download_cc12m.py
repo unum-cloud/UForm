@@ -1,3 +1,10 @@
+"""Download CC-12M: 12M Common-Crawl (image, caption) WebDataset tar shards -> canonical parquet.
+
+File: scripts/data/download_cc12m.py
+Author: Ash Vardanian
+Date: July 5, 2026
+"""
+
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -7,7 +14,6 @@
 #     "xxhash",
 # ]
 # ///
-"""Download CC-12M: 12M Common-Crawl (image, caption) WebDataset tar shards -> canonical parquet."""
 
 import pyarrow as pa
 from acquire import acquire

@@ -10,10 +10,11 @@
  *  to @ref unum::uform::media::decode_video_frames , a libavcodec decode that scales each kept
  *  frame to the planned grid with libswscale.
  *
- *  Both paths convert BT.601 limited-range YCbCr to full-range RGB, whatever the stream signals. They differ in
- *  the details: NVDEC's scaler resizes NV12 and the conversion kernel reads one chroma sample per 2×2 block, while
- *  libswscale scales bilinearly from the decoder's own format, interpolates chroma, and rounds in fixed point, so
- *  pixels agree to within a few levels rather than exactly.
+ *  Both paths convert BT.601 limited-range YCbCr to full-range RGB, whatever the stream signals.
+ *  They differ in the details: NVDEC's scaler resizes NV12 and the conversion kernel reads one
+ *  chroma sample per 2×2 block, while libswscale scales bilinearly from the decoder's own
+ *  format, interpolates chroma, and rounds in fixed point, so pixels agree to within a few
+ *  levels rather than exactly.
  */
 #pragma once
 
@@ -36,12 +37,13 @@ using uu::u8_t;
 /** The channels every decoded video pixel carries — interleaved RGB. */
 inline constexpr u32_t video_channels_k = 3u;
 
-/** A segment's tube cells @b [temporal_groups,patch_rows·patch_columns,tube_frames,patch_side,patch_side,3] , which
- *  sit contiguously in a batch row in exactly this order. */
+/** A segment's tube cells
+ *  @b [temporal_groups,patch_rows·patch_columns,tube_frames,patch_side,patch_side,3] , which sit
+ *  contiguously in a batch row in exactly this order. */
 using pixel_tubes_span_t = nk::tensor_span<pixel_t, 6>;
 
-/** The elementary-stream codecs a container can carry; contiguous from @c h264_k so a cast indexes a per-codec
- *  table. */
+/** The elementary-stream codecs a container can carry; contiguous from @c h264_k so a cast indexes
+ *  a per-codec table. */
 enum class video_codec_t : u8_t { h264_k = 0, h265_k, vp9_k, av1_k, mpeg2_k, mpeg4_k, vc1_k };
 
 /** Count of @ref video_codec_t enumerators. */
@@ -69,10 +71,11 @@ struct demuxed_t {
 };
 
 /**
- *  @brief Demux one container's bytes in memory, through a custom AVIO context, into its video stream's packets,
- *      passing H.264 and H.265 through the @c *_mp4toannexb bitstream filters.
+ *  @brief Demux one container's bytes in memory, through a custom AVIO context, into its video
+ *      stream's packets, passing H.264 and H.265 through the @c *_mp4toannexb bitstream filters.
  *
- *  A raw Annex-B input passes through as one packet with its codec sniffed from the first NAL header.
+ *  A raw Annex-B input passes through as one packet with its codec sniffed from the
+ *  first NAL header.
  *
  *  @param[in] container The clip's container or raw elementary-stream bytes.
  *
@@ -85,9 +88,9 @@ struct demuxed_t {
 /**
  *  @brief Decode @p clip in software and scatter its sampled frames into a segment's tube cells.
  *
- *  Displayed frame @c (tg·tube_frames+t)·frame_stride becomes tube frame @c t of temporal group @c tg , as the
- *  NVIDIA tile kernel samples, each scaled to @c (patch_columns·P,patch_rows·P) and converted to RGB. Frames a short
- *  clip lacks stay zero.
+ *  Displayed frame @c (tg · tube_frames+t) · frame_stride becomes tube frame @c t of temporal group
+ *  @c tg , as the NVIDIA tile kernel samples, each scaled to @c (patch_columns · P,patch_rows · P)
+ *  and converted to RGB. Frames a short clip lacks stay zero.
  *
  *  @param[in] clip The demuxed clip.
  *  @param[in] grid The segment's factorization, from @ref unum::uform::media::video_tube_grid .

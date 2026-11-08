@@ -2,19 +2,19 @@
  *  @file c/uform/train.h
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief Training steps of the UForm C interface: multimodal batches in, masked reconstruction and pairwise
- *      contrastive losses joined into one optimizer step, checkpoints out.
+ *  @brief Training steps of the UForm C interface: multimodal batches in, masked reconstruction and
+ *      pairwise contrastive losses joined into one optimizer step, checkpoints out.
  *
- *  A @c uform_trainer_t owns everything a run keeps between steps on its executor's devices: one replica of
- *  the tower per device, its gradients, the Adafactor moments, the reconstruction heads, the learnable
- *  temperatures, and the collectives joining the replicas across the mesh. Training is GPU-only, so the one
- *  constructor is @c uform_trainer_init_vram, and one @c uform_trainer_step is one optimizer step: forward,
- *  losses, backward, the world gradient reduction, and the update.
+ *  A @c uform_trainer_t owns everything a run keeps between steps on its executor's devices: one
+ *  replica of the tower per device, its gradients, the Adafactor moments, the reconstruction heads,
+ *  the learnable temperatures, and the collectives joining the replicas across the mesh. Training
+ *  is GPU-only, so the one constructor is @c uform_trainer_init_vram, and one @c uform_trainer_step
+ *  is one optimizer step: forward, losses, backward, the world gradient reduction, and the update.
  *
  *  @section train_objectives Objectives
  *
- *  The two losses the engine implements join additively at the final-norm states, so a joint step carries
- *  @c L = L_contrastive + Σ λ·L_masked exactly:
+ *  The two losses the engine implements join additively at the final-norm states, so a joint step
+ *  carries @c L = L_contrastive + Σ λ · L_masked exactly:
  *
  *      Objective     Scores                                    Against
  *      masked        byte cross-entropy for text, normalized   the clean copy of the batch the step
@@ -24,16 +24,16 @@
  *                    of every Matryoshka prefix of the         ignore edges between items, and ambient
  *                    pooled embeddings                         repulsion for every unnamed pair
  *
- *  The contrastive loss is a sum over independent pairs with no softmax normalization, so it spans the whole
- *  mesh: every item of the step repels every unnamed item of every process, while each device moves only its
- *  own embeddings and their forces.
+ *  The contrastive loss is a sum over independent pairs with no softmax normalization, so it spans
+ *  the whole mesh: every item of the step repels every unnamed item of every process, while each
+ *  device moves only its own embeddings and their forces.
  *
  *  @section train_batches Batches
  *
- *  A step takes this process's share of the global batch as items: one encoded file or UTF-8 text each,
- *  tagged with its modality, packed into fixed-width rows on the executor's devices and shuffled across the
- *  mesh before the forward. Items sharing a bag travel together. Relations index the step's own items; the
- *  library rebases them onto the global axis after the shuffle.
+ *  A step takes this process's share of the global batch as items: one encoded file or UTF-8 text
+ *  each, tagged with its modality, packed into fixed-width rows on the executor's devices and
+ *  shuffled across the mesh before the forward. Items sharing a bag travel together. Relations
+ *  index the step's own items; the library rebases them onto the global axis after the shuffle.
  *
  *  @section train_paths Paths
  *
@@ -136,8 +136,9 @@ typedef struct uform_audio_shape_t {
     size_t sample_rate;
 } uform_audio_shape_t;
 
-/** What one device's step carries at most, whatever the modality mix: capacity fixed at creation, with
- *  padding through the data. Text always takes part; a media modality takes part when its slice is live. */
+/** What one device's step carries at most, whatever the modality mix: capacity fixed at creation,
+ *  with padding through the data. Text always takes part; a media modality takes part when its
+ *  slice is live. */
 typedef struct uform_batch_shape_t {
 
     /** Rows one device's step packs. */
@@ -184,7 +185,8 @@ UFORM_EXPORT char const* uform_objective_name(uform_objective_t objective);
 /** Reads an objective back; @c uform_objective_masked_k when unrecognized. */
 UFORM_EXPORT uform_objective_t uform_objective_from_name(uform_bytes_view_t name);
 
-/** How the masked objective corrupts a batch and weighs its heads; every zero derives the default named. */
+/** How the masked objective corrupts a batch and weighs its heads; every zero derives
+ *  the default named. */
 typedef struct uform_masking_t {
 
     /** Fraction of text positions covered by spans; 0.15. */
@@ -247,8 +249,8 @@ typedef enum uform_pair_loss_form_t {
     /** The sigmoid cross-entropy of every cell, its attract and repel halves normalized apart. */
     uform_pair_loss_form_balanced_k = 1,
 
-    /** The sigmoid cross-entropy of every positive's score over every negative's, where the bias
-     *  cancels. */
+    /** The sigmoid cross-entropy of every positive's score over every negative's, where
+     *  the bias cancels. */
     uform_pair_loss_form_ranked_k = 2,
 
     /** SigLIP's sigmoid cross-entropy of every cell, each repel weighed like an attract. */
@@ -258,8 +260,8 @@ typedef enum uform_pair_loss_form_t {
 /** How the contrastive loss scores the pooled embeddings; every zero derives the default named. */
 typedef struct uform_contrastive_t {
 
-    /** The @b optional Matryoshka prefix widths, strictly ascending, each a multiple of 8, at most 8 of them,
-     *  every one scored; @c NULL scores the full width alone. Copied, not borrowed. */
+    /** The @b optional Matryoshka prefix widths, strictly ascending, each a multiple of 8, at most
+     *  8 of them, every one scored; @c NULL scores the full width alone. Copied, not borrowed. */
     size_t const* matryoshka_dimensions;
 
     /** Entries in @c matryoshka_dimensions. */
@@ -268,8 +270,8 @@ typedef struct uform_contrastive_t {
     /** Learnable (inverse temperature, bias) pairs, one per group a step's items select; one. */
     size_t temperature_groups;
 
-    /** The starting inverse temperature of every group; 10 under the sigmoid form, SigLIP's,
-     *  else 1. */
+    /** The starting inverse temperature of every group; 10 under the sigmoid form,
+     *  SigLIP's, else 1. */
     float inverse_temperature;
 
     /** The starting logit bias of every group; −10 under the sigmoid form, SigLIP's, else zero. */
@@ -338,10 +340,10 @@ typedef enum uform_late_interaction_side_t {
     uform_late_interaction_side_query_and_document_k = 3,
 } uform_late_interaction_side_t;
 
-/** SearchJev's calibrated choices over the byte decoder, the masked head's untied byte logits read
- *  at a mask byte appended to a state and restricted to the item's legal bytes. Each choice item
- *  scores @c −Σt·log(p) + brier_weight·Σ(p−t)², with @c p that restricted softmax and @c t its
- *  targets. */
+/** SearchJev's calibrated choices over the byte decoder, the masked head's untied byte logits
+ *  read at a mask byte appended to a state and restricted to the item's legal bytes. Each choice
+ *  item scores @c −Σt · log(p) + brier_weight · Σ(p − t)², with @c p that restricted softmax and
+ *  @c t its targets. */
 typedef struct uform_choices_t {
 
     /** The loss weight; zero trains no choices. */
@@ -376,11 +378,12 @@ typedef struct uform_mesh_options_t {
     /** Processes in the run, one per host; zero derives one, a run with no peers. */
     size_t host_domain_count;
 
-    /** GPUs one NVLink multicast domain spans, a fabric property no local probe sees; zero derives the host. */
+    /** GPUs one NVLink multicast domain spans, a fabric property no local probe sees; zero
+     *  derives the host. */
     size_t gpus_per_multimem_domain;
 
-    /** The path of the directory every host sees, where processes exchange their facts; required
-     *  with peers. */
+    /** The path of the directory every host sees, where processes exchange their facts;
+     *  required with peers. */
     uform_bytes_view_t directory;
 
     /** The run's unique name, naming one directory inside @c directory; required with peers. */
@@ -394,10 +397,11 @@ typedef struct uform_mesh_options_t {
  *  @brief One process's place among the processes of a run: the topology every process agreed on at
  *      bootstrap, and the InfiniBand domain joining its NVLink domains.
  *
- *  The process-wide half of a run's transport, made once and borrowed by every trainer, so no consumer wires
- *  its own adapters. The NVLink multicast domain is not here: its size is the sum of what its consumers
- *  reserve, so each trainer makes its own over the mesh's devices. Bootstrap is a one-time rendezvous through
- *  files in @c directory; after it, processes talk only over NVLink and InfiniBand.
+ *  The process-wide half of a run's transport, made once and borrowed by every trainer, so no
+ *  consumer wires its own adapters. The NVLink multicast domain is not here: its size is the sum
+ *  of what its consumers reserve, so each trainer makes its own over the mesh's devices. Bootstrap
+ *  is a one-time rendezvous through files in @c directory; after it, processes talk only over
+ *  NVLink and InfiniBand.
  */
 typedef struct uform_mesh_handle_t* uform_mesh_t;
 
@@ -413,15 +417,17 @@ typedef struct uform_mesh_bootstrap_t {
     /** Output for the outcome, final once its status leaves @c uform_status_deferred_k. */
     uform_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. Peers wait for each other either way. */
+    /** Whether the call blocks or returns once queued; zero blocks. Peers wait for each
+     *  other either way. */
     uform_completion_t completion;
 
     /** Where this process sits and how the processes meet. */
     uform_mesh_options_t options;
 } uform_mesh_bootstrap_t;
 
-/** Joins this process to the run's mesh; every process of the run calls it with the same count, multicast
- *  extent, directory, job and GPU class, or the call reports @c uform_status_config_mismatch_k. */
+/** Joins this process to the run's mesh; every process of the run calls it with
+ *  the same count, multicast extent, directory, job and GPU class, or the call
+ *  reports @c uform_status_config_mismatch_k. */
 UFORM_EXPORT void uform_mesh_bootstrap(uform_mesh_bootstrap_t* arguments);
 
 /** How a mesh's NVLink domains reduce. */
@@ -430,7 +436,8 @@ typedef enum uform_multimem_tier_t {
     /** The NVLink switch reduces through multicast memory. */
     uform_multimem_tier_switch_reduced_k = 0,
 
-    /** Every member reads its peers in a fixed order, where multicast is absent; bit-identical results. */
+    /** Every member reads its peers in a fixed order, where multicast is
+     *  absent; bit-identical results. */
     uform_multimem_tier_peer_read_k = 1,
 } uform_multimem_tier_t;
 
@@ -449,7 +456,8 @@ typedef struct uform_mesh_description_t {
     /** This process's index among the run's processes. */
     size_t host_domain_index;
 
-    /** The run-wide index of this process's first GPU, where its share of a sharded dataset begins. */
+    /** The run-wide index of this process's first GPU, where its share of a
+     *  sharded dataset begins. */
     size_t first_gpu_index;
 
     /** How its NVLink domains reduce. */
@@ -475,18 +483,19 @@ typedef struct uform_mesh_describe_t {
 /** Reports a mesh's shape and this process's place in it. */
 UFORM_EXPORT void uform_mesh_describe(uform_mesh_describe_t* arguments);
 
-/** Leaves the mesh; @c NULL is safe, and it cannot fail, so takes no outcome. Every trainer borrowing it must
- *  be freed first. */
+/** Leaves the mesh; @c NULL is safe, and it cannot fail, so takes no outcome. Every trainer
+ *  borrowing it must be freed first. */
 UFORM_EXPORT void uform_mesh_free(uform_mesh_t mesh);
 
-/** The canonical spelling of a multimem tier, as @c uform_multimem_tier_peer_read_k spells "peer-read". */
+/** The canonical spelling of a multimem tier, as
+ *  @c uform_multimem_tier_peer_read_k spells "peer-read". */
 UFORM_EXPORT char const* uform_multimem_tier_name(uform_multimem_tier_t tier);
 
 /** Reads a multimem tier back; @c uform_multimem_tier_switch_reduced_k when unrecognized. */
 UFORM_EXPORT uform_multimem_tier_t uform_multimem_tier_from_name(uform_bytes_view_t name);
 
-/** A training run: the tower replicas, gradients, optimizer moments, heads, temperatures and the collectives
- *  sized by them, on the executor's devices. */
+/** A training run: the tower replicas, gradients, optimizer moments, heads, temperatures and the
+ *  collectives sized by them, on the executor's devices. */
 typedef struct uform_trainer_handle_t* uform_trainer_t;
 
 /** The arguments of @c uform_trainer_init_vram. */
@@ -501,7 +510,8 @@ typedef struct uform_trainer_init_vram_t {
     /** Output for the outcome, final once its status leaves @c uform_status_deferred_k. */
     uform_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. Peers wait for each other either way. */
+    /** Whether the call blocks or returns once queued; zero blocks. Peers wait for each
+     *  other either way. */
     uform_completion_t completion;
 
     /** The @b optional path of the checkpoint to continue from, at its saved step; empty starts
@@ -520,7 +530,8 @@ typedef struct uform_trainer_init_vram_t {
     /** Which losses a step relaxes. */
     uform_objective_t objective;
 
-    /** The masked objective's corruption and weights, read unless the objective is contrastive alone. */
+    /** The masked objective's corruption and weights, read unless the objective
+     *  is contrastive alone. */
     uform_masking_t masking;
 
     /** The contrastive loss's scoring, read unless the objective is masked alone. */
@@ -536,8 +547,8 @@ typedef struct uform_trainer_init_vram_t {
     /** The learning-rate schedule. */
     uform_schedule_t schedule;
 
-    /** The @b optional mesh, borrowed until the trainer is freed and made over this same executor; @c NULL
-     *  runs this process alone. */
+    /** The @b optional mesh, borrowed until the trainer is freed and made over this same executor;
+     *  @c NULL runs this process alone. */
     uform_mesh_t mesh;
 
     /** The base of every keyed draw: initialization, corruption and the shuffle. */
@@ -547,27 +558,29 @@ typedef struct uform_trainer_init_vram_t {
     uform_progress_t progress;
 } uform_trainer_init_vram_t;
 
-/** Builds one replica per device, the NVLink domain its consumers reserve over the mesh, and starts or
- *  resumes the run; every process of the run calls it with the same geometry, objective and seed. */
+/** Builds one replica per device, the NVLink domain its consumers reserve over the mesh, and
+ *  starts or resumes the run; every process of the run calls it with the same geometry,
+ *  objective and seed. */
 UFORM_EXPORT void uform_trainer_init_vram(uform_trainer_init_vram_t* arguments);
 
 /** One edge set over a step's items, as compressed sparse rows. */
 typedef struct uform_edges_view_t {
 
-    /** The step's @c count + 1 non-decreasing offsets into @c ids, in host memory; @c NULL names no edges. */
+    /** The step's @c count + 1 non-decreasing offsets into @c ids, in host memory; @c NULL
+     *  names no edges. */
     size_t const* offsets;
 
-    /** Item @c i links to items @c ids[offsets[i]] up to @c ids[offsets[i+1]], indices into the step's items,
-     *  ascending within each run. */
+    /** Item @c i links to items @c ids[offsets[i]] up to @c ids[offsets[i+1]], indices into the
+     *  step's items, ascending within each run. */
     uint32_t const* ids;
 
     /** The @b optional weight of each edge, paired with @c ids; @c NULL weighs every edge one. */
     float const* weights;
 } uform_edges_view_t;
 
-/** The contrastive targets of one step, resolved per pair in this order: a pair @c ignore names is skipped,
- *  one @c attract names pulls together, one @c repel names pushes apart, and every other pair follows the
- *  run's @c negatives. */
+/** The contrastive targets of one step, resolved per pair in this order: a pair @c ignore names is
+ *  skipped, one @c attract names pulls together, one @c repel names pushes apart, and every other
+ *  pair follows the run's @c negatives. */
 typedef struct uform_relations_view_t {
 
     /** Pairs pulled together. */
@@ -640,21 +653,21 @@ typedef struct uform_trainer_step_t {
      *  @c uform_status_shape_mismatch_k. */
     size_t count;
 
-    /** The modality of each item, @c count of them in host memory; a modality the run left out reports
-     *  @c uform_status_unsupported_k. */
+    /** The modality of each item, @c count of them in host memory; a modality the run left out
+     *  reports @c uform_status_unsupported_k. */
     uform_modality_t const* modalities;
 
-    /** The items' bytes, one entry each, of @c uform_scalar_u8_k: UTF-8 text or an encoded file,
-     *  as @c modalities tags it. One tape mixes the modalities, so it is not the encode verbs'
-     *  @c texts. */
+    /** The items' bytes, one entry each, of @c uform_scalar_u8_k: UTF-8 text or an encoded
+     *  file, as @c modalities tags it. One tape mixes the modalities, so it is not the encode
+     *  verbs' @c texts. */
     uform_tape_view_t contents;
 
-    /** The @b optional bag of each item, @c count of them in host memory; items sharing a bag land on one
-     *  device. @c NULL keeps every item its own bag. */
+    /** The @b optional bag of each item, @c count of them in host memory; items sharing a bag land
+     *  on one device. @c NULL keeps every item its own bag. */
     uint32_t const* bags;
 
-    /** The @b optional temperature group of each item, @c count of them in host memory, each below the run's
-     *  @c temperature_groups; @c NULL puts every item in group zero. */
+    /** The @b optional temperature group of each item, @c count of them in host memory, each below
+     *  the run's @c temperature_groups; @c NULL puts every item in group zero. */
     uint32_t const* temperature_groups;
 
     /** The @b optional late-interaction side of each item, @c count of them in host memory;
@@ -673,12 +686,12 @@ typedef struct uform_trainer_step_t {
      *  @c choices, summing to one. Read with @c choices. */
     uform_tape_view_t choice_targets;
 
-    /** The contrastive targets, read unless the objective is masked alone; a contrastive step naming no
-     *  attract edge reports @c uform_status_invalid_argument_k. */
+    /** The contrastive targets, read unless the objective is masked alone; a contrastive step
+     *  naming no attract edge reports @c uform_status_invalid_argument_k. */
     uform_relations_view_t relations;
 
-    /** The @b optional output for the pooled embedding of every item, as the contrastive loss scored it
-     *  before the update, inside @c arena; @c NULL skips the copy. */
+    /** The @b optional output for the pooled embedding of every item, as the contrastive loss
+     *  scored it before the update, inside @c arena; @c NULL skips the copy. */
     uform_rows_view_t* embeddings;
 
     /** Memory for @c embeddings, rewound by the call. */
@@ -691,8 +704,8 @@ typedef struct uform_trainer_step_t {
     uform_trainer_step_stats_t* stats;
 } uform_trainer_step_t;
 
-/** Applies one optimizer step over this process's items and every peer's; every process of the run calls
- *  it once per step. */
+/** Applies one optimizer step over this process's items and every peer's; every process of the run
+ *  calls it once per step. */
 UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t* arguments);
 
 /** The arguments of @c uform_trainer_save. */
@@ -717,12 +730,13 @@ typedef struct uform_trainer_save_t {
     uform_progress_t progress;
 } uform_trainer_save_t;
 
-/** Writes the weights and the step, which @c uform_model_load_vram and its siblings serve and
- *  @c uform_trainer_init_vram resumes; only the process of index zero writes, the rest return at once. */
+/** Writes the weights and the step, which @c uform_model_load_vram and its siblings serve
+ *  and @c uform_trainer_init_vram resumes; only the process of index zero writes, the rest
+ *  return at once. */
 UFORM_EXPORT void uform_trainer_save(uform_trainer_save_t* arguments);
 
-/** Frees a trainer and leaves the mesh; @c NULL is safe, and it cannot fail, so takes no outcome. Every call
- *  using it must be final. */
+/** Frees a trainer and leaves the mesh; @c NULL is safe, and it cannot fail, so takes no outcome.
+ *  Every call using it must be final. */
 UFORM_EXPORT void uform_trainer_free(uform_trainer_t trainer);
 
 #ifdef __cplusplus

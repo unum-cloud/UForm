@@ -1,7 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = []
-# ///
 """Catalog validator for the six per-mixture training JSONs — stdlib only, no cuDF / pyarrow.
 
 The mixture JSONs (`scripts/mixtures/{text_masked,text_contrastive,image_contrastive,video_contrastive,audio_contrastive,omni_multilingual}.json`)
@@ -20,7 +16,16 @@ Run as a script for a PASS summary:
     uv run scripts/data/test_mixtures.py
 Or under pytest (every `test_*` function below is an independent case):
     python -m pytest scripts/data/test_mixtures.py
+
+File: scripts/data/test_mixtures.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
 
 import json
 import re
@@ -28,7 +33,8 @@ from pathlib import Path
 
 import mixtures
 
-#: `scripts/data/` holds the `download_*.py` scripts; the mixture JSONs sit beside it in `scripts/mixtures/`.
+#: `scripts/data/` holds the `download_*.py` scripts; the mixture JSONs sit beside
+#: it in `scripts/mixtures/`.
 pkg_dir = Path(__file__).resolve().parent
 
 #: The six mixtures whose JSONs form the column contract; the file basename is `<name>.json`.
@@ -41,11 +47,13 @@ expected_mixtures = (
     "omni_multilingual",
 )
 
-#: The dataset-entry keys whose values are actual parquet column names (mirrors `mixtures.column_fields`).
+#: The dataset-entry keys whose values are actual parquet column
+#: names (mirrors `mixtures.column_fields`).
 column_fields = ("text", "anchor", "positive", "negative", "media")
 
-#: A mixture dataset name -> its `download_<stem>.py` stem, where the two differ. Every other name is its
-#: own stem. These are the acquisition-script renames (config suffix dropped, hyphen/underscore normalized).
+#: A mixture dataset name -> its `download_<stem>.py` stem, where the two differ. Every
+#: other name is its own stem. These are the acquisition-script renames (config suffix
+#: dropped, hyphen/underscore normalized).
 download_aliases = {
     "poj_104": "poj104",
     "code_contests": "codecontests",
@@ -60,7 +68,8 @@ download_aliases = {
     "msmarco_triplet50": "msmarco",
 }
 
-#: Relative tolerance when reporting how far a mixture's weights sum from 1.0 (informational, not asserted).
+#: Relative tolerance when reporting how far a mixture's weights sum from 1.0
+#: (informational, not asserted).
 weight_sum_tolerance = 0.1
 
 
@@ -114,7 +123,8 @@ def _acquired_via_text_pairs(glob: str) -> bool:
     return data_subdir is not None and data_subdir in _text_pairs_dirs()
 
 
-# Checks: each is an independent pytest case, and each is also called by `main` for the PASS summary.
+# Checks: each is an independent pytest case, and each is also called by `main` for
+# the PASS summary.
 
 
 def test_mixture_files_load() -> None:

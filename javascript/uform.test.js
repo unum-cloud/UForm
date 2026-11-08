@@ -1,6 +1,7 @@
-// The binding suite: the Node addon first, then the WebAssembly module under Node, both over whichever C library the
-// build linked. The checkpoint is the one `UFORM_TEST_CHECKPOINT` names, or else stand-in bytes only the stub loads, so
-// widths come from the model's description and only text, where every byte is a token, pins exact token counts.
+// The binding suite: the Node addon first, then the WebAssembly module under Node, both over
+// whichever C library the build linked. The checkpoint is the one `UFORM_TEST_CHECKPOINT` names, or
+// else stand-in bytes only the stub loads, so widths come from the model's description and only
+// text, where every byte is a token, pins exact token counts.
 const test = require("node:test");
 const assert = require("node:assert");
 const fs = require("node:fs");
@@ -74,7 +75,8 @@ function wav(samples = 1600) {
   return wav;
 }
 
-// Embeddings the addon computed, which the WebAssembly module must reproduce up to the rounding its own kernels add.
+// Embeddings the addon computed, which the WebAssembly module must reproduce up to the rounding its
+// own kernels add.
 const reference = {};
 
 function assertReproduces(row, expected) {
@@ -179,7 +181,8 @@ test("receivers choose completion and the verb stays: blocking and deferred agre
   assert.strictEqual(call.status, Status.Success);
   assert.deepStrictEqual(Array.from(awaited.embeddings.data), reference.hello);
   assert.strictEqual(call.wait(), awaited);
-  // A packed tape whose offsets are as wide as `size_t` is lent, so the deferred call holds both arrays.
+  // A packed tape whose offsets are as wide as `size_t` is lent, so the deferred call
+  // holds both arrays.
   const tape = { data: new TextEncoder().encode("hello"), offsets: BigUint64Array.of(0n, 5n) };
   const lent = await model.deferred(executor).textEncode(tape, arena);
   assert.deepStrictEqual(Array.from(lent.embeddings.data), reference.hello);
@@ -242,7 +245,8 @@ test("samples and encoded files count their tokens", () => {
     assert.ok(first > 0n && twice === 2n * first, verb);
     assert.strictEqual(encoded.stats.tokens, Number(twice), verb);
   }
-  // The engine fails an undecodable file whole as malformed; the stub decodes nothing, so it encodes any bytes.
+  // The engine fails an undecodable file whole as malformed; the stub decodes nothing, so it
+  // encodes any bytes.
   let video;
   try {
     video = model.videoEncode([new Uint8Array(33)], arena);

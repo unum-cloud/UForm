@@ -2,17 +2,17 @@
  *  @file javascript/types.ts
  *  @author Ash Vardanian
  *  @date October 18, 2026
- *  @brief The vocabulary every verb shares: closed-set names, the backend the classes run on, the executor whose
- *      threads a verb runs on, the arena every scaling output lands in, and the deferred call a deferred receiver
- *      answers.
+ *  @brief The vocabulary every verb shares: closed-set names, the backend the classes run on, the
+ *      executor whose threads a verb runs on, the arena every scaling output lands in, and the
+ *      deferred call a deferred receiver answers.
  */
 import type { Compiled, CompiledArena, CompiledDeferred, CompiledExecutor } from "./library.js";
 
 /**
- *  What went wrong, one member per `uform_status_*_k` of the C interface and spelled as its canonical name. Every error
- *  the library or this binding throws carries one as its `code`, so a caller branches on the identity of the fault
- *  rather than on which side of the boundary saw it. A {@link Deferred} also reports `Success`, and `Deferred` until its
- *  call is final.
+ *  What went wrong, one member per `uform_status_*_k` of the C interface and spelled as its
+ *  canonical name. Every error the library or this binding throws carries one as its `code`, so a
+ *  caller branches on the identity of the fault rather than on which side of the boundary saw it. A
+ *  {@link Deferred} also reports `Success`, and `Deferred` until its call is final.
  *  @enum {string}
  *  @readonly
  */
@@ -127,7 +127,8 @@ export enum MultimemTier {
 }
 
 /**
- *  How a contrastive term turns a row of scores into forces, numbered as `uform_pair_loss_form_t` numbers them.
+ *  How a contrastive term turns a row of scores into forces, numbered as
+ *  `uform_pair_loss_form_t` numbers them.
  *  @enum {number}
  *  @readonly
  */
@@ -136,14 +137,16 @@ export enum PairLossForm {
   Derived = 0,
   /** The sigmoid cross-entropy of every cell, its attract and repel halves normalized apart. */
   Balanced = 1,
-  /** The sigmoid cross-entropy of every positive's score over every negative's, where the bias cancels. */
+  /** The sigmoid cross-entropy of every positive's score over every negative's, where
+   *  the bias cancels. */
   Ranked = 2,
   /** SigLIP's sigmoid cross-entropy of every cell, each repel weighed like an attract. */
   Sigmoid = 3,
 }
 
 /**
- *  Which side of a late-interaction score an item takes, numbered as `uform_late_interaction_side_t` numbers them.
+ *  Which side of a late-interaction score an item takes, numbered as
+ *  `uform_late_interaction_side_t` numbers them.
  *  @enum {number}
  *  @readonly
  */
@@ -176,7 +179,8 @@ export interface GpuDevice {
   vendor: GpuVendor;
   /** The device's ordinal in its vendor's runtime, as `nvidia-smi` or `rocm-smi` lists it. */
   vendorOrdinal: number;
-  /** The class whose kernels run on it, as `uform_gpu_class_name` spells it, like "nvidia-hopper". */
+  /** The class whose kernels run on it, as `uform_gpu_class_name` spells
+   *  it, like "nvidia-hopper". */
   gpuClass: string | null;
   /** Streaming multiprocessors or compute units. */
   computeUnits: number;
@@ -188,7 +192,8 @@ export interface GpuDevice {
 
 let bound: Compiled | undefined;
 
-/** Installs the backend every class made from now on runs on: the Node addon, or the WebAssembly module. */
+/** Installs the backend every class made from now on runs on: the Node addon, or
+ *  the WebAssembly module. */
 export function bind(compiled: Compiled): void {
   bound = compiled;
 }
@@ -232,14 +237,16 @@ export function negativesCode(negatives: Negatives): number {
 }
 
 /**
- *  Lists every GPU this process can drive, NVIDIA devices first, then AMD, so a device's position is the ordinal VRAM
- *  placements name it by; a machine without GPUs lists none. Calls `uform_gpu_devices`.
+ *  Lists every GPU this process can drive, NVIDIA devices first, then AMD, so a device's
+ *  position is the ordinal VRAM placements name it by; a machine without GPUs lists
+ *  none. Calls `uform_gpu_devices`.
  */
 export function gpuDevices(): GpuDevice[] {
   return backend().gpuDevices() as GpuDevice[];
 }
 
-/** Where the host threads of a RAM executor are placed, how many there are, and how many deferred calls it tracks. */
+/** Where the host threads of a RAM executor are placed, how many there are, and how many deferred
+ *  calls it tracks. */
 export interface ExecutorForRamConfig {
   /** NUMA node IDs the threads are spread over; absent spreads them over every node. */
   memoryDomains?: number[];
@@ -265,11 +272,13 @@ export interface ExecutorOnPoolConfig {
 export interface ExecutorForVramConfig {
   /** Device ordinals, positions in {@link gpuDevices}, to drive; absent takes one free device. */
   devices?: number[];
-  /** The GPU class every device dispatches as, spelled like "nvidia-hopper"; absent derives the devices' own. */
+  /** The GPU class every device dispatches as, spelled like "nvidia-hopper"; absent derives
+   *  the devices' own. */
   gpuClass?: string;
   /** NUMA node IDs whose cores the host decoders take; absent takes every node. */
   memoryDomains?: number[];
-  /** The CPU class the host decoders dispatch as, spelled like "intel-haswell"; absent derives the CPU's own. */
+  /** The CPU class the host decoders dispatch as, spelled like "intel-haswell"; absent derives
+   *  the CPU's own. */
   cpuClass?: string;
   /** Borrowed CUDA stream addresses, one per device in `devices` order; absent creates its own. */
   streams?: bigint[];
@@ -285,10 +294,11 @@ const executorSeal = Symbol("Executor");
 /**
  *  The threads or streams a verb runs on, shared across models.
  *
- *  An executor owns host threads or device streams and the activation scratch; a model owns weights. Keeping them apart
- *  is what lets one executor serve several models, and what makes the cost of spawning visible at the line that spawns
- *  it. The WebAssembly backend computes on the calling thread alone, so its executors only order calls. The collector
- *  frees it eventually; `free` joins the threads now.
+ *  An executor owns host threads or device streams and the activation scratch; a model owns
+ *  weights. Keeping them apart is what lets one executor serve several models, and what makes the
+ *  cost of spawning visible at the line that spawns it. The WebAssembly backend computes on the
+ *  calling thread alone, so its executors only order calls. The collector frees it eventually;
+ *  `free` joins the threads now.
  */
 export class Executor implements Disposable {
   /** The backend handle every verb is handed. */
@@ -311,20 +321,23 @@ export class Executor implements Disposable {
     return new Executor(executorSeal, backend().Executor.forVram(config));
   }
 
-  /** Borrows a ForkUnion `fu_pool_t` by address, which reports `unsupported` until borrowing is designed. Calls `uform_executor_on_pool`. */
+  /** Borrows a ForkUnion `fu_pool_t` by address, which reports `unsupported` until borrowing is
+   *  designed. Calls `uform_executor_on_pool`. */
   static onPool(pool: bigint, config: ExecutorOnPoolConfig = {}): Executor {
     return new Executor(executorSeal, backend().Executor.onPool(pool, config));
   }
 
   /**
-   *  Waits for every call submitted to this executor so far, then idles in `mood`. Calls `uform_executor_drain`.
+   *  Waits for every call submitted to this executor so far, then idles in
+   *  `mood`. Calls `uform_executor_drain`.
    *  @param [mood=Mood.Parked] - What the threads or streams do once they go idle.
    */
   drain(mood: Mood = Mood.Parked): void {
     this.compiled.drain(mood);
   }
 
-  /** Runs every deferred call and joins the threads now; a second `free` does nothing. Calls `uform_executor_free`. */
+  /** Runs every deferred call and joins the threads now; a second `free` does
+   *  nothing. Calls `uform_executor_free`. */
   free(): void {
     this.compiled.free();
   }
@@ -335,29 +348,34 @@ export class Executor implements Disposable {
 }
 
 /**
- *  Memory the library writes every output whose length scales with a call into, reused across calls.
+ *  Memory the library writes every output whose length scales with a call into,
+ *  reused across calls.
  *
- *  Every verb with such an output takes one and answers a view into it rather than a copy, so a steady loop allocates
- *  once. Each call rewinds the arena it is handed and detaches every buffer over the previous call's outputs: a view
- *  refuses its reads with {@link Status.InvalidArgument} from then on. To keep one result past the next call, give that
- *  call another arena. A deferred call holds it until final: another call naming it before then finishes
- *  {@link Status.Contended} and leaves the first call's outputs alone, and `free` waits for it.
+ *  Every verb with such an output takes one and answers a view into it rather than a copy, so a
+ *  steady loop allocates once. Each call rewinds the arena it is handed and detaches every buffer
+ *  over the previous call's outputs: a view refuses its reads with {@link Status.InvalidArgument}
+ *  from then on. To keep one result past the next call, give that call another arena. A deferred
+ *  call holds it until final: another call naming it before then finishes {@link Status.Contended}
+ *  and leaves the first call's outputs alone, and `free` waits for it.
  */
 export class Arena implements Disposable {
   /** The backend handle every verb is handed. */
   readonly compiled: CompiledArena;
 
-  /** Makes an arena where `executor` computes, or host pages for calls on the calling thread. Calls `uform_arena_init`. */
+  /** Makes an arena where `executor` computes, or host pages for calls on the calling
+   *  thread. Calls `uform_arena_init`. */
   constructor(executor?: Executor) {
     this.compiled = new (backend().Arena)(executor?.compiled);
   }
 
-  /** `"ram"` or `"vram"`, where the executor that made it computes; a VRAM arena's views refuse host reads. */
+  /** `"ram"` or `"vram"`, where the executor that made it computes; a VRAM arena's views
+   *  refuse host reads. */
   get residency(): string {
     return this.compiled.residency;
   }
 
-  /** Releases the memory now, once every deferred call writing it is final, detaching every view into it. Calls `uform_arena_free`. */
+  /** Releases the memory now, once every deferred call writing it is final, detaching every view
+   *  into it. Calls `uform_arena_free`. */
   free(): void {
     this.compiled.free();
   }
@@ -370,11 +388,13 @@ export class Arena implements Disposable {
 /**
  *  Outputs a call wrote into an arena, readable until the arena's next call rewinds it.
  *
- *  The rewind detaches the buffer under every array, so each accessor refuses once the arena moved on, and refuses
- *  device memory with {@link Status.Device}, so a view never reads memory its call did not write.
+ *  The rewind detaches the buffer under every array, so each accessor refuses once the arena moved
+ *  on, and refuses device memory with {@link Status.Device}, so a view never reads memory its call
+ *  did not write.
  */
 export abstract class ArenaView {
-  /** Answers `view` while its buffer still holds this call's outputs in host memory, and refuses otherwise. */
+  /** Answers `view` while its buffer still holds this call's outputs in host memory,
+   *  and refuses otherwise. */
   protected live<View extends ArrayBufferView>(view: View | null): View {
     if (view === null) throw fail(Status.Device, "The outputs are device memory, which no host view reads.");
     if ((view.buffer as ArrayBuffer).detached)
@@ -383,7 +403,8 @@ export abstract class ArenaView {
   }
 }
 
-/** Deferred calls dropped before they are final, each handed back to the collector until it is, so none is freed while the library still writes into it. */
+/** Deferred calls dropped before they are final, each handed back to the collector until it is, so
+ *  none is freed while the library still writes into it. */
 const unfinished = new FinalizationRegistry<CompiledDeferred>((call) => {
   if (call.status() === Status.Deferred) unfinished.register({}, call);
 });
@@ -391,10 +412,11 @@ const unfinished = new FinalizationRegistry<CompiledDeferred>((call) => {
 /**
  *  A call submitted by a deferred receiver, final once its executor finishes it.
  *
- *  It keeps everything the library reads or writes alive until then - the outcome, the inputs, the outputs and every
- *  handle it names - so none of them is collected under the call. `status` polls without blocking, `wait` blocks and
- *  answers, and `await` runs that wait on the libuv pool; both answer the same cached result, or throw the same
- *  failure, however often they are asked. On the WebAssembly backend the call is final once submitted.
+ *  It keeps everything the library reads or writes alive until then - the outcome, the inputs, the
+ *  outputs and every handle it names - so none of them is collected under the call. `status` polls
+ *  without blocking, `wait` blocks and answers, and `await` runs that wait on the libuv pool; both
+ *  answer the same cached result, or throw the same failure, however often they are asked. On the
+ *  WebAssembly backend the call is final once submitted.
  *
  *  ```js
  *  const encoded = await call; // or: call.wait()
@@ -413,12 +435,14 @@ export class Deferred<T> implements PromiseLike<T>, Disposable {
     unfinished.register(this, call, this);
   }
 
-  /** `Status.Deferred` until the call is final, then `Status.Success` or its failure. Calls `uform_outcome_status`. */
+  /** `Status.Deferred` until the call is final, then `Status.Success` or its
+   *  failure. Calls `uform_outcome_status`. */
   get status(): Status {
     return this.#call.status() as Status;
   }
 
-  /** Blocks the calling thread until the call is final, then answers its result or throws its failure. Calls `uform_outcome_wait`. */
+  /** Blocks the calling thread until the call is final, then answers its result or throws its
+   *  failure. Calls `uform_outcome_wait`. */
   wait(): T {
     if (!this.#outcome) {
       this.#call.wait();
@@ -427,7 +451,8 @@ export class Deferred<T> implements PromiseLike<T>, Disposable {
     return this.#unwrap();
   }
 
-  /** Waits off the calling thread, which is what `await` reaches for. Calls `uform_outcome_wait` on the libuv pool. */
+  /** Waits off the calling thread, which is what `await` reaches for. Calls `uform_outcome_wait` on
+   *  the libuv pool. */
   then<Fulfilled = T, Rejected = never>(
     onFulfilled?: ((value: T) => Fulfilled | PromiseLike<Fulfilled>) | null,
     onRejected?: ((reason: unknown) => Rejected | PromiseLike<Rejected>) | null,

@@ -42,12 +42,12 @@ concept task_callback = std::is_nothrow_invocable_v<callback_ &, std::size_t, st
 /** What the thread that spawns a pool does on every dispatch it makes afterwards. */
 enum class caller_exclusivity_t : std::uint8_t {
 
-    /** Counts as one of the threads, runs its share of every dispatch, and is pinned like the
-     *  rest. */
+    /** Counts as one of the threads, runs its share of every dispatch, and is pinned
+     *  like the rest. */
     caller_inclusive_k,
 
-    /** Only dispatches and waits, keeping its own affinity and adding nothing to the thread
-     *  count. */
+    /** Only dispatches and waits, keeping its own affinity and adding nothing to
+     *  the thread count. */
     caller_exclusive_k,
 };
 
@@ -72,8 +72,8 @@ class pool_view_t {
         return status_from_(fu_pool_for_n(pool_, count, trampoline, &callback));
     }
 
-    /** Runs @p callback over @p count tasks of uneven cost, each thread taking the next task as it
-     *  finishes one. */
+    /** Runs @p callback over @p count tasks of uneven cost, each thread taking the next task as
+     *  it finishes one. */
     template <task_callback callback_>
     [[nodiscard]] status_t for_n_dynamic(std::size_t count, callback_ &&callback) const noexcept {
         fu_for_task_t const trampoline = [](fu_lambda_context_t context, std::size_t task, std::size_t thread,
@@ -95,8 +95,8 @@ class pool_view_t {
     fu_pool_t pool_;
 };
 
-/** The machine as ForkUnion harvests it, its cores, compute domains and memory domains, owned and
- *  deleted here. */
+/** The machine as ForkUnion harvests it, its cores, compute domains and memory domains, owned
+ *  and deleted here. */
 class topology_t {
   public:
     topology_t(topology_t &&other) noexcept : topology_(std::exchange(other.topology_, nullptr)) {}
@@ -125,8 +125,8 @@ class topology_t {
         return fu_memory_domains_count(topology_, &count) == fu_success_k ? count : 0;
     }
 
-    /** The identifier the operating system gives memory domain @p index , or -1 past the last
-     *  one. */
+    /** The identifier the operating system gives memory domain @p index , or -1 past
+     *  the last one. */
     [[nodiscard]] fu_memory_domain_id_t memory_domain(std::size_t index) const noexcept {
         fu_memory_domain_id_t identifier = -1;
         return fu_memory_domain_id_at_index(topology_, index, &identifier) == fu_success_k ? identifier : -1;
@@ -239,8 +239,8 @@ class executor_t {
     fu_pool_t pool_ = nullptr;
 };
 
-/** A pool lent by another library: dispatched on while its lender's own dispatch does not run,
- *  never deleted. */
+/** A pool lent by another library: dispatched on while its lender's own dispatch does not
+ *  run, never deleted. */
 class lent_pool_t {
   public:
 

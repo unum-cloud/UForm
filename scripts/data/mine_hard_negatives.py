@@ -1,14 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "av",
-#     "pillow>=10.0",
-#     "pyarrow>=21.0.0",
-#     "torch",
-#     "tqdm",
-#     "transformers>=4.40",
-# ]
-# ///
 """Mine K hard negatives per (anchor, positive) pair via a pretrained CLIP encoder.
 
 Modality: image+text (coco_captions) — also runnable for video+text by encoding the
@@ -24,25 +13,25 @@ cosine kNN within that shard, and adds two columns __in place__:
 
 Schema choice rationale:
 
-cuDF's parquet reader hangs the GPU driver on `list<binary>` reads, and flat `binary`
-columns are read as `string` columns internally — the nested-binary path is not built
-out.  `list<int32>` is fully supported (the same type `_sample_list_element` and the
-Mr. TyDi extractor read).  Storing K=8 row indices per row plus K matching keys costs
-~96 bytes per row — vs ~1.2 MB per row for inline `list<binary>`.  Disk overhead for
-COCO's 118K rows is ~12 MB total; for MSR-VTT's 9K rows ~900 KB.  No GPU hang.
+cuDF's parquet reader hangs the GPU driver on `list<binary>` reads, and flat `binary` columns are
+read as `string` columns internally — the nested-binary path is not built out. `list<int32>` is
+fully supported (the same type `_sample_list_element` and the Mr. TyDi extractor read). Storing K=8
+row indices per row plus K matching keys costs ~96 bytes per row — vs ~1.2 MB per row for inline
+`list<binary>`. Disk overhead for COCO's 118K rows is ~12 MB total; for MSR-VTT's 9K rows ~900 KB.
+No GPU hang.
 
-Constraint: mining is __per-shard__ (negatives drawn only from the same shard's
-~3K candidates for COCO, ~9K for MSR-VTT single-file).  Per-shard pools are still
-well-sized for hard-negative quality.  The trainer hot path resolves the indices to
-bytes via `frame[image_field].struct.field('bytes').take(picked_indices)` on the
-__full__ shard frame at batch yield time (see `ImageTextParquetLoader._iter_cudf`).
+Constraint: mining is __per-shard__ (negatives drawn only from the same shard's ~3K candidates for
+COCO, ~9K for MSR-VTT single-file). Per-shard pools are still well-sized for hard-negative quality.
+The trainer hot path resolves the indices to bytes via
+`frame[image_field].struct.field('bytes').take(picked_indices)` on the __full__ shard frame at batch
+yield time (see `ImageTextParquetLoader._iter_cudf`).
 
 This is an __offline pre-processing pass__, not a training hot path — PIL is used
 for decode here because the no-CPU-decode rule governs only the training prefetcher
 path, not offline builds.
 
-Each shard is rewritten __atomically in place__ — temp file, then `os.replace` to
-overwrite the source.  No `.with-mined-negatives.parquet` siblings: one form per dataset.
+Each shard is rewritten __atomically in place__ — temp file, then `os.replace` to overwrite the
+source. No `.with-mined-negatives.parquet` siblings: one form per dataset.
 
 CLI:
     uv run scripts/data/mine_hard_negatives.py --corpus coco_captions --k 8
@@ -50,7 +39,23 @@ CLI:
 
 Pass `--limit-shards N` for a small validation run before the full mining sweep.
 Pass `--overwrite` to re-mine shards that already carry `negative_indices`.
+
+File: scripts/data/mine_hard_negatives.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "av",
+#     "pillow>=10.0",
+#     "pyarrow>=21.0.0",
+#     "torch",
+#     "tqdm",
+#     "transformers>=4.40",
+# ]
+# ///
 
 import argparse
 import glob
@@ -72,19 +77,20 @@ from transformers import CLIPModel, CLIPProcessor
 #: HuggingFace model id; ViT-B/32 is the standard mining encoder (~88M params, 512-d).
 CLIP_MODEL_ID = "openai/clip-vit-base-patch32"
 
-#: GPU device.  B200 / single-device mining (corpora are small enough).
+#: GPU device. B200 / single-device mining (corpora are small enough).
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 #: Per-shard encode batch size for the CLIP image encoder.
 ENCODE_BATCH_SIZE = 128
 
-#: Thread-pool width for PIL decode.  PIL releases the GIL during decode, so threads
-#: scale; matches the 160-core box without oversubscribing the GPU encode.
+#: Thread-pool width for PIL decode. PIL releases the GIL during decode, so threads scale; matches
+#: the 160-core box without oversubscribing the GPU encode.
 DECODE_THREAD_POOL_SIZE = 32
 
-#: Corpus -> key-column mapping.  Only the key column is mining-specific (stable per-row identifier
-#: for negative dedup audits) and lives here; the shard glob and media column are the mixture JSONs'
-#: single-source-of-truth (`mixtures.dataset_glob(name)` / `.dataset_media_column(name)`), no longer inlined.
+#: Corpus -> key-column mapping.
+#: Only the key column is mining-specific (stable per-row identifier for negative dedup audits)
+#: and lives here; the shard glob and media column are the mixture JSONs' single-source-of-truth
+#: (`mixtures.dataset_glob(name)` / `.dataset_media_column(name)`), no longer inlined.
 CORPUS_KEY_COLUMN: dict[str, str] = {
     "coco_captions": "cocoid",
     "msrvtt_captions": "video_id",

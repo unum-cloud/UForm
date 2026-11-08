@@ -2,8 +2,8 @@
  *  @file src/loaders/choices_loader.cu
  *  @author Ash Vardanian
  *  @date October 25, 2026
- *  @brief The Parquet choices loader's bodies and its packing kernel — see the header for the
- *      contract.
+ *  @brief The Parquet choices loader's bodies and its packing kernel — see the header
+ *      for the contract.
  *
  *  A fill reads the state, choices and targets columns of the drawn row groups into one reservoir,
  *  lands the offsets, the choices and the targets on the host, draws every row there, and lays each

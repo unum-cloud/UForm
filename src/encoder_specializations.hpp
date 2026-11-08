@@ -35,8 +35,8 @@ using ram_tower_of =
                        typename encoder::elementwise_ladder<numkong_capabilities_of(kits_class_)>::kit_t,
                        atomic_ref_for_cpu_class<atomics_class_>::template type>;
 
-/** The mask a device class picks its kits under: its generation's, or its vendor's generic
- *  floor. */
+/** The mask a device class picks its kits under: its generation's, or its
+ *  vendor's generic floor. */
 template <encoder_home_t home_, gpu_class_t gpu_class_>
 inline constexpr nk_capability_t device_capabilities_of = gpu_class_ == gpu_class_t::unknown_k
                                                               ? vendor_of(home_)
@@ -52,10 +52,10 @@ using vram_tower_of =
                         entries_kit_of<home_>,
                         typename encoder::elementwise_ladder<numkong_capabilities_of(cpu_class_t::serial_k)>::kit_t>;
 
-/** Whether a host class picks kits its parent does not; the serial floor always does, and so does
- *  a class whose parent the build left out, as a monoversioned build leaves serial. Both sides
- *  take the class's own atomic reference, as each class names it through an alias template of its
- *  own. */
+/** Whether a host class picks kits its parent does not; the serial floor always does, and so
+ *  does a class whose parent the build left out, as a monoversioned build leaves serial. Both
+ *  sides take the class's own atomic reference, as each class names it through an alias template
+ *  of its own. */
 template <cpu_class_t cpu_class_>
 constexpr bool ram_variant_advances() noexcept {
     if constexpr (cpu_class_ == cpu_class_t::serial_k || !cpu_class_compiled(parent_class_of(cpu_class_))) return true;

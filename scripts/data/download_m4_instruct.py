@@ -1,29 +1,33 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "huggingface_hub",
-# ]
-# ///
 """Idempotent downloader for M4-Instruct-Data (lmms-lab/M4-Instruct-Data, ~234 GB).
 
-Modality: image+text instruction tuning.  ~3M multimodal instruction-response pairs covering
-VQA / reasoning / referring / captioning across many vision tasks.  We have zero multimodal
-instruction-tuning data; this fills that gap and pairs with the `ImageTextCaptionStep`
-(image-text caption) trainer for downstream alignment.  The HuggingFace mirror ships the
-instruction annotations as JSON plus the supporting image bytes in archive shards.
+Modality: image+text instruction tuning. ~3M multimodal instruction-response pairs covering VQA /
+reasoning / referring / captioning across many vision tasks. We have zero multimodal
+instruction-tuning data; this fills that gap and pairs with the `ImageTextCaptionStep` (image-text
+caption) trainer for downstream alignment. The HuggingFace mirror ships the instruction annotations
+as JSON plus the supporting image bytes in archive shards.
 
-Shard cap.
-The full corpus is ~234 GB, dominated by the image archive shards (`.tar.gz` / `.tar` / `.zip`).
-`--max-shards N` (or `--fraction F`) cap how many of those upstream archive shards are pulled BEFORE
-any transfer starts, mirroring `download_cc12m.py`; the JSON annotations and other metadata are always
-kept.  With NEITHER flag the whole repo is pulled (backwards-compatible default).
+Shard cap. The full corpus is ~234 GB, dominated by the image archive shards (`.tar.gz` / `.tar` /
+`.zip`). `--max-shards N` (or `--fraction F`) cap how many of those upstream archive shards are
+pulled BEFORE any transfer starts, mirroring `download_cc12m.py`; the JSON annotations and other
+metadata are always kept. With NEITHER flag the whole repo is pulled (backwards-compatible default).
 
 CLI usage:
     uv run scripts/data/download_m4_instruct.py                       # whole repo (~234 GB)
     uv run scripts/data/download_m4_instruct.py --max-shards 8        # first 8 archive shards
     uv run scripts/data/download_m4_instruct.py --fraction 0.1        # leading 10% of the shards
     uv run scripts/data/download_m4_instruct.py --out-dir $UFORM_DATA_ROOT/m4-instruct
+
+File: scripts/data/download_m4_instruct.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "huggingface_hub",
+# ]
+# ///
 
 import argparse
 import sys

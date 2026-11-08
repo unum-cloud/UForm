@@ -19,8 +19,8 @@
 
 namespace unum::uform::encoder {
 
-/** Places a tower's arrays in one device's memory, copying on its stream through the vendor's
- *  entries kit. */
+/** Places a tower's arrays in one device's memory, copying on its stream through the
+ *  vendor's entries kit. */
 template <typename entries_kit_type_>
 struct vram_placer {
     nk::allocator<b8_t> allocator {};

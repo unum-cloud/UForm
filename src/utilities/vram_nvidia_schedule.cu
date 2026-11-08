@@ -38,7 +38,8 @@ enum class transpose_alignment_t : bool {
     aligned_k,
 };
 
-/** Loads the eight elements at @p column of @p row as four packed words; out-of-range cells read zero. */
+/** Loads the eight elements at @p column of @p row as four packed words; out-of-range
+ *  cells read zero. */
 [[nodiscard]] static __device__ inline uint4 transpose_load_(bf16_t const *row_start, std::size_t column,
                                                              std::size_t columns,
                                                              transpose_alignment_t alignment) noexcept {

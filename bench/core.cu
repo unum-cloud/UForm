@@ -9,8 +9,8 @@
  *  - "tower/forward_backward": a text-only tower forward to the pooled vertices and its backward.
  *  - "contrastive/loss": the rank-local contrastive loss and its forces over self-edges.
  *  - "contrastive/tokens": the late-interaction loss and its forces, 256 queries of 64 tokens
- *    against 256 documents of 1024 tokens at width 128, each query attracting one document under
- *    ranked BCE.
+ *    against 256 documents of 1024 tokens at width 128, each query attracting one document
+ *    under ranked BCE.
  */
 #include <algorithm> // `std::min` — the bench's attract rows
 #include <chrono>    // `std::chrono::duration` — the CUDA-event windows

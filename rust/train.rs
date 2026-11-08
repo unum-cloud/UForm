@@ -5,8 +5,9 @@
 //! and borrowed by every [`Trainer`]. A trainer owns the tower replicas, gradients, optimizer
 //! moments, heads and temperatures on its executor's devices; training is GPU-only, so its one
 //! constructor is [`Trainer::init_vram`]. Its verbs come from [`TrainVerbs`], which run on the
-//! executor the trainer was made on: `trainer.on(&executor)` blocks, and `trainer.deferred(&executor)`
-//! answers a [`Deferred`](crate::Deferred) from the same verbs given owned arguments.
+//! executor the trainer was made on: `trainer.on(&executor)` blocks, and
+//! `trainer.deferred(&executor)` answers a [`Deferred`](crate::Deferred) from the same verbs
+//! given owned arguments.
 //!
 //! File: rust/train.rs
 //! Author: Ash Vardanian
@@ -336,7 +337,8 @@ impl FromStr for Negatives {
 pub enum MultimemTier {
     /// The NVLink switch reduces through multicast memory.
     SwitchReduced = 0,
-    /// Every member reads its peers in a fixed order, where multicast is absent; bit-identical results.
+    /// Every member reads its peers in a fixed order, where multicast is
+    /// absent; bit-identical results.
     PeerRead = 1,
 }
 
@@ -382,8 +384,8 @@ pub enum PairLossForm {
     Derived = 0,
     /// The sigmoid cross-entropy of every cell, its attract and repel halves normalized apart.
     Balanced = 1,
-    /// The sigmoid cross-entropy of every positive's score over every negative's, where the bias
-    /// cancels.
+    /// The sigmoid cross-entropy of every positive's score over every negative's, where
+    /// the bias cancels.
     Ranked = 2,
     /// SigLIP's sigmoid cross-entropy of every cell, each repel weighed like an attract.
     Sigmoid = 3,
@@ -507,8 +509,8 @@ pub struct Masking {
     pub audio_weight: f32,
 }
 
-/// How the contrastive loss scores the pooled embeddings; every zero derives the default the C
-/// header names.
+/// How the contrastive loss scores the pooled embeddings; every zero derives the default the
+/// C header names.
 ///
 /// Mirrors `uform_contrastive_t`.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
@@ -518,8 +520,8 @@ pub struct Contrastive<'config> {
     pub matryoshka_dimensions: &'config [usize],
     /// Learnable inverse temperature and bias pairs, one per group a step's items select; one.
     pub temperature_groups: usize,
-    /// The starting inverse temperature of every group; 10 under the sigmoid form, SigLIP's,
-    /// else 1.
+    /// The starting inverse temperature of every group; 10 under the sigmoid form,
+    /// SigLIP's, else 1.
     pub inverse_temperature: f32,
     /// The starting logit bias of every group; −10 under the sigmoid form, SigLIP's, else zero.
     pub bias: f32,
@@ -618,7 +620,8 @@ pub struct MeshOptions<'options> {
     pub host_domain_index: usize,
     /// Processes in the run, one per host; zero derives one, a run with no peers.
     pub host_domain_count: usize,
-    /// GPUs one NVLink multicast domain spans, a fabric property no local probe sees; zero derives the host.
+    /// GPUs one NVLink multicast domain spans, a fabric property no local probe sees; zero
+    /// derives the host.
     pub gpus_per_multimem_domain: usize,
     /// The directory every host sees, where processes exchange their facts; required with peers.
     pub directory: &'options Path,
@@ -678,7 +681,8 @@ pub struct TrainerInitVramConfig<'config, 'mesh> {
     pub batch: BatchShape,
     /// Which losses a step relaxes.
     pub objective: Objective,
-    /// The masked objective's corruption and weights, read unless the objective is contrastive alone.
+    /// The masked objective's corruption and weights, read unless the objective
+    /// is contrastive alone.
     pub masking: Masking,
     /// The contrastive loss's scoring, read unless the objective is masked alone.
     pub contrastive: Contrastive<'config>,
@@ -689,8 +693,8 @@ pub struct TrainerInitVramConfig<'config, 'mesh> {
     pub choices: Choices,
     /// The learning-rate schedule.
     pub schedule: Schedule,
-    /// The mesh made over the same executor, borrowed until the trainer drops; `None` runs this
-    /// process alone.
+    /// The mesh made over the same executor, borrowed until the trainer drops; `None` runs
+    /// this process alone.
     pub mesh: Option<&'mesh Mesh>,
     /// The base of every keyed draw: initialization, corruption and the shuffle.
     pub seed: u64,
@@ -834,8 +838,8 @@ fn lower_choices(
 ///
 /// Mirrors `uform_trainer_step_t`.
 pub struct TrainerStepConfig<'config, 'arena> {
-    /// The bag of each item, items sharing a bag landing on one device; empty keeps every item its
-    /// own bag.
+    /// The bag of each item, items sharing a bag landing on one device; empty keeps every item
+    /// its own bag.
     pub bags: &'config [u32],
     /// The temperature group of each item, each below the run's `temperature_groups`; empty puts
     /// every item in group zero.
@@ -844,9 +848,9 @@ pub struct TrainerStepConfig<'config, 'arena> {
     /// [`LateInteractionSide::None`].
     pub sides: &'config [LateInteractionSide],
     /// Each item's legal choices, one byte each, as a `(data, offsets)` tape like the one
-    /// [`text_choose`](crate::EncodeVerbs::text_choose) takes; empty offsets make no choices. Read when
-    /// the run trains them: a text item offering any is the state its answer follows, and the call
-    /// appends the mask byte, cutting a state longer than a row at its head.
+    /// [`text_choose`](crate::EncodeVerbs::text_choose) takes; empty offsets make no choices. Read
+    /// when the run trains them: a text item offering any is the state its answer follows, and the
+    /// call appends the mask byte, cutting a state longer than a row at its head.
     pub choices: (&'config [u8], &'config [usize]),
     /// The target probability of each choice, a `(data, offsets)` tape whose entries are as long as
     /// those of `choices` and sum to one, as `text_choose` answers its probabilities.
@@ -887,7 +891,8 @@ impl<'config> From<Relations<'config>> for TrainerStepConfig<'config, '_> {
     }
 }
 
-/// The path a checkpoint is written to and the handler counting its tensors; see [`TrainVerbs::save`].
+/// The path a checkpoint is written to and the handler counting its
+/// tensors; see [`TrainVerbs::save`].
 ///
 /// Mirrors `uform_trainer_save_t`.
 pub struct TrainerSaveConfig<'config, Location> {
@@ -1035,8 +1040,8 @@ impl Drop for Trainer<'_> {
 }
 
 impl<'mesh> Trainer<'mesh> {
-    /// Builds one replica per device of `executor`, the NVLink domain its consumers reserve over the
-    /// mesh, and starts or resumes the run; every process of the run calls it with the same
+    /// Builds one replica per device of `executor`, the NVLink domain its consumers reserve over
+    /// the mesh, and starts or resumes the run; every process of the run calls it with the same
     /// geometry, objective and seed.
     ///
     /// Calls `uform_trainer_init_vram`.
@@ -1101,12 +1106,13 @@ impl<'mesh> Trainer<'mesh> {
     }
 }
 
-/// What a verb answers through `Receiver`: what the call produced, or a [`Deferred`](crate::Deferred).
+/// What a verb answers through `Receiver`: what the call produced,
+/// or a [`Deferred`](crate::Deferred).
 type Answer<'trainer, Receiver, Verb> =
     <<Receiver as TrainVerbs<'trainer>>::Completion as Completion>::Answer<'trainer, Verb>;
 
-/// Every trainer verb, written once for both receivers of [`Trainer::on`] and [`Trainer::deferred`],
-/// which run on the executor the trainer was made on.
+/// Every trainer verb, written once for both receivers of [`Trainer::on`] and
+/// [`Trainer::deferred`], which run on the executor the trainer was made on.
 ///
 /// Rust-only.
 pub trait TrainVerbs<'trainer>: Copy {
@@ -1384,7 +1390,8 @@ mod tests {
         assert_eq!(offset_of!(uform_mesh_description_t, gpu_class), 5 * word + 4);
     }
 
-    /// Training is GPU-only, so a build without GPUs refuses both constructors as the device's fault.
+    /// Training is GPU-only, so a build without GPUs refuses both constructors as
+    /// the device's fault.
     #[test]
     fn a_build_without_gpus_refuses_to_train() -> Result<()> {
         let executor = Executor::for_ram(&[], None, 1, 0)?;
@@ -1488,7 +1495,8 @@ mod tests {
             assert_eq!(status_of(receiver.step(modalities, contents, relations)), Some(status));
         }
 
-        // A well-formed step reaches the library, which refuses the null trainer or, first, the RAM executor.
+        // A well-formed step reaches the library, which refuses the null trainer or, first,
+        // the RAM executor.
         let refused = [Some(Status::InvalidArgument), Some(Status::Device)];
         let mut arena = Arena::new_in(&executor)?;
         let config = TrainerStepConfig {

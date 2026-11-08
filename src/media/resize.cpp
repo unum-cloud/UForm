@@ -1,6 +1,6 @@
 /**
- *  @brief The host Lanczos resize of @ref unum::uform::media::resize_image , over decoded pixels and no codec, so
- *      a build without the codecs resizes the pixels its caller decoded.
+ *  @brief The host Lanczos resize of @ref unum::uform::media::resize_image , over decoded pixels
+ *      and no codec, so a build without the codecs resizes the pixels its caller decoded.
  *  @file src/media/resize.cpp
  *  @author Ash Vardanian
  *  @date July 4, 2026
@@ -23,7 +23,8 @@ using uu::i64_t;
 inline constexpr i64_t lanczos_lobes_k = 3;
 inline constexpr u32_t lanczos_taps_k = 6;
 
-/** One output coordinate's Lanczos taps along an axis: the clamped source indices and their normalized weights. */
+/** One output coordinate's Lanczos taps along an axis: the clamped source indices and
+ *  their normalized weights. */
 struct lanczos_tap_t {
 
     /** The source indices, clamped into the crop so its edge pixels replicate. */
@@ -33,7 +34,7 @@ struct lanczos_tap_t {
     f32_t weight[lanczos_taps_k] = {};
 };
 
-/** The Lanczos-3 window @c sinc(x)·sinc(x/3) over @c |x|<3 . */
+/** The Lanczos-3 window @c sinc(x) · sinc(x/3) over @c |x|<3 . */
 [[nodiscard]] static f64_t lanczos_(f64_t x) noexcept {
     if (x == 0.0) return 1.0;
     if (x <= -lanczos_lobes_k || x >= lanczos_lobes_k) return 0.0;
@@ -41,9 +42,9 @@ struct lanczos_tap_t {
     return lanczos_lobes_k * std::sin(pi_x) * std::sin(pi_x / lanczos_lobes_k) / (pi_x * pi_x);
 }
 
-/** Fill @p taps with one entry per output coordinate of a @p source_length → @p target_length resample. Output
- *  pixel centers map onto source pixel centers, @c (target+0.5)·scale−0.5 , and the window keeps its six-tap
- *  support whatever the scale. */
+/** Fill @p taps with one entry per output coordinate of a @p source_length → @p target_length
+ *  resample. Output pixel centers map onto source pixel centers, @c (target+0.5) · scale − 0.5 ,
+ *  and the window keeps its six-tap support whatever the scale. */
 [[nodiscard]] static status_t lanczos_taps_(u32_t source_length, u32_t target_length,
                                             st::basic_vector<lanczos_tap_t> &taps) noexcept {
     if (st::failed(taps.resize(target_length))) return status_t::bad_alloc_k;

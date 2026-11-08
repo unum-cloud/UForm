@@ -2,11 +2,13 @@
  *  @file src/encode.cpp
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief The verbs of @c encode.h over decoded inputs: pack each input form into the batch contract and run the
- *      model's tower over it. The verbs decoding files live in @c encode_media.cpp.
+ *  @brief The verbs of @c encode.h over decoded inputs: pack each input form into the
+ *      batch contract and run the model's tower over it. The verbs decoding files live
+ *      in @c encode_media.cpp.
  *
- *  Every verb plans its items first, so the outputs are sized before anything is decoded, then packs the slices its
- *  progress handler asks for into one batch row of segments laid back to back, so short items cost no padding:
+ *  Every verb plans its items first, so the outputs are sized before anything is decoded, then
+ *  packs the slices its progress handler asks for into one batch row of segments laid back to back,
+ *  so short items cost no padding:
  *
  *      Verb                  One token                       Planned from
  *      text                  one byte                        the tape alone
@@ -16,8 +18,8 @@
  *      audio samples         one frame of chunk samples      the count, resampled to the model's rate
  *      audio                 one frame of chunk samples      a decode into the context, its silent tail dropped
  *
- *  Media decode on the executor's threads: its pool on the host, its decoder pool beside GPUs, and one thread of the
- *  caller's without an executor.
+ *  Media decode on the executor's threads: its pool on the host, its decoder pool beside GPUs, and
+ *  one thread of the caller's without an executor.
  */
 #include "uform/media/audio.hpp"    // `resample_mono`
 #include "uform/media/planning.hpp" // `image_patch_grid`
@@ -52,8 +54,8 @@ struct text_packer_t {
     }
 };
 
-/** A state's UTF-8 bytes and the mask byte a choice is read at, its head cut so the mask survives
- *  the context. */
+/** A state's UTF-8 bytes and the mask byte a choice is read at, its head cut so the mask
+ *  survives the context. */
 struct choice_packer_t {
     static constexpr modality_t modality_k = modality_t::text_k;
     tape_view<b8_t const> tape;
@@ -87,8 +89,8 @@ struct pixels_packer_t {
     std::span<u32_t const> heights;
     std::span<u32_t const> widths;
 
-    /** @b [threads,pixels·4] one RGBA copy of the largest item per thread, which the resize
-     *  reads. */
+    /** @b [threads,pixels·4] one RGBA copy of the largest item per thread, which
+     *  the resize reads. */
     nk::tensor_span<pixel_t, 2> expanded {};
 
     std::size_t cell_bytes(ue::geometry_t const &geometry) const noexcept {

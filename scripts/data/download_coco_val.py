@@ -1,9 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "huggingface_hub",
-# ]
-# ///
 """Idempotent downloader for the COCO 2017 val split (5K images, ~1 GB).
 
 Modality: image. The val split is the standard image-text retrieval smoke harness; Recall@1 / @5 /
@@ -14,7 +8,18 @@ CLI usage:
     uv run scripts/data/download_coco_val.py
     uv run scripts/data/download_coco_val.py --out-dir /custom/path
     uv run scripts/data/download_coco_val.py --force
+
+File: scripts/data/download_coco_val.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "huggingface_hub",
+# ]
+# ///
 
 import argparse
 import sys

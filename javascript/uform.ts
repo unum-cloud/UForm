@@ -4,8 +4,9 @@
  *  @date October 18, 2026
  *  @brief Distributed training and inference pipeline for multi-modal perception, for Node.
  *
- *      The package entry point: it binds the Node addon, and re-exports one module per C header underneath, so a
- *      caller imports `@unum-cloud/uform` and nothing deeper. Browsers import `@unum-cloud/uform/wasm` instead.
+ *      The package entry point: it binds the Node addon, and re-exports one module per C
+ *      header underneath, so a caller imports `@unum-cloud/uform` and nothing deeper. Browsers
+ *      import `@unum-cloud/uform/wasm` instead.
  */
 import { loadAddon } from "./library.js";
 import { backend, bind } from "./types.js";
@@ -64,12 +65,14 @@ export function version(): string {
   return backend().version();
 }
 
-/** The hardware capabilities this binary was compiled with, comma-separated. Calls `uform_capabilities_compiled`. */
+/** The hardware capabilities this binary was compiled with,
+ *  comma-separated. Calls `uform_capabilities_compiled`. */
 export function capabilitiesCompiled(): string {
   return backend().capabilitiesCompiled();
 }
 
-/** The hardware capabilities the current machine offers at runtime, comma-separated. Calls `uform_capabilities_available`. */
+/** The hardware capabilities the current machine offers at runtime,
+ *  comma-separated. Calls `uform_capabilities_available`. */
 export function capabilitiesAvailable(): string {
   return backend().capabilitiesAvailable();
 }

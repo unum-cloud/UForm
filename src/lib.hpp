@@ -2,12 +2,12 @@
  *  @file src/lib.hpp
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief What every verb of the C interface shares: the outcome and progress crossings, the executor and arena
- *      handles, and the deferred calls every verb enters through.
+ *  @brief What every verb of the C interface shares: the outcome and progress crossings, the
+ *      executor and arena handles, and the deferred calls every verb enters through.
  *
- *  Each verb file includes this, so one verb reads the same in every header it implements. The registry of deferred
- *  calls and the functions touching the handles' members are defined once, in @c types.cpp, so a wait or a free
- *  finds the calls of every verb naming its handle.
+ *  Each verb file includes this, so one verb reads the same in every header it implements. The
+ *  registry of deferred calls and the functions touching the handles' members are defined once, in
+ *  @c types.cpp, so a wait or a free finds the calls of every verb naming its handle.
  *
  *  Every verb opens the same way:
  *
@@ -87,7 +87,8 @@ inline constexpr std::size_t default_progress_steps_k = 10;
 /** Calls a deferred table holds when its executor's constructor names no limit. */
 inline constexpr std::size_t deferred_limit_default_k = 64;
 
-/** One core in this many stays idle when an executor derives its thread count, so threads are 7/8 of the cores. */
+/** One core in this many stays idle when an executor derives its thread count, so threads are 7/8
+ *  of the cores. */
 inline constexpr std::size_t idle_cores_denominator_k = 8;
 
 /** The ticket no call outlives, so a blocking call runs everything its executor holds. */
@@ -184,8 +185,8 @@ constexpr nk_capability_t numkong_capabilities_of(cpu_class_t cpu_class) noexcep
 
 /** Lowers one GPU class onto NumKong's GPU capabilities. On NVIDIA, the Ampere & Ada bits
  *  accumulate, while Hopper, Blackwell & RTX Blackwell each run only their own kits, and Rubin
- *  rides the Blackwell kits until its own land. AMD and Apple generations accumulate over their
- *  vendor's floor. */
+ *  rides the Blackwell kits until its own land. AMD and Apple generations accumulate over
+ *  their vendor's floor. */
 constexpr nk_capability_t numkong_capabilities_of(gpu_class_t gpu_class) noexcept {
     nk_capability_t const ampere = nk_cap_cuda_k | nk_cap_ampere_k, ada = ampere | nk_cap_ada_k;
     nk_capability_t const cdna3 = nk_cap_rocm_k | nk_cap_cdna3_k, cdna4 = cdna3 | nk_cap_cdna4_k;
@@ -722,7 +723,8 @@ host_verbs_t const *pick_host_verbs(cpu_ladder<classes_...>, cpu_ceiling_t ceili
 /** The C status a failure of the engine's own vocabulary crosses into, whose values it shares. */
 [[nodiscard]] inline uform_status_t status_of(status_t status) noexcept { return static_cast<uform_status_t>(status); }
 
-/** The C status a NumKong failure crosses into; whatever a device answers beyond shapes and memory is the device's. */
+/** The C status a NumKong failure crosses into; whatever a device answers beyond shapes and memory
+ *  is the device's. */
 [[nodiscard]] inline uform_status_t status_of(nk_status_t status) noexcept {
     switch (status) {
     case nk_success_k: return uform_status_success_k;
@@ -769,12 +771,13 @@ struct slice_t {
 };
 
 /**
- *  @brief One call's reports: the C handler, serialized for the executor's threads, which the contract promises it
- *      never sees concurrently, thinned to the caller's steps, and the slices a batch verb hands its engine whole.
+ *  @brief One call's reports: the C handler, serialized for the executor's threads, which the
+ *      contract promises it never sees concurrently, thinned to the caller's steps, and the slices
+ *      a batch verb hands its engine whole.
  *
- *  Without a handler a batch is one slice and nothing is reported; with one it splits into @c progress.steps nearly
- *  equal slices, ten when zero. A verb counting its own units, a load's tensors, forwards each tick and only the
- *  ones crossing into the next step reach the handler.
+ *  Without a handler a batch is one slice and nothing is reported; with one it splits into
+ *  @c progress.steps nearly equal slices, ten when zero. A verb counting its own units, a load's
+ *  tensors, forwards each tick and only the ones crossing into the next step reach the handler.
  */
 class progress_ticks_t {
   public:
@@ -782,8 +785,8 @@ class progress_ticks_t {
     progress_ticks_t(progress_ticks_t const &) = delete;
     progress_ticks_t &operator=(progress_ticks_t const &) = delete;
 
-    /** Walks the slices of a batch in order; slice @c i starts at @c ⌈i·total/slices⌉ , so lengths differ by one
-     *  at most. */
+    /** Walks the slices of a batch in order; slice @c i starts at @c ⌈i · total/slices⌉ , so
+     *  lengths differ by one at most. */
     class iterator {
       public:
         iterator(std::size_t index, std::size_t slices, std::size_t total) noexcept
@@ -802,7 +805,8 @@ class progress_ticks_t {
         std::size_t total_;
     };
 
-    /** Slices the batch splits into: one per step with a handler, the whole batch without, none when empty. */
+    /** Slices the batch splits into: one per step with a handler, the whole batch without,
+     *  none when empty. */
     [[nodiscard]] std::size_t slices() const noexcept {
         if (!total_) return 0;
         return progress_.callback ? steps_(total_) : 1;
@@ -811,11 +815,12 @@ class progress_ticks_t {
     [[nodiscard]] iterator begin() const noexcept { return {0, slices(), total_}; }
     [[nodiscard]] iterator end() const noexcept { return {slices(), slices(), total_}; }
 
-    /** Reports @p completed of the batch's units, reaching the handler only when it closes a new step. */
+    /** Reports @p completed of the batch's units, reaching the handler only when it closes
+     *  a new step. */
     continuation_t operator()(std::size_t completed) noexcept { return (*this)(completed, total_); }
 
-    /** The sibling for verbs that know their own population, like a load counting its tensors. A slice end
-     *  @c ⌈i·population/steps⌉ closes exactly step @c i . */
+    /** The sibling for verbs that know their own population, like a load counting its tensors. A
+     *  slice end @c ⌈i · population/steps⌉ closes exactly step @c i . */
     continuation_t operator()(std::size_t completed, std::size_t population) noexcept {
         if (!progress_.callback) return continuation_t::continue_k;
         st::unique_lock<fu::spin_mutex_t> lock(mutex_);
@@ -849,11 +854,13 @@ class progress_ticks_t {
 #pragma region Memory
 
 /**
- *  @brief Memory that one call at a time rewinds and refills through one NumKong allocation policy: chunks that
- *      double and never move, so a steady loop allocates once and every view a call hands out stays put.
+ *  @brief Memory that one call at a time rewinds and refills through one NumKong allocation policy:
+ *      chunks that double and never move, so a steady loop allocates once and every view a call
+ *      hands out stays put.
  *
- *  Chunks are returned through the policy on the stream it was given, so a device arena dies before its stream.
- *  Movable so a per-device table can hold it, never move-assigned, since that would leak the destination's chunks.
+ *  Chunks are returned through the policy on the stream it was given, so a device arena dies before
+ *  its stream. Movable so a per-device table can hold it, never move-assigned, since that would
+ *  leak the destination's chunks.
  */
 class chunked_arena_t {
   public:
@@ -868,7 +875,8 @@ class chunked_arena_t {
     /** The stream its chunks are allocated and freed on; null for host pages. */
     [[nodiscard]] nk_stream_t stream() const noexcept { return stream_; }
 
-    /** Forgets every allocation, keeping the chunks, which invalidates every view the previous call handed out. */
+    /** Forgets every allocation, keeping the chunks, which invalidates every view the previous
+     *  call handed out. */
     void rewind() noexcept { current_ = 0, used_ = 0; }
 
     /** Whether @p address lies in memory this arena handed out, which its next rewind reuses. */
@@ -878,8 +886,8 @@ class chunked_arena_t {
         return false;
     }
 
-    /** Hands out @p bytes aligned for any kernel, growing by a chunk as large as everything held so far when full,
-     *  or null when the policy or the limit refuses. */
+    /** Hands out @p bytes aligned for any kernel, growing by a chunk as large as everything held so
+     *  far when full, or null when the policy or the limit refuses. */
     [[nodiscard]] void *allocate(std::size_t bytes) noexcept {
         std::size_t const aligned = divide_round_up(bytes, nk_default_alignment_k) * nk_default_alignment_k;
         for (; current_ != chunks_.size(); ++current_, used_ = 0)
@@ -929,13 +937,14 @@ class chunked_arena_t {
     return policy;
 }
 
-/** Host pages, which serve calls on the calling thread or any RAM executor and may outlive the executor that made
- *  them. */
+/** Host pages, which serve calls on the calling thread or any RAM executor and may outlive the
+ *  executor that made them. */
 struct host_arena_t {
     chunked_arena_t chunks {host_pages_policy(), nullptr, 0};
 };
 
-/** The memory of one GPU, grown through NumKong's device allocator on one stream of the executor that made it. */
+/** The memory of one GPU, grown through NumKong's device allocator on one stream of the executor
+ *  that made it. */
 struct device_arena_t {
     chunked_arena_t chunks;
 };
@@ -950,7 +959,8 @@ struct device_arena_t {
 
 #pragma region Executors
 
-/** A device stream an executor opened and closes, its vendor named by the device it was opened on. */
+/** A device stream an executor opened and closes, its vendor named by the device it
+ *  was opened on. */
 using owned_stream_t = nk::stream_t;
 
 /** The host threads of a RAM executor, spawned here or lent by another library, and where its
@@ -981,13 +991,15 @@ struct vram_device_t {
     /** The class the device dispatches as: its driver's report, or the pinned class it holds. */
     gpu_class_t gpu_class = gpu_class_t::unknown_k;
 
-    /** Declared before the scratch, so the scratch returns its chunks while the stream still lives. */
+    /** Declared before the scratch, so the scratch returns its chunks while the
+     *  stream still lives. */
     owned_stream_t stream;
 
     /** Activations, grown to a high-water mark under the executor's @c scratch_limit. */
     device_arena_t scratch;
 
-    /** Pinned host pages both the host and the device address, where a call packs what the device reads. */
+    /** Pinned host pages both the host and the device address, where a call packs what
+     *  the device reads. */
     chunked_arena_t transfers;
 };
 
@@ -1030,8 +1042,8 @@ struct encoder_home_executor<encoder_home_t::ram_k> {
 template <encoder_home_t home_>
 struct encoder_verbs;
 
-/** The variant a load picked, as its home's verb table, which alone casts each tower back to its
- *  type. */
+/** The variant a load picked, as its home's verb table, which alone casts each tower back
+ *  to its type. */
 using encoder_home_tables_t =
     std::variant<encoder_verbs<encoder_home_t::ram_k> const *, encoder_verbs<encoder_home_t::vram_nvidia_k> const *,
                  encoder_verbs<encoder_home_t::vram_amd_k> const *>;
@@ -1046,8 +1058,8 @@ struct vram_replica_t {
 
 #pragma region Deferred Calls
 
-/** Every argument structure that names an executor, so a deferred submission keeps its call by value; whatever the
- *  copy points to stays the caller's until final. */
+/** Every argument structure that names an executor, so a deferred submission keeps its call by
+ *  value; whatever the copy points to stays the caller's until final. */
 using deferred_arguments_t = std::variant<                                                        //
     uform_model_load_ram_t, uform_model_load_ram_buffer_t,                                        //
     uform_model_load_vram_t, uform_model_load_vram_buffer_t, uform_model_describe_t,              //
@@ -1069,7 +1081,8 @@ enum class deferred_stage_t : u8_t {
     running_k,
 };
 
-/** One entry of an executor's deferred table: the copied call, the verb that runs it, and its place in line. */
+/** One entry of an executor's deferred table: the copied call, the verb that runs it, and its
+ *  place in line. */
 struct deferred_call_t {
     deferred_arguments_t arguments;
     void (*verb)(void *) = nullptr;
@@ -1079,8 +1092,8 @@ struct deferred_call_t {
     deferred_stage_t stage = deferred_stage_t::free_k;
 };
 
-/** Every listed executor and the lock every deferred table is read under, so a wait or a free finds the calls
- *  naming its handle without asking each executor. */
+/** Every listed executor and the lock every deferred table is read under, so a wait or a free finds
+ *  the calls naming its handle without asking each executor. */
 struct deferred_registry_t {
     fu::spin_mutex_t guard;
 
@@ -1098,8 +1111,8 @@ struct deferred_registry_t {
 /** The one registry every verb's calls list in. */
 extern deferred_registry_t deferred_registry;
 
-/** The held call whose arguments this thread passes back into their verb, which then runs them in place rather than
- *  holding them again. */
+/** The held call whose arguments this thread passes back into their verb, which then runs them in
+ *  place rather than holding them again. */
 extern thread_local void const *resuming_call;
 
 /** Lets go of @p arena when the call whose published outcome is @p call holds it. */
@@ -1108,21 +1121,24 @@ void release_arena(uform_arena_t arena, uform_outcome_t const *call) noexcept;
 /** Runs every call @p executor holds with a ticket up to @p last on this thread, oldest first. */
 void run_held(uform_executor_t executor, u64_t last) noexcept;
 
-/** Returns once no deferred call reads or writes @p handle, running the held ones on this thread together with every
- *  call held before them on the same executor - what every wait and every free does first. */
+/** Returns once no deferred call reads or writes @p handle, running the held ones on this thread
+ *  together with every call held before them on the same executor - what every wait and every
+ *  free does first. */
 void finish_calls_using(void const *handle) noexcept;
 
-/** Copies @p arguments into a free entry of @p executor 's table, holding @p arena for the call, or finishes
- *  @p outcome contended when the arena serves another call or the table is full. */
+/** Copies @p arguments into a free entry of @p executor 's table, holding @p arena for the call, or
+ *  finishes @p outcome contended when the arena serves another call or the table is full. */
 void hold_deferred(uform_executor_t executor, deferred_arguments_t const &arguments, void (*verb)(void *),
                    uform_arena_t arena, uform_outcome_t *outcome) noexcept;
 
 /**
- *  @brief Every verb's entry. A deferred call on an executor is copied into the executor's table, holding its arena,
- *      and answers true; a blocking one first runs the calls the executor holds and answers false.
+ *  @brief Every verb's entry. A deferred call on an executor is copied into the executor's table,
+ *      holding its arena, and answers true; a blocking one first runs the calls the executor holds
+ *      and answers false.
  *
- *  A call the runner of a held call passes back answers false at once, so the verb runs it in place, and so does a
- *  call with no executor, which is final when it returns whatever its completion says.
+ *  A call the runner of a held call passes back answers false at once, so the verb runs it
+ *  in place, and so does a call with no executor, which is final when it returns whatever
+ *  its completion says.
  */
 template <auto verb_, typename arguments_type_>
 bool submitted(arguments_type_ *arguments) noexcept {
@@ -1139,11 +1155,12 @@ bool submitted(arguments_type_ *arguments) noexcept {
 }
 
 /**
- *  @brief A verb's outcome while it runs: the caller's reads deferred from the start, every step records into a
- *      private one, and the end lets go of the arena before the one final store.
+ *  @brief A verb's outcome while it runs: the caller's reads deferred from the start, every step
+ *      records into a private one, and the end lets go of the arena before the one final store.
  *
- *  Declared first in a verb, it unwinds last, so a waiter that sees the final status may reuse the arena at once. A
- *  path that forgot to report finishes @c uform_status_internal_k rather than hanging its waiters.
+ *  Declared first in a verb, it unwinds last, so a waiter that sees the final status may reuse the
+ *  arena at once. A path that forgot to report finishes @c uform_status_internal_k rather than
+ *  hanging its waiters.
  */
 class call_outcome_t {
   public:
@@ -1171,11 +1188,13 @@ class call_outcome_t {
 };
 
 /**
- *  @brief Holds @p arena for the call @p outcome tracks and rewinds it, freeing the previous call's outputs.
+ *  @brief Holds @p arena for the call @p outcome tracks and rewinds it, freeing the
+ *      previous call's outputs.
  *  @return The arena, or null once @p outcome records why not.
  *
- *  Refuses a null arena, host pages named by a VRAM executor, device memory named by another executor than the one
- *  that made it, an arena another call holds, and an input of @p inputs still inside it.
+ *  Refuses a null arena, host pages named by a VRAM executor, device memory named by another
+ *  executor than the one that made it, an arena another call holds, and an input of @p inputs
+ *  still inside it.
  */
 uform_arena_t claim_arena(uform_arena_t arena, uform_executor_t executor, std::initializer_list<void const *> inputs,
                           call_outcome_t &outcome) noexcept;
@@ -1186,8 +1205,8 @@ uform_arena_t claim_arena(uform_arena_t arena, uform_executor_t executor, std::i
 
 namespace uf = unum::uform;
 
-/** The state behind @c uform_executor_t: its deferred table and one residency's executor; the variant is the kind
- *  tag, so no second word can disagree. */
+/** The state behind @c uform_executor_t: its deferred table and one residency's executor; the
+ *  variant is the kind tag, so no second word can disagree. */
 struct uform_executor_handle_t {
 
     /** One entry per call it tracks at once, sized at creation, so a submission never allocates. */
@@ -1203,15 +1222,15 @@ struct uform_executor_handle_t {
     std::variant<uf::ram_executor_t, uf::vram_executor_t> executor;
 };
 
-/** What @c uform_arena_t owns: memory that one call at a time rewinds and refills, as host pages or on one device,
- *  and the call holding it. */
+/** What @c uform_arena_t owns: memory that one call at a time rewinds and refills, as host pages or
+ *  on one device, and the call holding it. */
 struct uform_arena_handle_t {
 
     /** Fixed at @c uform_arena_init by the executor that made it. */
     std::variant<uf::host_arena_t, uf::device_arena_t> memory;
 
-    /** The executor whose first stream the device memory rides, the only one whose calls it serves; null for host
-     *  pages, which serve any call computing on the host. */
+    /** The executor whose first stream the device memory rides, the only one whose calls it serves;
+     *  null for host pages, which serve any call computing on the host. */
     uform_executor_t executor = nullptr;
 
     /** The published outcome of the call holding the arena, from its claim or deferred submission
@@ -1220,8 +1239,9 @@ struct uform_arena_handle_t {
     uform_outcome_t const *holder = nullptr;
 };
 
-/** What @c uform_model_t owns: the geometry its checkpoint carried, the precision its blocks run in, and its packed
- *  towers; the variant is the residency, so the checkpoint itself is closed once the load completes. */
+/** What @c uform_model_t owns: the geometry its checkpoint carried, the precision its blocks run
+ *  in, and its packed towers; the variant is the residency, so the checkpoint itself is closed once
+ *  the load completes. */
 struct uform_model_handle_t {
     uf::encoder::geometry_t geometry;
     uf::encoder::precision_t precision = uf::encoder::precision_t::bf16_k;
@@ -1233,8 +1253,8 @@ struct uform_model_handle_t {
      *  runs; empty without the byte decoder. */
     uf::st::basic_vector<uf::f32_t> choice_inverse_temperatures;
 
-    /** The variant picked once at load: its home's verb table, which alone casts each tower
-     *  back. */
+    /** The variant picked once at load: its home's verb table, which alone casts
+     *  each tower back. */
     uf::encoder_home_tables_t tables;
 
     /** The one host tower, serving any RAM executor, or one replica per GPU the load named, every

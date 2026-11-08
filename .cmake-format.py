@@ -16,8 +16,9 @@ with section("format"):
     dangle_parens = True
 
 with section("markup"):
-    # Never reflow hand-authored comment blocks: the file-level docstring carries multi-line apt / uv
-    # / cmake usage that a reflow would restitch into an unreadable run. Disabling markup keeps every
-    # comment verbatim, so the docstring survives without a (banned) `cmake-format: off` guard.
+    # Never reflow hand-authored comment blocks: the file-level docstring carries multi-line apt
+    # / uv / cmake usage that a reflow would restitch into an unreadable run. Disabling markup
+    # keeps every comment verbatim, so the docstring survives without a (banned)
+    # `cmake-format: off` guard.
     enable_markup = False
     first_comment_is_literal = True

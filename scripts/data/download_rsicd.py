@@ -1,3 +1,10 @@
+"""Download RSICD: ~11K remote-sensing images, five captions each — already in the image schema.
+
+File: scripts/data/download_rsicd.py
+Author: Ash Vardanian
+Date: July 5, 2026
+"""
+
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -5,12 +12,12 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download RSICD: ~11K remote-sensing images, five captions each — already in the image schema."""
 from acquire import acquire
 
 if __name__ == "__main__":
-    # The `arampacha/rsicd` split shards already ship `image` struct + `captions` list, so the source is
-    # canonical and needs no transform; all three splits (train / valid / test) are pulled by default.
+    # The `arampacha/rsicd` split shards already ship `image` struct + `captions` list, so the
+    # source is canonical and needs no transform; all three splits (train / valid / test) are
+    # pulled by default.
     raise SystemExit(
         acquire(
             "rsicd",

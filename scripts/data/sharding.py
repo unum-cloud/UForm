@@ -1,7 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = []
-# ///
 """Cluster-safety primitives for offline data acquisition.
 
 The acquisition-time analog of the (deleted) train-time `_seeding` / `_chunked_sampler`. Parallelism
@@ -18,7 +14,16 @@ Rank/world resolution order (first that fully resolves wins):
     4. single host   (0, 1)                                          (pull everything)
 
 This module never imports or reimplements Slurm; it only reads the env vars Slurm exports.
+
+File: scripts/data/sharding.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
 
 import contextlib
 import os

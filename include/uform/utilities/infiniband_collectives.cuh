@@ -2,33 +2,35 @@
  *  @file include/uform/utilities/infiniband_collectives.cuh
  *  @author Ash Vardanian
  *  @date July 2, 2026
- *  @brief Device-initiated InfiniBand collectives across multimem_domains — the vertex all-gather and
- *      the force / gradient all-reduce-sum, each an argument-free method of one member's wired
+ *  @brief Device-initiated InfiniBand collectives across multimem_domains — the vertex all-gather
+ *      and the force / gradient all-reduce-sum, each an argument-free method of one member's wired
  *      @ref unum::uform::utilities::infiniband_reach_t .
  *
  *  The doorbell path is the one NVIDIA documents as GDAKI, GPUDirect Async Kernel-Initiated.
  *
- *  Both collectives walk the same @b recursive-doubling schedule over @c D = multimem_domain_count()
- *  domains: @c ceil(log2 D) rounds, one @ref unum::uform::utilities::infiniband_link_t per round,
- *  partner @c this_domain^(1<<round) . Every kernel is a capture-safe graph node — the posts and
- *  waits are device-initiated ( @c infiniband_post_write / @c infiniband_load_acquire_u32 ), and
- *  per-step variability reaches replays only through device memory:
+ *  Both collectives walk the same @b recursive-doubling schedule over @c D =
+ *  multimem_domain_count() domains: @c ceil(log2 D) rounds, one
+ *  @ref unum::uform::utilities::infiniband_link_t per round, partner @c this_domain^(1<<round) .
+ *  Every kernel is a capture-safe graph node — the posts and waits are device-initiated (
+ *  @c infiniband_post_write / @c infiniband_load_acquire_u32 ), and per-step variability reaches
+ *  replays only through device memory:
  *
- *      - @b all-gather — each round posts the contiguous run of domain blocks this domain already holds
- *        into the partner's symmetric buffer at the @b identical byte offset, so blocks land domain-major
- *        with no accumulate; after @c log2(D) rounds every domain holds all @c D blocks. This is how the
- *        contrastive losses receive remote vertex towers.
- *      - @b all-reduce-sum — each round posts this domain's Float32 shard into the partner's landing
- *        buffer, waits for the partner's, and folds it in with one round-to-nearest-even add per element
- *        ( @c __fadd_rn , no fused-multiply-add contraction) — the SPMD-static schedule fixes the fold
- *        order, so every domain associates identically, bit-for-bit. This is the cross-domain gradient
- *        reduce.
+ *      - @b all-gather — each round posts the contiguous run of domain blocks this domain already
+ *        holds into the partner's symmetric buffer at the @b identical byte offset, so blocks land
+ *        domain-major with no accumulate; after @c log2(D) rounds every domain holds all @c D
+ *        blocks. This is how the contrastive losses receive remote vertex towers.
+ *      - @b all-reduce-sum — each round posts this domain's Float32 shard into the partner's
+ *        landing buffer, waits for the partner's, and folds it in with one round-to-nearest-even
+ *        add per element ( @c __fadd_rn , no fused-multiply-add contraction) — the SPMD-static
+ *        schedule fixes the fold order, so every domain associates identically, bit-for-bit. This
+ *        is the cross-domain gradient reduce.
  *
  *  @section collectives_rounds Arrival flags are rounds, never events
  *
- *  Every round's arrival proof is a 4-byte @b inline flag write on the @b same queue pair as the payload:
- *  Reliable-Connection delivery is in-order, so the flag's arrival proves the payload landed. Flags are
- *  @b monotonic never-reset counters — a waiter spins with @c >= against the absolute target
+ *  Every round's arrival proof is a 4-byte @b inline flag write on the @b same queue pair
+ *  as the payload:
+ *  Reliable-Connection delivery is in-order, so the flag's arrival proves the payload landed. Flags
+ *  are @b monotonic never-reset counters — a waiter spins with @c >= against the absolute target
  *  @c *round+round+1 , so replays of a captured step need no flag reset (a reset would be a host
  *  write inside the replay loop). Each @ref unum::uform::utilities::infiniband_reach_t owns its
  *  round scalar and @c advance() s it once per step by its round count — distinct members' flags
@@ -37,8 +39,8 @@
  *  @section infiniband_layers The transport underneath, smallest dependency surface first
  *
  *      1. Wire PODs — @ref infiniband_coordinates_t (what two queue pairs exchange to connect),
- *         @ref infiniband_queue_handles_t / @ref infiniband_completion_handles_t (what a kernel needs
- *         to post and drain), and @ref unum::uform::utilities::infiniband_link_t (how one GPU
+ *         @ref infiniband_queue_handles_t / @ref infiniband_completion_handles_t (what a kernel
+ *         needs to post and drain), and @ref unum::uform::utilities::infiniband_link_t (how one GPU
  *         reaches one remote multimem_domain). These are ibverbs-free and always compiled.
  *      2. @c infiniband_endpoint_t — one (GPU, NIC) Reliable-Connection queue pair with its memory
  *         region registered over GPU VRAM: dmabuf-first ( @c cuMemGetHandleForAddressRange +
@@ -50,19 +52,19 @@
  *         GPU's address space so @c infiniband_post_write builds one MLX5 work-queue entry and
  *         rings the doorbell entirely from device code — capture-safe graph nodes, no
  *         @c ibv_post_send .
- *      4. @ref unum::uform::utilities::infiniband_reach_t — one member's wired reach into the other
- *         domains, owning the registered symmetric heap and running the two collectives above as
- *         methods.
+ *      4. @ref unum::uform::utilities::infiniband_reach_t — one member's wired reach into the
+ *         other domains, owning the registered symmetric heap and running the two collectives
+ *         above as methods.
  *
  *  @section infiniband_platform Platform contract
  *
- *  LID-routed same-subnet InfiniBand (GID carried but unused), pkey 0, GID index 0 — the single-fabric
- *  cluster this project targets. The BlueFlame register lives in NIC BAR / MMIO space: mapping it for
- *  the GPU needs @c CU_MEMHOSTREGISTER_IOMEMORY , and a platform whose IOMMU / ACS configuration
- *  refuses that registration cannot run the device-initiated path —
+ *  LID-routed same-subnet InfiniBand (GID carried but unused), pkey 0, GID index 0 — the
+ *  single-fabric cluster this project targets. The BlueFlame register lives in NIC BAR / MMIO
+ *  space: mapping it for the GPU needs @c CU_MEMHOSTREGISTER_IOMEMORY , and a platform whose IOMMU
+ *  / ACS configuration refuses that registration cannot run the device-initiated path —
  *  @c infiniband_queue_mapping_t::make names that failure explicitly. CQE compression must be off
- *  (validated at mapping time). Everything below layer 1 builds only under @c UFORM_WITH_INFINIBAND ;
- *  without it the wire PODs remain and every factory fails loudly naming the gate.
+ *  (validated at mapping time). Everything below layer 1 builds only under @c UFORM_WITH_INFINIBAND
+ *  ; without it the wire PODs remain and every factory fails loudly naming the gate.
  */
 #pragma once
 
@@ -95,10 +97,12 @@ namespace unum::uform::utilities {
 /** Monotonic never-reset arrival counter the GDAKI collectives spin on; lives in device memory. */
 using infiniband_round_t = u32_t;
 
-/** The send-doorbell entry in the mlx5 two-entry doorbell-record array (entry 0 is the receive side). */
+/** The send-doorbell entry in the mlx5 two-entry doorbell-record array (entry 0 is
+ *  the receive side). */
 inline constexpr std::size_t mlx5_send_doorbell_index_k = 1;
 
-/** The set-consumer-index entry in the mlx5 completion-queue doorbell array (entry 1 arms interrupts). */
+/** The set-consumer-index entry in the mlx5 completion-queue doorbell array (entry
+ *  1 arms interrupts). */
 inline constexpr std::size_t mlx5_completion_consumer_index_k = 0;
 
 /** Owner-bit mask of an mlx5 completion entry's @c op_own byte; hardware flips it per ring wrap. */
@@ -122,13 +126,15 @@ struct infiniband_coordinates_t {
     /** The queue pair number the peer's RTR state targets. */
     u32_t queue_pair_number = 0;
 
-    /** The initial packet sequence number; both ends exchange theirs, reliability needs agreement only. */
+    /** The initial packet sequence number; both ends exchange theirs, reliability
+     *  needs agreement only. */
     u32_t packet_sequence_number = 0;
 
     /** The memory region's remote key authorizing the peer's writes and reads. */
     u32_t remote_key = 0;
 
-    /** The registered GPU buffer's base virtual address; a peer targets @c buffer_address+offset . */
+    /** The registered GPU buffer's base virtual address; a peer targets
+     *  @c buffer_address+offset . */
     u64_t buffer_address = 0;
 
     /** The port's global identifier — carried for a future routed fabric, unused on LID routing. */
@@ -174,8 +180,8 @@ struct infiniband_coordinates_t {
     }
 };
 
-/** Publish this rank's @p local coordinates under @p key and await + parse the @p peer_host_domain 's
- *  payload under the same key — one QP handshake over the mesh's filesystem rendezvous. */
+/** Publish this rank's @p local coordinates under @p key and await + parse the @p peer_host_domain
+ *  's payload under the same key — one QP handshake over the mesh's filesystem rendezvous. */
 [[nodiscard]] inline expected_t exchange_infiniband_coordinates(mesh_topology_t const &topology, sz::string_view_t key,
                                                                 infiniband_coordinates_t const &local,
                                                                 u32_t peer_host_domain, infiniband_coordinates_t &peer,
@@ -199,10 +205,11 @@ struct infiniband_coordinates_t {
 struct infiniband_queue_handles_t {
 
     /** The send work-queue entry storage (host DMA memory the NIC fetches from), spanning
-     *  @c send_queue_entry_count·send_queue_stride bytes. */
+     *  @c send_queue_entry_count · send_queue_stride bytes. */
     bytes_span_t send_queue {};
 
-    /** The big-endian doorbell-record array; the send entry holds the producer counter the NIC polls. */
+    /** The big-endian doorbell-record array; the send entry holds the producer counter
+     *  the NIC polls. */
     u32_t *doorbell_record = nullptr;
 
     /** The BlueFlame / User-Access-Region doorbell register — NIC BAR / MMIO space. */
@@ -222,8 +229,8 @@ struct infiniband_queue_handles_t {
 };
 
 /**
- *  @brief The handles a kernel needs to reap one signaled send completion — the drain counterpart of
- *      @ref infiniband_queue_handles_t .
+ *  @brief The handles a kernel needs to reap one signaled send completion — the drain counterpart
+ *      of @ref infiniband_queue_handles_t .
  *
  *  The three hardware unknowns ( @c entry_size , @c initial_owner , @c compressed ) are captured at
  *  mapping time; the valid 64-byte entry lives in the @b high bytes of a wider cell.
@@ -231,7 +238,7 @@ struct infiniband_queue_handles_t {
 struct infiniband_completion_handles_t {
 
     /** The completion-entry ring (host DMA memory the NIC writes into), spanning
-     *  @c entry_count·entry_size bytes. */
+     *  @c entry_count · entry_size bytes. */
     bytes_span_t ring {};
 
     /** The big-endian completion doorbell record; set-consumer-index at entry 0. */
@@ -246,7 +253,8 @@ struct infiniband_completion_handles_t {
     /** Bytes per ring cell (64 or 128); the valid 64-byte entry sits in the high bytes. */
     u32_t entry_size = 0;
 
-    /** @c log2(entry_count) ; the owner-bit polarity at index @c i is @c (i>>entry_log_count)&1 . */
+    /** @c log2(entry_count) ; the owner-bit polarity at index @c i is
+     *  @c (i>>entry_log_count)&1 . */
     u32_t entry_log_count = 0;
 
     /** The completion queue number, carried for diagnostics. */
@@ -260,20 +268,22 @@ struct infiniband_completion_handles_t {
 };
 
 /**
- *  @brief How one GPU reaches one @b remote multimem_domain's symmetric heap: the device-initiated send
- *      path, the peer's landing coordinates, and the local arrival flag — one link per remote domain per
- *      recursive-doubling round, never one per remote GPU.
+ *  @brief How one GPU reaches one @b remote multimem_domain's symmetric heap: the device-initiated
+ *      send path, the peer's landing coordinates, and the local arrival flag — one link per remote
+ *      domain per recursive-doubling round, never one per remote GPU.
  *
  *  Symmetric heaps lay identical offsets on every rank, so any tensor's remote target is
- *  @c remote_heap_base+offset with the @b local offset — no per-tensor lookup. Built once at wiring time,
- *  outside capture, from an @c infiniband_endpoint_t + the GDAKI mappings + exchanged coordinates.
+ *  @c remote_heap_base+offset with the @b local offset — no per-tensor lookup. Built once
+ *  at wiring time, outside capture, from an @c infiniband_endpoint_t + the GDAKI mappings
+ *  + exchanged coordinates.
  */
 struct infiniband_link_t {
 
     /** Which remote multimem_domain this link reaches. */
     u32_t remote_multimem_domain_index = 0;
 
-    /** Recursive-doubling round this link serves: the partner is @c this_domain^(1<<round_index) . */
+    /** Recursive-doubling round this link serves: the partner is
+     *  @c this_domain^(1<<round_index) . */
     u32_t round_index = 0;
 
     /** Peer domain's symmetric-heap base virtual address; targets are @c base+offset . */
@@ -291,7 +301,8 @@ struct infiniband_link_t {
     /** The completion parser paired with @ref queue ; one drain per signaled post. */
     infiniband_completion_handles_t completion {};
 
-    /** Symmetric-heap byte offset of the even-step landing buffer, the partner's and this rank's alike. */
+    /** Symmetric-heap byte offset of the even-step landing buffer, the partner's and
+     *  this rank's alike. */
     std::size_t landing_offset = 0;
 
     /** Byte stride from a round's even-step landing to its odd-step twin — the parity doubling
@@ -321,22 +332,25 @@ struct infiniband_link_t {
 inline constexpr int infiniband_access_flags_k = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE |
                                                  IBV_ACCESS_REMOTE_READ;
 
-/** Completion-queue and work-request depth; the host path posts a handful of writes per exchange. */
+/** Completion-queue and work-request depth; the host path posts a handful of
+ *  writes per exchange. */
 inline constexpr int infiniband_queue_depth_k = 16;
 
-/** Whether a host-posted write also carries immediate data (consuming a posted receive on the peer). */
+/** Whether a host-posted write also carries immediate data (consuming a posted receive
+ *  on the peer). */
 enum class infiniband_signal_t : u32_t {
     plain_signaled_k = 0,
     with_immediate_k = 1,
 };
 
-/** Which kind of host memory a page registration covers: ordinary DMA memory, or NIC BAR space such as
- *  the BlueFlame register, which the driver registers as I/O memory. */
+/** Which kind of host memory a page registration covers: ordinary DMA memory, or NIC BAR space such
+ *  as the BlueFlame register, which the driver registers as I/O memory. */
 enum class host_memory_t : bool { dma_k, mmio_k };
 
-/** One registered host page and its reference count — mlx5 packs many doorbell records (and
- *  neighboring rings) per OS page, so several mappings routinely share one page. A page someone
- *  outside the registry registered first is @b borrowed ( @c owned false) and never unregistered. */
+/** One registered host page and its reference count — mlx5 packs many doorbell records
+ *  (and neighboring rings) per OS page, so several mappings routinely share one page. A
+ *  page someone outside the registry registered first is @b borrowed ( @c owned false)
+ *  and never unregistered. */
 struct host_page_registration_t {
 
     /** The page base; null marks a free table entry reused by the next @c acquire . */
@@ -350,16 +364,17 @@ struct host_page_registration_t {
 };
 
 /**
- *  @brief The NIC's ledger of host pages registered for GPU access — owned by @ref infiniband_nic_t ,
- *      borrowed by every queue / completion mapping on that NIC.
+ *  @brief The NIC's ledger of host pages registered for GPU access — owned by @ref infiniband_nic_t
+ *      , borrowed by every queue / completion mapping on that NIC.
  *
- *  mlx5 allocates work queues, completion rings, and doorbell records from page-shared pools, so two
- *  mappings routinely land on one OS page. An unshared @c cuMemHostRegister per mapping then either fails
- *  ( @c CUDA_ERROR_HOST_MEMORY_ALREADY_REGISTERED , leaving a range's tail pages unmapped for the GPU) or,
- *  worse, the first mapping's teardown unregisters a page the second mapping's doorbell kernel still
- *  dereferences — a roaming device fault (Xid 43). Registering page by page with reference counts makes
- *  both impossible: a shared page is counted, a partially-covered range still gets its tail pages, and a
- *  page lives until its @b last user releases it.
+ *  mlx5 allocates work queues, completion rings, and doorbell records from page-shared pools,
+ *  so two mappings routinely land on one OS page. An unshared @c cuMemHostRegister per mapping
+ *  then either fails ( @c CUDA_ERROR_HOST_MEMORY_ALREADY_REGISTERED , leaving a range's tail
+ *  pages unmapped for the GPU) or, worse, the first mapping's teardown unregisters a page the
+ *  second mapping's doorbell kernel still dereferences — a roaming device fault (Xid 43).
+ *  Registering page by page with reference counts makes both impossible: a shared page is
+ *  counted, a partially-covered range still gets its tail pages, and a page lives until its
+ *  @b last user releases it.
  */
 struct host_page_registry_t {
 
@@ -445,9 +460,9 @@ struct host_page_registry_t {
 };
 
 /**
- *  @brief One opened mlx5 adapter serving one GPU: the device context, the protection domain, the page
- *      registry, and the port identity (LID, GID, MTU) every endpoint on this GPU borrows — opened
- *      @b once, in main, never per queue pair.
+ *  @brief One opened mlx5 adapter serving one GPU: the device context, the protection domain, the
+ *      page registry, and the port identity (LID, GID, MTU) every endpoint on this GPU borrows —
+ *      opened @b once, in main, never per queue pair.
  *
  *  Move-only; teardown deallocates the domain and closes the device.
  */
@@ -536,8 +551,8 @@ struct infiniband_nic_t {
     ibv_pd *protection_domain_ = nullptr;
 
     /** The paired GPU's primary context, retained for the NIC's lifetime — the page registrations
-     *  below are scoped to it, and a transient wiring stream releasing the last reference would reset
-     *  the context and destroy them under the doorbell kernels. */
+     *  below are scoped to it, and a transient wiring stream releasing the last reference would
+     *  reset the context and destroy them under the doorbell kernels. */
     CUcontext primary_context_ = nullptr;
 
     /** The paired GPU the retained context (and every registration) belongs to. */
@@ -564,17 +579,17 @@ struct infiniband_nic_t {
 };
 
 /**
- *  @brief One Reliable-Connection endpoint talking to one remote GPU: completion queue, RC queue pair,
- *      and a memory region over GPU VRAM — all inside a borrowed @ref infiniband_nic_t 's device
- *      context and protection domain.
+ *  @brief One Reliable-Connection endpoint talking to one remote GPU: completion queue, RC queue
+ *      pair, and a memory region over GPU VRAM — all inside a borrowed @ref infiniband_nic_t 's
+ *      device context and protection domain.
  *
  *  The region registers dmabuf-first ( @c cuMemGetHandleForAddressRange exports the range,
- *  @c ibv_reg_dmabuf_mr registers the descriptor with the GPU virtual address as the I/O address so peer
- *  @c buffer_address+offset math lands on the right byte); on any failure it falls back to a plain
- *  @c ibv_reg_mr serviced by the @c nvidia_peermem kernel module. Host-posted writes and completion polls
- *  remain the bring-up / smoke-test path; production traffic runs through the GDAKI mappings layered on
- *  this endpoint's queue pair. Move-only; teardown reverses construction: region, queue pair, completion
- *  queue, dmabuf descriptor — the adapter stays with its NIC owner.
+ *  @c ibv_reg_dmabuf_mr registers the descriptor with the GPU virtual address as the I/O address so
+ *  peer @c buffer_address+offset math lands on the right byte); on any failure it falls back to a
+ *  plain @c ibv_reg_mr serviced by the @c nvidia_peermem kernel module. Host-posted writes and
+ *  completion polls remain the bring-up / smoke-test path; production traffic runs through the
+ *  GDAKI mappings layered on this endpoint's queue pair. Move-only; teardown reverses construction:
+ *  region, queue pair, completion queue, dmabuf descriptor — the adapter stays with its NIC owner.
  */
 struct infiniband_endpoint_t {
 
@@ -613,8 +628,9 @@ struct infiniband_endpoint_t {
      *      register @p gpu_buffer as a GPUDirect memory region — everything a peer handshake needs.
      *
      *  @param[in] nic The GPU's opened adapter — borrowed for this endpoint's whole lifetime.
-     *  @param[in] gpu_buffer The GPU VRAM range peers will read and write, shaped @b [buffer_bytes] —
-     *      typically a window over a @ref gpu_arena_t (its chunks are created GPUDirect-RDMA-capable).
+     *  @param[in] gpu_buffer The GPU VRAM range peers will read and write, shaped
+     *      @b [buffer_bytes] — typically a window over a @ref gpu_arena_t (its chunks
+     *      are created GPUDirect-RDMA-capable).
      */
     [[nodiscard]] static expected<infiniband_endpoint_t> make(infiniband_nic_t &nic, b8r1_span_t gpu_buffer) noexcept;
 
@@ -631,17 +647,18 @@ struct infiniband_endpoint_t {
     [[nodiscard]] u32_t local_key() const noexcept { return memory_region_->lkey; }
 
     /**
-     *  @brief Drive the queue pair to Ready-To-Send against @p peer : INIT (port + pkey + access) → RTR
-     *      (peer queue-pair number and sequence number over an LID-routed address vector) → RTS.
+     *  @brief Drive the queue pair to Ready-To-Send against @p peer : INIT (port + pkey +
+     *      access) → RTR (peer queue-pair number and sequence number over an LID-routed address
+     *      vector) → RTS.
      *
-     *  Infinite receiver-not-ready retries: a write racing ahead of the peer's posted receive is retried,
-     *  never dropped — the host-side handshake needs no strict ordering.
+     *  Infinite receiver-not-ready retries: a write racing ahead of the peer's posted receive is
+     *  retried, never dropped — the host-side handshake needs no strict ordering.
      */
     [[nodiscard]] expected_t connect(infiniband_coordinates_t const &peer) noexcept;
 
     /** Host-post one signaled RDMA write of @p length bytes from @c gpu_buffer+local_offset into
-     *  the peer's @c buffer_address+remote_offset — the bring-up / smoke-test path; production posts
-     *  ride @c infiniband_post_write . */
+     *  the peer's @c buffer_address+remote_offset — the bring-up / smoke-test path; production
+     *  posts ride @c infiniband_post_write . */
     [[nodiscard]] expected_t post_write(std::size_t local_offset, std::size_t remote_offset, std::size_t length,
                                         infiniband_signal_t signal = infiniband_signal_t::plain_signaled_k) noexcept {
         if (length == 0 || local_offset + length > gpu_buffer_.extent(0))
@@ -744,8 +761,9 @@ struct infiniband_endpoint_t {
 };
 
 /**
- *  @brief The GPU-reachable send path of one queue pair: the work-queue buffer, the doorbell record, and
- *      the BlueFlame register mapped into GPU address space, plus a device producer-index counter.
+ *  @brief The GPU-reachable send path of one queue pair: the work-queue buffer, the
+ *      doorbell record, and the BlueFlame register mapped into GPU address space, plus a
+ *      device producer-index counter.
  *
  *  Layers onto a built, connected @c infiniband_endpoint_t 's queue pair (borrowed, never owned) —
  *  build it once after Ready-To-Send, @b outside any capture. The BlueFlame registration (
@@ -839,8 +857,8 @@ struct infiniband_completion_mapping_t {
 
     /** Expose @p completion_queue 's raw mlx5 ring + doorbell and map both for the GPU through
      *  @p registry (pages are shared across completion queues, so acquisitions are
-     *  reference-counted); the consumer counter is allocated from @p arena . The ring must be a power
-     *  of two and uncompressed. */
+     *  reference-counted); the consumer counter is allocated from @p arena . The ring must be a
+     *  power of two and uncompressed. */
     [[nodiscard]] static expected<infiniband_completion_mapping_t> make(ibv_cq *completion_queue, gpu_arena_t &arena,
                                                                         host_page_registry_t &registry) noexcept;
 
@@ -905,17 +923,18 @@ struct infiniband_completion_mapping_t {
 enum class infiniband_signaling_t : bool { unsignaled_k, signaled_k };
 
 /**
- *  @brief Post @b one RDMA-write work-queue entry and ring the doorbell entirely from device code — the
- *      GDAKI primitive.
+ *  @brief Post @b one RDMA-write work-queue entry and ring the doorbell entirely from device code —
+ *      the GDAKI primitive.
  *
- *  Claims the next producer cell, writes the control + remote-address segments followed by @b either a
- *  pointer local-data segment ( @p inline_four_bytes null) @b or a 4-byte inline segment (the arrival-flag
- *  write), fences, advances the send doorbell record, fences, and stores the control segment's first 8
- *  bytes to the BlueFlame register. One 48-byte entry fills exactly one 64-byte basic block, so each post
- *  advances the producer index by one. A @c signaled_k post raises one reapable completion for
- *  @ref infiniband_drain_one ; delivery on a Reliable Connection is in-order, so an unsignaled payload write
- *  followed by a signaled inline flag write on the @b same queue pair makes the flag's arrival the proof
- *  the payload landed. Call from @b one thread.
+ *  Claims the next producer cell, writes the control + remote-address segments followed by
+ *  @b either a pointer local-data segment ( @p inline_four_bytes null) @b or a 4-byte inline
+ *  segment (the arrival-flag write), fences, advances the send doorbell record, fences, and stores
+ *  the control segment's first 8 bytes to the BlueFlame register. One 48-byte entry fills exactly
+ *  one 64-byte basic block, so each post advances the producer index by one. A @c signaled_k post
+ *  raises one reapable completion for @ref infiniband_drain_one ; delivery on a Reliable
+ *  Connection is in-order, so an unsignaled payload write followed by a signaled inline flag write
+ *  on the @b same queue pair makes the flag's arrival the proof the payload landed. Call from
+ *  @b one thread.
  */
 __device__ inline void infiniband_post_write(infiniband_queue_handles_t handles, void const *local_source,
                                              u32_t local_access_key, u64_t remote_address, u32_t remote_access_key,
@@ -956,20 +975,23 @@ __device__ inline void infiniband_post_write(infiniband_queue_handles_t handles,
         for (u32_t byte_index = 0; byte_index != 4u; ++byte_index) after_remote[4u + byte_index] = source[byte_index];
     }
     else {
-        // Local-data segment: the source range inside this endpoint's registered buffer, under our key.
+        // Local-data segment: the source range inside this endpoint's registered buffer,
+        // under our key.
         auto *data = reinterpret_cast<mlx5_wqe_data_seg *>(after_remote);
         data->byte_count = infiniband_byte_swap_32(byte_count);
         data->lkey = infiniband_byte_swap_32(local_access_key);
         data->addr = infiniband_byte_swap_64(reinterpret_cast<u64_t>(local_source));
     }
 
-    // The entry must be visible in system memory before the NIC observes the advanced doorbell record.
+    // The entry must be visible in system memory before the NIC observes the
+    // advanced doorbell record.
     __threadfence_system();
     handles.doorbell_record[mlx5_send_doorbell_index_k] = infiniband_byte_swap_32((producer_index + 1u) & 0xffffu);
     // The doorbell record must be visible before the BlueFlame ring that tells the NIC to fetch.
     __threadfence_system();
     u64_t const doorbell = static_cast<u64_t>(opmod_index_opcode) | (static_cast<u64_t>(qpn_descriptor_size) << 32);
-    // Ring BlueFlame: the control segment's first 8 bytes, one 64-bit MMIO store, halves already big-endian.
+    // Ring BlueFlame: the control segment's first 8 bytes, one 64-bit MMIO store,
+    // halves already big-endian.
     *static_cast<volatile u64_t *>(handles.blueflame_register) = doorbell;
     __threadfence_system();
 }
@@ -1021,8 +1043,8 @@ __device__ inline void infiniband_drain_one(infiniband_completion_handles_t comp
 #endif // defined(UFORM_WITH_INFINIBAND)
 
 /** Rank-1 device view of the per-round link table, shaped @b [ceil(log2(D))] — one
- *  @ref unum::uform::utilities::infiniband_link_t per recursive-doubling round, indexed by
- *  round. */
+ *  @ref unum::uform::utilities::infiniband_link_t per recursive-doubling round,
+ *  indexed by round. */
 using infiniband_links_view_t = nk::tensor_view<infiniband_link_t, 1>;
 
 /** Rank-1 device view of the flag-round scalar, shaped @b [1] — the monotonic base every
@@ -1043,8 +1065,8 @@ struct infiniband_allgather_plan_t {
 };
 
 /** The static description of one all-to-all invocation — this domain's per-peer send blocks live at
- *  @b [D·block_bytes] ( block @c p is what this domain sends domain @c p ; block @c self stays local ), and
- *  each round's landing receives that round's partner's block. Internal to
+ *  @b [D·block_bytes] ( block @c p is what this domain sends domain @c p ; block @c self stays
+ *  local ), and each round's landing receives that round's partner's block. Internal to
  *  @ref unum::uform::utilities::infiniband_reach_t 's dispatch; consumers never construct one. */
 struct infiniband_alltoall_plan_t {
 
@@ -1058,18 +1080,20 @@ struct infiniband_alltoall_plan_t {
 using infiniband_links_tensor_t = nk::tensor<infiniband_link_t, gpu_arena_alloc<infiniband_link_t>, 1>;
 
 /**
- *  @brief The shared RDMA body every typed collective handle holds — one member's wired reach into the
- *      other multimem_domains, the level-2 counterpart of @ref multimem_domain_t 's per-member surface.
+ *  @brief The shared RDMA body every typed collective handle holds — one member's wired
+ *      reach into the other multimem_domains, the level-2 counterpart of
+ *      @ref multimem_domain_t 's per-member surface.
  *
- *  It owns the registered symmetric heap, one RC endpoint with its device-initiated queue / completion
- *  mappings per recursive-doubling round, the exchanged coordinates, the device-resident link table, and
- *  the collective's round scalar.
+ *  It owns the registered symmetric heap, one RC endpoint with its device-initiated queue /
+ *  completion mappings per recursive-doubling round, the exchanged coordinates, the device-resident
+ *  link table, and the collective's round scalar.
  *
  *  @b Internal : consumers hold @ref infiniband_all_reduce , @ref infiniband_all_gather , or
- *  @ref infiniband_all_to_all , whose @c make constructs this body through @ref colocated_domain_t —
- *  the handle's type @b is the role, so a heap layout can never contradict the collective it runs, and
- *  the adapters underneath are always the shared ones. Payload, links, round, and the domain coordinate
- *  are all baked at wiring time; the per-collective methods here are the handles' implementation.
+ *  @ref infiniband_all_to_all , whose @c make constructs this body through
+ *  @ref colocated_domain_t — the handle's type @b is the role, so a heap layout can never
+ *  contradict the collective it runs, and the adapters underneath are always the shared ones.
+ *  Payload, links, round, and the domain coordinate are all baked at wiring time; the
+ *  per-collective methods here are the handles' implementation.
  */
 struct infiniband_reach_t {
 
@@ -1089,11 +1113,12 @@ struct infiniband_reach_t {
     friend struct infiniband_all_to_all;
 
     /**
-     *  @brief Byte offsets of one member's registered symmetric heap — the identical formula on every
-     *      domain: the symmetric-heap contract the remote writes rely on.
+     *  @brief Byte offsets of one member's registered symmetric heap — the identical formula on
+     *      every domain: the symmetric-heap contract the remote writes rely on.
      *
-     *  Layout: @b [payload | parity landing pairs | parity flag pairs] , every region 128-byte aligned; the
-     *  typed handles set the payload and landing bytes, and @ref colocated_domain_t derives the rounds.
+     *  Layout: @b [payload | parity landing pairs | parity flag pairs] , every region 128-byte
+     *  aligned; the typed handles set the payload and landing bytes, and @ref colocated_domain_t
+     *  derives the rounds.
      */
     struct heap_layout_t {
 
@@ -1139,16 +1164,16 @@ struct infiniband_reach_t {
     [[nodiscard]] b8r1_span_t payload() noexcept { return {heap_.data(), layout_.payload_bytes}; }
 
     /** An all-gather member's own domain-major cell inside @ref payload — where this domain's
-     *  block must be staged before @ref allgather ; the coordinate stays baked, never re-derived
-     *  by consumers. */
+     *  block must be staged before @ref allgather ; the coordinate stays baked, never
+     *  re-derived by consumers. */
     [[nodiscard]] b8r1_span_t own_block() noexcept {
         std::size_t const block_bytes = layout_.payload_bytes >> layout_.rounds;
         return {heap_.data() + static_cast<std::size_t>(multimem_domain_index_) * block_bytes, block_bytes};
     }
 
     /** The one enqueued host write of a step: stage the round into the pinned cell and
-     *  enqueue its upload — on @p stream , before this step's collective. A no-op on the zero-round
-     *  single-domain identity. */
+     *  enqueue its upload — on @p stream , before this step's collective. A no-op on the
+     *  zero-round single-domain identity. */
     [[nodiscard]] expected_t advance(gpu_stream_t &stream) noexcept {
         if (layout_.rounds == 0) return {};
         return round_.advance(stream);
@@ -1162,8 +1187,9 @@ struct infiniband_reach_t {
     [[nodiscard]] u32_t multimem_domain_count() const noexcept { return 1u << layout_.rounds; }
 
     /**
-     *  @brief Device-initiated inter-domain all-reduce-sum of this member's Float32 payload, in place —
-     *      the cross-domain gradient / force reduce, enqueued on @p stream as capture-safe graph nodes.
+     *  @brief Device-initiated inter-domain all-reduce-sum of this member's Float32 payload, in
+     *      place — the cross-domain gradient / force reduce, enqueued on @p stream as
+     *      capture-safe graph nodes.
      *
      *  Rounds run in order (round @c r 's accumulate feeds round @c r+1 's post); within a round:
      *  post-and-drain, wait, accumulate. Call @ref advance first, once per step. Zero rounds — the
@@ -1172,26 +1198,28 @@ struct infiniband_reach_t {
     [[nodiscard]] expected_t allreduce_sum(gpu_stream_t &stream) noexcept;
 
     /**
-     *  @brief Device-initiated inter-domain all-gather of the domain-major blocks inside this member's
-     *      payload — how every domain receives every other domain's vertex tower, enqueued on @p stream
-     *      as capture-safe graph nodes.
+     *  @brief Device-initiated inter-domain all-gather of the domain-major blocks inside this
+     *      member's payload — how every domain receives every other domain's vertex tower, enqueued
+     *      on @p stream as capture-safe graph nodes.
      *
-     *  This domain's own block must already sit at its domain-major cell; after @c log2(D) rounds every
-     *  block is filled. Call @ref advance first, once per step.
+     *  This domain's own block must already sit at its domain-major cell; after @c log2(D) rounds
+     *  every block is filled. Call @ref advance first, once per step.
      */
     [[nodiscard]] expected_t allgather(gpu_stream_t &stream) noexcept;
 
-    /** This domain's outgoing block for @p destination_domain inside the send region — where the caller
-     *  stages what @ref alltoall ships to that domain. @c destination_domain equal to this domain's own index
-     *  is the local block, kept in place and read directly. Meaningful only on an all-to-all-wired member. */
+    /** This domain's outgoing block for @p destination_domain inside the send region — where the
+     *  caller stages what @ref alltoall ships to that domain. @c destination_domain equal to this
+     *  domain's own index is the local block, kept in place and read directly. Meaningful only on
+     *  an all-to-all-wired member. */
     [[nodiscard]] b8r1_span_t send_block(u32_t destination_domain) noexcept {
         std::size_t const block_bytes = layout_.landing_bytes;
         return {heap_.data() + static_cast<std::size_t>(destination_domain) * block_bytes, block_bytes};
     }
 
-    /** The block @ref alltoall received from round @p round 's partner ( @c multimem_domain_index ^ 2^round )
-     *  — that round's landing at @p step_parity (landings are even/odd doubled, so the caller names
-     *  which step's landing it consumes). Meaningful only on an all-to-all-wired member. */
+    /** The block @ref alltoall received from round @p round 's partner (
+     *  @c multimem_domain_index ^ 2^round ) — that round's landing at @p step_parity (landings
+     *  are even/odd doubled, so the caller names which step's landing it consumes). Meaningful
+     *  only on an all-to-all-wired member. */
     [[nodiscard]] b8r1_span_t recv_block(u32_t round, u32_t step_parity) noexcept {
         std::size_t const block_bytes = layout_.landing_bytes;
         std::size_t const landing = layout_.landings_offset() +
@@ -1200,12 +1228,14 @@ struct infiniband_reach_t {
     }
 
     /**
-     *  @brief Device-initiated inter-domain all-to-all: ship each peer this domain's send block for it and land
-     *      the peer's block for this domain, enqueued on @p stream as capture-safe graph nodes.
+     *  @brief Device-initiated inter-domain all-to-all: ship each peer this domain's send block
+     *      for it and land the peer's block for this domain, enqueued on @p stream as
+     *      capture-safe graph nodes.
      *
-     *  Stage every @ref send_block first; after the rounds each @ref recv_block holds its partner's block
-     *  and the local block ( @ref send_block for this domain ) stays in place. Call @ref advance first,
-     *  once per step. Two domains today — one pairwise exchange; beyond two needs the multi-hop schedule.
+     *  Stage every @ref send_block first; after the rounds each @ref recv_block holds its partner's
+     *  block and the local block ( @ref send_block for this domain ) stays in place. Call
+     *  @ref advance first, once per step. Two domains today — one pairwise exchange; beyond two
+     *  needs the multi-hop schedule.
      */
     [[nodiscard]] expected_t alltoall(gpu_stream_t &stream) noexcept;
 
@@ -1243,11 +1273,12 @@ struct infiniband_reach_t {
 };
 
 /**
- *  @brief This process's membership of the mesh's colocated_domain: the opened NICs of every local GPU
- *      and the coordinate-exchange context.
+ *  @brief This process's membership of the mesh's colocated_domain: the opened NICs of every local
+ *      GPU and the coordinate-exchange context.
  *
- *  It is created @b once in main, right after the mesh bootstrap, and threaded by reference to every
- *  cross-domain consumer, exactly like the per-rank arenas and the one @ref multimem_domain_t .
+ *  It is created @b once in main, right after the mesh bootstrap, and threaded by reference to
+ *  every cross-domain consumer, exactly like the per-rank arenas and the one
+ *  @ref multimem_domain_t .
  *
  *  Wiring a handle is a consumer's own lane — its queue pairs (the single-poster concurrency
  *  granularity, so consumers' collectives can overlap), its heap, its round; this domain only lends
@@ -1257,9 +1288,9 @@ struct infiniband_reach_t {
  */
 struct colocated_domain_t {
 
-    /** Open each local GPU's adapter — @c mlx5_<d> for local ordinal @c d , the box's GPU↔HCA
-     *  pairing — once for the process: one per local GPU, however many processes share the
-     *  multimem_domain. */
+    /** Open each local GPU's adapter — @c mlx5_<d> for local ordinal @c d , the box's
+     *  GPU↔HCA pairing — once for the process: one per local GPU, however many processes
+     *  share the multimem_domain. */
     [[nodiscard]] static expected<colocated_domain_t> make(mesh_topology_t &topology) noexcept;
 
     /** The bootstrapped world this domain was wired against. */
@@ -1270,7 +1301,8 @@ struct colocated_domain_t {
 
   private:
 
-    /** The typed collective handles are the only wiring consumers — the handle's type is the role. */
+    /** The typed collective handles are the only wiring consumers — the handle's type
+     *  is the role. */
     template <typename value_type_>
     friend struct infiniband_all_reduce;
 
@@ -1298,7 +1330,8 @@ struct colocated_domain_t {
      *  @param[in,out] arena The member's arena; the heap, the link table, and the mapping counters
      *      allocate from it (its chunks are GPUDirect-RDMA-capable by construction).
      *  @param[in,out] stream The member's lead stream; the round scalar is seeded on it at setup.
-     *  @param[in] layout The handle's heap shape — payload and landing bytes; the rounds are derived here.
+     *  @param[in] layout The handle's heap shape — payload and landing bytes; the rounds
+     *      are derived here.
      *  @param[in] timeout_seconds Deadline on the coordinate and armed-peer rendezvous, and on
      *      every device-side flag wait and completion drain of the wired rounds.
      */
@@ -1310,14 +1343,15 @@ struct colocated_domain_t {
      *  handle claims its rendezvous generation from it. */
     mesh_topology_t *topology_ = nullptr;
 
-    /** One opened adapter per local GPU, local order: entry @c d serves domain member @c member_offset+d . */
+    /** One opened adapter per local GPU, local order: entry @c d serves domain member
+     *  @c member_offset+d . */
     per_gpu_array<infiniband_nic_t> nics_ {};
 };
 
-/** Cross-domain Float32 all-reduce-sum in place — the typed op-handle over @ref colocated_domain_t . Wires
- *  one endpoint per recursive-doubling round at @ref make (no lazy-init), auto-keys its rendezvous, and exposes
- *  the shard as a typed @c nk::tensor_span the caller stages before each step. @c operator() folds @c advance
- *  and the reduce into one enqueue. */
+/** Cross-domain Float32 all-reduce-sum in place — the typed op-handle over @ref colocated_domain_t
+ *  . Wires one endpoint per recursive-doubling round at @ref make (no lazy-init), auto-keys its
+ *  rendezvous, and exposes the shard as a typed @c nk::tensor_span the caller stages before each
+ *  step. @c operator() folds @c advance and the reduce into one enqueue. */
 template <typename value_type_>
 struct infiniband_all_reduce {
     using value_type = value_type_;
@@ -1338,12 +1372,14 @@ struct infiniband_all_reduce {
         return result_t {std::move(handle)};
     }
 
-    /** The typed shard summed in place — the caller stages its contribution here before each step. */
+    /** The typed shard summed in place — the caller stages its contribution here
+     *  before each step. */
     [[nodiscard]] nk::tensor_span<value_type_, 1> payload() noexcept {
         return typed_span<value_type_>(reach_.payload());
     }
 
-    /** Advance the round and enqueue the in-place cross-domain sum — one op per step, capture-safe. */
+    /** Advance the round and enqueue the in-place cross-domain sum — one op
+     *  per step, capture-safe. */
     [[nodiscard]] expected_t operator()(gpu_stream_t &stream) noexcept {
         if (expected_t advanced = reach_.advance(stream); !advanced) return advanced;
         return reach_.allreduce_sum(stream);
@@ -1359,8 +1395,8 @@ struct infiniband_all_reduce {
     infiniband_reach_t reach_ {};
 };
 
-/** Cross-domain all-gather of domain-major blocks — the typed op-handle. This domain's block sits at
- *  @ref own_block before @c operator() ; after, every domain's block fills @ref payload . */
+/** Cross-domain all-gather of domain-major blocks — the typed op-handle. This domain's block sits
+ *  at @ref own_block before @c operator() ; after, every domain's block fills @ref payload . */
 template <typename value_type_>
 struct infiniband_all_gather {
     using value_type = value_type_;
@@ -1392,7 +1428,8 @@ struct infiniband_all_gather {
         return typed_span<value_type_>(reach_.own_block());
     }
 
-    /** Advance the round and enqueue the domain-major all-gather — one op per step, capture-safe. */
+    /** Advance the round and enqueue the domain-major all-gather — one op
+     *  per step, capture-safe. */
     [[nodiscard]] expected_t operator()(gpu_stream_t &stream) noexcept {
         if (expected_t advanced = reach_.advance(stream); !advanced) return advanced;
         return reach_.allgather(stream);
@@ -1403,8 +1440,9 @@ struct infiniband_all_gather {
 };
 
 /** Cross-domain all-to-all of per-peer blocks — the typed op-handle. The caller stages each
- *  @ref send_block before @c operator() ; after, each @ref recv_block holds its round-partner's block, and this
- *  domain's own block stays in place. Two domains today (a pairwise exchange); beyond two fails loud. */
+ *  @ref send_block before @c operator() ; after, each @ref recv_block holds its round-partner's
+ *  block, and this domain's own block stays in place. Two domains today (a pairwise exchange);
+ *  beyond two fails loud. */
 template <typename value_type_>
 struct infiniband_all_to_all {
     using value_type = value_type_;
@@ -1436,10 +1474,11 @@ struct infiniband_all_to_all {
         return typed_span<value_type_>(reach_.send_block(destination_domain));
     }
 
-    /** The parity of this handle's @b latest exchange — even/odd landings alternate per step, and
-     *  a consumer reading @b several handles wired in lockstep (the mixer's per-member buffers) names
-     *  the shared mix parity from its @b own handle, whose count already ticked. Host-side, so this
-     *  serves the eager consumer only — a captured replay's device-side advances are invisible here. */
+    /** The parity of this handle's @b latest exchange — even/odd landings alternate per step,
+     *  and a consumer reading @b several handles wired in lockstep (the mixer's per-member
+     *  buffers) names the shared mix parity from its @b own handle, whose count already ticked.
+     *  Host-side, so this serves the eager consumer only — a captured replay's device-side
+     *  advances are invisible here. */
     [[nodiscard]] u32_t latest_parity() const noexcept {
         return (exchanges_ + 1u) & 1u; // exchange e (1-based) used parity (e-1)&1
     }
@@ -1503,8 +1542,9 @@ struct colocated_domain_t {
     mesh_topology_t *topology_ = nullptr;
 };
 
-/** Build-gate stubs of the typed collective handles — the zero-round identity: @c make succeeds with a
- *  no-op handle, the payload accessors return empty spans, and @c operator() enqueues nothing. */
+/** Build-gate stubs of the typed collective handles — the zero-round identity: @c make
+ *  succeeds with a no-op handle, the payload accessors return empty spans, and
+ *  @c operator() enqueues nothing. */
 template <typename value_type_>
 struct infiniband_all_reduce {
     using value_type = value_type_;
@@ -1543,7 +1583,8 @@ struct infiniband_all_to_all {
 
 #endif // defined(UFORM_WITH_INFINIBAND)
 
-/** The three InfiniBand buffers share the unified enqueue-only shape — a drifted signature fails here. */
+/** The three InfiniBand buffers share the unified enqueue-only shape — a drifted
+ *  signature fails here. */
 static_assert(collective_buffer<infiniband_all_reduce<f32_t>>, "infiniband_all_reduce must model collective_buffer");
 static_assert(collective_buffer<infiniband_all_gather<bf16_t>>, "infiniband_all_gather must model collective_buffer");
 static_assert(collective_buffer<infiniband_all_to_all<b8_t>>, "infiniband_all_to_all must model collective_buffer");

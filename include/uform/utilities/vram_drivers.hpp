@@ -43,8 +43,8 @@ struct shared_library_t {
 
 #pragma region CUDA Driver
 
-/** The driver's status word, @c CUresult , naming the values UForm tells apart; any other is a
- *  failure. */
+/** The driver's status word, @c CUresult , naming the values UForm tells apart; any other
+ *  is a failure. */
 enum cuda_result_t : int {
     cuda_success_k = 0,
     cuda_error_not_initialized_k = 3,
@@ -72,9 +72,8 @@ enum cuda_device_attribute_t : int {
 /**
  *  @brief The driver entry points UForm's kernels launch through, resolved from @c libcuda .
  *
- *  Every entry is null when the driver is absent or lacks any of them; each spells the prototype
- *  of the exported symbol it is resolved by, the @c _v2 one where @c <cuda.h> maps the name onto
- *  it.
+ *  Every entry is null when the driver is absent or lacks any of them; each spells the prototype of
+ *  the exported symbol it is resolved by, the @c _v2 one where @c <cuda.h> maps the name onto it.
  */
 struct cuda_api_t {
     cuda_result_t (*init)(unsigned) = nullptr;
@@ -126,8 +125,8 @@ struct cuda_api_t {
 
 #pragma region HIP Runtime
 
-/** The runtime's status word, @c hipError_t , naming the values UForm tells apart; any other is a
- *  failure. */
+/** The runtime's status word, @c hipError_t , naming the values UForm tells apart; any other
+ *  is a failure. */
 enum hip_result_t : int {
     hip_success_k = 0,
     hip_error_not_initialized_k = 3,

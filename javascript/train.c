@@ -2,10 +2,11 @@
  *  @file javascript/train.c
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief The Node-API training verbs: the mesh a run's processes join, and the trainer that steps and saves.
+ *  @brief The Node-API training verbs: the mesh a run's processes join, and the trainer that
+ *      steps and saves.
  *
- *  Training is GPU-only, so both constructors take a VRAM executor and block on it; the trainer's step and save
- *  take the executor and the completion first, as every verb does.
+ *  Training is GPU-only, so both constructors take a VRAM executor and block on it; the trainer's
+ *  step and save take the executor and the completion first, as every verb does.
  */
 #include <stdlib.h> // `calloc`, `malloc`, `free`
 
@@ -357,7 +358,8 @@ static napi_value uform_js_finish_step(napi_env env, uform_js_call_t *call, napi
     return object;
 }
 
-/** Reads one edge set: its widened offsets, its borrowed ids, and its @b optional borrowed weights. */
+/** Reads one edge set: its widened offsets, its borrowed ids, and its @b optional
+ *  borrowed weights. */
 static bool uform_js_edges_from_value(napi_env env, napi_value const *arguments, uform_js_call_t *call,
                                       uform_edges_view_t *edges) {
     size_t count = 0, ids_count = 0, weights_count = 0;

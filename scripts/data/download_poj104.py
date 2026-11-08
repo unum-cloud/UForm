@@ -1,3 +1,10 @@
+"""Download POJ-104: CodeXGLUE C++ clone-detection pairs (`label` anchor / `code` positive).
+
+File: scripts/data/download_poj104.py
+Author: Ash Vardanian
+Date: July 5, 2026
+"""
+
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -5,12 +12,12 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download POJ-104: CodeXGLUE C++ clone-detection pairs (`label` anchor / `code` positive)."""
 from acquire import acquire
 
 if __name__ == "__main__":
-    # The loader-script main branch is rejected by modern `datasets`, so pull the auto-converted parquet
-    # (`default/train/*.parquet`, cols `id`/`code`/`label`) — `label`/`code` are already present.
+    # The loader-script main branch is rejected by modern `datasets`, so pull the
+    # auto-converted parquet (`default/train/*.parquet`, cols `id`/`code`/`label`) —
+    # `label`/`code` are already present.
     raise SystemExit(
         acquire(
             "poj_104",

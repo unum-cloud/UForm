@@ -5,8 +5,8 @@
  *  @brief Module glue of the UForm Node-API addon: the classes and functions it publishes, and the
  *      per-environment state its verbs type-check against.
  *
- *  Only @c <node_api.h> - no C++ wrapper, no exceptions, and nothing of the library beyond its C surface, so one
- *  prebuilt shared library serves every Node release the ABI covers.
+ *  Only @c <node_api.h> - no C++ wrapper, no exceptions, and nothing of the library beyond its C
+ *  surface, so one prebuilt shared library serves every Node release the ABI covers.
  */
 #include <stdlib.h> // `calloc`, `free`
 

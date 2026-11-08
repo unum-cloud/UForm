@@ -1,14 +1,19 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = []
-# ///
 """Shared acquisition helpers: the volume-cap and artifact-naming rules `acquire` reuses across sources.
 
 The cap and naming rules must be identical for every source kind, so they live here once. Naming is the
 load-bearing one: an artifact is named by its source shard's stem, never by an enumeration index, so
 that the same shard maps to the same output on every rank and across resumes — which is what makes the
 atomic-rename `already_done` skip correct under a rank partition.
+
+File: scripts/data/acquire_shared.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
 
 import math
 import os

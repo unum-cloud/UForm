@@ -31,8 +31,8 @@ using namespace unum::uform::utilities;
     return side == late_interaction_side_t::document_k || side == late_interaction_side_t::query_and_document_k;
 }
 
-/** The entry of the ascending @p offsets run whose range holds @p row , for a @p row below its last
- *  entry. */
+/** The entry of the ascending @p offsets run whose range holds @p row , for a @p row below
+ *  its last entry. */
 [[nodiscard]] static __device__ inline u32_t contrastive_tokens_owner_(u32r1_view_t offsets, u32_t row) noexcept {
     return static_cast<u32_t>(cub::UpperBound(offsets.data(), static_cast<u32_t>(offsets.extent(0)), row)) - 1u;
 }
@@ -116,8 +116,8 @@ static __global__ void contrastive_tokens_layout_kernel_( //
  *  @brief Gather the query tile's rows from the token head's, with each row's segment, zeroing the
  *      rows past the live total.
  *
- *  __grid_size__ @c [query_tokens,1,1] ; one CTA per row; threads stripe the width; no dynamic
- *  shared memory.
+ *  __grid_size__ @c [query_tokens,1,1] ; one CTA per row; threads stripe the width; no
+ *  dynamic shared memory.
  */
 static __global__ void contrastive_tokens_gather_queries_kernel_(bf16r2_view_t token_vectors,
                                                                  u32r1_view_t token_offsets, u32r1_view_t query_offsets,
@@ -137,8 +137,8 @@ static __global__ void contrastive_tokens_gather_queries_kernel_(bf16r2_view_t t
  *  @brief Gather the documents' rows from the token head's, with each row's document, zeroing the
  *      rows past the live total.
  *
- *  __grid_size__ @c [document_tokens,1,1] ; one CTA per row; threads stripe the width; no dynamic
- *  shared memory.
+ *  __grid_size__ @c [document_tokens,1,1] ; one CTA per row; threads stripe the width; no
+ *  dynamic shared memory.
  */
 static __global__ void contrastive_tokens_gather_documents_kernel_(
     bf16r2_view_t token_vectors, u32r1_view_t token_offsets, u32r1_view_t document_offsets,
@@ -165,8 +165,8 @@ struct contrastive_tokens_lane_t {
     bool closes_run;
 };
 
-/** Classify lane @p lane holding @p document within its chunk; the documents tile the rows
- *  contiguously. */
+/** Classify lane @p lane holding @p document within its chunk; the documents tile
+ *  the rows contiguously. */
 [[nodiscard]] static __device__ inline contrastive_tokens_lane_t contrastive_tokens_lane_(u32_t document,
                                                                                           u32_t lane) noexcept {
     u32_t const previous = __shfl_up_sync(0xffffffffu, document, 1u);
@@ -186,8 +186,8 @@ struct contrastive_tokens_lane_t {
     return value;
 }
 
-/** Rows a warp covers per wide step, eight per lane through two 16-byte loads and one 16-byte
- *  store. */
+/** Rows a warp covers per wide step, eight per lane through two 16-byte loads and
+ *  one 16-byte store. */
 inline constexpr std::size_t contrastive_tokens_wide_rows_k = 8u * warp_size_k;
 
 /** The four products at @p column and after of a 16-byte aligned row. */
@@ -206,8 +206,8 @@ inline constexpr std::size_t contrastive_tokens_wide_rows_k = 8u * warp_size_k;
            static_cast<u32_t>(__bfloat16_as_ushort(__float2bfloat16(high))) << 16u;
 }
 
-/** Store the eight gradients @p low then @p high at @p column and after of a 16-byte aligned
- *  BFloat16 row. */
+/** Store the eight gradients @p low then @p high at @p column and after of a 16-byte
+ *  aligned BFloat16 row. */
 static __device__ inline void contrastive_tokens_store_(bf16_t *row_start, std::size_t column, float4 low,
                                                         float4 high) noexcept {
     asm volatile("st.global.v4.u32 [%0], {%1, %2, %3, %4};" ::"l"(row_start + column),
@@ -232,8 +232,8 @@ static __device__ inline void contrastive_tokens_store_(bf16_t *row_start, std::
  *  open one with one warp reduce, reduces the documents it holds whole with a segmented scan, and
  *  opens its last.
  *
- *  __grid_size__ @c [ceil(query_tokens/8),1,1] ; one warp per query row, 8 per CTA; no dynamic
- *  shared memory.
+ *  __grid_size__ @c [ceil(query_tokens/8),1,1] ; one warp per query row, 8 per CTA; no
+ *  dynamic shared memory.
  */
 static __global__ void contrastive_tokens_band_max_kernel_(f32r2_view_t band_products, u32r1_view_t query_segments,
                                                            u32r1_view_t document_of_row, u32r1_view_t document_offsets,
@@ -291,8 +291,8 @@ static __global__ void contrastive_tokens_band_max_kernel_(f32r2_view_t band_pro
 
 /**
  *  @brief The raw MaxSim scores of one query tile: @c raw[q,d] = Σ_t maxima[t,d]/|q| over the
- *      query's rows, in row order, for every live query segment and document; the caller zeroed the
- *      rest.
+ *      query's rows, in row order, for every live query segment and document; the caller
+ *      zeroed the rest.
  *
  *  __grid_size__ @c [segments,1,1] ; one CTA per query segment; threads stripe the documents; no
  *  dynamic shared memory.
@@ -321,8 +321,8 @@ static __global__ void contrastive_tokens_scores_kernel_(f32r2_view_t maxima, u3
  *  the document's later rows, since a document never crosses a band. Wide steps inside the open
  *  document move eight rows per lane, as in @ref contrastive_tokens_band_max_kernel_ .
  *
- *  __grid_size__ @c [ceil(query_tokens/8),1,1] ; one warp per query row, 8 per CTA; no dynamic
- *  shared memory.
+ *  __grid_size__ @c [ceil(query_tokens/8),1,1] ; one warp per query row, 8 per CTA; no
+ *  dynamic shared memory.
  */
 static __global__ void contrastive_tokens_band_grad_kernel_(f32r2_view_t band_products, u32r1_view_t query_segments,
                                                             u32r1_view_t query_offsets, u32r1_view_t document_of_row,
@@ -403,8 +403,8 @@ static __global__ void contrastive_tokens_band_grad_kernel_(f32r2_view_t band_pr
  *  @brief The token head's gradient: each row's query force and document force by its segment's
  *      sides, in that order, and zero past the live rows.
  *
- *  __grid_size__ @c [head_tokens,1,1] ; one CTA per row; threads stripe the width; no dynamic
- *  shared memory.
+ *  __grid_size__ @c [head_tokens,1,1] ; one CTA per row; threads stripe the width; no
+ *  dynamic shared memory.
  */
 static __global__ void contrastive_tokens_finish_kernel_(multimodal_batch_view_t batch, u32r1_view_t token_offsets,
                                                          u32r1_view_t query_offsets, f32r2_view_t query_grad,
@@ -431,12 +431,12 @@ static __global__ void contrastive_tokens_finish_kernel_(multimodal_batch_view_t
 }
 
 /**
- *  @brief Scale the home score rows by @p weight times their query's β in place: raw scores into
- *      the pair loss's logits before it, and its logit gradient into the weighted score gradient
- *      after it.
+ *  @brief Scale the home score rows by @p weight times their query's β in place: raw scores
+ *      into the pair loss's logits before it, and its logit gradient into the weighted score
+ *      gradient after it.
  *
- *  __grid_size__ grid-stride over the @b [subgraphs,segments,segments] cells; no dynamic shared
- *  memory.
+ *  __grid_size__ grid-stride over the @b [subgraphs,segments,segments] cells; no
+ *  dynamic shared memory.
  */
 static __global__ void contrastive_tokens_scale_kernel_(f32r3_span_t scores, contrastive_recipe_t recipe,
                                                         f32_t weight) {
@@ -773,8 +773,8 @@ expected<distributed_contrastive_tokens_t> distributed_contrastive_tokens_t::mak
             !distributed.query_grads_[rank] || !distributed.world_scalars_[rank])
             return result_t::fail(status_t::bad_alloc_k, "tokens rank scratch allocation failed (rank={})", rank);
         if (domains == 1u) continue;
-        // Every process wires its members in the same order, as each handle keys its own
-        // rendezvous.
+        // Every process wires its members in the same order, as each handle keys
+        // its own rendezvous.
         u32_t const member = static_cast<u32_t>(domain.member_offset() + rank);
         auto tiles = infiniband_all_gather<bf16_t>::make(colocated, member, arenas[rank], tile_scalars, streams[rank],
                                                          timeout_seconds);
@@ -1013,8 +1013,8 @@ expected_t distributed_contrastive_tokens_t::reduce_(std::size_t rank, gpu_token
                                              tail_offset, stream);
     }
     else {
-        // Level 1 sums this member's row of every domain's query tiles, level 2 sums them across
-        // domains.
+        // Level 1 sums this member's row of every domain's query tiles, level 2 sums
+        // them across domains.
         f32r1_span_t const shard = force_reduces_[rank].payload();
         std::size_t const world_forces = world_domains_() * force_scalars;
         f32r2_span_t const shard_rows = shard[nk::range(0, world_forces), nk::slice].reshape<2>(

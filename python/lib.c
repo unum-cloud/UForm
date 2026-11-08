@@ -2,10 +2,12 @@
  *  @file python/lib.c
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief The module-init glue - `PyModuleDef`, method merging, type registration, and `PyInit_lib`.
+ *  @brief The module-init glue - `PyModuleDef`, method merging, type
+ *      registration, and `PyInit_lib`.
  *
- *  Each header's file contributes its verbs as one table, and this file merges them into the methods of the
- *  model, the trainer and both receivers, so a verb is written once and every receiver offers it.
+ *  Each header's file contributes its verbs as one table, and this file merges them into the
+ *  methods of the model, the trainer and both receivers, so a verb is written once and every
+ *  receiver offers it.
  */
 #include "lib.h"
 
@@ -16,7 +18,8 @@ static char const doc_module[] =                                                
     "batch over buffer-protocol inputs, every output lands in an arena the caller reuses,\n" //
     "and NumPy is never required.";
 
-/** One type the module readies, the name it exports it under, and the layout of a struct sequence. */
+/** One type the module readies, the name it exports it under, and the layout of
+ *  a struct sequence. */
 static struct {
     char const *name;
     PyTypeObject *type;
@@ -48,7 +51,8 @@ static struct {
     {"TrainerStepStats", &TrainerStepStatsType, NULL},
 };
 
-/** The keyword-built structures, readied from their field tables; nested ones before the ones holding them. */
+/** The keyword-built structures, readied from their field tables; nested ones before the
+ *  ones holding them. */
 static uform_py_fields_t *const module_fields[] = {
     &ImageShapeType,      &VideoShapeType, &AudioShapeType, &BatchShapeType,  &MaskingType, &ContrastiveType,
     &LateInteractionType, &ChoicesType,    &ScheduleType,   &MeshOptionsType, &EdgesType,   &RelationsType,
@@ -66,7 +70,8 @@ static PyMethodDef const receiver_class_getitem[] = {
     {NULL, NULL, 0, NULL},
 };
 
-/** Copies the rows of the @p count NULL-terminated @p tables into @p merged, ending it with a sentinel. */
+/** Copies the rows of the @p count NULL-terminated @p tables into @p merged, ending it
+ *  with a sentinel. */
 static void methods_merge(PyMethodDef *merged, PyMethodDef const *const *tables, size_t count) {
     size_t written = 0;
     for (size_t table = 0; table != count; ++table)
@@ -82,8 +87,9 @@ static PyMethodDef module_methods[] = {
     {NULL, NULL, 0, NULL},
 };
 
-/** Named with the dotted name the extension is built as, where the import machinery finds it, while the types keep
- *  the undotted `uform.` prefix in their `tp_name`, where the package re-exports them. */
+/** Named with the dotted name the extension is built as, where the import machinery finds
+ *  it, while the types keep the undotted `uform.` prefix in their `tp_name`, where the
+ *  package re-exports them. */
 static PyModuleDef module_definition = {
     PyModuleDef_HEAD_INIT, .m_name = "uform.lib", .m_doc = doc_module, .m_size = -1, .m_methods = module_methods,
 };

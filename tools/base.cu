@@ -50,16 +50,16 @@ struct fmt::formatter<ashvardanian::stringzilla::string_t> : fmt::formatter<std:
 namespace ul = unum::uform::loaders;
 using namespace unum::uform::train;
 
-/** Tag @p message with the binary name, write it to standard error, and hand back main's failure
- *  code. */
+/** Tag @p message with the binary name, write it to standard error, and hand back
+ *  main's failure code. */
 [[nodiscard]] static int fail_out_(sz::string_view_t message) noexcept {
     fmt::println(stderr, "uform_base: {}", message);
     return 1;
 }
 
-/** Step @p trainer from its completed steps to @c config.steps over @p source , with telemetry,
- *  checkpoints and held-out evaluations over @p held_out on cadence, and a checkpoint at the
- *  end. */
+/** Step @p trainer from its completed steps to @c config.steps over @p source , with
+ *  telemetry, checkpoints and held-out evaluations over @p held_out on cadence, and a
+ *  checkpoint at the end. */
 [[nodiscard]] static int step_(trainer_t &trainer, trainer_config_t const &config, batch_source_t source,
                                batch_source_t held_out) noexcept {
     auto checkpoint = [&]() noexcept {
@@ -78,8 +78,8 @@ using namespace unum::uform::train;
         if (config.report_every && completed % config.report_every == 0u)
             trainer.telemetry(optimizer_step_t {ordinal}).report();
         if (config.eval_every && completed % config.eval_every == 0u) {
-            // Held-out draws key past the training steps, so a synthetic source never repeats a
-            // step's batch.
+            // Held-out draws key past the training steps, so a synthetic source never repeats
+            // a step's batch.
             expected<retrieval_t> evaluated = trainer.evaluate(held_out, data_epoch_t {config.steps + ordinal});
             if (!evaluated) return fail_out_(evaluated.description_.view());
             evaluated.value_.report();
@@ -100,8 +100,8 @@ using namespace unum::uform::train;
     return 0;
 }
 
-/** Bootstrap the mesh over every visible device, make the trainer and the source @p mixture names,
- *  and step. */
+/** Bootstrap the mesh over every visible device, make the trainer and the source @p mixture
+ *  names, and step. */
 [[nodiscard]] static int train_(trainer_config_t config, mesh_options_t options, mixture_t mixture) noexcept {
     if (cuInit(0) != CUDA_SUCCESS) return fail_out_("cuInit failed");
     int device_count = 0;
@@ -181,8 +181,8 @@ using namespace unum::uform::train;
 }
 
 int main(int argc, char **argv) {
-    // Lazy module loading deadlocks against the InfiniBand doorbell kernels' flag spins (see the mixer
-    // and base conformance suites); eager loading before `cuInit` front-loads every module.
+    // Lazy module loading deadlocks against the InfiniBand doorbell kernels' flag spins (see the
+    // mixer and base conformance suites); eager loading before `cuInit` front-loads every module.
     ::setenv("CUDA_MODULE_LOADING", "EAGER", 1);
     // The trainer's telemetry writes the descriptor directly, so every line here flushes at once.
     std::setvbuf(stdout, nullptr, _IOLBF, 0);

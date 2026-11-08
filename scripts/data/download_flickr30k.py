@@ -1,3 +1,10 @@
+"""Download Flickr30k: ~31K images, five human captions each, into the coco_captions image schema.
+
+File: scripts/data/download_flickr30k.py
+Author: Ash Vardanian
+Date: July 5, 2026
+"""
+
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -5,7 +12,6 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download Flickr30k: ~31K images, five human captions each, into the coco_captions image schema."""
 import pyarrow as pa
 from acquire import acquire
 

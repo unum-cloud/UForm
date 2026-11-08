@@ -1,10 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "huggingface_hub",
-#     "pyarrow>=21.0.0",
-# ]
-# ///
 """Idempotent downloader for MSR-VTT (10K clips + 200K captions, ~10 GB) — pulls AND repacks.
 
 Modality: video. MSR-VTT exercises the video-text contrastive smoke with paired captions. The
@@ -24,7 +17,19 @@ CLI usage:
     uv run scripts/data/download_msrvtt.py
     uv run scripts/data/download_msrvtt.py --out-dir /custom/path
     uv run scripts/data/download_msrvtt.py --repo-id friedrichor/MSR-VTT
+
+File: scripts/data/download_msrvtt.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "huggingface_hub",
+#     "pyarrow>=21.0.0",
+# ]
+# ///
 
 import argparse
 import json

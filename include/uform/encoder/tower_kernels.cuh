@@ -5,17 +5,18 @@
  *  @brief The element-wise bodies of the encoder tower's entries, rotary and E4M3 scaling steps,
  *      shared by the NVIDIA training kernels and every vendor's inference kernels.
  *
- *  Each body is a @c constexpr template over its views, so a host compiler reads this header too, and device
- *  compilers call it from any kernel through relaxed @c constexpr . A kernel passes its thread's place in the
- *  stripe, and a @p scalars object carrying its vendor's conversions:
+ *  Each body is a @c constexpr template over its views, so a host compiler reads this header too,
+ *  and device compilers call it from any kernel through relaxed @c constexpr . A kernel passes its
+ *  thread's place in the stripe, and a @p scalars object carrying its vendor's conversions:
  *
  *  - @c widen(x) Float32 from a stored scalar, BFloat16 or Float32;
  *  - @c narrow(x) BFloat16 from Float32, rounding to nearest even;
  *  - @c narrow_e4m3(x) E4M3 from Float32, saturating;
  *  - @c sincos(x,&sine,&cosine) .
  *
- *  Bodies read a source row and write a target row separately: training runs on the batch grid, where the two
- *  coincide, and inference on packed rows, where every segment's live cells sit back to back.
+ *  Bodies read a source row and write a target row separately: training runs on the batch grid,
+ *  where the two coincide, and inference on packed rows, where every segment's live cells sit
+ *  back to back.
  */
 #pragma once
 
@@ -34,7 +35,8 @@ inline constexpr f32_t e4m3_range_k = 240.0f;
 /** The descale floor keeping a zero tensor representable — @c max_abs/240 clamps to this. */
 inline constexpr f32_t e4m3_descale_floor_k = 1.0e-12f;
 
-/** One text segment's rows @c target[target_first+k,:]=table[tokens[source_first+k],:] , channels striped. */
+/** One text segment's rows @c target[target_first+k,:]=table[tokens[source_first+k],:]
+ *  , channels striped. */
 template <typename tokens_type_, typename table_type_, typename rows_type_>
 constexpr void gather_bytes_segment(tokens_type_ tokens, table_type_ table, std::size_t source_first,
                                     std::size_t target_first, u32_t length, rows_type_ target, u32_t thread,
@@ -70,7 +72,8 @@ constexpr void stage_patches_segment(pixels_type_ pixels, std::size_t source_fir
     }
 }
 
-/** One audio segment's raw frames @b [length,samples] narrowed, the @c length·samples cells striped. */
+/** One audio segment's raw frames @b [length,samples] narrowed, the
+ *  @c length · samples cells striped. */
 template <typename samples_type_, typename frames_type_, typename scalars_type_>
 constexpr void stage_frames_segment(samples_type_ samples, std::size_t source_first, std::size_t target_first,
                                     u32_t length, frames_type_ frames, u32_t thread, u32_t threads,
@@ -84,8 +87,8 @@ constexpr void stage_frames_segment(samples_type_ samples, std::size_t source_fi
     }
 }
 
-/** The angle of within-head pair @p pair for row @p token , from @p angles ' temporal, height and width grids
- *  @b [positions,pairs] , temporal pairs first. */
+/** The angle of within-head pair @p pair for row @p token , from @p angles ' temporal, height and
+ *  width grids @b [positions,pairs] , temporal pairs first. */
 template <typename coords_type_, typename angles_type_>
 [[nodiscard]] constexpr f32_t rope_angle(u32_t pair, coords_type_ coords, std::size_t token,
                                          angles_type_ const &angles) noexcept {
@@ -98,9 +101,9 @@ template <typename coords_type_, typename angles_type_>
 }
 
 /** Rotate the channel pairs @c [first,…) every @p stride of the @b [tokens,head_width/2] grid in
- *  place: each pair's sine and cosine, of @p angle_sign times its angle, turn the NeoX split-half
- *  pair @c (k,k+head_width/2) of all @p heads heads from @p role_offset ; a sign of @c -1 is the
- *  inverse rotation. */
+ *  place: each pair's sine and cosine, of @p angle_sign times its angle, turn the NeoX
+ *  split-half pair @c (k,k+head_width/2) of all @p heads heads from @p role_offset ; a sign of
+ *  @c -1 is the inverse rotation. */
 template <typename values_type_, typename coords_type_, typename angles_type_, typename scalars_type_>
 constexpr void rope_rotate(values_type_ values, angles_type_ const &angles, coords_type_ coords, u32_t heads,
                            u32_t head_width, u32_t role_offset, f32_t angle_sign, std::size_t first, std::size_t stride,
@@ -133,8 +136,8 @@ template <typename values_type_, typename scalars_type_>
     return largest;
 }
 
-/** Quantize row @p token by its own @c max(largest/240,floor) into @p shadow , channels striped, and return
- *  that scale. */
+/** Quantize row @p token by its own @c max(largest/240,floor) into @p shadow , channels striped,
+ *  and return that scale. */
 template <typename values_type_, typename shadow_type_, typename scalars_type_>
 constexpr f32_t quantize_token(values_type_ values, shadow_type_ shadow, std::size_t token, f32_t largest, u32_t thread,
                                u32_t threads, scalars_type_ const &scalars) noexcept {
@@ -165,8 +168,8 @@ constexpr void rescale_tokens_cells(products_type_ products, scales_type_ token_
     }
 }
 
-/** The packed rows' layout, serially: @c packed_offsets prefix sums of @p lengths , and @c pool_offsets[s]=s , both
- *  @b [segments+1] . */
+/** The packed rows' layout, serially: @c packed_offsets prefix sums of @p lengths , and
+ *  @c pool_offsets[s]=s , both @b [segments+1] . */
 template <typename lengths_type_, typename offsets_type_>
 constexpr void fill_packed_layout(lengths_type_ lengths, offsets_type_ packed_offsets,
                                   offsets_type_ pool_offsets) noexcept {

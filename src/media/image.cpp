@@ -18,8 +18,8 @@
 namespace um = unum::uform::media;
 using namespace um;
 
-/** Load a big-endian unsigned integer from @p bytes — one unaligned load, then a byte swap on a little-endian
- *  host. */
+/** Load a big-endian unsigned integer from @p bytes — one unaligned load, then a byte swap on
+ *  a little-endian host. */
 template <typename integer_type_>
 [[nodiscard]] static integer_type_ load_big_endian_(b8_t const *bytes) noexcept {
     integer_type_ value;
@@ -28,7 +28,8 @@ template <typename integer_type_>
     return value;
 }
 
-/** The @c unsigned @c char pointer TurboJPEG, libpng and libwebp read compressed @p bytes through. */
+/** The @c unsigned @c char pointer TurboJPEG, libpng and libwebp read compressed
+ *  @p bytes through. */
 [[nodiscard]] static unsigned char const *codec_bytes_(b8_t const *bytes) noexcept {
     return reinterpret_cast<unsigned char const *>(bytes);
 }
@@ -74,8 +75,8 @@ template <typename integer_type_>
     return image_probe_t {format_jpeg_k, image_extent_t {}, window_offset + offset};
 }
 
-/** A PNG's pixel extent from its IHDR — width and height are big-endian UInt32 at byte offsets 16 and 20 of the
- *  signature+IHDR prologue. */
+/** A PNG's pixel extent from its IHDR — width and height are big-endian UInt32 at byte offsets 16
+ *  and 20 of the signature+IHDR prologue. */
 [[nodiscard]] static expected<image_extent_t> png_dimensions_(bytes_view_t encoded) noexcept {
     b8_t const *const bytes = encoded.data();
     if (encoded.size() < 24)
@@ -120,9 +121,9 @@ expected<image_plan_t> um::plan_image(bytes_view_t encoded, u32_t patch_side, u3
     return plan;
 }
 
-/** Decode a JPEG through @p decoder into @p out with the @c 1/2ᵏ DCT scale landing exactly on its extent. TurboJPEG
- *  reports a corrupt or truncated stream where libjpeg's default error handler exits the process; @c TJPF_RGBA
- *  emits a constant 255 alpha, so a JPEG matches the RGBA grid. */
+/** Decode a JPEG through @p decoder into @p out with the @c 1/2ᵏ DCT scale landing exactly on its
+ *  extent. TurboJPEG reports a corrupt or truncated stream where libjpeg's default error handler
+ *  exits the process; @c TJPF_RGBA emits a constant 255 alpha, so a JPEG matches the RGBA grid. */
 [[nodiscard]] static expected_t decode_jpeg_(tjhandle decoder, bytes_view_t encoded, pixel_image_span_t out) noexcept {
     unsigned char const *const bytes = codec_bytes_(encoded.data());
     std::size_t const size = encoded.size();

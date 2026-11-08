@@ -2,14 +2,14 @@
  *  @file javascript/library.ts
  *  @author Ash Vardanian
  *  @date October 18, 2026
- *  @brief The boundary both backends satisfy: the shapes the Node addon and the WebAssembly module publish, and the
- *      search that locates the prebuilt addon.
+ *  @brief The boundary both backends satisfy: the shapes the Node addon and the WebAssembly module
+ *      publish, and the search that locates the prebuilt addon.
  *
- *      Every signature here is positional and takes no defaults, so the wrapper classes decide what an omitted
- *      argument means rather than a backend guessing. Every instance verb opens with the executor and the C
- *      `completion`, and answers its result when blocking or a `CompiledDeferred` when deferred. Only the Node entry
- *      imports this module at runtime; the browser entry imports its types alone, so no bundle pulls
- *      `node-gyp-build` into a page.
+ *      Every signature here is positional and takes no defaults, so the wrapper classes decide what
+ *      an omitted argument means rather than a backend guessing. Every instance verb opens with the
+ *      executor and the C `completion`, and answers its result when blocking or a
+ *      `CompiledDeferred` when deferred. Only the Node entry imports this module at runtime; the
+ *      browser entry imports its types alone, so no bundle pulls `node-gyp-build` into a page.
  */
 import build from "node-gyp-build";
 import * as path from "path";
@@ -23,8 +23,9 @@ export type Completion = 0 | 1;
 export type ProgressCallback = (completed: number, total: number) => boolean | void;
 
 /**
- *  The `count + 1` offsets of a tape: a `BigUint64Array`, which the Node addon lends as `size_t` without a copy, or a
- *  `Uint32Array`, which it widens and the WebAssembly module, whose `size_t` is 32 bits wide, lends as it is.
+ *  The `count + 1` offsets of a tape: a `BigUint64Array`, which the Node addon lends as `size_t`
+ *  without a copy, or a `Uint32Array`, which it widens and the WebAssembly module, whose `size_t`
+ *  is 32 bits wide, lends as it is.
  */
 export type Offsets = BigUint64Array | Uint32Array;
 
@@ -34,7 +35,8 @@ export interface CompiledExecutor {
   free(): void;
 }
 
-/** Memory every output whose length scales with a call lands in, made where its executor computes. */
+/** Memory every output whose length scales with a call lands in, made where
+ *  its executor computes. */
 export interface CompiledArena {
   readonly residency: string;
   free(): void;
@@ -57,7 +59,8 @@ export interface CompiledRows {
   scalar: string;
 }
 
-/** The final-norm states or the token vectors a call landed inside its arena, with `count + 1` row offsets. */
+/** The final-norm states or the token vectors a call landed inside its arena, with
+ *  `count + 1` row offsets. */
 export interface CompiledStates extends CompiledRows {
   offsets: BigUint64Array | null;
 }
@@ -76,7 +79,8 @@ export interface CompiledEncoded {
   stats: CompiledEncodeStats;
 }
 
-/** One probability per choice a call landed inside its arena, with `count + 1` offsets; `null` over device memory. */
+/** One probability per choice a call landed inside its arena, with `count + 1` offsets; `null`
+ *  over device memory. */
 export interface CompiledChosen {
   probabilities: Float32Array | null;
   offsets: BigUint64Array | null;
@@ -95,7 +99,8 @@ export interface CompiledDescription {
   choiceTemperatureGroups: number;
 }
 
-/** One GPU this process can drive, its position in the listing being the ordinal VRAM placements name it by. */
+/** One GPU this process can drive, its position in the listing being the ordinal VRAM placements
+ *  name it by. */
 export interface CompiledGpuDevice {
   vendor: number;
   vendorOrdinal: number;

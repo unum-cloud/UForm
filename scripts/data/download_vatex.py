@@ -1,17 +1,10 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "pyarrow>=21.0.0",
-#     "yt-dlp",
-# ]
-# ///
 """Build the VATEX multilingual video-caption corpus by fetching each clip from YouTube.
 
-Modality: video + text.  VATEX ships caption JSON only — `vatex_training_v1.0.json` and
-`vatex_validation_v1.0.json` from the official site (https://eric-xw.github.io/vatex-website/) — where
-each entry carries a `videoID` of the form `<youtube_id>_<start:06d>_<end:06d>` plus `enCap` (10 English
-captions) and `chCap` (10 Chinese captions).  The clips themselves must be fetched.  This thin builder
-keeps only its bespoke index read + id parse (`_clip_records`); the shared
+Modality: video + text. VATEX ships caption JSON only — `vatex_training_v1.0.json` and
+`vatex_validation_v1.0.json` from the official site (https://eric-xw.github.io/vatex-website/) —
+where each entry carries a `videoID` of the form `<youtube_id>_<start:06d>_<end:06d>` plus `enCap`
+(10 English captions) and `chCap` (10 Chinese captions). The clips themselves must be fetched.
+This thin builder keeps only its bespoke index read + id parse (`_clip_records`); the shared
 `acquire_clips.acquire_clips` orchestrator does the rest — a Slurm `(rank, world)` split so each
 worker fetches a disjoint `clips[rank::world]` stride, intra-host GNU-`parallel` fan-out, per-shard
 yt-dlp fetch (an H.264 `bestvideo+bestaudio` mux trimmed to the clip's window), and the uniform registry
@@ -30,7 +23,19 @@ CLI usage:
     uv run scripts/data/download_vatex.py                                  # all caption clips, parallel fetch
     uv run scripts/data/download_vatex.py --fraction 0.01 --fanout 8       # ~1% slice
     uv run scripts/data/download_vatex.py --rank 0 --world 16              # this worker's disjoint stride
+
+File: scripts/data/download_vatex.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "pyarrow>=21.0.0",
+#     "yt-dlp",
+# ]
+# ///
 
 import json
 import urllib.request

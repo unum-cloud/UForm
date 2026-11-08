@@ -12,8 +12,8 @@
 using namespace unum::uform::train;
 using namespace unum::uform::utilities;
 
-/** The power iteration's one CTA, the widest a launch takes, since it walks every row and channel
- *  alone. */
+/** The power iteration's one CTA, the widest a launch takes, since it walks every row
+ *  and channel alone. */
 static constexpr unsigned spectrum_power_block_size_k = 1024u;
 
 /** Rows one CTA of a warp-per-row kernel covers. */
@@ -23,11 +23,11 @@ static constexpr unsigned spectrum_rows_per_block_k = kernel_block_size_default_
 static constexpr dim3 spectrum_tile_block_k {warp_size_k, kernel_block_size_default_k / warp_size_k, 1u};
 
 /**
- *  @brief The inverse L2 norm of every pooled row, zero for an all-zero row, which then contributes
- *      nothing.
+ *  @brief The inverse L2 norm of every pooled row, zero for an all-zero row, which
+ *      then contributes nothing.
  *
- *  __grid_size__ one CTA per @ref spectrum_rows_per_block_k rows, a warp per row; no dynamic shared
- *  memory.
+ *  __grid_size__ one CTA per @ref spectrum_rows_per_block_k rows, a warp per row; no
+ *  dynamic shared memory.
  */
 static __global__ void __launch_bounds__(kernel_block_size_default_k, 1)
     spectrum_inverse_norms_kernel_(bf16r2_view_t pooled, f32r1_span_t inverse_norms) {
@@ -48,8 +48,8 @@ static __global__ void __launch_bounds__(kernel_block_size_default_k, 1)
  *      through a shared tile so both sides stay coalesced; the padding columns past the rows keep
  *      the zeros @c make wrote.
  *
- *  __grid_size__ @c [rows/32,hidden/32] tiles of @ref spectrum_tile_block_k ; no dynamic shared
- *  memory.
+ *  __grid_size__ @c [rows/32,hidden/32] tiles of @ref spectrum_tile_block_k ; no
+ *  dynamic shared memory.
  */
 static __global__ void __launch_bounds__(kernel_block_size_default_k, 1)
     spectrum_transpose_kernel_(bf16r2_view_t pooled, f32r1_view_t inverse_norms, bf16r2_span_t transposed) {
@@ -67,7 +67,7 @@ static __global__ void __launch_bounds__(kernel_block_size_default_k, 1)
 }
 
 /**
- *  @brief Overwrite the lower triangle of @p factor with @c A=I+α·G , reading @c G off the upper
+ *  @brief Overwrite the lower triangle of @p factor with @c A=I+α · G , reading @c G off the upper
  *      triangle NumKong's symmetric kernel fills.
  *
  *  __grid_size__ grid-stride over the @c [hidden,hidden] cells; no dynamic shared memory.
@@ -124,7 +124,7 @@ static __global__ void __launch_bounds__(warp_size_k, 1)
 
 /**
  *  @brief The trailing update after block column @p block : every lower tile right of it takes
- *      @c A[I,J]-=L[I,block]·L[J,block]ᵀ , each cell summing its 32 products in order.
+ *      @c A[I,J]-=L[I,block] · L[J,block]ᵀ , each cell summing its 32 products in order.
  *
  *  __grid_size__ @c [m,m] with @c m the tiles past the block, the upper tiles exiting at once;
  *  @ref spectrum_tile_block_k threads; no dynamic shared memory.
@@ -173,7 +173,7 @@ static __global__ void __launch_bounds__(kernel_block_size_default_k, 1) spectru
 }
 
 /**
- *  @brief The coding rate @c R=½·logdet(A)=Σlog(L[i,i]) into @c terms[0] .
+ *  @brief The coding rate @c R=½ · logdet(A)=Σlog(L[i,i]) into @c terms[0] .
  *
  *  __grid_size__ @c [1,1,1] ; one CTA stripes the diagonal; no dynamic shared memory.
  */
@@ -188,11 +188,11 @@ static __global__ void __launch_bounds__(kernel_block_size_default_k, 1)
 
 /**
  *  @brief The power iteration on @c ZᵀZ through @c Z itself: from the uniform direction,
- *      @p iterations rounds of @c v←Zᵀ(Z·v)/‖Zᵀ(Z·v)‖ , then the projections @c Z·v and
- *      @c σ²=‖Z·v‖² into @c terms[1] .
+ *      @p iterations rounds of @c v←Zᵀ(Z · v)/‖Zᵀ(Z · v)‖ , then the projections @c Z · v and
+ *      @c σ²=‖Z · v‖² into @c terms[1] .
  *
- *  __grid_size__ @c [1,1,1] ; a warp per row for @c Z·v and a thread per channel for @c Zᵀ·u ; no
- *  dynamic shared memory.
+ *  __grid_size__ @c [1,1,1] ; a warp per row for @c Z · v and a thread per channel for @c Zᵀ · u ;
+ *      no dynamic shared memory.
  */
 static __global__ void __launch_bounds__(spectrum_power_block_size_k, 1)
     spectrum_power_iteration_kernel_(bf16r2_view_t pooled, f32r1_view_t inverse_norms, u32_t iterations,
@@ -235,16 +235,16 @@ static __global__ void __launch_bounds__(spectrum_power_block_size_k, 1)
 
 /**
  *  @brief Every row's force on its raw pooled row, added into @p pooled_grad : the unit-row
- *      gradient @c g=s_tcr·A⁻¹·z+s_lip·(z·v)·v through the normalization's Jacobian,
- *      @c (g−z·(z·g))/‖x‖ .
+ *      gradient @c g=s_tcr · A⁻¹ · z+s_lip · (z · v) · v through the normalization's Jacobian,
+ *      @c (g − z · (z · g))/‖x‖ .
  *
- *  @c A⁻¹·z comes from two solves, @c L·y=z over the lower triangle of @p factor and @c Lᵀ·x=y
- *  over its upper, each step one dot product with a row of the factor. Lane @c l owns the entries
- *  @c k≡l (mod 32) of its row's solve, so it reads only what it wrote, and the shuffle tree fixes
- *  the order of every sum. An empty @p factor or @p direction drops its term.
+ *  @c A⁻¹ · z comes from two solves, @c L · y=z over the lower triangle of @p factor and @c Lᵀ ·
+ *  x=y over its upper, each step one dot product with a row of the factor. Lane @c l owns the
+ *  entries @c k≡l (mod 32) of its row's solve, so it reads only what it wrote, and the shuffle tree
+ *  fixes the order of every sum. An empty @p factor or @p direction drops its term.
  *
- *  __grid_size__ one CTA per @ref spectrum_rows_per_block_k rows, a warp per row; no dynamic shared
- *  memory.
+ *  __grid_size__ one CTA per @ref spectrum_rows_per_block_k rows, a warp per row; no
+ *  dynamic shared memory.
  */
 static __global__ void __launch_bounds__(kernel_block_size_default_k, 1)
     spectrum_gradient_kernel_(bf16r2_view_t pooled, f32r1_view_t inverse_norms, f32r2_view_t factor,

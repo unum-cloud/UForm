@@ -31,11 +31,11 @@ using namespace unum::uform::utilities;
 
 /**
  *  @brief Token-embedding lookup over one segment: for each @b text segment, @c x[offset+k,:] =
- *      table[tokens[offset+k],:] . Segments of other modalities exit at once, so only text cells are
- *      written and the packed state's media / PAD cells keep whatever the caller pre-zeroed.
+ *      table[tokens[offset+k],:] . Segments of other modalities exit at once, so only text cells
+ *      are written and the packed state's media / PAD cells keep whatever the caller pre-zeroed.
  *
- *  __grid_size__ @c [segments,1,1] , threads stripe the hidden channels for each of the segment's cells;
- *      no dynamic shared memory.
+ *  __grid_size__ @c [segments,1,1] , threads stripe the hidden channels for each of the segment's
+ *      cells; no dynamic shared memory.
  */
 static __global__ void tower_text_entry_kernel_(tokens_view_t tokens, bf16r2_span_t table, u32r1_view_t offsets,
                                                 u32r1_view_t lengths, modality_view_t modality,
@@ -49,12 +49,12 @@ static __global__ void tower_text_entry_kernel_(tokens_view_t tokens, bf16r2_spa
 }
 
 /**
- *  @brief Stage the embedding-scatter sort keys from one @b text segment: @c keys[offset+k] =
- *      tokens[offset+k] .
+ *  @brief Stage the embedding-scatter sort keys from one @b text segment: @c keys[offset+k]
+ *      = tokens[offset+k] .
  *
- *  Non-text segments exit, leaving their cells at the sentinel the caller pre-filled so they sort into one
- *  skipped run — the packed grid interleaves modalities, so the text token ids are not a leading slice
- *  any more.
+ *  Non-text segments exit, leaving their cells at the sentinel the caller pre-filled so they sort
+ *  into one skipped run — the packed grid interleaves modalities, so the text token ids are not a
+ *  leading slice any more.
  *
  *  __grid_size__ @c [segments,1,1] , threads stripe the segment's length; no dynamic shared memory.
  */
@@ -69,9 +69,9 @@ static __global__ void tower_text_keys_kernel_(tokens_view_t tokens, u32r1_view_
 }
 
 /**
- *  @brief Deterministic embedding-gradient scatter over the pre-sorted (token, position) pairs: one
- *      CTA per run head, its warps folding interleaved bands of the duplicate run — fixed order, no
- *      atomics.
+ *  @brief Deterministic embedding-gradient scatter over the pre-sorted (token, position) pairs:
+ *      one CTA per run head, its warps folding interleaved bands of the duplicate run — fixed
+ *      order, no atomics.
  *
  *  Each band covers a block-wide chunk of channels, and the bands fold in warp order.
  *
@@ -85,8 +85,9 @@ static __global__ void __launch_bounds__(kernel_block_size_default_k, 1)
     std::size_t const row = blockIdx.x;
     std::size_t const tokens = sorted_tokens.extent(0);
     token_id_t const token = sorted_tokens[row];
-    // Non-text cells carry the sentinel id (>= vocabulary); they sort into one trailing run with no table
-    // row to fold into, so the whole run is skipped and no media / PAD gradient leaks into the table.
+    // Non-text cells carry the sentinel id (>= vocabulary); they sort into one trailing run with
+    // no table row to fold into, so the whole run is skipped and no media / PAD gradient leaks
+    // into the table.
     if (static_cast<std::size_t>(token) >= table_grad.extent(0)) return;
     if (row != 0 && sorted_tokens[row - 1] == token) return; // Not this run's head.
     u32_t const hidden = static_cast<u32_t>(table_grad.extent(1));
@@ -125,7 +126,8 @@ static __global__ void tower_iota_kernel_(u32r1_span_t positions) {
 }
 
 /**
- *  @brief Elementwise SiLU forward: @c y = x·σ(x) ; the backward recomputes σ from the stashed input.
+ *  @brief Elementwise SiLU forward: @c y = x · σ(x) ; the backward recomputes σ from
+ *      the stashed input.
  *
  *  __grid_size__ grid-stride over the flattened extent; no dynamic shared memory.
  */
@@ -140,7 +142,7 @@ static __global__ void tower_silu_kernel_(bf16r1_span_t input, bf16r1_span_t out
 }
 
 /**
- *  @brief Elementwise SiLU backward: @c dx = dy·σ(x)·(1+x·(1−σ(x))) from the stashed input.
+ *  @brief Elementwise SiLU backward: @c dx = dy · σ(x) · (1+x · (1 − σ(x))) from the stashed input.
  *
  *  __grid_size__ grid-stride; no dynamic shared memory.
  */
@@ -184,7 +186,8 @@ static __global__ void tower_pool_query_grad_kernel_(f32r2_view_t query_partials
  *  @c channels innermost so @p mean / @p inverse_std index by the channel coordinate directly. The scratch
  *  is pre-zeroed, so every cell this pass skips stays zero and the projection's non-modality rows vanish.
  *
- *  __grid_size__ @c [segments,1,1] , threads stripe the segment's @c length·spatial cells; no dynamic shared memory.
+ *  __grid_size__ @c [segments,1,1] , threads stripe the segment's @c length · spatial cells; no
+ *  dynamic shared memory.
  */
 static __global__ void tower_normalize_segment_kernel_(nk::tensor_view<pixel_t, 3> content, u32r1_view_t offsets,
                                                        u32r1_view_t lengths, modality_view_t modality,
@@ -200,13 +203,16 @@ static __global__ void tower_normalize_segment_kernel_(nk::tensor_view<pixel_t, 
 }
 
 /**
- *  @brief Stage one @b audio segment's raw waveform frames in place into the projection's BFloat16 fan-in.
+ *  @brief Stage one @b audio segment's raw waveform frames in place into the
+ *      projection's BFloat16 fan-in.
  *
- *  Like @ref tower_normalize_segment_kernel_ but raw samples carry no per-channel statistics to subtract, so
- *  the cast is the whole staging ( @c f32 → BFloat16 ) over the flat @c [rows,scalars] peel (a frame is
- *  @c chunk_samples raw samples); non-audio segments and the pre-zeroed remainder stay zero.
+ *  Like @ref tower_normalize_segment_kernel_ but raw samples carry no per-channel statistics to
+ *  subtract, so the cast is the whole staging ( @c f32 → BFloat16 ) over the flat
+ *  @c [rows,scalars] peel (a frame is @c chunk_samples raw samples); non-audio segments and the
+ *  pre-zeroed remainder stay zero.
  *
- *  __grid_size__ @c [segments,1,1] , threads stripe the segment's @c length·scalars cells; no dynamic shared memory.
+ *  __grid_size__ @c [segments,1,1] , threads stripe the segment's @c length · scalars cells; no
+ *  dynamic shared memory.
  */
 static __global__ void tower_audio_segment_kernel_(nk::tensor_view<f32_t, 2> content, u32r1_view_t offsets,
                                                    u32r1_view_t lengths, modality_view_t modality,
@@ -219,9 +225,10 @@ static __global__ void tower_audio_segment_kernel_(nk::tensor_view<f32_t, 2> con
     stage_frames_segment(content, offset, offset, length, patches, threadIdx.x, blockDim.x, tower_scalars_t {});
 }
 
-/** The head's biasless fc1 → SiLU → fc2 over the normalized pooled rows into @p vertices — raw, never
- *  L2-normalized here, since the loss owns the cosine geometry. Each product lands in the Float32 @p products
- *  and narrows into its BFloat16 destination. Shared verbatim by both towers' forwards. */
+/** The head's biasless fc1 → SiLU → fc2 over the normalized pooled rows into @p vertices —
+ *  raw, never L2-normalized here, since the loss owns the cosine geometry. Each product lands
+ *  in the Float32 @p products and narrows into its BFloat16 destination. Shared verbatim by
+ *  both towers' forwards. */
 static expected_t head_forward_(bf16r2_view_t normalized, b8r1_tensor_arena_t const &packed_fc1,
                                 b8r1_tensor_arena_t const &packed_fc2, bf16r2_span_t hidden_state,
                                 bf16r2_span_t activated, f32r2_span_t products, bf16r2_span_t vertices,
@@ -245,8 +252,9 @@ static expected_t head_forward_(bf16r2_view_t normalized, b8r1_tensor_arena_t co
 }
 
 /** Upload one modality's per-channel pixel mean and inverse-std to the device, allocating the two
- *  @b [channels] arenas off @p f32_alloc — the shared upload @ref encoder_tower_bf16_t::make runs for
- *  image and video (audio frames are raw waveform with no per-channel statistics, so they never call this). */
+ *  @b [channels] arenas off @p f32_alloc — the shared upload @ref encoder_tower_bf16_t::make runs
+ *  for image and video (audio frames are raw waveform with no per-channel statistics, so they
+ *  never call this). */
 static expected_t upload_pixel_constants(f32r1_tensor_arena_t &mean_arena, f32r1_tensor_arena_t &inverse_std_arena,
                                          f32_t const *mean_source, f32_t const *std_source, u32_t channels,
                                          gpu_arena_alloc<f32_t> &f32_alloc, gpu_arena_t &arena) noexcept {
@@ -270,8 +278,8 @@ static expected_t upload_pixel_constants(f32r1_tensor_arena_t &mean_arena, f32r1
 }
 
 /**
- *  @brief Stage one pixel modality's raw cells into per-channel-normalized BFloat16 patch vectors over the
- *      caller's @b [rows,scalars] @p patches .
+ *  @brief Stage one pixel modality's raw cells into per-channel-normalized BFloat16 patch vectors
+ *      over the caller's @b [rows,scalars] @p patches .
  *
  *  Zero the whole span, then run @ref tower_normalize_segment_kernel_ so only @p target 's cells are
  *  written ( @c (byte/255 − mean)·inverse_std , @c channels innermost) and every non-modality row stays
@@ -296,12 +304,12 @@ static expected_t stage_pixel_patches(nk::tensor_view<pixel_t, 3> raw, modality_
 /**
  *  @brief Project every present media modality's raw signal into the Float32 entry state.
  *
- *  For each present modality zero @p patch_scratch , stage only that modality's cells in place (image / video
- *  pixels normalized by their per-channel mean / inverse-std, audio raw frames cast as-is — a cell's content
- *  shares the flat grid position of its state), multiply by the packed projection, and add the product into
- *  @p entry_state , so the zero non-modality rows leave every other cell untouched — no scatter, no atomics.
- *  A modality is present iff its projection is packed. Shared verbatim by both towers' forwards; the text
- *  entry (a kernel) is the caller's.
+ *  For each present modality zero @p patch_scratch , stage only that modality's cells in place
+ *  (image / video pixels normalized by their per-channel mean / inverse-std, audio raw frames cast
+ *  as-is — a cell's content shares the flat grid position of its state), multiply by the packed
+ *  projection, and add the product into @p entry_state , so the zero non-modality rows leave every
+ *  other cell untouched — no scatter, no atomics. A modality is present iff its projection is
+ *  packed. Shared verbatim by both towers' forwards; the text entry (a kernel) is the caller's.
  */
 static expected_t project_media_entries(multimodal_batch_on_gpu_t const &batch, bf16r2_tensor_arena_t &patch_scratch,
                                         f32r1_tensor_arena_t &image_mean, f32r1_tensor_arena_t &image_inverse_std,
@@ -328,7 +336,8 @@ static expected_t project_media_entries(multimodal_batch_on_gpu_t const &batch, 
                                     "entry projection");
         return staged;
     };
-    // One pixel modality's forward: zero the scratch, normalize its cells in place, add the projection.
+    // One pixel modality's forward: zero the scratch, normalize its cells in place,
+    // add the projection.
     auto project_pixels = [&](nk::tensor_view<pixel_t, 3> raw, modality_t target, f32r1_view_t mean,
                               f32r1_view_t inverse_std, b8r1_tensor_arena_t const &packed) noexcept -> expected_t {
         u32_t const scalars = static_cast<u32_t>(raw.extent(1)) * static_cast<u32_t>(raw.extent(2));
@@ -366,11 +375,11 @@ static expected_t project_media_entries(multimodal_batch_on_gpu_t const &batch, 
 }
 
 /**
- *  @brief Fold the packed entry gradient against each present media modality's re-staged patches into that
- *      modality's projection weight gradient.
+ *  @brief Fold the packed entry gradient against each present media modality's re-staged patches
+ *      into that modality's projection weight gradient.
  *
- *  Re-stage exactly as @ref project_media_entries (segment-driven, so non-modality rows stay zero), then
- *  take the weight gradient through the blocks' shared @p scratch — the backward twin of
+ *  Re-stage exactly as @ref project_media_entries (segment-driven, so non-modality rows stay zero),
+ *  then take the weight gradient through the blocks' shared @p scratch — the backward twin of
  *  @ref project_media_entries . A modality is present iff its gradient is allocated.
  */
 static expected_t project_media_weight_grads(multimodal_batch_on_gpu_t const &batch,
@@ -396,7 +405,8 @@ static expected_t project_media_weight_grads(multimodal_batch_on_gpu_t const &ba
                                     scratch.weight_grad_products.span(), scratch.weight_gradient_workspace.span(),
                                     numerics, stream);
     };
-    // One pixel modality's weight grad: re-stage its cells, then fold the whole entry gradient against them.
+    // One pixel modality's weight grad: re-stage its cells, then fold the whole entry
+    // gradient against them.
     auto project_pixels_grad = [&](nk::tensor_view<pixel_t, 3> raw, modality_t target, f32r1_view_t mean,
                                    f32r1_view_t inverse_std, bf16r2_span_t projection_grad) noexcept -> expected_t {
         u32_t const scalars = static_cast<u32_t>(raw.extent(1)) * static_cast<u32_t>(raw.extent(2));
@@ -536,12 +546,13 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, en
         tower.token_head_ = std::move(token_head.value_);
     }
 
-    // Media entries: each present modality patch-cuts its raw signal and projects it through a NumKong pack.
-    // A modality is present iff its geometry is fully specified — zero extents leave its projection, pack, and
-    // scratch untouched. Fan-ins are per-modality: image is ph·pw·image_channels, video folds
-    // video_tube_frames ahead of ph·pw·video_channels, and audio — a 1-D signal, unpatched — is just
-    // chunk_samples raw samples per frame (its projection is the learnable spectral frontend). Image and video
-    // pixels carry an ImageNet-style per-channel normalization; audio raw frames upload no constants.
+    // Media entries: each present modality patch-cuts its raw signal and projects it through a
+    // NumKong pack. A modality is present iff its geometry is fully specified — zero extents leave
+    // its projection, pack, and scratch untouched. Fan-ins are per-modality: image is
+    // ph·pw·image_channels, video folds video_tube_frames ahead of ph·pw·video_channels, and audio
+    // — a 1-D signal, unpatched — is just chunk_samples raw samples per frame (its projection is
+    // the learnable spectral frontend). Image and video pixels carry an ImageNet-style per-channel
+    // normalization; audio raw frames upload no constants.
 
     bool const image_present = config.image_patch_height != 0 && config.image_patch_width != 0;
     bool const video_present = config.video_tube_frames != 0 && config.video_patch_height != 0 &&
@@ -623,7 +634,8 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, en
                                   arena.used());
     }
 
-    // The block stack, over one scratch wide enough for the entries' and the head's weight gradients too.
+    // The block stack, over one scratch wide enough for the entries' and the head's
+    // weight gradients too.
     if (st::failed(tower.blocks_.resize(config.depth)))
         return result_t::fail(status_t::bad_alloc_k, "block table allocation failed ({})", config.depth);
     u32_t const entry_scalars[3] = {image_patch_scalars, video_tube_scalars, audio_frame_scalars};
@@ -706,7 +718,8 @@ expected_t tower_pool_t::backward(bf16r1_view_t query, bf16r2_view_t pooled_grad
     std::size_t const segments = pooled_.extent(0), hidden = pooled_.extent(1);
     std::size_t const heads = hidden / transformer_head_dim_k;
     std::size_t const tokens = key_grad.extent(0);
-    // NumKong never writes rows past a segment's live keys, nor the query rows of key-less PAD segments.
+    // NumKong never writes rows past a segment's live keys, nor the query rows of
+    // key-less PAD segments.
     for (f32_t *const gradient : {key_grad.data(), value_grad.data()})
         if (expected_t zeroed = zero_async(f32r1_span_t {gradient, tokens * hidden}, stream); !zeroed) return zeroed;
     if (expected_t zeroed = zero_async(f32r1_span_t {query_partials_.data(), segments * hidden}, stream); !zeroed)
@@ -752,8 +765,8 @@ expected_t tower_pool_t::backward(bf16r1_view_t query, bf16r2_view_t pooled_grad
  *  @brief The token head's compact offsets: the exclusive scan of every segment's span, in segment
  *      order, with the live total last.
  *
- *  __grid_size__ @c [1,1,1] ; one CTA scans the segments in chunks of its width; no dynamic shared
- *  memory.
+ *  __grid_size__ @c [1,1,1] ; one CTA scans the segments in chunks of its width; no
+ *  dynamic shared memory.
  */
 static __global__ void tower_token_offsets_kernel_(multimodal_batch_view_t batch, u32r1_span_t token_offsets) {
     using block_scan_t = cub::BlockScan<u32_t, kernel_block_size_default_k>;
@@ -776,11 +789,11 @@ static __global__ void tower_token_offsets_kernel_(multimodal_batch_view_t batch
 }
 
 /**
- *  @brief Gather every compact row of the token head from its state row, zeroing the rows past the
- *      live total.
+ *  @brief Gather every compact row of the token head from its state row, zeroing the rows past
+ *      the live total.
  *
- *  __grid_size__ @c [rows,1,1] ; one CTA per compact row; threads stripe the channels; no dynamic
- *  shared memory.
+ *  __grid_size__ @c [rows,1,1] ; one CTA per compact row; threads stripe the channels; no
+ *  dynamic shared memory.
  */
 static __global__ void tower_token_gather_kernel_(bf16r2_view_t states, multimodal_batch_view_t batch,
                                                   u32r1_view_t token_offsets, bf16r2_span_t gathered) {
@@ -794,8 +807,8 @@ static __global__ void tower_token_gather_kernel_(bf16r2_view_t states, multimod
  *  @brief Add every live compact row's gradient onto its state row; each state row receives at most
  *      one, so the fold is order-free.
  *
- *  __grid_size__ @c [rows,1,1] ; one CTA per compact row; threads stripe the channels; no dynamic
- *  shared memory.
+ *  __grid_size__ @c [rows,1,1] ; one CTA per compact row; threads stripe the channels; no
+ *  dynamic shared memory.
  */
 static __global__ void tower_token_scatter_kernel_(bf16r2_view_t gathered_grad, multimodal_batch_view_t batch,
                                                    u32r1_view_t token_offsets, f32r2_span_t states_grad) {
@@ -807,11 +820,11 @@ static __global__ void tower_token_scatter_kernel_(bf16r2_view_t gathered_grad, 
 }
 
 /**
- *  @brief Per-row L2 normalization @c v = p/max(‖p‖,√ε) , stashing the inverse norm for the
- *      backward.
+ *  @brief Per-row L2 normalization @c v = p/max(‖p‖,√ε) , stashing the inverse norm
+ *      for the backward.
  *
- *  __grid_size__ @c [rows,1,1] ; one CTA per row; threads stripe the width; no dynamic shared
- *  memory.
+ *  __grid_size__ @c [rows,1,1] ; one CTA per row; threads stripe the width; no
+ *  dynamic shared memory.
  */
 static __global__ void tower_token_normalize_kernel_(f32r2_view_t projected, f32r1_span_t inverse_norms,
                                                      bf16r2_span_t vectors, f32_t epsilon) {
@@ -828,10 +841,10 @@ static __global__ void tower_token_normalize_kernel_(f32r2_view_t projected, f32
 }
 
 /**
- *  @brief The L2 normalization's backward @c dp = (dv − (u·dv)·u)/‖p‖ with @c u = p/‖p‖ .
+ *  @brief The L2 normalization's backward @c dp = (dv − (u · dv) · u)/‖p‖ with @c u = p/‖p‖ .
  *
- *  __grid_size__ @c [rows,1,1] ; one CTA per row; threads stripe the width; no dynamic shared
- *  memory.
+ *  __grid_size__ @c [rows,1,1] ; one CTA per row; threads stripe the width; no
+ *  dynamic shared memory.
  */
 static __global__ void tower_token_normalize_backward_kernel_(f32r2_view_t projected, f32r1_view_t inverse_norms,
                                                               bf16r2_view_t vectors_grad,
@@ -994,9 +1007,10 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
                                 "batch disagrees with the baked capacities (tokens={} segments={})", live_tokens,
                                 segments);
 
-    // The step's live extent is the whole packed grid — modalities interleave, so there is no per-modality
-    // row band to trim; PAD and inter-segment gap cells ride through as zeros. Resized within each arena's
-    // reserved capacity (the check above makes this infallible; the bool is still verified, never assumed).
+    // The step's live extent is the whole packed grid — modalities interleave, so there is no
+    // per-modality row band to trim; PAD and inter-segment gap cells ride through as zeros. Resized
+    // within each arena's reserved capacity (the check above makes this infallible; the bool is
+    // still verified, never assumed).
 
     bool const resized = nk::succeeded(entry_output_.resize({live_tokens, hidden})) &&
                          nk::succeeded(normalized_.resize({live_tokens, hidden})) &&
@@ -1007,8 +1021,8 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
         return expected_t::fail(status_t::unsupported_k, "tower scratch cannot hold {} live tokens (capacity {})",
                                 live_tokens, entry_output_.capacity() / hidden);
 
-    // Zero the coordinates (PAD / gap cells stay (0,0,0)) and the packed entry state (cells no segment writes
-    // stay 0, and the media projections add onto that zero).
+    // Zero the coordinates (PAD / gap cells stay (0,0,0)) and the packed entry state (cells no
+    // segment writes stay 0, and the media projections add onto that zero).
     if (expected_t zeroed = zero_async(coords_.span(), stream); !zeroed) return zeroed;
     if (expected_t zeroed = zero_async(entry_output_.span(), stream); !zeroed) return zeroed;
 
@@ -1018,17 +1032,19 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
     u32r1_view_t const segment_lengths = batch.segment_lengths.view();
     modality_view_t const segment_modality = batch.segment_modality.view();
 
-    // Coordinates: one segment-driven fill dispatching on modality replaces the three per-modality adapters.
+    // Coordinates: one segment-driven fill dispatching on modality replaces the
+    // three per-modality adapters.
     expected_t staged = fill_coords(segment_offsets, segment_lengths, segment_modality, batch.image_shapes.view(),
                                     batch.video_shapes.view(), config_.video_tube_frames, config_.video_frame_stride,
                                     coords_.span(), stream);
     if (!staged) return staged;
 
-    // Entry, per-segment gather: text segments look up the embedding table into their cells, which widen into
-    // the Float32 state `activations_b_`; each present media modality zeroes the scratch, stages only its own
-    // cells in place (image / video pixels normalized, audio raw frames cast as-is; content shares the flat grid
-    // position of its state), and adds its projection, so the zero non-modality rows leave every other cell
-    // untouched — no scatter, no atomics.
+    // Entry, per-segment gather: text segments look up the embedding table into their cells,
+    // which widen into the Float32 state `activations_b_`; each present media modality zeroes
+    // the scratch, stages only its own cells in place (image / video pixels normalized, audio
+    // raw frames cast as-is; content shares the flat grid position of its state), and adds
+    // its projection, so the zero non-modality rows leave every other cell untouched — no
+    // scatter, no atomics.
 
     live_token_ids_ = batch.tokens.flatten<1>();
     staged = launch_kernel(&tower_text_entry_kernel_, segment_grid, block_shape, stream, live_token_ids_,
@@ -1045,8 +1061,8 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
                                        scratch_->products.span(), numerics_, stream);
     if (!staged) return staged;
 
-    // The block stack carries the Float32 residual stream: layer n reads layer n-1's output, ping-ponging the two
-    // buffers, and the last output is a stash the backward reads.
+    // The block stack carries the Float32 residual stream: layer n reads layer n-1's output,
+    // ping-ponging the two buffers, and the last output is a stash the backward reads.
     f32r2_view_t layer_input = activations_b_.view();
     for (u32_t layer_index = 0; layer_index != config_.depth; ++layer_index) {
         f32r2_tensor_arena_t &layer_output = layer_index % 2 == 0 ? activations_a_ : activations_b_;
@@ -1057,7 +1073,8 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
     }
     stack_output_ = layer_input;
 
-    // Final norm narrows the stack output into the per-token states, under the scale widened for rmscast.
+    // Final norm narrows the stack output into the per-token states, under the scale
+    // widened for rmscast.
     nk_status_t status = numerics_.cast(final_norm_scale_.data(), nk_bf16_k, widened_final_norm_scale_.data(), nk_f32_k,
                                         hidden, stream.numkong());
     if (status == nk_success_k)
@@ -1070,7 +1087,8 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
         if (expected_t projected = token_head_.forward(normalized_.view(), batch.view(), stream); !projected)
             return projected;
 
-    // Masked path stops here — the masked head reads normalized(); the contrastive path pools + heads.
+    // Masked path stops here — the masked head reads normalized(); the contrastive path
+    // pools + heads.
     if (vertices.empty()) return {};
     if (vertices.extent(0) != segments || vertices.extent(1) != hidden)
         return expected_t::fail(status_t::unsupported_k, "vertices must be [{},{}] (got [{},{}])", segments, hidden,
@@ -1081,8 +1099,8 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
                            stream);
     if (!staged) return staged;
 
-    // The head: learnable-γ RMSNorm, then the biasless fc1 → SiLU → fc2 into the caller's vertices —
-    // raw, never L2-normalized here (the loss owns the cosine geometry).
+    // The head: learnable-γ RMSNorm, then the biasless fc1 → SiLU → fc2 into the caller's vertices
+    // — raw, never L2-normalized here (the loss owns the cosine geometry).
     staged = launch_kernel(&rmsnorm_forward_kernel, segment_grid, block_shape, stream, pooled_.view(),
                            head_norm_scale_.view(), head_normalized_.span(), head_inverse_rms_.span(),
                            config_.block.rms_eps);
@@ -1095,10 +1113,11 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
 expected_t encoder_tower_bf16_t::patchify_media_targets(multimodal_batch_on_gpu_t const &batch,
                                                         bf16r2_span_t image_patches, bf16r2_span_t video_patches,
                                                         gpu_stream_t &stream) noexcept {
-    // The masked-autoencoder reconstruction target: the same per-channel-normalized patch vectors the entry
-    // stages before its projection, but written into the caller's clean-batch spans with no projection and no
-    // forward — one shared stage per present pixel modality, non-modality and gap rows left zero. Audio's target
-    // is the raw waveform frames, so the caller reshapes batch.audio_samples directly and passes nothing here.
+    // The masked-autoencoder reconstruction target: the same per-channel-normalized patch vectors
+    // the entry stages before its projection, but written into the caller's clean-batch spans with
+    // no projection and no forward — one shared stage per present pixel modality, non-modality and
+    // gap rows left zero. Audio's target is the raw waveform frames, so the caller reshapes
+    // batch.audio_samples directly and passes nothing here.
     std::size_t const columns = batch.tokens.extent(1);
     std::size_t const live_tokens = static_cast<std::size_t>(batch.tokens.extent(0)) * columns;
     dim3 const segment_grid {static_cast<u32_t>(batch.live_segments()), 1u, 1u};
@@ -1213,14 +1232,16 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
                                    f32r2_view_t {segment_scale_grad_partials}, head_norm_scale_grad_.span());
         if (!staged) return staged;
 
-        // The pool backward leaves the Float32 d(normalized) of every live token row in token_grad_a_.
+        // The pool backward leaves the Float32 d(normalized) of every live token
+        // row in token_grad_a_.
         staged = pool_.backward(pool_query_.view(), segment_grad_b_.view(), token_grad_a_.span(), token_grad_b_.span(),
                                 pool_query_grad_.span(), stream);
         if (!staged) return staged;
     }
 
-    // The caller's BFloat16 masked force widens into token_grad_a_ alone, or beside the pooled force and adds
-    // onto it: the co-trained join. The caller's hidden_grad may carry a wider capacity than the live extent.
+    // The caller's BFloat16 masked force widens into token_grad_a_ alone, or beside the pooled
+    // force and adds onto it: the co-trained join. The caller's hidden_grad may carry a wider
+    // capacity than the live extent.
     if (masked_present) {
         bf16r2_view_t const masked_grad = hidden_grad[nk::range(0, live_tokens), nk::slice];
         f32_t *const widened = pooled_present ? token_grad_b_.data() : token_grad_a_.data();
@@ -1239,8 +1260,8 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
         if (!staged) return staged;
     }
 
-    // Final-norm backward: the Float32 d(normalized) in token_grad_a_ → the Float32 d(stack output) into
-    // token_grad_b_, plus the scale grad.
+    // Final-norm backward: the Float32 d(normalized) in token_grad_a_ → the Float32 d(stack output)
+    // into token_grad_b_, plus the scale grad.
     staged = launch_kernel(&rmscast_backward_kernel, dim3 {static_cast<u32_t>(token_bands), 1u, 1u}, block_shape,
                            stream, stack_output_, final_norm_scale_.view(), token_grad_a_.view(), f32r2_view_t {},
                            token_grad_b_.span(), token_scale_grad_partials, config_.block.rms_eps);
@@ -1249,8 +1270,8 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
                                f32r2_view_t {token_scale_grad_partials}, final_norm_scale_grad_.span());
     if (!staged) return staged;
 
-    // Blocks in reverse; the flowing gradient ping-pongs the two token-gradient buffers. `coords_` still
-    // holds this step's coordinates from the paired forward.
+    // Blocks in reverse; the flowing gradient ping-pongs the two token-gradient buffers. `coords_`
+    // still holds this step's coordinates from the paired forward.
     f32r2_tensor_arena_t *grad_in = &token_grad_b_;
     f32r2_tensor_arena_t *grad_out = &token_grad_a_;
     f32r2_view_t flowing = grad_in->view();
@@ -1267,7 +1288,8 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
         flowing = grad_out->view();
         std::swap(grad_in, grad_out);
     }
-    // The entry backward reads BFloat16, so the stack's gradient narrows into the free normalized-grad buffer.
+    // The entry backward reads BFloat16, so the stack's gradient narrows into the
+    // free normalized-grad buffer.
     if (nk_status_t const status = numerics_.cast(flowing.data(), nk_f32_k, normalized_grad_.data(), nk_bf16_k,
                                                   live_tokens * hidden, stream.numkong());
         status != nk_success_k)
@@ -1308,10 +1330,11 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
                            u32r1_view_t {values_out}, entry_grad, entry_weight_grad_.span());
     if (!staged) return staged;
 
-    // Media weight grads: re-stage each present modality's cells (segment-driven, so non-modality rows stay
-    // zero) and fold the whole entry gradient against them — the zero patch rows drop every non-modality term,
-    // so dW gathers exactly its modality's cells. The backward twin of project_media_entries; coords_ was
-    // filled by the paired forward, so the backward derives no coordinates.
+    // Media weight grads: re-stage each present modality's cells (segment-driven, so
+    // non-modality rows stay zero) and fold the whole entry gradient against them — the zero
+    // patch rows drop every non-modality term, so dW gathers exactly its modality's cells. The
+    // backward twin of project_media_entries; coords_ was filled by the paired forward, so the
+    // backward derives no coordinates.
     return project_media_weight_grads(batch, patch_scratch_, entry_grad, image_pixel_mean_, image_pixel_inverse_std_,
                                       image_projection_grad_, video_pixel_mean_, video_pixel_inverse_std_,
                                       video_projection_grad_, audio_projection_grad_, *scratch_, numerics_, stream);
@@ -1339,9 +1362,10 @@ expected_t encoder_tower_bf16_t::pack_weights(gpu_stream_t &stream) noexcept {
 expected_t encoder_tower_bf16_t::fill(st::basic_vector<differentiable_weights_t> &weights) noexcept {
     u32_t const hidden = config_.block.hidden;
     u32_t const ffn = config_.block.ffn_expansion * hidden;
-    // Every weight joins under the checkpoint name the tower spells for it — the composition root adds only
-    // its `model.` prefix. A block weight arrives as a rank-1 accessor; it joins as its logical [rows,cols]
-    // rectangle (a tower matrix is already rank-2 and joins through its own span / view).
+    // Every weight joins under the checkpoint name the tower spells for it — the composition root
+    // adds only its `model.` prefix. A block weight arrives as a rank-1 accessor; it joins as its
+    // logical [rows,cols] rectangle (a tower matrix is already rank-2 and joins through its own
+    // span / view).
 
     auto push = [&weights](sz::string_view_t name, bf16r2_span_t weight, bf16r2_view_t grad) noexcept {
         differentiable_weights_t entry {{}, weight, grad};
@@ -1354,8 +1378,8 @@ expected_t encoder_tower_bf16_t::fill(st::basic_vector<differentiable_weights_t>
     };
     status_t pushed = push("embedding", entry_weight_.span(), entry_weight_grad_.view());
     // Media projections next, in modality order — each present iff it was allocated. These rank-2
-    // [hidden, fan_in] matrices join directly (like the head products), replica-identical with the grads
-    // backward() produces, so the optimizer trains what was frozen before.
+    // [hidden, fan_in] matrices join directly (like the head products), replica-identical with the
+    // grads backward() produces, so the optimizer trains what was frozen before.
     if (pushed == status_t::success_k && image_projection_.data() != nullptr)
         pushed = push("image_projection", image_projection_.span(), image_projection_grad_.view());
     if (pushed == status_t::success_k && video_projection_.data() != nullptr)
@@ -1509,8 +1533,8 @@ expected<encoder_tower_e4m3_t> encoder_tower_bf16_t::quantize_weights(gpu_arena_
         if (!uploaded) return result_t::fail(std::move(uploaded));
     }
 
-    // The rotary tables rebuild from the same config (their content is a pure function of it), and the
-    // forward activations allocate at the tower's capacities.
+    // The rotary tables rebuild from the same config (their content is a pure function of it), and
+    // the forward activations allocate at the tower's capacities.
     expected<rope_angles_t> angles = rope_angles_t::make(arena, config_.rope_max_positions, config_.rope,
                                                          config_.rope_base);
     if (!angles) return result_t::fail(std::move(angles));
@@ -1583,8 +1607,9 @@ expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const &batch,
     u32r1_view_t const segment_lengths = batch.segment_lengths.view();
     modality_view_t const segment_modality = batch.segment_modality.view();
 
-    // Coordinates + per-segment entry, mirroring the training twin: one fill_coords, a text-only embedding
-    // gather, and a projection added per present media modality (zero non-modality rows compose).
+    // Coordinates + per-segment entry, mirroring the training twin: one fill_coords, a
+    // text-only embedding gather, and a projection added per present media modality (zero
+    // non-modality rows compose).
     expected_t staged = fill_coords(segment_offsets, segment_lengths, segment_modality, batch.image_shapes.view(),
                                     batch.video_shapes.view(), config_.video_tube_frames, config_.video_frame_stride,
                                     coords_.span(), stream);
@@ -1596,7 +1621,8 @@ expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const &batch,
                            entry_output_.span());
     if (!staged) return staged;
 
-    // The media projections add in Float32, the same shared helper the training twin runs, then narrow once.
+    // The media projections add in Float32, the same shared helper the training twin runs,
+    // then narrow once.
     if (entry_state_.data() != nullptr) {
         std::size_t const cells = live_tokens * hidden;
         f32r2_span_t const entry_state {entry_state_.data(), live_tokens, hidden};

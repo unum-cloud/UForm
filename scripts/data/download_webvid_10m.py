@@ -1,3 +1,10 @@
+"""Download WebVid-10M: ~10M short (video, text) clips shipped inline as parquet -> canonical parquet.
+
+File: scripts/data/download_webvid_10m.py
+Author: Ash Vardanian
+Date: July 5, 2026
+"""
+
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -5,7 +12,6 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download WebVid-10M: ~10M short (video, text) clips shipped inline as parquet -> canonical parquet."""
 
 from acquire import acquire
 

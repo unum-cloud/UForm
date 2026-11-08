@@ -2,16 +2,18 @@
  *  @file src/encode.hpp
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief What every encode verb shares once its packer is chosen: the plans, the sites a call computes on, and the
- *      body that sizes the outputs, packs each slice and runs the model's tower over it.
+ *  @brief What every encode verb shares once its packer is chosen: the plans, the sites a call
+ *      computes on, and the body that sizes the outputs, packs each slice and runs the model's
+ *      tower over it.
  *
- *  Included by @c encode.cpp, whose verbs take decoded inputs, and by @c encode_media.cpp, whose verbs decode files,
- *  so a build without the codecs links the first alone.
+ *  Included by @c encode.cpp, whose verbs take decoded inputs, and by @c encode_media.cpp, whose
+ *  verbs decode files, so a build without the codecs links the first alone.
  *
- *  A RAM call packs its batch and borrows the tower's scratch from its own arena, which keeps the high-water mark. A
- *  VRAM call plans in the executor's host pages and packs what the devices read into its first device's pinned
- *  pages; each device copies its run of the slice into its own scratch, writes its share of the outputs there, and
- *  copies it into the arena when the arena lives on another device.
+ *  A RAM call packs its batch and borrows the tower's scratch from its own arena, which keeps the
+ *  high-water mark. A VRAM call plans in the executor's host pages and packs what the devices read
+ *  into its first device's pinned pages; each device copies its run of the slice into its own
+ *  scratch, writes its share of the outputs there, and copies it into the arena when the arena
+ *  lives on another device.
  */
 #pragma once
 
@@ -41,7 +43,8 @@ struct failure_t {
     char const *message = nullptr;
 };
 
-/** The C status a media decoder's failure crosses into: whatever the bytes do not decode to is malformed. */
+/** The C status a media decoder's failure crosses into: whatever the bytes do not decode
+ *  to is malformed. */
 inline uform_status_t media_status_of(status_t status) noexcept {
     switch (status) {
     case status_t::bad_alloc_k: return uform_status_out_of_memory_k;
@@ -59,7 +62,8 @@ struct item_plan_t {
     /** Tokens the item spans before truncation. */
     std::size_t spanned = 0;
 
-    /** The factorization its coordinates read: an image's @c (rows,columns) , a clip's @c (groups,rows,columns) . */
+    /** The factorization its coordinates read: an image's @c (rows,columns) , a clip's
+     *  @c (groups,rows,columns) . */
     u16_t shape[3] = {};
 
     /** An encoded image's format, decoded extent and DCT scale. */
@@ -84,7 +88,8 @@ inline nk_dtype_t output_dtype(uform_scalar_t scalar) noexcept {
     }
 }
 
-/** The refusals of every image verb: a model without the image entry, or one whose pixels are not RGBA. */
+/** The refusals of every image verb: a model without the image entry, or one whose pixels
+ *  are not RGBA. */
 inline failure_t validate_images(ue::geometry_t const &geometry) noexcept {
     if (!geometry.image_patch_side) return {uform_status_unsupported_k, "The model was not trained on images"};
     if (geometry.image_channels != um::image_channels_k)
@@ -108,7 +113,8 @@ inline failure_t validate_audio(ue::geometry_t const &geometry) noexcept {
 
 #pragma region Sites
 
-/** The C status a tower's failure crosses into: a batch it calls invalid is a packing defect of the encode verbs. */
+/** The C status a tower's failure crosses into: a batch it calls invalid is a packing defect of
+ *  the encode verbs. */
 inline failure_t tower_failure(status_t status) noexcept {
     switch (status) {
     case status_t::invalid_argument_k: return {uform_status_internal_k, "The tower refused a packed batch"};
@@ -119,21 +125,23 @@ inline failure_t tower_failure(status_t status) noexcept {
     }
 }
 
-/** @p view over @p data in place of its own storage, its shape kept; an absent view stays absent. */
+/** @p view over @p data in place of its own storage, its shape kept; an absent
+ *  view stays absent. */
 template <typename view_type_>
 view_type_ rebased(view_type_ view, void const *data) noexcept {
     if (!view.byte_data()) return view;
     return view_type_ {static_cast<char const *>(data), view.shape()};
 }
 
-/** @p rows over @p staging in place of their own storage, their shape kept; absent rows stay
- *  absent. */
+/** @p rows over @p staging in place of their own storage, their shape kept; absent
+ *  rows stay absent. */
 inline ue::rows_span_t rebased(ue::rows_span_t rows, bytes_span_t staging) noexcept {
     if (rows.empty()) return rows;
     return {nk::tensor_span<b8_t, 2> {staging.data(), rows.bytes.extent(0), rows.bytes.extent(1)}, rows.dtype};
 }
 
-/** A RAM call: the host tower on a pool, packing into the call's own arena, which also lends the scratch. */
+/** A RAM call: the host tower on a pool, packing into the call's own arena, which also
+ *  lends the scratch. */
 struct ram_site_t {
     pool_view_t pool;
 
@@ -168,31 +176,33 @@ struct ram_site_t {
     failure_t finish() noexcept { return {}; }
 };
 
-/** One device of a VRAM call: the executor's device, the model's replica on it, and its regions of the scratch. */
+/** One device of a VRAM call: the executor's device, the model's replica on it, and its regions
+ *  of the scratch. */
 struct vram_shard_t {
     vram_device_t *device = nullptr;
     vram_replica_t const *replica = nullptr;
     bytes_span_t scratch {};
 
-    /** Room for a whole slice's cells, of which the shard copies in only its own run, at the run's offset. */
+    /** Room for a whole slice's cells, of which the shard copies in only its own run, at
+     *  the run's offset. */
     bytes_span_t cells {};
 
     /** @b [segments,2] and @b [segments,3] the media shapes of the shard's run. */
     nk::tensor_span<u16_t, 2> image_shapes {}, video_shapes {};
 
-    /** Where a device other than the arena's writes its outputs before copying them over; empty on
-     *  the arena's. */
+    /** Where a device other than the arena's writes its outputs before copying them over; empty
+     *  on the arena's. */
     bytes_span_t embeddings {}, states {}, token_vectors {};
 
-    /** @b [segments,masked_vocabulary] where every shard writes its logits before copying them into
-     *  host pages. */
+    /** @b [segments,masked_vocabulary] where every shard writes its logits before copying them
+     *  into host pages. */
     f32r2_span_t masked_logits {};
 };
 
-/** A VRAM call: plans on the decoder pool into host pages, packs into pinned pages, and splits each
- *  slice across the devices holding a replica, by token count, through the verbs of the variant
- *  @p home_ 's load picked, moving each shard's run in and its outputs out through the vendor's
- *  copies. */
+/** A VRAM call: plans on the decoder pool into host pages, packs into pinned pages, and
+ *  splits each slice across the devices holding a replica, by token count, through the verbs
+ *  of the variant @p home_ 's load picked, moving each shard's run in and its outputs out
+ *  through the vendor's copies. */
 template <encoder_home_t home_>
 struct vram_site {
     using entries_kit_t = entries_kit_of<home_>;
@@ -201,7 +211,8 @@ struct vram_site {
     chunked_arena_t &staging;
     chunked_arena_t &transfers;
 
-    /** The stream of the device the call's arena lives on, whose shard writes the arena directly. */
+    /** The stream of the device the call's arena lives on, whose shard writes
+     *  the arena directly. */
     nk_stream_t arena_stream = nullptr;
     encoder_verbs<home_> const &verbs;
     per_gpu_array<vram_shard_t> shards {};
@@ -248,8 +259,8 @@ struct vram_site {
         return {};
     }
 
-    /** Runs the items of @p batch , whose cells @p cells hold, on every shard, each taking a contiguous run of about
-     *  equal tokens, their outputs landing at the run's rows. */
+    /** Runs the items of @p batch , whose cells @p cells hold, on every shard, each taking a
+     *  contiguous run of about equal tokens, their outputs landing at the run's rows. */
     failure_t encode(ue::multimodal_batch_view_t const &batch, bytes_view_t cells,
                      std::span<std::size_t const> packed_offsets, ue::outputs_t outputs) noexcept {
         std::size_t const segments = packed_offsets.size() - 1, origin = packed_offsets[0];
@@ -318,7 +329,8 @@ struct vram_site {
         return {};
     }
 
-    /** Copies host bytes into the arena on the first shard's stream, which @ref finish waits for. */
+    /** Copies host bytes into the arena on the first shard's stream, which
+     *  @ref finish waits for. */
     failure_t land(bytes_span_t target, bytes_view_t source) noexcept {
         vram_shard_t const &first = shards[0];
         if (entries_kit_t::copy(target, source, first.device->stream.get()) != nk_success_k)
@@ -356,7 +368,8 @@ requested_t requested_of(arguments_type_ const &arguments) noexcept {
     else return {arguments.embeddings, arguments.states, arguments.token_vectors, arguments.outputs_scalar};
 }
 
-/** Zeroes every output and report, so a call refused or failing before it lands leaves them null. */
+/** Zeroes every output and report, so a call refused or failing before it lands
+ *  leaves them null. */
 template <typename arguments_type_>
 void clear_outputs(arguments_type_ &arguments) noexcept {
     requested_t const requested = requested_of(arguments);
@@ -450,7 +463,8 @@ failure_t land_choices(uform_text_choose_t &arguments, f32r2_view_t logits, site
     return failure;
 }
 
-/** Runs @p step for every item of @c [begin,end) on @p pool , answering the first failure any reported. */
+/** Runs @p step for every item of @c [begin,end) on @p pool , answering the first
+ *  failure any reported. */
 template <typename step_type_>
 failure_t for_items(pool_view_t pool, std::size_t begin, std::size_t end, step_type_ step) noexcept {
     failure_t first {};
@@ -466,12 +480,12 @@ failure_t for_items(pool_view_t pool, std::size_t begin, std::size_t end, step_t
 }
 
 /**
- *  @brief The body every encode verb shares once its arena is claimed: plan, size the outputs, pack and encode each
- *      slice on @p site , land the views and the stats.
+ *  @brief The body every encode verb shares once its arena is claimed: plan, size the outputs, pack
+ *      and encode each slice on @p site , land the views and the stats.
  *  @param[in] memory The call's arena, where the outputs land.
  *
- *  Each slice finishes before the next one packs, so the pinned pages a device still reads are never overwritten,
- *  and a progress report means its items are encoded.
+ *  Each slice finishes before the next one packs, so the pinned pages a device still reads are
+ *  never overwritten, and a progress report means its items are encoded.
  */
 template <typename arguments_type_, typename packer_type_, typename site_type_>
 void encode_items(arguments_type_ &arguments, packer_type_ &packer, site_type_ &site, chunked_arena_t &memory,
@@ -655,7 +669,8 @@ void encode_on_devices(arguments_type_ &arguments, packer_type_ &packer, encoder
     site.finish(); // a failed slice leaves work queued, which drains before the next call reuses what it reads
 }
 
-/** Every encode verb after its entry: refuse, claim the arena, pick where the call computes, and encode. */
+/** Every encode verb after its entry: refuse, claim the arena, pick where the call
+ *  computes, and encode. */
 template <typename arguments_type_, typename packer_type_>
 void encode_call(arguments_type_ &arguments, packer_type_ &packer, uform_tape_view_t const &tape,
                  uform_scalar_t element, std::initializer_list<void const *> inputs, call_outcome_t &outcome) noexcept {

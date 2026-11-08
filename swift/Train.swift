@@ -2,9 +2,9 @@
  *  @file swift/Train.swift
  *  @author Ash Vardanian
  *  @date October 18, 2026
- *  @brief Training steps, mirroring `c/uform/train.h`: the mesh joining a run's processes, the trainer owning its
- *      replicas and optimizer, and the closed sets that configure them. Training is GPU-only, so every constructor
- *      here takes a VRAM executor.
+ *  @brief Training steps, mirroring `c/uform/train.h`: the mesh joining a run's processes, the
+ *      trainer owning its replicas and optimizer, and the closed sets that configure them. Training
+ *      is GPU-only, so every constructor here takes a VRAM executor.
  */
 
 import UFormC
@@ -28,7 +28,8 @@ public struct Modality: Hashable, Sendable, CustomStringConvertible {
     /// The modality as the library spells it. Calls `uform_modality_name`.
     public var description: String { String(cString: uform_modality_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no modality carries. Calls `uform_modality_from_name`.
+    /// Reads a spelling back, and nil for one no modality
+    /// carries. Calls `uform_modality_from_name`.
     public init?(name: String) {
         guard let raw = parsed(name, uform_modality_from_name, uform_modality_name) else { return nil }
         self.raw = raw
@@ -52,7 +53,8 @@ public struct Objective: Hashable, Sendable, CustomStringConvertible {
     /// The objective as the library spells it. Calls `uform_objective_name`.
     public var description: String { String(cString: uform_objective_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no objective carries. Calls `uform_objective_from_name`.
+    /// Reads a spelling back, and nil for one no objective
+    /// carries. Calls `uform_objective_from_name`.
     public init?(name: String) {
         guard let raw = parsed(name, uform_objective_from_name, uform_objective_name) else { return nil }
         self.raw = raw
@@ -96,7 +98,8 @@ public struct MultimemTier: Hashable, Sendable, CustomStringConvertible {
     /// The tier as the library spells it. Calls `uform_multimem_tier_name`.
     public var description: String { String(cString: uform_multimem_tier_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no tier carries. Calls `uform_multimem_tier_from_name`.
+    /// Reads a spelling back, and nil for one no tier
+    /// carries. Calls `uform_multimem_tier_from_name`.
     public init?(name: String) {
         guard let raw = parsed(name, uform_multimem_tier_from_name, uform_multimem_tier_name) else { return nil }
         self.raw = raw
@@ -114,7 +117,8 @@ public struct PairLossForm: Hashable, Sendable {
     public static let derived = PairLossForm(raw: uform_pair_loss_form_derived_k)
     /// The sigmoid cross-entropy of every cell, its attract and repel halves normalized apart.
     public static let balanced = PairLossForm(raw: uform_pair_loss_form_balanced_k)
-    /// The sigmoid cross-entropy of every positive's score over every negative's, where the bias cancels.
+    /// The sigmoid cross-entropy of every positive's score over every negative's, where
+    /// the bias cancels.
     public static let ranked = PairLossForm(raw: uform_pair_loss_form_ranked_k)
     /// SigLIP's sigmoid cross-entropy of every cell, each repel weighed like an attract.
     public static let sigmoid = PairLossForm(raw: uform_pair_loss_form_sigmoid_k)
@@ -214,8 +218,9 @@ public final class Mesh: @unchecked Sendable {
     /// Calls `uform_mesh_free`.
     deinit { uform_mesh_free(raw) }
 
-    /// Joins this process to the run's mesh over the devices of `executor`; every process of the run calls it
-    /// with the same count, multicast extent, directory and job. Calls `uform_mesh_bootstrap`.
+    /// Joins this process to the run's mesh over the devices of `executor`; every
+    /// process of the run calls it with the same count, multicast extent, directory and
+    /// job. Calls `uform_mesh_bootstrap`.
     public static func bootstrap(executor: Executor, options: MeshOptions = MeshOptions()) throws(UFormError) -> Mesh {
         let landing = Landing()
         let mesh = landing.slots(uform_mesh_t?.none)
@@ -297,7 +302,8 @@ public struct AudioShape: Sendable {
     }
 }
 
-/// What one device's step carries at most, whatever the modality mix. Mirrors `uform_batch_shape_t`.
+/// What one device's step carries at most, whatever the modality
+/// mix. Mirrors `uform_batch_shape_t`.
 public struct BatchShape: Sendable {
     /// Rows one device's step packs.
     public var maxRowsPerDevice: Int
@@ -356,8 +362,8 @@ public struct BatchShape: Sendable {
     }
 }
 
-/// How the masked objective corrupts a batch and weighs its heads. Mirrors `uform_masking_t`, every zero deriving
-/// the default the C field names.
+/// How the masked objective corrupts a batch and weighs its heads. Mirrors `uform_masking_t`, every
+/// zero deriving the default the C field names.
 public struct Masking: Sendable {
     /// Fraction of text positions covered by spans; zero derives 0.15.
     public var tokenMaskProbability: Float = 0
@@ -402,19 +408,20 @@ public struct Masking: Sendable {
     }
 }
 
-/// How the contrastive loss scores the pooled embeddings. Mirrors `uform_contrastive_t`, every zero deriving the
-/// default the C field names.
+/// How the contrastive loss scores the pooled embeddings. Mirrors `uform_contrastive_t`, every zero
+/// deriving the default the C field names.
 public struct Contrastive: Sendable {
-    /// Matryoshka prefix widths, strictly ascending, each a multiple of 8, at most 8; empty scores the full width.
+    /// Matryoshka prefix widths, strictly ascending, each a multiple of 8, at most 8; empty scores
+    /// the full width.
     public var matryoshkaDimensions: [Int] = []
-    /// Learnable inverse temperature and bias pairs, one per group of a step's items; zero derives
-    /// one.
+    /// Learnable inverse temperature and bias pairs, one per group of a step's items;
+    /// zero derives one.
     public var temperatureGroups: Int = 0
     /// The starting inverse temperature of every group; zero derives 10 under the sigmoid form,
     /// SigLIP's, else 1.
     public var inverseTemperature: Float = 0
-    /// The starting logit bias of every group; zero derives −10 under the sigmoid form, SigLIP's,
-    /// else zero.
+    /// The starting logit bias of every group; zero derives −10 under the sigmoid form,
+    /// SigLIP's, else zero.
     public var bias: Float = 0
     /// Which pairs repel.
     public var negatives: Negatives = .ambient
@@ -431,8 +438,8 @@ public struct Contrastive: Sendable {
 }
 
 /// How the late-interaction loss scores the per-token vectors of query and document items. Mirrors
-/// `uform_late_interaction_t`, every zero deriving the default the C field names; a zero `weight` trains no token
-/// head.
+/// `uform_late_interaction_t`, every zero deriving the default the C field names; a zero `weight`
+/// trains no token head.
 public struct LateInteraction: Sendable {
     /// The loss weight; zero trains no token head.
     public var weight: Float = 0
@@ -444,13 +451,13 @@ public struct LateInteraction: Sendable {
     public var bias: Float = 0
     /// Tokens one query segment contributes at most, its first past the prefix; zero derives 64.
     public var maxQuerySpan: Int = 0
-    /// Query token rows one device's step holds at most; zero derives `maxQuerySpan` for every
-    /// segment.
+    /// Query token rows one device's step holds at most; zero derives `maxQuerySpan`
+    /// for every segment.
     public var maxQueryTokensPerDevice: Int = 0
     /// Document segments one device's step holds at most; zero derives `maxSegmentsPerDevice`.
     public var maxDocumentsPerDevice: Int = 0
-    /// Document token rows one device's step holds at most; zero derives the batch's tokens per
-    /// device.
+    /// Document token rows one device's step holds at most; zero derives the batch's
+    /// tokens per device.
     public var maxDocumentTokensPerDevice: Int = 0
     /// The pair loss over each query's row of hard MaxSim scores; `.derived` takes ranked.
     public var pairLoss: PairLossForm = .derived
@@ -473,8 +480,8 @@ public struct LateInteraction: Sendable {
     }
 }
 
-/// Calibrated choices over the byte decoder: each choice item scores the soft cross-entropy of its legal bytes'
-/// softmax, plus `brierWeight` times its Brier score. Mirrors `uform_choices_t`.
+/// Calibrated choices over the byte decoder: each choice item scores the soft cross-entropy of its
+/// legal bytes' softmax, plus `brierWeight` times its Brier score. Mirrors `uform_choices_t`.
 public struct Choices: Sendable {
     /// The loss weight; zero trains no choices.
     public var weight: Float
@@ -488,8 +495,8 @@ public struct Choices: Sendable {
     }
 }
 
-/// The learning-rate schedule: a linear warmup to the peak, then a cosine decay to the floor. Mirrors
-/// `uform_schedule_t`.
+/// The learning-rate schedule: a linear warmup to the peak, then a cosine decay to the
+/// floor. Mirrors `uform_schedule_t`.
 public struct Schedule: Sendable {
     /// The peak learning rate; zero derives 5e-3.
     public var learningRate: Float
@@ -511,8 +518,8 @@ public struct Schedule: Sendable {
 
 // MARK: - Steps
 
-/// One edge set over a step's items, as compressed sparse rows: item `i` links to `ids[offsets[i] ..<
-/// offsets[i + 1]]`. Mirrors `uform_edges_view_t`.
+/// One edge set over a step's items, as compressed sparse rows: item `i` links to
+/// `ids[offsets[i] ..< offsets[i + 1]]`. Mirrors `uform_edges_view_t`.
 public struct Edges: Sendable {
     /// The step's count + 1 non-decreasing offsets into `ids`.
     public var offsets: [Int]
@@ -529,8 +536,9 @@ public struct Edges: Sendable {
     }
 }
 
-/// The contrastive targets of one step; a pair `ignore` names is skipped, one `attract` names pulls together, one
-/// `repel` names pushes apart, and every other pair follows the run's negatives. Mirrors `uform_relations_view_t`.
+/// The contrastive targets of one step; a pair `ignore` names is skipped, one `attract` names
+/// pulls together, one `repel` names pushes apart, and every other pair follows the run's
+/// negatives. Mirrors `uform_relations_view_t`.
 public struct Relations: Sendable {
     /// Pairs pulled together.
     public var attract: Edges?
@@ -595,14 +603,15 @@ public struct TrainerStepStats: Sendable {
 public struct TrainerStep {
     /// What the step reports.
     public let stats: TrainerStepStats
-    /// One row per item, as the contrastive loss scored it before the update, or nil without an arena.
+    /// One row per item, as the contrastive loss scored it before the update, or nil
+    /// without an arena.
     public let embeddings: Rows?
 }
 
 // MARK: - Trainer
 
-/// A training run: the tower replicas, gradients, optimizer moments, heads and temperatures on the devices of
-/// its executor, every verb blocking on that executor.
+/// A training run: the tower replicas, gradients, optimizer moments, heads and temperatures on the
+/// devices of its executor, every verb blocking on that executor.
 public final class Trainer: @unchecked Sendable {
     /// The native handle, released by `deinit`.
     let raw: uform_trainer_t
@@ -620,9 +629,9 @@ public final class Trainer: @unchecked Sendable {
     /// Calls `uform_trainer_free`.
     deinit { uform_trainer_free(raw) }
 
-    /// Builds one replica per device of `executor` and starts the run from `seed`, or continues it from the
-    /// `resume` checkpoint; every process of the run calls it with the same geometry, objective and seed. Calls
-    /// `uform_trainer_init_vram`.
+    /// Builds one replica per device of `executor` and starts the run from `seed`, or continues it
+    /// from the `resume` checkpoint; every process of the run calls it with the same geometry,
+    /// objective and seed. Calls `uform_trainer_init_vram`.
     public static func initVram(
         executor: Executor,
         depth: Int,
@@ -681,12 +690,13 @@ public final class Trainer: @unchecked Sendable {
         }
     }
 
-    /// Applies one optimizer step over this process's items and every peer's; every process of the run calls it
-    /// once per step. With an `arena`, the step also lands the pooled embeddings it scored there, as
-    /// `outputsScalar`. `sides` places each item in the late-interaction loss, nil leaving every item out,
-    /// `choices` names each item's legal bytes as `textChoose` takes them, and `choiceTargets` their target
-    /// probabilities, an entry as long as the item's choices. Each list of items is gathered into one tape, the one
-    /// copy this form makes before lending it as the packed form does. Calls `uform_trainer_step`.
+    /// Applies one optimizer step over this process's items and every peer's; every process of the
+    /// run calls it once per step. With an `arena`, the step also lands the pooled embeddings it
+    /// scored there, as `outputsScalar`. `sides` places each item in the late-interaction loss, nil
+    /// leaving every item out, `choices` names each item's legal bytes as `textChoose` takes them,
+    /// and `choiceTargets` their target probabilities, an entry as long as the item's choices. Each
+    /// list of items is gathered into one tape, the one copy this form makes before lending it as
+    /// the packed form does. Calls `uform_trainer_step`.
     public func step(
         modalities: [Modality],
         contents: [[UInt8]],
@@ -713,8 +723,9 @@ public final class Trainer: @unchecked Sendable {
         )
     }
 
-    /// Applies one optimizer step over tapes already packed as `data` and its `count + 1` Apache Arrow `offsets`,
-    /// lent to the library in place, without a copy, until the step returns. Calls `uform_trainer_step`.
+    /// Applies one optimizer step over tapes already packed as `data` and its `count + 1`
+    /// Apache Arrow `offsets`, lent to the library in place, without a copy, until the step
+    /// returns. Calls `uform_trainer_step`.
     public func step(
         modalities: [Modality],
         contents: (data: [UInt8], offsets: [Int]),
@@ -728,7 +739,8 @@ public final class Trainer: @unchecked Sendable {
         outputsScalar: Scalar = .f32
     ) throws(UFormError) -> TrainerStep {
         let count = modalities.count
-        // The C side reads one entry per item, and one offset more, behind pointers that carry no count.
+        // The C side reads one entry per item, and one offset more, behind pointers that
+        // carry no count.
         let edges = [relations.attract, relations.repel, relations.ignore].compactMap { $0 }
         guard bounds(contents.offsets, count, contents.data.count), bags.map({ $0.count == count }) ?? true,
             temperatureGroups.map({ $0.count == count }) ?? true, sides.map({ $0.count == count }) ?? true,
@@ -789,8 +801,9 @@ public final class Trainer: @unchecked Sendable {
         }
     }
 
-    /// Writes the weights and the step to a safetensors checkpoint, which `Model.loadVram` and its siblings serve
-    /// and `initVram` resumes; only the process of index zero writes. Calls `uform_trainer_save`.
+    /// Writes the weights and the step to a safetensors checkpoint, which `Model.loadVram`
+    /// and its siblings serve and `initVram` resumes; only the process of index zero
+    /// writes. Calls `uform_trainer_save`.
     public func save(path: String, progress: Progress? = nil, progressSteps: Int = 0) throws(UFormError) {
         let landing = Landing()
         var arguments = uform_trainer_save_t(
@@ -819,15 +832,15 @@ private func packed<Item: Collection>(_ items: [Item]) -> (data: [Item.Element],
     return tape
 }
 
-/// Whether `offsets` bound `count` entries of a run of `elements`: one more of them, from zero up, never
-/// decreasing, the last inside the run.
+/// Whether `offsets` bound `count` entries of a run of `elements`: one more of them, from zero up,
+/// never decreasing, the last inside the run.
 private func bounds(_ offsets: [Int], _ count: Int, _ elements: Int) -> Bool {
     offsets.count == count + 1 && offsets[0] >= 0 && offsets[count] <= elements
         && zip(offsets, offsets.dropFirst()).allSatisfy { $0 <= $1 }
 }
 
-/// Runs `body` with `tape` lent in place over its arrays' own storage, valid only until `body` returns; nil lends an
-/// empty tape.
+/// Runs `body` with `tape` lent in place over its arrays' own storage, valid only until `body`
+/// returns; nil lends an empty tape.
 private func withTape<Element: BitwiseCopyable>(
     _ tape: (data: [Element], offsets: [Int])?,
     _ scalar: Scalar,

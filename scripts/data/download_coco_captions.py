@@ -1,10 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "huggingface_hub",
-#     "pyarrow>=21.0.0",
-# ]
-# ///
 """Stage REAL COCO captions into the `coco_captions` registry schema, replacing the VQA-as-caption data.
 
 Modality: image+text. The `coco_captions` registry entry expects each row to pair an `image`
@@ -34,7 +27,19 @@ CLI usage:
     uv run scripts/data/download_coco_captions.py                    # whole caption corpus (~18 GB)
     uv run scripts/data/download_coco_captions.py --max-shards 1     # one shard (~4000 images) probe
     uv run scripts/data/download_coco_captions.py --out-dir $UFORM_DATA_ROOT/coco_captions
+
+File: scripts/data/download_coco_captions.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "huggingface_hub",
+#     "pyarrow>=21.0.0",
+# ]
+# ///
 
 import argparse
 import shutil

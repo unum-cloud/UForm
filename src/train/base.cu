@@ -6,23 +6,24 @@
  *      the synthetic-mixture kernels, the weight seeding and checkpoint helpers, and every
  *      out-of-line body of @ref trainer_config_t and @ref base_replica_t .
  *
- *  No @c main lives here — the binary's thin entry is @c tools/base.cu , and the conformance test is
- *  @c test/base.cu .
+ *  No @c main lives here — the binary's thin entry is @c tools/base.cu , and the conformance test
+ *  is @c test/base.cu .
  *
  *  @section base_impl_mixture The synthetic mixture, drawn like the real mixer composes
  *
- *  Each step partitions the row budget across the live modalities with a keyed draw — any counts, no
- *  per-modality caps — and assigns the rows in the @ref modality_t order (tokens, image, video, audio), each row
- *  modality-uniform with one segment, so projections tile contiguous row runs. The partition, the contents, and
- *  the corruption are all pure functions of @c (seed,data_epoch,gpu_index_in_colocated_domain) — the mesh's
- *  global world coordinate, so every world GPU trains on distinct data: every run and the capture-vs-eager
- *  parity re-run draw bitwise-identically, with no files.
+ *  Each step partitions the row budget across the live modalities with a keyed draw — any counts,
+ *  no per-modality caps — and assigns the rows in the @ref modality_t order (tokens, image, video,
+ *  audio), each row modality-uniform with one segment, so projections tile contiguous row runs. The
+ *  partition, the contents, and the corruption are all pure functions of
+ *  @c (seed,data_epoch,gpu_index_in_colocated_domain) — the mesh's global world coordinate, so
+ *  every world GPU trains on distinct data: every run and the capture-vs-eager parity re-run draw
+ *  bitwise-identically, with no files.
  *
  *  @section base_impl_schedule The learning-rate schedule
  *
- *  The rate is the trainer's policy, computed on host per step (legal because the optimizer region is eager):
- *  a linear ramp from zero to the peak over @c warmup_steps , then a cosine decay to @c min_learning_rate over
- *  the run's remainder — the validated draft envelope's shape.
+ *  The rate is the trainer's policy, computed on host per step (legal because the optimizer region
+ *  is eager): a linear ramp from zero to the peak over @c warmup_steps , then a cosine decay to
+ *  @c min_learning_rate over the run's remainder — the validated draft envelope's shape.
  */
 #include <cmath>   // `std::cos`, `std::sqrt`, `std::ceil`, `std::isfinite`
 #include <cstring> // `std::strlen`
@@ -60,9 +61,9 @@ using namespace unum::uform::train;
 namespace ut = unum::uform::train;
 
 /**
- *  @brief Fill the token grid with a keyed synthetic byte corpus — every row, media rows included (their bytes
- *      are simply never read); the draw is a pure function of @c (seed,data_epoch,gpu_index,row,column) with
- *      the @b world GPU coordinate.
+ *  @brief Fill the token grid with a keyed synthetic byte corpus — every row, media rows included
+ *      (their bytes are simply never read); the draw is a pure function of
+ *      @c (seed,data_epoch,gpu_index,row,column) with the @b world GPU coordinate.
  *
  *  @b grid_size @c [rows,1,1] , one CTA per row; no dynamic shared memory.
  */
@@ -77,9 +78,9 @@ static __global__ void synthetic_tokens_kernel_(nk::tensor_span<token_id_t, 2> t
 }
 
 /**
- *  @brief Write every row's segment descriptor from the host-drawn partition: rows below @p image_begin are
- *      tokens, then the image / video / audio runs in @ref modality_t order (an empty run leaves consecutive
- *      begins equal).
+ *  @brief Write every row's segment descriptor from the host-drawn partition: rows below
+ *      @p image_begin are tokens, then the image / video / audio runs in @ref modality_t order (an
+ *      empty run leaves consecutive begins equal).
  *
  *  A token row splits into equal slices, as many as the segment budget gives each row, so the
  *  envelope probe runs at the real batch's density. A media row is one full-width segment with
@@ -128,10 +129,10 @@ static __global__ void synthetic_segments_kernel_(u32r1_span_t segment_offsets, 
 }
 
 /**
- *  @brief Fill one media pixel tensor (flattened @b [rows, patch_scalars] ) with keyed byte noise — the raw
- *      image / video content the tower re-patchifies, identical across runs.
+ *  @brief Fill one media pixel tensor (flattened @b [rows, patch_scalars] ) with keyed byte noise —
+ *      the raw image / video content the tower re-patchifies, identical across runs.
  *
- *  @b grid_size capped grid-stride over @c rows·patch_scalars scalars; no dynamic shared memory.
+ *  @b grid_size capped grid-stride over @c rows · patch_scalars scalars; no dynamic shared memory.
  */
 static __global__ void synthetic_pixels_kernel_(nk::tensor_span<pixel_t, 2> media, u64_t seed, data_epoch_t data_epoch,
                                                 u32_t gpu_index_in_colocated_domain, u32_t salt) {
@@ -149,10 +150,11 @@ static __global__ void synthetic_pixels_kernel_(nk::tensor_span<pixel_t, 2> medi
 }
 
 /**
- *  @brief Fill the audio waveform tensor (flattened @b [frames, chunk_samples] ) with keyed noise in
- *      @b [-1,1] — the raw samples the tower's learnable frontend projects.
+ *  @brief Fill the audio waveform tensor (flattened @b [frames, chunk_samples] ) with keyed noise
+ *      in @b [-1,1] — the raw samples the tower's learnable frontend projects.
  *
- *  @b grid_size capped grid-stride over @c frames·chunk_samples scalars; no dynamic shared memory.
+ *  @b grid_size capped grid-stride over @c frames · chunk_samples scalars; no
+ *      dynamic shared memory.
  */
 static __global__ void synthetic_audio_kernel_(f32r2_span_t frames, u64_t seed, data_epoch_t data_epoch,
                                                u32_t gpu_index_in_colocated_domain, u32_t salt) {
@@ -181,8 +183,9 @@ struct grid_factor_t {
     u16_t patch_rows = 0, patch_cols = 0;
 };
 
-/** The near-square factorization of one media row's @p columns patches. Picks the largest divisor no
- *  greater than the square root as the column count, so the grid stays as square as the budget allows. */
+/** The near-square factorization of one media row's @p columns patches. Picks the largest
+ *  divisor no greater than the square root as the column count, so the grid stays as square as
+ *  the budget allows. */
 [[nodiscard]] static grid_factor_t square_factor_(u32_t columns) noexcept {
     u32_t side = 1u;
     while ((side + 1u) * (side + 1u) <= columns) ++side;
@@ -198,8 +201,8 @@ struct grid_factor_t {
     return (uniform - 0.5f) * 3.4641016f * std;
 }
 
-/** Whether @p matrix projects back into the residual stream: each block's attention and MLP
- *  output. */
+/** Whether @p matrix projects back into the residual stream: each block's attention
+ *  and MLP output. */
 [[nodiscard]] static bool writes_residual_(differentiable_weights_t const &matrix) noexcept {
     return matrix.name.view().ends_with(".out") || matrix.name.view().ends_with(".down");
 }
@@ -216,8 +219,8 @@ multimodal_batch_shape_t ut::batch_capacity(multimodal_batch_shape_t shape, std:
     return shape;
 }
 
-/** How many matrices of @p list project back into the residual stream, splitting one unit of
- *  variance. */
+/** How many matrices of @p list project back into the residual stream, splitting one
+ *  unit of variance. */
 [[nodiscard]] static std::size_t residual_writers_(std::span<differentiable_weights_t const> list) noexcept {
     std::size_t residual_writers = 0;
     for (differentiable_weights_t const &matrix : list) residual_writers += writes_residual_(matrix) ? 1u : 0u;
@@ -230,8 +233,8 @@ multimodal_batch_shape_t ut::batch_capacity(multimodal_batch_shape_t shape, std:
                                              std::size_t residual_writers, gpu_stream_t &stream) noexcept {
     differentiable_weights_t const &matrix = list[weight_index];
     std::size_t const rows = matrix.weights.extent(0), columns = matrix.weights.extent(1);
-    // Matrices are [outputs,inputs]; the residual writers split one unit of variance across the
-    // stack.
+    // Matrices are [outputs,inputs]; the residual writers split one unit of variance
+    // across the stack.
     std::size_t const fan_in = writes_residual_(matrix) ? columns * residual_writers : columns;
     f32_t const deviation = 1.0f / std::sqrt(static_cast<f32_t>(fan_in));
     nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1> staging =
@@ -266,7 +269,8 @@ f32_t trainer_config_t::learning_rate_for(optimizer_step_t optimizer_step) const
     return min_learning_rate + (learning_rate - min_learning_rate) * cosine;
 }
 
-/** The masking corruptor's keyed recipe — the run's knobs, its seed derived once from the run seed. */
+/** The masking corruptor's keyed recipe — the run's knobs, its seed derived once from
+ *  the run seed. */
 [[nodiscard]] static masking_recipe_t masking_recipe_(trainer_config_t const &config) noexcept {
     masking_recipe_t recipe = config.masking;
     recipe.seed = config.seed * 2654435761u + 17u;
@@ -284,10 +288,10 @@ struct row_partition_t {
     u32_t begins[4] = {};
 };
 
-/** Partition the row budget across the live modalities — any counts, no per-modality caps, exactly the
- *  freedom the real mixer has. Every live modality gets the floor share; the keyed draw rotates which ones
- *  carry the remainder, so every mixture recurs across passes (and a one-row omni batch deterministically
- *  leaves most heads with zero live rows — the dynamic-M edge). */
+/** Partition the row budget across the live modalities — any counts, no per-modality caps, exactly
+ *  the freedom the real mixer has. Every live modality gets the floor share; the keyed draw rotates
+ *  which ones carry the remainder, so every mixture recurs across passes (and a one-row omni batch
+ *  deterministically leaves most heads with zero live rows — the dynamic-M edge). */
 [[nodiscard]] static row_partition_t partition_rows_(trainer_config_t const &config,
                                                      u32_t gpu_index_in_colocated_domain,
                                                      data_epoch_t data_epoch) noexcept {
@@ -317,10 +321,10 @@ struct row_partition_t {
     return partition;
 }
 
-/** Fold the run description into the tower's make-config: the block geometry from the batch envelope,
- *  one media entry per live batch slice — the batch shape stays the single source of modality presence. The
- *  rotary tables cover the largest coordinate a row reaches: its column count, or the absolute source frame
- *  the last tube of a one-patch clip starts at. */
+/** Fold the run description into the tower's make-config: the block geometry from the batch
+ *  envelope, one media entry per live batch slice — the batch shape stays the single source of
+ *  modality presence. The rotary tables cover the largest coordinate a row reaches: its column
+ *  count, or the absolute source frame the last tube of a one-patch clip starts at. */
 [[nodiscard]] static encoder_tower_config_t tower_config_(trainer_config_t const &config) noexcept {
     multimodal_batch_shape_t const &batch = config.batch;
     u32_t const max_tokens = batch.max_rows_per_gpu * batch.max_columns_per_row;
@@ -518,8 +522,8 @@ expected<trainer_config_t> trainer_config_t::parse(int argc, char **argv) noexce
         else if (flag == "--mixture") {
             if (value.ends_with(".json")) config.mixture = value;
             else if (value == "omni") {
-                // The omni preset: 8-pixel RGB image patches, 2-frame RGB video tubes, 320-sample
-                // audio frames.
+                // The omni preset: 8-pixel RGB image patches, 2-frame RGB video tubes,
+                // 320-sample audio frames.
                 config.batch.image = image_batch_shape_t {8u, 3u};
                 config.batch.video = video_batch_shape_t {8u, 3u, 2u, 1u};
                 config.batch.audio = audio_batch_shape_t {320u, 16000u};
@@ -695,8 +699,9 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config
             return result_t::fail(status_t::bad_alloc_k, "late-interaction scratch allocation failed");
     }
 
-    // The registration list — tower first, then each live head, identical order on every replica. The tower
-    // spells its own weight names; the heads take their instance names here, where the modalities are told apart.
+    // The registration list — tower first, then each live head, identical order on every replica.
+    // The tower spells its own weight names; the heads take their instance names here, where the
+    // modalities are told apart.
     if (expected_t listed = replica.tower.fill(replica.weights); !listed) return result_t::fail(std::move(listed));
     if (reconstructs || chooses)
         if (expected_t listed = replica.tokens.fill("masked_tokens", replica.weights); !listed)
@@ -757,7 +762,8 @@ expected_t base_replica_t::draw(trainer_config_t const &config, u32_t gpu_index_
     // No synthetic segment makes a choice.
     if (expected_t padded = pad_choices(batch, stream); !padded) return padded;
 
-    // Each live modality's raw content — filled across the whole tensor, keyed identically every run.
+    // Each live modality's raw content — filled across the whole tensor, keyed
+    // identically every run.
     if (shape.contains(modality_t::image_k)) {
         u32_t const patch_pixels = patch_scalars(shape.image.patch_side, shape.image.channels);
         nk::tensor_span<pixel_t, 2> const raw = batch.images.span().reshape<2>({max_tokens, patch_pixels});
@@ -827,8 +833,8 @@ expected_t base_replica_t::prepare(trainer_config_t const &config, data_epoch_t 
             !snapshot)
             return snapshot;
 
-    // The media masks and the in-place raw corruption — sampled eagerly so the masks persist into the
-    // captured forward region.
+    // The media masks and the in-place raw corruption — sampled eagerly so the masks persist into
+    // the captured forward region.
     u32r1_view_t const segment_offsets = batch.segment_offsets.view();
     u32r1_view_t const segment_lengths = batch.segment_lengths.view();
     modality_view_t const segment_modality = batch.segment_modality.view();

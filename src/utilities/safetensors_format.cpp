@@ -117,8 +117,8 @@ static void release_(bytes_span_t bytes) noexcept {
 
 /**
  *  @brief Serialize the safetensors header for @p entries inside @p pool : the metadata first, then
- *      a <tt>name: {dtype, shape, data_offsets}</tt> record per tensor, offsets as byte prefix sums
- *      in insertion order. The returned view points into the pool's backing.
+ *      a <tt>name: {dtype, shape, data_offsets}</tt> record per tensor, offsets as byte prefix sums in
+ *      insertion order. The returned view points into the pool's backing.
  *
  *  @par Statuses:
  *  - @c status_t::bad_alloc_k The pool ran dry — the caller grows it and retries.
@@ -320,9 +320,9 @@ expected_t checkpoint_to_save_t::metadata(sz::string_view_t key, sz::string_view
 expected_t checkpoint_to_save_t::save(sz::string_view_t path) noexcept {
     if (entries_.empty()) return expected_t::fail(status_t::invalid_argument_k, "a checkpoint needs tensors");
 
-    // The header builds in the hoisted scratch through a pool allocator spanning its whole backing —
-    // grown lazily, doubling when the pool runs dry, so the buffer settles after the first save and a
-    // `clear`ed container re-inflates it without allocating.
+    // The header builds in the hoisted scratch through a pool allocator spanning its whole backing
+    // — grown lazily, doubling when the pool runs dry, so the buffer settles after the first save
+    // and a `clear`ed container re-inflates it without allocating.
     sz::string_view_t header {};
     for (;;) {
         std::size_t const pool_bytes = scratch_.capacity() != 0 ? scratch_.capacity() : 4096;
@@ -340,8 +340,8 @@ expected_t checkpoint_to_save_t::save(sz::string_view_t path) noexcept {
             return expected_t::fail(std::move(serialized)); // a dry pool with no room left to grow
     }
 
-    // The JSON is space-padded to the next 8-byte boundary and the recorded length counts the padding,
-    // so the payload starts 8-aligned — byte-compatible with Hugging Face's own writer.
+    // The JSON is space-padded to the next 8-byte boundary and the recorded length counts the
+    // padding, so the payload starts 8-aligned — byte-compatible with Hugging Face's own writer.
     u64_t const header_length = divide_round_up(header.size(), 8) * 8;
     char const padding[8] = {' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
 
@@ -429,8 +429,8 @@ expected<checkpoint_to_load_t> checkpoint_to_load_t::make(sz::string_view_t path
 expected<checkpoint_to_load_t> checkpoint_to_load_t::view(bytes_view_t buffer) noexcept {
     using loaded_t = expected<checkpoint_to_load_t>;
 
-    // The length prefix is untrusted bytes until proven otherwise, and the image's own extent is the only
-    // honest bound on it: a header the image can't hold is corruption.
+    // The length prefix is untrusted bytes until proven otherwise, and the image's own extent is
+    // the only honest bound on it: a header the image can't hold is corruption.
     u64_t header_length = 0;
     if (buffer.size() < sizeof(header_length))
         return loaded_t::fail(status_t::invalid_argument_k, "a {}-byte image is shorter than a length prefix",
@@ -441,8 +441,8 @@ expected<checkpoint_to_load_t> checkpoint_to_load_t::view(bytes_view_t buffer) n
                               header_length, buffer.size());
     u64_t const payload_bytes = buffer.size() - sizeof(header_length) - header_length;
 
-    // The parse scratch holds a copy of the header up front and the yyjson pool behind it — one allocation,
-    // released once the tables are indexed.
+    // The parse scratch holds a copy of the header up front and the yyjson pool behind it — one
+    // allocation, released once the tables are indexed.
     st::basic_vector<char> scratch;
     std::size_t const pool_bytes = yyjson_read_max_memory_usage(header_length, 0);
     if (st::failed(scratch.resize(st::assume_uninitialized, header_length + pool_bytes)))

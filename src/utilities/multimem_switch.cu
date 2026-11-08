@@ -6,9 +6,9 @@
  *      device-only for the multicast-capable codes into the bundle @ref multimem_switch_module_t
  *      loads by name.
  *
- *  The kernels keep C linkage, so their names in the bundle are the ones spelled here, and no host
- *  code of this unit is ever linked: a build without a multicast-capable code embeds an empty
- *  bundle instead.
+ *  The kernels keep C linkage, so their names in the bundle are the ones spelled here, and no
+ *  host code of this unit is ever linked: a build without a multicast-capable code embeds an
+ *  empty bundle instead.
  */
 #include "uform/utilities/multimem_collectives.cuh"
 

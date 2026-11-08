@@ -35,34 +35,34 @@
  *  engines own no streams — the whole GPU tail rides the caller's one stream. The CPU pool stays a
  *  @b slave: it does only the host-bound demux, never the GPU.
  *
- *  @section video_jobs Jobs, the clips×representations cross-product
+ *  @section video_jobs Jobs, the clips × representations cross-product
  *
- *  A @b job is one @c (clip,representation) pair; a fill's jobs are the full @b cross-product of the drawn clips and
- *  the configured representations (each a flat @ref unum::uform::encoder::video_batch_shape_t ).
- *  Each job emits exactly @b one segment packed onto the @c [rows,columns] grid — the @b segment /
- *  column axis, not a tensor rank — whose footprint is derived from the clip's decoded native
- *  resolution ( @c derive_triple_ ), never a fixed budget. The common single-representation (Omni)
- *  config is one decode per clip. Representations of one clip differ only in @c frame_stride and
- *  (almost always) share their spatial target, so the drive decodes each clip @b once per distinct
- *  spatial target — keeping every frame in a shared buffer — and each representation temporally
- *  subsamples those frames by its own @c frame_stride when the tile kernel gathers its tubes. A
- *  multi-representation config therefore pays one decode per distinct @c (patch_rows,patch_cols) ,
- *  not one per job.
+ *  A @b job is one @c (clip,representation) pair; a fill's jobs are the full @b cross-product of
+ *  the drawn clips and the configured representations (each a flat
+ *  @ref unum::uform::encoder::video_batch_shape_t ). Each job emits exactly @b one segment packed
+ *  onto the @c [rows,columns] grid — the @b segment / column axis, not a tensor rank — whose
+ *  footprint is derived from the clip's decoded native resolution ( @c derive_triple_ ), never a
+ *  fixed budget. The common single-representation (Omni) config is one decode per clip.
+ *  Representations of one clip differ only in @c frame_stride and (almost always) share their
+ *  spatial target, so the drive decodes each clip @b once per distinct spatial target — keeping
+ *  every frame in a shared buffer — and each representation temporally subsamples those frames by
+ *  its own @c frame_stride when the tile kernel gathers its tubes. A multi-representation config
+ *  therefore pays one decode per distinct @c (patch_rows,patch_cols) , not one per job.
  *
  *  @section video_shape The patch-arranged contract
  *
  *  @c multimodal_batch_on_gpu_t::videos is
  *  @b [rows,columns,tube_frames,patch_side,patch_side,channels] UInt8. Each drawn clip emits one
  *  @b segment per representation, its @c (temporal_groups,patch_rows,patch_cols) derived from the
- *  clip's decoded native @c (frames,width,height) — @c patch_rows and @c patch_cols tile the native
- *  frame at @c patch_side and @c temporal_groups packs the @c frame_stride -sampled frames into
- *  @c tube_frames -deep tubes, exactly like an image with a temporal axis — then clamped to one row
- *  so an oversized clip downscales to fit rather than dropping. NVDEC's post-processor scales each
- *  sampled frame straight to the segment's @c (patch_cols·P,patch_rows·P) grid target,
- *  @c tile_tubes_kernel_ scatters the tubes into the segment's @c [column_begin,column_begin+len)
- *  cells of its row, and the loader records each segment's factorization into @c video_shapes . No
- *  learnable transform (projection, M-RoPE) is applied here — that lives in the differentiated
- *  step.
+ *  clip's decoded native @c (frames,width,height) — @c patch_rows and @c patch_cols tile the
+ *  native frame at @c patch_side and @c temporal_groups packs the @c frame_stride -sampled frames
+ *  into @c tube_frames -deep tubes, exactly like an image with a temporal axis — then clamped to
+ *  one row so an oversized clip downscales to fit rather than dropping. NVDEC's post-processor
+ *  scales each sampled frame straight to the segment's @c (patch_cols · P,patch_rows · P) grid
+ *  target, @c tile_tubes_kernel_ scatters the tubes into the segment's
+ *  @c [column_begin,column_begin+len) cells of its row, and the loader records each segment's
+ *  factorization into @c video_shapes . No learnable transform (projection, M-RoPE) is applied
+ *  here — that lives in the differentiated step.
  */
 #pragma once
 
@@ -81,37 +81,41 @@
 #include "uform/media/video.hpp"                    // `pixel_tubes_span_t`
 
 /** The session's owned NVDEC engine state — forward-declared at global scope and defined in
- *  @c video_loader.cu (which reaches its namespace with using-directives, never a namespace block), so this
- *  pimpl-carrying header never pulls in libnvcuvid or libav. */
+ *  @c video_loader.cu (which reaches its namespace with using-directives, never a namespace block),
+ *  so this pimpl-carrying header never pulls in libnvcuvid or libav. */
 struct nvdec_state_t;
 
 namespace unum::uform::loaders {
 using namespace unum::uform::utilities;
 using namespace unum::uform::encoder;
 
-/** The writable @b [rows,columns,tube_frames,patch_side,patch_side,channels] tube grid of one batch's video
- *  rows — the decode's destination. Each drawn clip emits one segment @b per representation, and every segment
- *  scatters its @c temporal_groups·patch_rows·patch_columns tubes into a column sub-range of one row. */
+/** The writable @b [rows,columns,tube_frames,patch_side,patch_side,channels] tube grid of one
+ *  batch's video rows — the decode's destination. Each drawn clip emits one segment @b per
+ *  representation, and every segment scatters its @c temporal_groups · patch_rows · patch_columns
+ *  tubes into a column sub-range of one row. */
 using media::pixel_tubes_span_t;
 
 /** The baked knobs of the @ref unum::uform::loaders::nvdec_session_t — the engine budget and each
  *  decoder's surface ceiling. */
 struct nvdec_config_t {
 
-    /** Concurrent decode engines to stand up — @b required (0 is rejected). Each engine owns a per-codec
-     *  parser / decoder entry table with its own surface pool, so this is not free to over-provision. Set it to
-     *  the target GPU's physical NVDEC engine count; there is no runtime query for that count (NVML exposes only
-     *  decoder utilization), so the caller — which knows the deployment GPU — must state it. */
+    /** Concurrent decode engines to stand up — @b required (0 is rejected). Each engine owns a
+     *  per-codec parser / decoder entry table with its own surface pool, so this is not free to
+     *  over-provision. Set it to the target GPU's physical NVDEC engine count; there is no runtime
+     *  query for that count (NVML exposes only decoder utilization), so the caller — which knows
+     *  the deployment GPU — must state it. */
     u32_t engine_count = 0;
 
-    /** Upper bound on the frame side any engine's NVDEC decoder scales to — the decode-surface budget. */
+    /** Upper bound on the frame side any engine's NVDEC decoder scales to —
+     *  the decode-surface budget. */
     u32_t max_side = 0;
 };
 
-/** The multi-engine NVDEC RAII context: @c engine_count decode engines (each a per-codec parser / decoder
- *  entry table) plus the shared context lock — made once at the composition root with a current context on the
- *  target device, threaded by reference. The engines own no streams; decode rides the caller's stream. Move-only;
- *  all vendor state behind a pimpl. It @b borrows the run's CPU pool per call (for demux) rather than owning one. */
+/** The multi-engine NVDEC RAII context: @c engine_count decode engines (each a per-codec parser /
+ *  decoder entry table) plus the shared context lock — made once at the composition root with a
+ *  current context on the target device, threaded by reference. The engines own no streams; decode
+ *  rides the caller's stream. Move-only; all vendor state behind a pimpl. It @b borrows the run's
+ *  CPU pool per call (for demux) rather than owning one. */
 struct nvdec_session_t {
 
   private:
@@ -124,27 +128,32 @@ struct nvdec_session_t {
     nvdec_session_t &operator=(nvdec_session_t &&) noexcept;
     ~nvdec_session_t() noexcept;
 
-    /** Stand up the engines' per-codec NVDEC parser / decoder entries and the shared context lock — once, at
-     *  setup, with a current context on the target device. No streams: decode rides the caller's stream. */
+    /** Stand up the engines' per-codec NVDEC parser / decoder entries and the shared context lock
+     *  — once, at setup, with a current context on the target device. No streams: decode rides
+     *  the caller's stream. */
     [[nodiscard]] static expected<nvdec_session_t> make(nvdec_config_t config) noexcept;
 
     /**
-     *  @brief Decode the drawn @p clips into the @p videos tube grid, one segment per representation of every clip.
+     *  @brief Decode the drawn @p clips into the @p videos tube grid, one segment per
+     *      representation of every clip.
      *
      *  Demux @p clips (parallel, over @p pool — the pool's only job here), pack one segment @b per
      *  representation of every clip into the token-cursor geometry, derive each segment's
-     *  @c (temporal_groups,patch_rows,patch_cols) from the clip's decoded native resolution, NVDEC-decode + scale
-     *  to that grid across the engines round-robin from a single host thread, and scatter the frames into @p videos
-     *  at each segment's @c [column_begin,column_begin+len) placement; write each segment's factorization into
-     *  @p video_shapes . All GPU work rides @p stream .
+     *  @c (temporal_groups,patch_rows,patch_cols) from the clip's decoded native resolution,
+     *  NVDEC-decode + scale to that grid across the engines round-robin from a single host thread,
+     *  and scatter the frames into @p videos at each segment's @c [column_begin,column_begin+len)
+     *  placement; write each segment's factorization into @p video_shapes . All GPU work rides
+     *  @p stream .
      *
      *  @param[in,out] pool The run's CPU pool, borrowed for the host-bound demux only — it never
      *      drives the decode.
-     *  @param[in] clips The drawn clips' container bytes as a host-pinned tape; @c [0,clips.size()) clips.
+     *  @param[in] clips The drawn clips' container bytes as a host-pinned tape;
+     *      @c [0,clips.size()) clips.
      *  @param[in] representations The flat @ref unum::uform::encoder::video_batch_shape_t
      *      representations; each clip emits one segment per representation. Must be non-empty (the
      *      loader defaults it to one at @c frame_stride 1).
-     *  @param[out] videos @b [rows,columns,tube_frames,P,P,C] destination grid; segments scatter across its rows.
+     *  @param[out] videos @b [rows,columns,tube_frames,P,P,C] destination grid; segments scatter
+     *      across its rows.
      *  @param[out] video_shapes @b [max_segments,3] per-segment factorization.
      *  @param[out] segment_offsets @b [max_segments+1] , @param[out] segment_lengths / @param[out] segment_modality
      *      @b [max_segments] — the token cursor this fill writes: @c clips.size()·representations.size() live video
@@ -163,18 +172,21 @@ struct nvdec_session_t {
 };
 
 /**
- *  @brief Decode a batch's drawn clip rows into its @c videos tube grid — the video decode every video loader
- *      shares (Parquet today, tarball next). Hops each drawn clip's container bytes off the device @p tape to a
- *      pinned tape, then hands them to @p nvdec 's multi-engine
+ *  @brief Decode a batch's drawn clip rows into its @c videos tube grid — the video decode every
+ *      video loader shares (Parquet today, tarball next). Hops each drawn clip's container bytes
+ *      off the device @p tape to a pinned tape, then hands them to @p nvdec 's multi-engine
  *      @ref unum::uform::loaders::nvdec_session_t::decode_into .
  *
  *  @param[in,out] nvdec The multi-engine NVDEC context doing the demux + decode + tile.
  *  @param[in,out] pool The run's CPU pool, forwarded for the parallel demux and engine drive.
- *  @param[in] tape The pooled clip column with its offsets on host — device bytes, host-indexable via @c tape[row] .
- *  @param[in] drawn_rows The tape rows to decode, one clip each; each clip emits one segment per representation.
+ *  @param[in] tape The pooled clip column with its offsets on host — device bytes, host-indexable
+ *      via @c tape[row] .
+ *  @param[in] drawn_rows The tape rows to decode, one clip each; each clip emits one
+ *      segment per representation.
  *  @param[in] representations The flat @ref unum::uform::encoder::video_batch_shape_t
  *      representations; must be non-empty.
- *  @param[out] videos The @b [rows,columns,tube_frames,P,P,C] tube grid to fill; segments scatter across its rows.
+ *  @param[out] videos The @b [rows,columns,tube_frames,P,P,C] tube grid to fill; segments scatter
+ *      across its rows.
  *  @param[out] video_shapes The @b [max_segments,3] per-segment factorization to fill.
  *  @param[out] segment_offsets / @param[out] segment_lengths / @param[out] segment_modality The batch's token
  *      cursor this fill writes for its video segments.
@@ -186,9 +198,9 @@ struct nvdec_session_t {
                                        u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
                                        modality_span_t segment_modality, gpu_stream_t &stream) noexcept;
 
-/** The Parquet video loader's baked knob — just which column; the video geometry travels on the loader's
- *  @c video_batch_shape_t (fixed at @ref video_loader_parquet_t::make ), not here, so the shape stays the single
- *  source of a step's geometry. */
+/** The Parquet video loader's baked knob — just which column; the video geometry travels on the
+ *  loader's @c video_batch_shape_t (fixed at @ref video_loader_parquet_t::make ), not here, so the
+ *  shape stays the single source of a step's geometry. */
 struct video_loader_parquet_config_t {
 
     /** The Parquet column holding the encoded clip blobs ( @c list<uint8> , mp4 / webm bytes). */
@@ -204,32 +216,36 @@ struct video_loader_parquet_config_t {
 struct video_loader_parquet_t {
 
     /**
-     *  @brief Failure-safe exception-free constructor that indexes all the shards' footers (host, once).
+     *  @brief Failure-safe exception-free constructor that indexes all the shards'
+     *      footers (host, once).
      *
      *  @param[in,out] session GPU Direct Storage session for IO.
      *  @param[in] path_or_glob Dataset's Parquet paths or a GLOB pattern for all the files.
      *  @param[in] seed The training-run specific order-affecting seed.
-     *  @param[in,out] pool The run's CPU-decode worker pool, owned at the composition root and
-     *      borrowed here.
-     *  @param[in] video The video modality's own geometry slice ( @c tube_frames , @c patch_side , @c frame_stride )
-     *      — the single source of a step's video geometry; it never sees the sibling modalities' shapes.
+     *  @param[in,out] pool The run's CPU-decode worker pool, owned at the composition root
+     *      and borrowed here.
+     *  @param[in] video The video modality's own geometry slice ( @c tube_frames , @c patch_side ,
+     *      @c frame_stride ) — the single source of a step's video geometry; it never sees the
+     *      sibling modalities' shapes.
      */
     [[nodiscard]] static expected<video_loader_parquet_t> make(gpu_direct_storage_session_t &session,
                                                                sz::string_view_t path_or_glob, u64_t seed,
                                                                pool_view_t pool, video_batch_shape_t video) noexcept;
 
     /**
-     *  @brief Fill the next few @p batches ' @c videos tube grid on one GPU rank, packing each drawn clip's segment
-     *      (one per representation of the loader's @c video_batch_shape_t ) into the shared @c [rows,columns] cursor.
+     *  @brief Fill the next few @p batches ' @c videos tube grid on one GPU rank, packing each
+     *      drawn clip's segment (one per representation of the loader's @c video_batch_shape_t )
+     *      into the shared @c [rows,columns] cursor.
      *  @sa multimodal_batch_mixer_t for the subsequent cross-GPU mixing.
      *
-     *  @param[in,out] gpu_stream The GPU-specific stream the staging, decode, and segmenting run
-     *      on.
+     *  @param[in,out] gpu_stream The GPU-specific stream the staging, decode, and
+     *      segmenting run on.
      *  @param[in,out] decoder The multi-engine NVDEC context to decode through.
      *  @param[in] config Which Parquet column holds the clips.
      *  @param[in] gpu_rank Ensures different GPUs draw different rows from the same dataset.
      *  @param[in] training_step Ensures subsequent steps sample different data.
-     *  @param[out] batches Output batches whose @c videos grid, @c video_shapes , and segment geometry get populated.
+     *  @param[out] batches Output batches whose @c videos grid, @c video_shapes , and segment
+     *      geometry get populated.
      */
     [[nodiscard]] expected_t fill(gpu_stream_t &gpu_stream, nvdec_session_t &decoder,
                                   video_loader_parquet_config_t config, u32_t gpu_rank, u32_t training_step,
@@ -240,7 +256,8 @@ struct video_loader_parquet_t {
     /** The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
     gpu_direct_storage_session_t *storage_ = nullptr;
 
-    /** The run's CPU-decode worker pool — borrowed from the composition root, forwarded to the decode. */
+    /** The run's CPU-decode worker pool — borrowed from the composition root, forwarded
+     *  to the decode. */
     pool_view_t pool_ {nullptr};
 
     /** The dataset's Parquet shard paths, sorted by the glob — owned. */
@@ -249,8 +266,9 @@ struct video_loader_parquet_t {
     /** The run seed keying the random file and row draws. */
     u64_t seed_ = 0;
 
-    /** @b [shards+1] cumulative footer row counts — the weighted file draw's search table and, at its back,
-     *  the dataset's total rows. Read once per dataset; shared across every GPU the loader serves. */
+    /** @b [shards+1] cumulative footer row counts — the weighted file draw's search table and,
+     *  at its back, the dataset's total rows. Read once per dataset; shared across every GPU
+     *  the loader serves. */
     st::basic_vector<std::size_t> row_prefix_ {};
 
     /** The video modality's geometry ( @c tube_frames , @c patch_side , @c frame_stride ) every

@@ -8,10 +8,10 @@
 # ///
 r"""Repack one WebDataset tar shard to a Parquet sibling with full annotation preservation.
 
-Modality: image+text (cc12m, laion_cc3m) and video+text (panda70m, webvid_10m).  The unit of
-work for the GNU `parallel` repack model: one process per shard, so many shards convert
-concurrently at full CPU saturation without an in-process pool (Python multiprocessing is
-banned per the project stylebook; the orchestrator uses `parallel -j$(nproc)` instead).
+Modality: image+text (cc12m, laion_cc3m) and video+text (panda70m, webvid_10m). The unit of work for
+the GNU `parallel` repack model: one process per shard, so many shards convert concurrently at full
+CPU saturation without an in-process pool (Python multiprocessing is banned per the project
+stylebook; the orchestrator uses `parallel -j$(nproc)` instead).
 
 Schema:
 - One column per file extension in the tar: e.g. `jpg: binary` (cc12m) or `mp4: binary`
@@ -24,10 +24,10 @@ Schema:
   matching_score`.  Every key is preserved verbatim — no silent dropping.  pyarrow infers
   per-column dtype from the observed values; missing keys land as null in nullable columns.
 
-Atomicity: writes to `<out>.parquet.tmp` then `os.replace`.  An interrupted run leaves the
-source tar untouched.  After verify passes (row-count + schema parity + xxhash of media
-column sizes against tar member sizes), the source tar is unlinked — the "delete after
-verify" policy frees disk for the next dataset (no rollback).
+Atomicity: writes to `<out>.parquet.tmp` then `os.replace`. An interrupted run leaves the source tar
+untouched. After verify passes (row-count + schema parity + xxhash of media column sizes against tar
+member sizes), the source tar is unlinked — the "delete after verify" policy frees disk for the next
+dataset (no rollback).
 
 Run one process per shard under GNU parallel at full core saturation:
 
@@ -35,8 +35,8 @@ Run one process per shard under GNU parallel at full core saturation:
         parallel -j$(nproc) uv run scripts/data/repack_webdataset_to_parquet.py {}
 
 Pass `--keep-tar` to skip the delete step (useful for the validation run on panda70m before
-launching the multi-hour cc12m sweep).  Pass `--overwrite` to re-repack a shard whose
-`.parquet` sibling already exists.
+launching the multi-hour cc12m sweep). Pass `--overwrite` to re-repack a shard whose `.parquet`
+sibling already exists.
 """
 
 import argparse
@@ -50,9 +50,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import xxhash
 
-#: Media file extensions we recognise as the "payload" column.  The first extension found in
-#: a tar drives the schema; mixing payload types within one shard raises (shouldn't happen
-#: with the WebDataset corpora we target — each shard is single-modality).
+#: Media file extensions we recognise as the "payload" column. The first extension found in a
+#: tar drives the schema; mixing payload types within one shard raises (shouldn't happen with
+#: the WebDataset corpora we target — each shard is single-modality).
 PAYLOAD_EXTENSIONS = ("jpg", "jpeg", "png", "webp", "mp4", "webm", "mkv")
 
 #: Sidecar extensions whose contents we parse as JSON and union into the schema.

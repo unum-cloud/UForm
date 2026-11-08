@@ -2,11 +2,12 @@
  *  @file src/train_absent.cpp
  *  @author Ash Vardanian
  *  @date October 18, 2026
- *  @brief The verbs of @c train.h in a build without CUDA: training runs on NVIDIA alone, so no mesh or trainer is
- *      ever created.
+ *  @brief The verbs of @c train.h in a build without CUDA: training runs on NVIDIA alone, so no
+ *      mesh or trainer is ever created.
  *
- *  Every verb is submitted and deferred like any call. A RAM executor is refused with @c uform_status_device_k , as
- *  the NVIDIA build refuses it, and any other with @c uform_status_unsupported_k ; the frees stay callable.
+ *  Every verb is submitted and deferred like any call. A RAM executor is refused with
+ *  @c uform_status_device_k , as the NVIDIA build refuses it, and any other with
+ *  @c uform_status_unsupported_k ; the frees stay callable.
  */
 #include "lib.hpp"
 

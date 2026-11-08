@@ -1,10 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "huggingface_hub",
-#     "pyarrow>=21.0.0",
-# ]
-# ///
 """Pull MeViS (referring motion-expression video segmentation) and repack it to the video schema.
 
 MeViS pairs ~2K short clips with ~33K natural-language motion expressions ("Horse running around",
@@ -45,7 +38,19 @@ Usage:
     uv run scripts/data/download_mevis.py                       # all splits, then repack
     uv run scripts/data/download_mevis.py --max-shards 1        # train split only
     uv run scripts/data/download_mevis.py --data-root $UFORM_DATA_ROOT --no-repack
+
+File: scripts/data/download_mevis.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "huggingface_hub",
+#     "pyarrow>=21.0.0",
+# ]
+# ///
 
 import argparse
 import json
@@ -64,11 +69,13 @@ from huggingface_hub import snapshot_download
 DEFAULT_DATA_ROOT = str(data_root())
 #: HF mirror that ships per-split JPEG frame tars plus the expression/frame-order JSON.
 MEVIS_REPO = "xing0047/mevis"
-#: Splits the mirror exposes with BOTH frames and expressions (we skip the mask-only `mask_dict.json`).
+#: Splits the mirror exposes with BOTH frames and expressions (we skip
+#: the mask-only `mask_dict.json`).
 SPLITS = ("train", "valid", "valid_u")
 #: Parquet row-group size — small enough for streaming sub-shard reads in the loader.
 ROW_GROUP_SIZE = 64
-#: Default playback rate for the re-encode; MeViS frames are uniformly sampled, so any steady rate works.
+#: Default playback rate for the re-encode; MeViS frames are uniformly sampled, so any
+#: steady rate works.
 DEFAULT_FPS = 5
 
 

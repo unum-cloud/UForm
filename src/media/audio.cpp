@@ -4,8 +4,8 @@
  *  @author Ash Vardanian
  *  @date July 5, 2026
  *
- *  A firewall over the libav C API: every libav and libswresample error is wrapped and can leave only as an
- *  @ref expected_t .
+ *  A firewall over the libav C API: every libav and libswresample error is wrapped and can leave
+ *  only as an @ref expected_t .
  */
 #include <cstring> // `std::memcpy` — the in-memory AVIO read callback
 
@@ -54,7 +54,8 @@ static int audio_memory_read_(void *opaque, u8_t *buffer, int buffer_size) noexc
     return to_read;
 }
 
-/** @c AVIOContext seek callback: honors @c SEEK_SET/CUR/END and the @c AVSEEK_SIZE query, @c -1 out of range. */
+/** @c AVIOContext seek callback: honors @c SEEK_SET/CUR/END and the @c AVSEEK_SIZE query, @c -1
+ *  out of range. */
 static i64_t audio_memory_seek_(void *opaque, i64_t offset, int whence) noexcept {
     auto *reader = static_cast<audio_memory_reader_t *>(opaque);
     i64_t const size = static_cast<i64_t>(reader->bytes.size());
@@ -75,11 +76,13 @@ static i64_t audio_memory_seek_(void *opaque, i64_t offset, int whence) noexcept
     return reinterpret_cast<u8_t const *>(samples);
 }
 
-/** One clip's demux + decode + resample chain, owned as a unit so its destructor is the single unwind on every
- *  return. @c format holds a context only once @c avformat_open_input succeeded, so one teardown fits every state. */
+/** One clip's demux + decode + resample chain, owned as a unit so its destructor is the single
+ *  unwind on every return. @c format holds a context only once @c avformat_open_input succeeded, so
+ *  one teardown fits every state. */
 struct audio_decoder_ {
 
-    /** Backing bytes for the in-memory AVIO callbacks; @c avio holds its address, so it lives here. */
+    /** Backing bytes for the in-memory AVIO callbacks; @c avio holds its address, so
+     *  it lives here. */
     audio_memory_reader_t reader {};
 
     /** The custom in-memory @c AVIOContext feeding the demuxer the clip's bytes. */
@@ -91,7 +94,8 @@ struct audio_decoder_ {
     /** The audio decoder context bound to the picked stream's codec parameters. */
     AVCodecContext *decoder = nullptr; // vendor-boundary
 
-    /** The libswresample context converting the decoded audio to mono Float32 at the target rate. */
+    /** The libswresample context converting the decoded audio to mono Float32 at
+     *  the target rate. */
     SwrContext *resampler = nullptr; // vendor-boundary
 
     /** The reusable packet the demuxer reads each compressed unit into. */
@@ -119,8 +123,8 @@ struct audio_decoder_ {
 /**
  *  @brief Build the demux + decode + resample chain for one clip's bytes into @p session .
  *
- *  Stands up its own libav stack over the in-memory bytes, so several run concurrently on a pool. On any failure
- *  the partially built @p session is left for its destructor to unwind.
+ *  Stands up its own libav stack over the in-memory bytes, so several run concurrently on a pool.
+ *  On any failure the partially built @p session is left for its destructor to unwind.
  *
  *  @param[in] encoded The clip's bytes, kept alive by the caller for @p session 's whole lifetime.
  *  @param[in] sample_rate The mono rate the resampler converts to.
@@ -141,7 +145,8 @@ struct audio_decoder_ {
     if (format == nullptr) return status_t::bad_alloc_k;
     format->pb = session.avio;
     format->flags |= AVFMT_FLAG_CUSTOM_IO;
-    // On failure `avformat_open_input` frees `format` itself, so the session adopts it only once it is open.
+    // On failure `avformat_open_input` frees `format` itself, so the session adopts it only once
+    // it is open.
     if (avformat_open_input(&format, nullptr, nullptr, nullptr) < 0) return status_t::io_k;
     session.format = format;
     if (avformat_find_stream_info(session.format, nullptr) < 0) return status_t::io_k;
@@ -200,16 +205,17 @@ struct resample_cursor_t {
 };
 
 /**
- *  @brief Resample one step into the fixed-length clip and advance @p cursor : real input emits its samples, a
- *      null @p input pumps the resampler's delay line, so conversion and drain share this one call.
+ *  @brief Resample one step into the fixed-length clip and advance @p cursor : real input emits its
+ *      samples, a null @p input pumps the resampler's delay line, so conversion and drain share
+ *      this one call.
  *
  *  @param[in,out] resampler The libswresample context to convert through.
  *  @param[in] input The input planes, or @c nullptr to drain the resampler.
  *  @param[in] input_samples The samples per input plane.
  *  @param[out] out The fixed-length clip, already silent.
  *  @param[in,out] cursor The write position and outcome, advanced in place.
- *  @return Whether the resampler may still yield output: always for real input, and for a drain only while it
- *      emitted samples.
+ *  @return Whether the resampler may still yield output: always for real input, and for a drain
+ *      only while it emitted samples.
  */
 static bool feed_(SwrContext *resampler, u8_t const *const *input, int input_samples, f32r1_span_t out,
                   resample_cursor_t &cursor) noexcept {
@@ -226,8 +232,8 @@ static bool feed_(SwrContext *resampler, u8_t const *const *input, int input_sam
     return input != nullptr || converted != 0;
 }
 
-/** Pull every frame the decoder holds and resample each into the clip, until it asks for input or the clip is
- *  full. */
+/** Pull every frame the decoder holds and resample each into the clip, until it asks for input or
+ *  the clip is full. */
 static void receive_frames_(audio_decoder_ &session, f32r1_span_t out, resample_cursor_t &cursor) noexcept {
     while (cursor.outcome == status_t::success_k && cursor.written < out.extent(0)) {
         int const received = avcodec_receive_frame(session.decoder, session.frame);
@@ -272,8 +278,8 @@ expected_t um::decode_audio(bytes_view_t encoded, u32_t sample_rate, f32r1_span_
         receive_frames_(session, out, cursor);
     }
 
-    // Flush the decoder's tail frames, then drain the resampler's delay line — mandatory for codecs (MP3, AAC) that
-    // hold priming or look-ahead samples.
+    // Flush the decoder's tail frames, then drain the resampler's delay line — mandatory for codecs
+    // (MP3, AAC) that hold priming or look-ahead samples.
     if (cursor.outcome == status_t::success_k) {
         avcodec_send_packet(session.decoder, nullptr);
         receive_frames_(session, out, cursor);

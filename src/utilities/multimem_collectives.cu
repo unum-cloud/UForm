@@ -23,7 +23,8 @@ static bool format_fabric_handle_(sz::string_t &text, CUmemFabricHandle const &h
     return built;
 }
 
-/** Parse a 128-hex fabric-handle token back into its 64 bytes; @c false on any non-hex or short token. */
+/** Parse a 128-hex fabric-handle token back into its 64 bytes; @c false on any non-hex
+ *  or short token. */
 static bool parse_fabric_handle_(sz::string_view_t token, CUmemFabricHandle &handle) noexcept {
     if (token.size() != 2u * sizeof(handle.data)) return false;
     for (std::size_t index = 0; index != sizeof(handle.data); ++index) {
@@ -61,9 +62,9 @@ static __global__ void multimem_barrier_peer_kernel_(multimem_member_t member) {
 }
 
 /**
- *  @brief Peer-read sibling of @c multimem_reduce_scatter_switch_kernel_ : the same shard, folded
- *      serially over the members through the symmetric range — a fixed order, bit-identical on
- *      every member.
+ *  @brief Peer-read sibling of @c multimem_reduce_scatter_switch_kernel_ : the same shard,
+ *      folded serially over the members through the symmetric range — a fixed order,
+ *      bit-identical on every member.
  *
  *  __grid_size__ grid-stride over @c shard_scalars ; no dynamic shared memory.
  */
@@ -82,8 +83,9 @@ static __global__ void multimem_reduce_scatter_peer_kernel_(multimem_member_t me
     }
 }
 
-/** Grant every local device read-write access to the slice mapped at @p slice — shared by the
- *  local-create and peer-adopt paths, so the peer-read tier reads every replica through the range. */
+/** Grant every local device read-write access to the slice mapped at @p slice — shared by
+ *  the local-create and peer-adopt paths, so the peer-read tier reads every replica
+ *  through the range. */
 static expected_t grant_local_access_(CUdeviceptr slice, std::size_t bytes, std::span<i32_t const> local_devices,
                                       u32_t member) noexcept {
     for (i32_t const reader : local_devices) {
@@ -213,8 +215,8 @@ expected<gpu_symmetric_arena_t> gpu_symmetric_arena_t::make(std::span<i32_t cons
         return result_t::fail(status_t::bad_alloc_k, "member table allocation failed ({} of {})", local_devices.size(),
                               member_count);
 
-    // The stride honors the coarsest requirement: every local device's physical granularity plus the
-    // caller's alignment (a multicast binding granularity, typically).
+    // The stride honors the coarsest requirement: every local device's physical granularity plus
+    // the caller's alignment (a multicast binding granularity, typically).
     std::size_t stride = alignment_granularity != 0 ? alignment_granularity : 1;
     for (i32_t const device : local_devices) {
         CUmemAllocationProp properties = arena.allocation_properties_(device);
@@ -293,9 +295,9 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t &topology, s
         return result_t::fail(status_t::invalid_argument_k, "every local device needs its stream ({} vs {})",
                               local_count, local_streams.size());
 
-    // The island's geometry comes from the world, not the local span: it may cross processes. The domain's
-    // host_domains are the contiguous run [domain_first_host, +host_domains_per_domain); this process's
-    // slices occupy members [member_offset, member_offset+local_count).
+    // The island's geometry comes from the world, not the local span: it may cross processes. The
+    // domain's host_domains are the contiguous run [domain_first_host, +host_domains_per_domain);
+    // this process's slices occupy members [member_offset, member_offset+local_count).
     mesh_shape_t const &shape = topology.shape;
     u32_t const gpus_per_host = shape.gpus_per_host_domain;
     u32_t const member_count = shape.gpus_per_multimem_domain;
@@ -310,9 +312,9 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t &topology, s
         !format_into(barrier_key, "multimem.{}", collective_id))
         return result_t::fail(status_t::bad_alloc_k, "rendezvous key formatting failed");
 
-    // Host-side staging (creates, binds, memsets) needs a current context; the lead local stream owns
-    // one — every VMM call names its device explicitly, so one context serves all. No stream is
-    // retained: the domain outlives its bring-up streams by design.
+    // Host-side staging (creates, binds, memsets) needs a current context; the lead local stream
+    // owns one — every VMM call names its device explicitly, so one context serves all. No stream
+    // is retained: the domain outlives its bring-up streams by design.
     switch_to_gpu_t gpu_scope {local_streams[0]};
     if (!gpu_scope.ok())
         return result_t::fail(status_t::device_error_k, "context entry failed (device={})", local_devices[0]);
@@ -439,7 +441,8 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t &topology, s
                 result != CUDA_SUCCESS)
                 return cuda_failure<multimem_domain_t>(result, "multicast object import failed");
         }
-        // Add this process's local devices and bind its local slices — no peer dependency, so no barrier.
+        // Add this process's local devices and bind its local slices — no peer dependency,
+        // so no barrier.
         for (i32_t const device : local_devices) {
             CUdevice device_handle = 0;
             if (CUresult result = cuDeviceGet(&device_handle, device); result != CUDA_SUCCESS)

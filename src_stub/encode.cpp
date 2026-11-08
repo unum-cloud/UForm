@@ -2,12 +2,13 @@
  *  @file src_stub/encode.cpp
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief A stand-in for the @c uform_*_encode C ABI: deterministic rows of the right shape, so a binding
- *      checks offsets, truncation stats, scalars and arena lifetimes without a tower.
+ *  @brief A stand-in for the @c uform_*_encode C ABI: deterministic rows of the right shape, so a
+ *      binding checks offsets, truncation stats, scalars and arena lifetimes without a tower.
  *
- *  Every verb decodes nothing and runs no model. An item's pooled embedding is a run of xorshift draws seeded
- *  by the FNV-1a hash of its bytes, and each of its states is seeded by that hash continued over the token's
- *  position, so equal inputs land equal outputs under any completion. What a token is depends on the verb:
+ *  Every verb decodes nothing and runs no model. An item's pooled embedding is a run of xorshift
+ *  draws seeded by the FNV-1a hash of its bytes, and each of its states is seeded by that hash
+ *  continued over the token's position, so equal inputs land equal outputs under any completion.
+ *  What a token is depends on the verb:
  *
  *      Verb                  One token
  *      text                  one byte of UTF-8
@@ -26,7 +27,8 @@
 
 using namespace unum::uform;
 
-/** One item as a verb reads it: the bytes seeding its rows, and the tokens they make before truncation. */
+/** One item as a verb reads it: the bytes seeding its rows, and the tokens they
+ *  make before truncation. */
 struct item_t {
     std::byte const *data;
     std::size_t length;
@@ -78,8 +80,8 @@ static bool reject_call(arguments_ const &arguments, uform_tape_view_t tape, ufo
 }
 
 /**
- *  @brief Lands the outputs of @p arguments in its arena: one embedding per item, and one state per token
- *      kept, item by item, reporting after each slice of items.
+ *  @brief Lands the outputs of @p arguments in its arena: one embedding per item, and one state per
+ *      token kept, item by item, reporting after each slice of items.
  *  @param[in] inputs Every pointer the call reads, refused when it lies inside the arena.
  *  @param[in] item_at Reads item @c i as an @c item_t.
  */

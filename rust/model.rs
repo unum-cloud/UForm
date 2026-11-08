@@ -199,7 +199,8 @@ impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for ModelL
 pub struct ModelLoadVramConfig<'config> {
     /// A safetensors checkpoint, read in full and closed before the load completes.
     pub path: &'config Path,
-    /// The executor the upload runs on, one stream per device; `None` uploads on the calling thread.
+    /// The executor the upload runs on, one stream per device; `None` uploads on
+    /// the calling thread.
     pub executor: Option<&'config Executor>,
     /// Positions in what [`gpu_devices`](crate::gpu_devices) lists, each holding a replica; empty
     /// derives one free device.
@@ -271,9 +272,11 @@ impl<'config, Bytes: Deref<Target = [u8]>> From<&'config Bytes> for ModelLoadRam
 ///
 /// Mirrors `uform_model_load_vram_buffer_t`.
 pub struct ModelLoadVramBufferConfig<'config> {
-    /// The safetensors checkpoint itself, in host or device memory, copied before the load completes.
+    /// The safetensors checkpoint itself, in host or device memory, copied before
+    /// the load completes.
     pub buffer: &'config [u8],
-    /// The executor the upload runs on, one stream per device; `None` uploads on the calling thread.
+    /// The executor the upload runs on, one stream per device; `None` uploads on
+    /// the calling thread.
     pub executor: Option<&'config Executor>,
     /// Positions in what [`gpu_devices`](crate::gpu_devices) lists, each holding a replica; empty
     /// derives one free device.
@@ -502,7 +505,8 @@ impl Model {
     }
 }
 
-/// What a verb answers through `Receiver`: what the call produced, or a [`Deferred`](crate::Deferred).
+/// What a verb answers through `Receiver`: what the call produced,
+/// or a [`Deferred`](crate::Deferred).
 pub(crate) type Answer<'model, Receiver, Verb> =
     <<Receiver as ModelVerbs<'model>>::Completion as Completion>::Answer<'model, Verb>;
 
@@ -617,7 +621,8 @@ pub(crate) mod tests {
 
     use super::*;
 
-    /// The tiny checkpoint `UFORM_TEST_CHECKPOINT` names, or stand-in bytes only the stub loads as a model.
+    /// The tiny checkpoint `UFORM_TEST_CHECKPOINT` names, or stand-in bytes only the stub loads
+    /// as a model.
     pub(crate) fn checkpoint() -> Vec<u8> {
         match std::env::var_os("UFORM_TEST_CHECKPOINT") {
             Some(path) => std::fs::read(path).expect("UFORM_TEST_CHECKPOINT names a readable checkpoint"),

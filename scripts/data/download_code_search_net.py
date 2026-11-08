@@ -1,3 +1,10 @@
+"""Download CodeSearchNet: function bodies (`func_code_string`) for the code share of the text_masked mixture.
+
+File: scripts/data/download_code_search_net.py
+Author: Ash Vardanian
+Date: July 5, 2026
+"""
+
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -5,12 +12,12 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download CodeSearchNet: function bodies (`func_code_string`) for the code share of the text_masked mixture."""
 from acquire import acquire
 
 if __name__ == "__main__":
-    # Every config (`all/`, `python/`, `java/`, ...) ships `func_code_string` — pure passthrough. The
-    # text_masked mixture reads only the `all/train-*.parquet` split; the per-language configs ride along.
+    # Every config (`all/`, `python/`, `java/`, ...) ships `func_code_string` — pure passthrough.
+    # The text_masked mixture reads only the `all/train-*.parquet` split; the per-language
+    # configs ride along.
     raise SystemExit(
         acquire(
             "code_search_net_text",

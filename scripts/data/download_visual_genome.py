@@ -1,3 +1,10 @@
+"""Download Visual Genome: ~108K images with dense region descriptions, into the image registry schema.
+
+File: scripts/data/download_visual_genome.py
+Author: Ash Vardanian
+Date: July 5, 2026
+"""
+
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -5,11 +12,11 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download Visual Genome: ~108K images with dense region descriptions, into the image registry schema."""
 import pyarrow as pa
 from acquire import acquire
 
-#: Cap on region phrases packed per image (Visual Genome carries ~50) to bound the `captions` list width.
+#: Cap on region phrases packed per image (Visual Genome carries ~50) to bound the
+#: `captions` list width.
 _MAX_CAPTIONS_PER_IMAGE = 16
 
 

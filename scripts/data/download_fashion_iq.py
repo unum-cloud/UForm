@@ -1,3 +1,14 @@
+"""Download Fashion-IQ: composed-retrieval triplets collapsed to (target image, modifier captions).
+
+Lossy simplification: the reference ("candidate") image is dropped and the relative modifier `caption`
+is used as the target's `captions`, so the pair is weaker supervision than a true caption. The
+`royokong/fashioniq_val` mirror is validation-only (~6K triplets).
+
+File: scripts/data/download_fashion_iq.py
+Author: Ash Vardanian
+Date: July 5, 2026
+"""
+
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -5,12 +16,6 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download Fashion-IQ: composed-retrieval triplets collapsed to (target image, modifier captions).
-
-Lossy simplification: the reference ("candidate") image is dropped and the relative modifier `caption`
-is used as the target's `captions`, so the pair is weaker supervision than a true caption. The
-`royokong/fashioniq_val` mirror is validation-only (~6K triplets).
-"""
 import pyarrow as pa
 from acquire import acquire
 

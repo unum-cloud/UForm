@@ -2,9 +2,8 @@
  *  @file src/encoder/vram_entries_nvidia.cpp
  *  @author Ash Vardanian
  *  @date October 25, 2026
- *  @brief The NVIDIA entries kit @ref vram_nvidia_entries_kit_t : copies and fills through the
- *      CUDA driver, and launches by name of the kernels @c vram_kernels_nvidia.cu compiles
- *      device-only.
+ *  @brief The NVIDIA entries kit @ref vram_nvidia_entries_kit_t : copies and fills through the CUDA
+ *      driver, and launches by name of the kernels @c vram_kernels_nvidia.cu compiles device-only.
  *
  *  Compiled host-only, so no NVCC host pass registers a fatbin with the CUDA runtime, and every
  *  call goes through the driver table this unit loads at its first entry, so nothing links
@@ -93,8 +92,8 @@ static device_module_t device_modules_[max_gpus_per_host_k];
     return static_cast<cuda_stream_handle_t>(static_cast<void *>(stream));
 }
 
-/** Run @p enqueue in the context of @p stream , the current one for a null stream, and report its
- *  result. */
+/** Run @p enqueue in the context of @p stream , the current one for a null stream, and
+ *  report its result. */
 template <typename enqueue_type_>
 [[nodiscard]] static nk_status_t in_context_(nk_stream_t stream, enqueue_type_ const &enqueue) noexcept {
     cuda_api_t const &driver = driver_();
@@ -107,8 +106,8 @@ template <typename enqueue_type_>
     return result == uu::cuda_success_k ? nk_success_k : nk_device_code_mismatch_k;
 }
 
-/** The function of @p kernel in the current context's device, loading the bundle there on first
- *  use. */
+/** The function of @p kernel in the current context's device, loading the bundle there
+ *  on first use. */
 [[nodiscard]] static cuda_result_t function_of_(cuda_api_t const &driver, kernel_t kernel,
                                                 cuda_function_handle_t &function) noexcept {
     cuda_context_handle_t context = nullptr;

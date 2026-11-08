@@ -5,19 +5,20 @@
  *  @brief Sharded sigmoid-pairwise (SigLIP-BCE) contrastive loss over pooled @b segment embeddings
  *      — the Embedder objective, as a function object with owned scratch and tensor-core matmuls.
  *
- *  The loss is best read as a @b force-directed @b graph @b layout relaxing in embedding space: every
- *  pooled embedding is a vertex, the relation graph's attract edges are springs pulling matched pairs
- *  together on the cosine sphere, repel edges and the ambient repulsion push everything else apart, and
- *  one call evaluates the potential (the weighted sigmoid-BCE on the Matryoshka cosine) and its forces
- *  (the gradients). Because the potential is a plain @b sum over independent vertex pairs (no softmax /
- *  InfoNCE normalisation), it distributes trivially: the global vertex axis partitions into
- *  @b per-GPU @b subgraphs and the call loops them, scoring each against the rank-owned vertices and
- *  accumulating. No @b [global_batch,hidden] embedding block ever materialises.
+ *  The loss is best read as a @b force-directed @b graph @b layout relaxing in embedding space:
+ *  every pooled embedding is a vertex, the relation graph's attract edges are springs pulling
+ *  matched pairs together on the cosine sphere, repel edges and the ambient repulsion push
+ *  everything else apart, and one call evaluates the potential (the weighted sigmoid-BCE on the
+ *  Matryoshka cosine) and its forces (the gradients). Because the potential is a plain @b sum over
+ *  independent vertex pairs (no softmax / InfoNCE normalisation), it distributes trivially: the
+ *  global vertex axis partitions into @b per-GPU @b subgraphs and the call loops them, scoring
+ *  each against the rank-owned vertices and accumulating. No @b [global_batch,hidden] embedding
+ *  block ever materialises.
  *
  *  @section gemms The heavy passes are tensor-core matmuls
  *
- *  The nested prefixes decompose into disjoint @b segments @c [D_{p-1},D_p) , and every O(R²·H) pass is a
- *  BFloat16 → Float32 NumKong product over segments, its B operand packed at call time:
+ *  The nested prefixes decompose into disjoint @b segments @c [D_{p-1},D_p) , and every O(R² · H)
+ *  pass is a BFloat16 → Float32 NumKong product over segments, its B operand packed at call time:
  *
  *      - scores: @c raw_p = V_seg·N_segᵀ + raw_{p-1} per segment (owned vertices × subgraph vertices), so
  *        prefix @c p 's raw dot builds on prefix @c p-1 's — the nesting costs one full-width product, not
@@ -26,7 +27,7 @@
  *        the per-prefix @c d(raw) blocks over the prefixes containing the segment;
  *      - to-vertex forces: @c subgraph.to_vertices_grad[:,seg] += G_segᵀ·V_seg .
  *
- *  Hand-rolled kernels keep only the O(R²·K) and O(R·H·K) epilogues: norms, the scaled-cosine
+ *  Hand-rolled kernels keep only the O(R² · K) and O(R · H · K) epilogues: norms, the scaled-cosine
  *  scaling, the pair loss with the relation resolution, the @c d(raw) build and its suffix
  *  accumulation, the cosine self-coefficient folds, the finalise, and the casts. Determinism holds
  *  through the products: NumKong has no split-K, so every run and every replay sums in the same
@@ -35,11 +36,11 @@
  *
  *  @section gpu_subgraphs The force grid as a per-GPU subgraph loop
  *
- *  The global force grid is @b [from_vertices_per_gpu,to_vertices_per_mesh] . Each GPU's subgraph owns a
- *  contiguous run of the global vertex axis starting at its @c global_offset ; the subgraphs tile the
- *  axis in order, without gap or overlap. The mesh is homogeneous, so @b every subgraph is
- *  @b [to_vertices_per_gpu,hidden] — the shape is baked at construction and ragged reality is PAD in the
- *  relation view, never a shape change. A subgraph's @c to_vertices view may point at:
+ *  The global force grid is @b [from_vertices_per_gpu,to_vertices_per_mesh] . Each GPU's subgraph
+ *  owns a contiguous run of the global vertex axis starting at its @c global_offset ; the subgraphs
+ *  tile the axis in order, without gap or overlap. The mesh is homogeneous, so @b every subgraph is
+ *  @b [to_vertices_per_gpu,hidden] — the shape is baked at construction and ragged reality is PAD
+ *  in the relation view, never a shape change. A subgraph's @c to_vertices view may point at:
  *
  *      - this rank's own vertices — the single-GPU case, or several local tiles of one bag;
  *      - a peer GPU's vertices inside this host_domain, reachable over NVLink peer mappings;
@@ -66,17 +67,17 @@
  *
  *  @section distributed Distributed contract — rank-local object, collectives at the boundaries
  *
- *  A call computes the rank-local contribution: @c loss_out is this rank's per-vertex-mean potential
- *  summand (one all-reduce-sum yields the global mean), @c from_vertices_grad is the full force on the
- *  rank-owned vertices, and each subgraph's @c to_vertices_grad is this rank's Float32 force contribution
- *  to that subgraph's vertices (reduce-scatter-summed across ranks by the caller —
- *  @ref unum::uform::utilities::infiniband_all_reduce across domains — then cast). Ordering is the
- *  caller's; no rank writes memory another rank reads during the loss.
+ *  A call computes the rank-local contribution: @c loss_out is this rank's per-vertex-mean
+ *  potential summand (one all-reduce-sum yields the global mean), @c from_vertices_grad is the full
+ *  force on the rank-owned vertices, and each subgraph's @c to_vertices_grad is this rank's Float32
+ *  force contribution to that subgraph's vertices (reduce-scatter-summed across ranks by the caller
+ *  — @ref unum::uform::utilities::infiniband_all_reduce across domains — then cast). Ordering is
+ *  the caller's; no rank writes memory another rank reads during the loss.
  *
  *  @section traffic What the distributed case actually moves
  *
- *  With @c D multimem_domains, @c R vertex rows per domain and @c H hidden, one loss step exchanges per
- *  domain, each way:
+ *  With @c D multimem_domains, @c R vertex rows per domain and @c H hidden, one loss step exchanges
+ *  per domain, each way:
  *
  *      - vertex all-gather: @c (D-1)·R·H·2 bytes — recursive doubling sends @c 2^r subgraphs in round
  *        @c r , summing to every other domain's BFloat16 vertices exactly once;
@@ -84,9 +85,10 @@
  *        subgraph, once per round;
  *      - loss / β / bias reduces: @c O(D) scalars — noise.
  *
- *  Total ≈ @c (2·(D-1)+4·log2(D))·R·H bytes per domain per step — @b linear in the domain's own vertex
- *  count and independent of the global batch beyond it: doubling the world doubles the repulsors every
- *  vertex feels while each domain's traffic grows by one more subgraph, not by the whole world.
+ *  Total ≈ @c (2 · (D-1)+4 · log2(D)) · R · H bytes per domain per step — @b linear in the
+ *  domain's own vertex count and independent of the global batch beyond it: doubling the world
+ *  doubles the repulsors every vertex feels while each domain's traffic grows by one more
+ *  subgraph, not by the whole world.
  *
  *  @section ownership Owned scratch, baked shapes
  *
@@ -122,12 +124,13 @@ using namespace unum::uform::utilities;
 inline constexpr u32_t max_matryoshka_prefixes_k = 8u;
 
 /**
- *  @brief Denominator floor for cosine normalisation @c ‖q‖·‖c‖ .
+ *  @brief Denominator floor for cosine normalisation @c ‖q‖ · ‖c‖ .
  *
- *  This is the @b stability floor of the contrastive backward, not a mere divide-by-zero guard. The
- *  cosine gradient carries a @c 1/(‖q‖·‖c‖) factor and the self-fold a @c 1/‖·‖² factor; when pooled
- *  embeddings collapse to a small norm, those factors amplify the gradient without bound. Flooring caps
- *  the backward gain at @c β/floor while healthy unit-ish embeddings sit far above it.
+ *  This is the @b stability floor of the contrastive backward, not a mere divide-by-zero guard.
+ *  The cosine gradient carries a @c 1/(‖q‖ · ‖c‖) factor and the self-fold a @c 1/‖ · ‖² factor;
+ *  when pooled embeddings collapse to a small norm, those factors amplify the gradient without
+ *  bound. Flooring caps the backward gain at @c β/floor while healthy unit-ish embeddings sit
+ *  far above it.
  */
 inline constexpr f32_t cosine_denominator_floor_k = 1.0e-2f;
 
@@ -182,20 +185,22 @@ enum class retrieval_column_t : u32_t {
 inline constexpr u32_t ranked_positives_per_pass_k = 8u;
 
 /** One GPU's subgraph of the force layout: its contiguous run of the global vertex axis — always
- *  @b [to_vertices_per_gpu,hidden] , wherever the transport put it (local tile, NVLink peer memory, or
- *  a landed remote copy). Vertex existence (PAD) is state of the relation view, not of the subgraph. */
+ *  @b [to_vertices_per_gpu,hidden] , wherever the transport put it (local tile, NVLink peer
+ *  memory, or a landed remote copy). Vertex existence (PAD) is state of the relation view, not
+ *  of the subgraph. */
 struct gpu_subgraph_t {
 
-    /** @b [to_vertices_per_gpu,hidden] BFloat16 to-vertex (column) tower of this block, row-major. */
+    /** @b [to_vertices_per_gpu,hidden] BFloat16 to-vertex (column) tower of
+     *  this block, row-major. */
     bf16r2_view_t to_vertices {};
 
     /** Global vertex id of this subgraph's row 0 — shifts its local rows onto the global vertex
      *  axis. */
     std::size_t global_offset = 0;
 
-    /** @b [to_vertices_per_gpu,hidden] Float32 output — this rank's force contribution to the
-     *  subgraph's to-vertices; Float32 so the caller can reduce-scatter-sum without per-rank
-     *  rounding. */
+    /** @b [to_vertices_per_gpu,hidden] Float32 output — this rank's force contribution
+     *  to the subgraph's to-vertices; Float32 so the caller can reduce-scatter-sum
+     *  without per-rank rounding. */
     f32r2_span_t to_vertices_grad {};
 };
 
@@ -257,13 +262,13 @@ struct matryoshka_prefixes_t {
  *      a stash of scaled scores into logit gradients in place, then folds the loss and the
  *      temperature summands.
  *
- *  Row @c r is local vertex @c r , and candidate @c s·per_subgraph+n of the stash is global vertex
- *  @c s·per_subgraph+n , so the subgraphs tile the global axis in order. Under @c balanced_k every
- *  cell is a sigmoid BCE on @c β·score+bias , its attract and repel halves normalized apart, and
- *  under @c sigmoid_k every repel is weighed on the attracts' scale instead. Under @c ranked_k ,
- *  row @c i scores @c Σ_p Σ_n w_p·w_n·softplus(x_n−x_p)/(Σw_p·Σw_n) over the attract set @c P_i
- *  and the repel and ambient set @c N_i , where the bias cancels and its gradient is zero. All
- *  three average over the live anchors, and every fold runs in a fixed order.
+ *  Row @c r is local vertex @c r , and candidate @c s · per_subgraph+n of the stash is global
+ *  vertex @c s · per_subgraph+n , so the subgraphs tile the global axis in order. Under
+ *  @c balanced_k every cell is a sigmoid BCE on @c β · score+bias , its attract and repel halves
+ *  normalized apart, and under @c sigmoid_k every repel is weighed on the attracts' scale instead.
+ *  Under @c ranked_k , row @c i scores @c Σ_p Σ_n w_p · w_n · softplus(x_n−x_p)/(Σw_p · Σw_n) over
+ *  the attract set @c P_i and the repel and ambient set @c N_i , where the bias cancels and its
+ *  gradient is zero. All three average over the live anchors, and every fold runs in a fixed order.
  */
 struct contrastive_pair_loss_t {
 
@@ -277,15 +282,15 @@ struct contrastive_pair_loss_t {
      *  @brief Rewrite @p logits from scaled scores into @c d(loss)/d(logit) and write the loss and
      *      the temperature summands, enqueue-only and capture-safe.
      *
-     *  @param[in,out] logits @b [prefixes,subgraphs,rows,per_subgraph] Float32: @c β·score without
-     *      the bias in, the logit gradient out.
+     *  @param[in,out] logits @b [prefixes,subgraphs,rows,per_subgraph] Float32: @c β · score
+     *      without the bias in, the logit gradient out.
      *  @param[in] relations The relation graph over the rows and the global candidates.
      *  @param[in] recipe β and bias, host scalars or per-temperature-group device entries.
      *  @param[in] live_anchors @b [1] the mean divisor, floored at one here.
      *  @param[out] loss_out @b [1] Float32 summand of the mean. Overwritten.
      *  @param[in] stream The stream every kernel is enqueued on.
-     *  @param[out] log_inverse_temperature_grad Optional @b [temperature_group_count] summands;
-     *      empty disables.
+     *  @param[out] log_inverse_temperature_grad Optional @b [temperature_group_count]
+     *      summands; empty disables.
      *  @param[out] bias_grad Optional @b [temperature_group_count] summands, zero under the ranked
      *      form; empty disables.
      */
@@ -296,8 +301,8 @@ struct contrastive_pair_loss_t {
 
   private:
 
-    /** @b [3,rows] per-row loss, bias and log-β gradient summands, in @ref pair_loss_row_t
-     *  order. */
+    /** @b [3,rows] per-row loss, bias and log-β gradient summands, in
+     *  @ref pair_loss_row_t order. */
     f32r2_tensor_arena_t from_vertex_accumulator_ {};
 
     /** @b [rows,candidates_per_row] one prefix's ranked gradients, written while its scores are
@@ -333,17 +338,20 @@ struct contrastive_segments_config_t {
 };
 
 /** The segments contrastive loss as a function object: shapes, Matryoshka prefixes, and every
- *  scratch tensor are baked at @ref make — a call is a pure enqueue, capture-safe and bit-reproducible
- *  (see the file header). */
+ *  scratch tensor are baked at @ref make — a call is a pure enqueue, capture-safe and
+ *  bit-reproducible (see the file header). */
 struct contrastive_segments_t {
 
     /**
-     *  @brief Bake everything static: validate the prefix ladder, and allocate every scratch tensor and the
-     *      products' packing buffer off @p arena — so a constructed loss never sizes and never allocates.
+     *  @brief Bake everything static: validate the prefix ladder, and allocate every scratch
+     *      tensor and the products' packing buffer off @p arena — so a constructed loss never
+     *      sizes and never allocates.
      *
-     *  @param[in] config The baked geometry (see @ref contrastive_segments_config_t ); @c hidden a multiple of 8.
-     *  @param[in] prefix_dims Matryoshka prefix widths, validated through @ref matryoshka_prefixes_t , each
-     *      a multiple of 8 so every segment's column band starts on NumKong's 16-byte boundary.
+     *  @param[in] config The baked geometry (see @ref contrastive_segments_config_t ); @c hidden a
+     *      multiple of 8.
+     *  @param[in] prefix_dims Matryoshka prefix widths, validated through
+     *      @ref matryoshka_prefixes_t , each a multiple of 8 so every segment's column band starts
+     *      on NumKong's 16-byte boundary.
      *  @param[in] numerics The NumKong kernels every product calls.
      */
     [[nodiscard]] static expected<contrastive_segments_t> make(gpu_arena_t &arena, contrastive_segments_config_t config,
@@ -351,21 +359,23 @@ struct contrastive_segments_t {
                                                                gpu_numerics_t const &numerics) noexcept;
 
     /**
-     *  @brief Rank-local forward + backward for one step — enqueue-only, capture-safe. Inputs and outputs
-     *      are the only per-call state; every intermediate lives inside the object.
+     *  @brief Rank-local forward + backward for one step — enqueue-only, capture-safe. Inputs and
+     *      outputs are the only per-call state; every intermediate lives inside the object.
      *
      *  @param[in] from_vertices This rank's owned @b [rows,hidden] BFloat16 from-vertex tower.
-     *  @param[in] gpu_subgraphs @b [gpu_subgraphs_per_step] descriptors, each @b [to_vertices_per_gpu,hidden] ,
-     *      tiling the global vertex axis in order.
-     *  @param[in] relations The staged relation graph view; @c from_vertices_per_gpu() must equal the baked
-     *      rows.
-     *  @param[in] recipe β / bias / ambient-repulsion weight, host scalars or per-temperature-group device
-     *      entries.
+     *  @param[in] gpu_subgraphs @b [gpu_subgraphs_per_step] descriptors, each
+     *      @b [to_vertices_per_gpu,hidden] , tiling the global vertex axis in order.
+     *  @param[in] relations The staged relation graph view; @c from_vertices_per_gpu() must equal
+     *      the baked rows.
+     *  @param[in] recipe β / bias / ambient-repulsion weight, host scalars or
+     *      per-temperature-group device entries.
      *  @param[out] loss_out @b [1] Float32 rank-local summand of the mean over the live vertices of
      *      the global axis, which the relations' to-vertex lengths count. Overwritten.
-     *  @param[out] from_vertices_grad @b [rows,hidden] BFloat16 force on the owned from-vertices. Overwritten.
+     *  @param[out] from_vertices_grad @b [rows,hidden] BFloat16 force on the
+     *      owned from-vertices. Overwritten.
      *  @param[in] stream The stream every kernel and matmul is enqueued on.
-     *  @param[out] log_inverse_temperature_grad Optional @b [temperature_group_count] summands; empty disables.
+     *  @param[out] log_inverse_temperature_grad Optional @b [temperature_group_count]
+     *      summands; empty disables.
      *  @param[out] bias_grad Optional @b [temperature_group_count] summands; empty disables.
      */
     [[nodiscard]] expected_t operator()(bf16r2_view_t from_vertices, nk::tensor_view<gpu_subgraph_t, 1> gpu_subgraphs,
@@ -380,8 +390,8 @@ struct contrastive_segments_t {
                                       contrastive_relations_view_t relations, contrastive_recipe_t recipe,
                                       gpu_stream_t &stream) noexcept;
 
-    /** The @b [rows,retrieval_columns] table of the last @ref evaluate , in @ref retrieval_column_t
-     *  order. */
+    /** The @b [rows,retrieval_columns] table of the last @ref evaluate , in
+     *  @ref retrieval_column_t order. */
     [[nodiscard]] f32r2_view_t retrieval() const noexcept { return retrieval_.view(); }
 
   private:
@@ -392,8 +402,8 @@ struct contrastive_segments_t {
                                     contrastive_relations_view_t relations, contrastive_recipe_t recipe,
                                     gpu_stream_t &stream) noexcept;
 
-    /** The baked geometry and the validated prefix ladder — every capacity a call is checked
-     *  against. */
+    /** The baked geometry and the validated prefix ladder — every capacity a call
+     *  is checked against. */
     matryoshka_prefixes_t prefixes_ {};
     contrastive_segments_config_t config_ {};
 
@@ -411,7 +421,7 @@ struct contrastive_segments_t {
     f32r3_tensor_arena_t to_vertex_norms_ {};
 
     /** @b [prefixes,subgraphs,rows,neighbors] per-prefix raw dot products of every subgraph, and
-     *  the logits over the same cells: the scaled cosines (β·cos, no bias) the pair loss rewrites
+     *  the logits over the same cells: the scaled cosines (β · cos, no bias) the pair loss rewrites
      *  into logit gradients. */
     f32r4_tensor_arena_t raw_dot_ {}, logits_ {};
 
@@ -431,14 +441,15 @@ struct contrastive_segments_t {
     /** @b [prefixes,rows] / @b [prefixes,neighbors] deterministic cosine self-coefficients. */
     f32r2_tensor_arena_t from_vertex_self_coefficients_ {}, to_vertex_self_coefficients_ {};
 
-    /** @b [rows,hidden] Float32 owned-vertex force accumulator, cast to BFloat16 at the end, and one
-     *  subgraph's segment products before they add onto it — zeroed every call, since no prefix writes the
-     *  channels past the last one. */
+    /** @b [rows,hidden] Float32 owned-vertex force accumulator, cast to BFloat16 at the end, and
+     *  one subgraph's segment products before they add onto it — zeroed every call, since no prefix
+     *  writes the channels past the last one. */
     f32r2_tensor_arena_t from_vertices_grad_f32_ {}, from_vertices_grad_products_ {};
 
-    /** @b [hidden,rows] , @b [hidden,neighbors] and @b [neighbors,rows] BFloat16 transposes of the owned
-     *  vertices, a subgraph's vertices and one segment's gradient, their rows padded to 8 — the products' B
-     *  operands come from the first two, the to-vertex force's A operand is the third. */
+    /** @b [hidden,rows] , @b [hidden,neighbors] and @b [neighbors,rows] BFloat16 transposes of
+     *  the owned vertices, a subgraph's vertices and one segment's gradient, their rows padded
+     *  to 8 — the products' B operands come from the first two, the to-vertex force's A operand
+     *  is the third. */
     bf16r1_tensor_arena_t vertices_transposed_ {}, to_vertices_transposed_ {}, gradient_transposed_ {};
 
     /** The one NumKong pack every product's B operand passes through, sized for the largest. */
@@ -449,20 +460,20 @@ struct contrastive_segments_t {
 };
 
 /**
- *  @brief The distributed sibling of @c contrastive_segments_t : one object owning a whole world's
- *      force evaluation.
+ *  @brief The distributed sibling of @c contrastive_segments_t : one object owning a whole
+ *      world's force evaluation.
  *
- *  It holds the per-rank loss objects, a reserved window of the main-owned @ref multimem_domain_t whose
- *  replicas @b are the column-force surfaces, and the cross-domain members wired through the main-owned
- *  @ref colocated_domain_t .
+ *  It holds the per-rank loss objects, a reserved window of the main-owned @ref multimem_domain_t
+ *  whose replicas @b are the column-force surfaces, and the cross-domain members wired through the
+ *  main-owned @ref colocated_domain_t .
  *
- *  This signature expresses the self-scoring configuration: @c towers serves as both the owned rows and
- *  the subgraph columns of one global vertex axis, so the row-side and column-side forces of every
- *  vertex always fold — a bipartite mesh is a different signature, not a flag. One call runs: the
- *  world-tower staging and gather (when no process holds the whole world), then per rank the loss (row force straight into the
- *  caller's gradient, column forces into the domain window), the round barrier, the switch
- *  reduce-scatter, the cross-domain force all-reduce, and the column fold — enqueue-only,
- *  deterministic, capture-friendly.
+ *  This signature expresses the self-scoring configuration: @c towers serves as both the owned rows
+ *  and the subgraph columns of one global vertex axis, so the row-side and column-side forces of
+ *  every vertex always fold — a bipartite mesh is a different signature, not a flag. One call runs:
+ *  the world-tower staging and gather (when no process holds the whole world), then per rank the
+ *  loss (row force straight into the caller's gradient, column forces into the domain window), the
+ *  round barrier, the switch reduce-scatter, the cross-domain force all-reduce, and the column fold
+ *  — enqueue-only, deterministic, capture-friendly.
  */
 struct distributed_contrastive_segments_t {
 
@@ -481,8 +492,8 @@ struct distributed_contrastive_segments_t {
 
     /**
      *  @brief One construction absorbs the whole world: validates every arena's visibility, builds
-     *      every rank's loss object, reserves this consumer's window of the shared @p domain , and wires
-     *      its cross-domain members through @p colocated .
+     *      every rank's loss object, reserves this consumer's window of the shared @p domain , and
+     *      wires its cross-domain members through @p colocated .
      *
      *  The caller (main) owns the infrastructure, this object only borrows it.
      *
@@ -490,16 +501,18 @@ struct distributed_contrastive_segments_t {
      *      and the world tower window when this process does not hold the whole world.
      *  @param[in,out] colocated The main-owned level-2 surface; reduce members are wired per rank
      *      and one gather member on the gateway — zero-round identities in single-domain worlds.
-     *  @param[in] arenas @b [gpus] per-rank arenas, one per member this process drives
-     *      ( @c [domain.member_offset(),+gpus) ); loss scratch and member heaps allocate from each rank's own.
+     *  @param[in] arenas @b [gpus] per-rank arenas, one per member this process drives (
+     *      @c [domain.member_offset(),+gpus) ); loss scratch and member heaps allocate from
+     *      each rank's own.
      *  @param[in] streams @b [gpus] per-rank streams; their contexts scope every per-device setup.
-     *  @param[in] towers @b [gpus] per-rank pooled towers — capture-stable device views, baked here so
-     *      the per-step slices carry no host arguments.
-     *  @param[in] relations @b [gpus] per-rank relation views — addresses baked, contents restaged by
-     *      the caller per step.
-     *  @param[in] from_vertices_grads @b [gpus] per-rank from-vertex-force outputs — baked like the towers.
-     *  @param[in] config The per-rank geometry; @c gpu_subgraphs_per_step must equal the @b world GPU
-     *      count and both row counts must agree (the self-scoring shape).
+     *  @param[in] towers @b [gpus] per-rank pooled towers — capture-stable device views, baked here
+     *      so the per-step slices carry no host arguments.
+     *  @param[in] relations @b [gpus] per-rank relation views — addresses baked, contents restaged
+     *      by the caller per step.
+     *  @param[in] from_vertices_grads @b [gpus] per-rank from-vertex-force outputs — baked
+     *      like the towers.
+     *  @param[in] config The per-rank geometry; @c gpu_subgraphs_per_step must equal the @b world
+     *      GPU count and both row counts must agree (the self-scoring shape).
      *  @param[in] prefix_dims Matryoshka prefix widths, shared by every rank.
      *  @param[in] numerics The NumKong kernels every rank's products call.
      */
@@ -532,13 +545,13 @@ struct distributed_contrastive_segments_t {
     [[nodiscard]] u32_t world_domains() const noexcept { return colocated_->multimem_domain_count(); }
 
     /**
-     *  @brief Local rank @p rank 's slice of one distributed evaluation — pure enqueue onto @p stream , the
-     *      shape a fork/join capture body composes directly.
+     *  @brief Local rank @p rank 's slice of one distributed evaluation — pure enqueue onto
+     *      @p stream , the shape a fork/join capture body composes directly.
      *
-     *  When no process holds the whole world, every member first stages its tower into member 0's window and
-     *  barriers; across domains member 0 then gathers the remote towers into that window and a second barrier
-     *  releases the readers. All views were baked at @ref make ; the only per-call argument is the
-     *  recipe. Ranks must be enqueued in order @c 0..gpus-1 within a step.
+     *  When no process holds the whole world, every member first stages its tower into member 0's
+     *  window and barriers; across domains member 0 then gathers the remote towers into that window
+     *  and a second barrier releases the readers. All views were baked at @ref make ; the only
+     *  per-call argument is the recipe. Ranks must be enqueued in order @c 0..gpus-1 within a step.
      */
     [[nodiscard]] expected_t operator()(std::size_t rank, contrastive_recipe_t recipe, gpu_stream_t &stream) noexcept;
 
@@ -552,8 +565,8 @@ struct distributed_contrastive_segments_t {
     /** The eager convenience: every rank's slice in order over the per-rank streams. */
     [[nodiscard]] expected_t operator()(contrastive_recipe_t recipe, std::span<gpu_stream_t> streams) noexcept;
 
-    /** Rebind rank @p rank 's relation view after its owner restaged edge sets of new extents — outside any
-     *  capture, before the next call. */
+    /** Rebind rank @p rank 's relation view after its owner restaged edge sets of new extents —
+     *  outside any capture, before the next call. */
     void rebind_relations(std::size_t rank, contrastive_relations_view_t relations) noexcept {
         relations_[rank] = relations;
     }
@@ -566,9 +579,9 @@ struct distributed_contrastive_segments_t {
         return 2u * std::size_t {config.temperature_groups} + 1u;
     }
 
-    /** Make the world tower readable for rank @p rank : a whole world waits for every peer's tower
-     *  in place, otherwise the rank stages its tower into member 0's window and gathers the remote
-     *  domains. */
+    /** Make the world tower readable for rank @p rank : a whole world waits for every peer's
+     *  tower in place, otherwise the rank stages its tower into member 0's window and gathers
+     *  the remote domains. */
     [[nodiscard]] expected_t stage_world_tower_(std::size_t rank, gpu_stream_t &stream) noexcept;
 
     /** Copy this domain's staged towers into the gather member's own block, all-gather the remote
@@ -576,8 +589,8 @@ struct distributed_contrastive_segments_t {
      *  caller already inside its context. */
     [[nodiscard]] expected_t gather_world_tower_(gpu_stream_t &stream) noexcept;
 
-    /** Member 0's window as the @b [subgraphs,rows,hidden] BFloat16 world tower every member
-     *  reads. */
+    /** Member 0's window as the @b [subgraphs,rows,hidden] BFloat16 world tower
+     *  every member reads. */
     [[nodiscard]] bf16r3_span_t world_tower_() noexcept {
         std::size_t const subgraphs = config_.gpu_subgraphs_per_step, rows = config_.from_vertices_per_gpu;
         std::size_t const hidden = config_.hidden;
@@ -603,9 +616,9 @@ struct distributed_contrastive_segments_t {
         return payload[nk::range(tail_begin, window_.offset + window_.scalars), nk::slice];
     }
 
-    /** Level-1 reduce of @p rank 's world columns — one switch-reduced window per domain into
-     *  the rank's reduce member — then the level-2 recursive-doubling sum; @p column_force receives
-     *  the rank's own reduced window. Caller holds the rank's context. */
+    /** Level-1 reduce of @p rank 's world columns — one switch-reduced window per domain into the
+     *  rank's reduce member — then the level-2 recursive-doubling sum; @p column_force receives the
+     *  rank's own reduced window. Caller holds the rank's context. */
     [[nodiscard]] expected_t reduce_world_columns_(std::size_t rank, gpu_stream_t &stream,
                                                    f32r1_view_t &column_force) noexcept;
 
@@ -625,8 +638,8 @@ struct distributed_contrastive_segments_t {
     /** This consumer's disjoint window of the domain payload, reserved at @ref make . */
     multimem_window_t window_ {};
 
-    /** The world tower's window, read only in member 0's replica; empty when this process holds the whole
-     *  world and reads the towers in place. */
+    /** The world tower's window, read only in member 0's replica; empty when this process holds the
+     *  whole world and reads the towers in place. */
     multimem_window_t world_tower_window_ {};
 
     /** @b [gpus] rank-local loss summands on the lead device, peer-written by each rank. */
@@ -639,8 +652,8 @@ struct distributed_contrastive_segments_t {
      *  baked: not recoverable from the retained topology. */
     u32_t home_domain_index_ = 0;
 
-    /** One cross-domain all-reduce buffer per local GPU — its typed payload is the rank's world-column
-     *  shard. */
+    /** One cross-domain all-reduce buffer per local GPU — its typed payload is the
+     *  rank's world-column shard. */
     per_gpu_array<infiniband_all_reduce<f32_t>> reduce_buffers_ {};
 
     /** The gateway's cross-domain all-gather buffer — its typed payload is the world tower. */

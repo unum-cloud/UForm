@@ -4,6 +4,10 @@ Holds only what pytest itself loads: the report header and the handles every mod
 asks for an executor, a model or an arena by name and imports nothing but `uform`. The suites run against
 the real library with the tiny checkpoint `UFORM_TEST_CHECKPOINT` names, and against the stub library,
 which loads any bytes as a model; shapes always come from the model's own description.
+
+File: test/python/conftest.py
+Author: Ash Vardanian
+Date: October 18, 2026
 """
 
 import os

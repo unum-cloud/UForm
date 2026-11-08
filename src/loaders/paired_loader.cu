@@ -2,8 +2,8 @@
  *  @file src/loaders/paired_loader.cu
  *  @author Ash Vardanian
  *  @date October 18, 2026
- *  @brief The Parquet paired loader's bodies and its pairing kernel — see the header for the
- *      contract.
+ *  @brief The Parquet paired loader's bodies and its pairing kernel — see the header
+ *      for the contract.
  *
  *  A fill reads the anchor, positive and negative columns of the picked shards into one reservoir,
  *  lands their offsets on the host, and draws every pair there. Each batch then decodes or packs
@@ -55,8 +55,8 @@ struct pair_tags_span_t_ {
 };
 
 /**
- *  @brief Interleave the role tables into the batch's segment table, tagging each segment's bag and
- *      role.
+ *  @brief Interleave the role tables into the batch's segment table, tagging each segment's
+ *      bag and role.
  *
  *  Pair @c i takes its positive, its anchor shifted by @p anchor_begin , and with three roles its
  *  negative shifted by @p negative_begin . All three share bag @c i , so the mixer routes a triplet
@@ -213,8 +213,8 @@ expected<paired_loader_parquet_t> paired_loader_parquet_t::make(gpu_direct_stora
         return result_t {std::move(loader)};
     }
 
-    // A media struct, the `{bytes,path}` pair the Hugging Face writers emit, reads its `bytes`
-    // leaf.
+    // A media struct, the `{bytes,path}` pair the Hugging Face writers emit, reads
+    // its `bytes` leaf.
     sz::string_t leaf;
     if (!format_into(leaf, "{}.bytes", config.positive))
         return result_t::fail(status_t::bad_alloc_k, "column name staging failed");

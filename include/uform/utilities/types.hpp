@@ -2,13 +2,13 @@
  *  @file include/uform/utilities/types.hpp
  *  @author Ash Vardanian
  *  @date July 2, 2026
- *  @brief Foundational vocabulary of the UForm v4 primitives cell: statuses, error channel, launch
- *      constants.
+ *  @brief Foundational vocabulary of the UForm v4 primitives cell: statuses, error
+ *      channel, launch constants.
  *
- *  The primitives cell holds the self-contained CUDA building blocks the rest of the v4 stack assembles —
- *  losses, collectives, packers — each a header-only @c .cuh with its own kernels and @c launch_* wrappers,
- *  parameterized by NumKong spans and a caller-owned stream + workspace, with no vendor-library sessions, no
- *  hidden state, and no allocation on any launch path.
+ *  The primitives cell holds the self-contained CUDA building blocks the rest of the v4 stack
+ *  assembles — losses, collectives, packers — each a header-only @c .cuh with its own kernels and
+ *  @c launch_* wrappers, parameterized by NumKong spans and a caller-owned stream + workspace, with
+ *  no vendor-library sessions, no hidden state, and no allocation on any launch path.
  */
 #pragma once
 
@@ -94,9 +94,10 @@ using f32r3_span_t = nk::tensor_span<f32_t, 3>;
 using f32r4_view_t = nk::tensor_view<f32_t, 4>;
 using f32r4_span_t = nk::tensor_span<f32_t, 4>;
 
-/** The whole @p value_type_ scalars of @p bytes , a trailing partial scalar dropped — the one place a byte region
- *  takes on a scalar type. The region comes from an allocation, which creates implicit-lifetime scalars on first
- *  access, so laundering the address is all it takes, and it touches no memory, so device regions qualify. */
+/** The whole @p value_type_ scalars of @p bytes , a trailing partial scalar dropped — the one place
+ *  a byte region takes on a scalar type. The region comes from an allocation, which creates
+ *  implicit-lifetime scalars on first access, so laundering the address is all it takes, and it
+ *  touches no memory, so device regions qualify. */
 template <typename value_type_>
 [[nodiscard]] inline nk::tensor_span<value_type_, 1> typed_span(b8r1_span_t bytes) noexcept {
     static_assert(std::is_implicit_lifetime_v<value_type_>);
@@ -113,8 +114,8 @@ template <typename value_type_>
 }
 
 /** Entries end to end and @c count+1 offsets into them, as the C ABI's tapes carry them;
- *  @c elements runs from where every offset counts to the last offset, and an empty tape holds no
- *  entries. */
+ *  @c elements runs from where every offset counts to the last offset, and an empty tape
+ *  holds no entries. */
 template <typename element_type_>
 struct tape_view {
     std::span<element_type_> elements {};
@@ -146,8 +147,8 @@ template <typename value_type_, std::size_t rank_>
             tensor.numel() * sizeof(value_type_)};
 }
 
-/** One vocabulary entry's index — the byte-level vocabulary (256 bytes + the special tokens)
- *  fits 16 bits, and every token tape, staging cell, and embedding lookup trades in this width. */
+/** One vocabulary entry's index — the byte-level vocabulary (256 bytes + the special tokens) fits
+ *  16 bits, and every token tape, staging cell, and embedding lookup trades in this width. */
 using token_id_t = u16_t;
 
 /** One raw image / video channel sample, as decoders emit it — 8-bit, interleaved channels;
@@ -194,8 +195,8 @@ struct concurrency_round_t {
     return (numerator + denominator - 1u) / denominator;
 }
 
-/** @c ceil(log2(value)) for @c value>=1 — the recursive-doubling round count over @c value
- *  domains. */
+/** @c ceil(log2(value)) for @c value>=1 — the recursive-doubling round count over
+ *  @c value domains. */
 [[nodiscard]] inline constexpr u32_t ceil_log2(u32_t value) noexcept {
     u32_t rounds = 0;
     while ((1u << rounds) < value) ++rounds;
@@ -203,20 +204,21 @@ struct concurrency_round_t {
 }
 
 /**
- *  @brief The project's one keyed hasher — a splitmix64 core, used three ways and nothing else, so no
- *      free-standing @c mix / @c combine / @c derive helpers proliferate.
+ *  @brief The project's one keyed hasher — a splitmix64 core, used three ways and nothing else, so
+ *      no free-standing @c mix / @c combine / @c derive helpers proliferate.
  *
- *  Pure and device-callable; stateless by design (no engine object to step, unlike @c std::minstd or a
- *  @c curandState ), so a thread hashes its own @c (key,index) pair independently and any result is
- *  recomputable from its inputs on any host or GPU and across restarts. Every keyed draw — dataset
- *  shuffling, batch mixing, span masking, dropout — builds on this; @ref epoch_permutation is the one
- *  primitive it cannot be (a hash collides, a permutation does not).
+ *  Pure and device-callable; stateless by design (no engine object to step, unlike
+ *  @c std::minstd or a @c curandState ), so a thread hashes its own @c (key,index) pair
+ *  independently and any result is recomputable from its inputs on any host or GPU and across
+ *  restarts. Every keyed draw — dataset shuffling, batch mixing, span masking, dropout — builds
+ *  on this; @ref epoch_permutation is the one primitive it cannot be (a hash collides, a
+ *  permutation does not).
  *
  *  - @c hash(word) avalanches one word (the finalizer).
  *  - @c hash(key,value) folds @p value into @p key (one mixing step).
  *  - @c hash(a,b,c,...) folds every argument left to right — the seeder over
- *    @c (seed,data_epoch,member,index,salt,...) , and the indexed draw @c hash(key,index) is just the
- *    two-argument case.
+ *    @c (seed,data_epoch,member,index,salt,...) , and the indexed draw @c hash(key,index) is just
+ *    the two-argument case.
  */
 struct splitmix64_hash_t {
 
@@ -271,9 +273,9 @@ struct splitmix64_hash_t {
  *
  *  Statuses fall into the categories of @c uform_status_t . Resources: @c bad_alloc_k,
  *  @c device_error_k and @c io_k. Input: @c invalid_argument_k. State: @c unsupported_k and
- *  @c contended_k. Defects: @c internal_k. Any verb that allocates, binds a device or touches a
- *  file may also return a Resources status. A verb's own block lists only what its contract
- *  adds. */
+ *  @c contended_k. Defects: @c internal_k. Any verb that allocates, binds a device or
+ *  touches a file may also return a Resources status. A verb's own block lists only what
+ *  its contract adds. */
 enum class status_t : i32_t {
 
     /** The operation completed; outputs are valid. */
@@ -317,9 +319,9 @@ enum class status_t : i32_t {
 }
 
 /** An output iterator @c std::vformat_to writes through, appending straight into an exception-free
- *  StringZilla string. An allocation failure latches into the shared @c failed flag (when bound) and
- *  truncates the text — for diagnostics that is acceptable as-is; for payloads, @ref format_into
- *  surfaces the flag. */
+ *  StringZilla string. An allocation failure latches into the shared @c failed flag (when bound)
+ *  and truncates the text — for diagnostics that is acceptable as-is; for payloads,
+ *  @ref format_into surfaces the flag. */
 struct format_into_t {
     using difference_type = std::ptrdiff_t;
 
@@ -346,9 +348,10 @@ template <typename... arg_types_>
     return !failed;
 }
 
-/** A format string bundled with the @c std::source_location of the call site that spelled it. The
- *  implicit conversion from a string literal lets @ref expected::fail capture the failure site behind
- *  its variadic pack, where a defaulted trailing argument cannot go — and without a macro. */
+/** A format string bundled with the @c std::source_location of the call site that spelled
+ *  it. The implicit conversion from a string literal lets @ref expected::fail capture the
+ *  failure site behind its variadic pack, where a defaulted trailing argument cannot go —
+ *  and without a macro. */
 struct format_at_t {
     char const *format = nullptr;
     std::source_location location {};
@@ -359,14 +362,15 @@ struct format_at_t {
 };
 
 /**
- *  @brief Minimal host-side value-or-error carrier — the return type of every fallible host function in the
- *      primitives cell.
+ *  @brief Minimal host-side value-or-error carrier — the return type of every fallible host
+ *      function in the primitives cell.
  *
- *  Move-only: the explicit @c noexcept on the defaulted move members is a compile-time check that every
- *  instantiating @c value_type_ moves without throwing, so a result propagates up the call chain as nothing
- *  but @c noexcept moves. The description is an exception-free StringZilla string, materialized with
- *  @c std::format at the failure site — the only place the operands (shapes, counts, labels) are still in
- *  scope — and @ref format_at_t records that site's @c std::source_location .
+ *  Move-only: the explicit @c noexcept on the defaulted move members is a compile-time check that
+ *  every instantiating @c value_type_ moves without throwing, so a result propagates up the call
+ *  chain as nothing but @c noexcept moves. The description is an exception-free StringZilla string,
+ *  materialized with @c std::format at the failure site — the only place the operands (shapes,
+ *  counts, labels) are still in scope — and @ref format_at_t records that site's
+ *  @c std::source_location .
  */
 template <typename value_type_>
 struct expected {
@@ -412,9 +416,9 @@ struct expected {
     /** @c true iff the operation succeeded and the value is readable. */
     [[nodiscard]] explicit operator bool() const noexcept { return status_ == status_t::success_k; }
 
-    /** Reach the held value on the success path, so a consumer writes @c result->field or @c *result
-     *  instead of @c result.value_ . Reading it on a failed @ref expected is a logic error, gated by
-     *  its @c bool conversion . */
+    /** Reach the held value on the success path, so a consumer writes @c result->field or
+     *  @c *result instead of @c result.value_ . Reading it on a failed @ref expected is a logic
+     *  error, gated by its @c bool conversion . */
     [[nodiscard]] value_type_ *operator->() noexcept { return &value_; }
     [[nodiscard]] value_type_ const *operator->() const noexcept { return &value_; }
     [[nodiscard]] value_type_ &operator*() noexcept { return value_; }

@@ -1,16 +1,8 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "huggingface_hub",
-#     "pyarrow>=21.0.0",
-#     "xxhash",
-# ]
-# ///
 """Idempotent downloader for Kinetics-400 (kiyoonkim/kinetics-400-targz mirror) — pulls AND repacks.
 
-Modality: video+text (label).  Full Kinetics-400 action-recognition corpus as `.tar.gz` shards
-with per-clip MP4s; the class label per clip serves as the caption.  ~467 GB, ~240k clips across
-~242 `part_*.tar.gz` shards.  The only complete non-gated K400 mirror on HF.
+Modality: video+text (label). Full Kinetics-400 action-recognition corpus as `.tar.gz` shards with
+per-clip MP4s; the class label per clip serves as the caption. ~467 GB, ~240k clips across ~242
+`part_*.tar.gz` shards. The only complete non-gated K400 mirror on HF.
 
 This single file does both halves. Default mode snapshots the (optionally shard-capped) tar.gz shards
 plus the per-split annotations CSVs, then repacks each train shard into a sibling
@@ -29,7 +21,20 @@ CLI usage:
     uv run scripts/data/download_kinetics400.py                  # whole repo (~467 GB)
     uv run scripts/data/download_kinetics400.py --max-shards 73  # first 73 tar.gz shards (~140 GB)
     uv run scripts/data/download_kinetics400.py --fraction 0.30  # leading 30% of the shards
+
+File: scripts/data/download_kinetics400.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "huggingface_hub",
+#     "pyarrow>=21.0.0",
+#     "xxhash",
+# ]
+# ///
 
 import argparse
 import csv

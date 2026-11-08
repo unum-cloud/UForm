@@ -1,3 +1,10 @@
+"""Download XLCoST: cross-lingual NL<->code pairs (`text` anchor / `code` positive).
+
+File: scripts/data/download_xlcost.py
+Author: Ash Vardanian
+Date: July 5, 2026
+"""
+
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -5,7 +12,6 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download XLCoST: cross-lingual NL<->code pairs (`text` anchor / `code` positive)."""
 from acquire import acquire
 
 if __name__ == "__main__":

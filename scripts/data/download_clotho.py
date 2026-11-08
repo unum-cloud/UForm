@@ -1,3 +1,10 @@
+"""Download Clotho v2: 6,974 audio clips with FIVE captions each -> `captions` list + `audio` parquet.
+
+File: scripts/data/download_clotho.py
+Author: Ash Vardanian
+Date: July 5, 2026
+"""
+
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -5,7 +12,6 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download Clotho v2: 6,974 audio clips with FIVE captions each -> `captions` list + `audio` parquet."""
 
 import pyarrow as pa
 from acquire import acquire

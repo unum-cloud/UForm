@@ -2,11 +2,12 @@
  *  @file src/encode_media_absent.cpp
  *  @author Ash Vardanian
  *  @date October 18, 2026
- *  @brief What a build without the codecs links in place of @c encode_media.cpp and libswresample: the verbs over
- *      encoded files and the resampler, each reporting @c uform_status_unsupported_k .
+ *  @brief What a build without the codecs links in place of @c encode_media.cpp and libswresample:
+ *      the verbs over encoded files and the resampler, each reporting
+ *      @c uform_status_unsupported_k .
  *
- *  WebAssembly builds no codec, so the browser decodes with @c createImageBitmap or WebAudio, at the model's rate,
- *  and calls @c uform_image_encode_pixels or @c uform_audio_encode_samples .
+ *  WebAssembly builds no codec, so the browser decodes with @c createImageBitmap or WebAudio, at
+ *  the model's rate, and calls @c uform_image_encode_pixels or @c uform_audio_encode_samples .
  */
 #include "uform/media/audio.hpp" // `resample_mono`
 

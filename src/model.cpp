@@ -2,12 +2,13 @@
  *  @file src/model.cpp
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief The verbs of @c model.h: load a checkpoint into one host tower or one tower per GPU, describe it, free it.
+ *  @brief The verbs of @c model.h: load a checkpoint into one host tower or one tower per GPU,
+ *      describe it, free it.
  *
- *  A load maps the checkpoint or views the caller's buffer, reads the geometry from its metadata, and packs every
- *  tower from it, so the mapping is closed and the buffer released before the load completes. A RAM model packs once
- *  for the CPU and serves every RAM executor; a VRAM model packs once per device its load names, each copy placed by
- *  that device's capabilities and stream.
+ *  A load maps the checkpoint or views the caller's buffer, reads the geometry from its metadata,
+ *  and packs every tower from it, so the mapping is closed and the buffer released before the load
+ *  completes. A RAM model packs once for the CPU and serves every RAM executor; a VRAM model packs
+ *  once per device its load names, each copy placed by that device's capabilities and stream.
  */
 #include <cstring> // `std::memchr` - a NUL inside a checkpoint path
 
@@ -66,7 +67,8 @@ static bool propagate_load_failure(status_t status, load_stage_t stage, uform_ou
     return propagate_error(uform_status_internal_k, outcome, "The model or its device failed to load");
 }
 
-/** The precision @p quantization names, false once @p outcome records that the blocks run in neither. */
+/** The precision @p quantization names, false once @p outcome records that the blocks
+ *  run in neither. */
 static bool precision_of(uform_scalar_t quantization, ue::precision_t &precision, uform_outcome_t *outcome) noexcept {
     switch (quantization) {
     case uform_scalar_bf16_k: precision = ue::precision_t::bf16_k; return true;
@@ -75,8 +77,9 @@ static bool precision_of(uform_scalar_t quantization, ue::precision_t &precision
     }
 }
 
-/** Bytes one tower of @p geometry holds in @p precision : the block products in its dtype, the entries, pool and
- *  head in BFloat16, the norm gains and pixel statistics widened to Float32, and the rotary angle grids. */
+/** Bytes one tower of @p geometry holds in @p precision : the block products in its dtype, the
+ *  entries, pool and head in BFloat16, the norm gains and pixel statistics widened to Float32, and
+ *  the rotary angle grids. */
 static std::size_t tower_bytes(ue::geometry_t const &geometry, ue::precision_t precision) noexcept {
     std::size_t const hidden = geometry.hidden, ffn = geometry.ffn();
     std::size_t const product_bytes = precision == ue::precision_t::e4m3_k ? 1 : 2;
@@ -94,8 +97,8 @@ static std::size_t tower_bytes(ue::geometry_t const &geometry, ue::precision_t p
     return geometry.depth * block + entries + pool + angles;
 }
 
-/** Parses the checkpoint @p loaded holds into a model handle in @p precision , its towers still to be packed; null
- *  once @p outcome records why not. */
+/** Parses the checkpoint @p loaded holds into a model handle in @p precision , its towers still to
+ *  be packed; null once @p outcome records why not. */
 static std::unique_ptr<uform_model_handle_t> start_model(expected<checkpoint_to_load_t> const &loaded,
                                                          ue::precision_t precision, uform_outcome_t *outcome) noexcept {
     if (!loaded) return propagate_load_failure(loaded.status_, load_stage_t::reading_k, outcome), nullptr;
@@ -195,8 +198,8 @@ static bool load_replicas(uform_model_handle_t &model, checkpoint_to_load_t cons
     return true;
 }
 
-/** Packs a VRAM model from @p loaded on every device of @p executor that @p vram names, all of them when it names
- *  none, and publishes it into @p output . */
+/** Packs a VRAM model from @p loaded on every device of @p executor that @p vram names, all of them
+ *  when it names none, and publishes it into @p output . */
 static void load_vram(uform_model_t *output, uform_executor_t executor, uform_vram_options_t const &vram,
                       expected<checkpoint_to_load_t> loaded, ue::precision_t precision, uform_progress_t progress,
                       uform_outcome_t *outcome) noexcept {

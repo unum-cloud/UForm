@@ -27,7 +27,7 @@
 #define rounds 2
 #define key(round) (generation_keys -> (round) : 0)
 
-byte payload[2 * rounds]; // host·rounds+key, the payload a host published under that key
+byte payload[2 * rounds]; // host · rounds+key, the payload a host published under that key
 byte arrive[rounds];      // the follower's arrival marker under a barrier key
 byte release[rounds];     // the lead's release marker under a barrier key
 bool lead_reached[rounds];

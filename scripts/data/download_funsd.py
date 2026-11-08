@@ -1,15 +1,9 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "huggingface_hub",
-# ]
-# ///
 """Idempotent downloader for FUNSD (nielsr/funsd + nielsr/funsd-layoutlmv3, <100 MB).
 
-Modality: image+text.  Form Understanding Noisy Scanned Documents - 199 fully annotated
-scanned forms with OCR text + spatial layout.  Tiny but extremely high quality for the
+Modality: image+text. Form Understanding Noisy Scanned Documents - 199 fully annotated
+scanned forms with OCR text + spatial layout. Tiny but extremely high quality for the
 document-understanding axis; complements caption-style image-text corpora with structured-
-text-in-images.  Use for eval / probe more than train.
+text-in-images. Use for eval / probe more than train.
 
 This corpus is tiny (<100 MB), so there is no `--max-shards` / `--fraction` volume cap: the
 whole thing is always pulled.
@@ -18,7 +12,18 @@ CLI usage:
     uv run scripts/data/download_funsd.py
     uv run scripts/data/download_funsd.py --out-dir $UFORM_DATA_ROOT/funsd
     uv run scripts/data/download_funsd.py --force
+
+File: scripts/data/download_funsd.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "huggingface_hub",
+# ]
+# ///
 
 import argparse
 import sys

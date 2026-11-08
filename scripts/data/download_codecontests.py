@@ -1,3 +1,10 @@
+"""Download DeepMind CodeContests: competitive-programming problems + solutions.
+
+File: scripts/data/download_codecontests.py
+Author: Ash Vardanian
+Date: July 5, 2026
+"""
+
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -5,7 +12,6 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download DeepMind CodeContests: competitive-programming problems + solutions."""
 from acquire import acquire
 
 if __name__ == "__main__":

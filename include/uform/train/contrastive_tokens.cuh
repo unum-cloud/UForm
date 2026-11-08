@@ -2,27 +2,28 @@
  *  @file include/uform/train/contrastive_tokens.cuh
  *  @author Ash Vardanian
  *  @date October 21, 2026
- *  @brief Late-interaction contrastive loss over per-token vectors: hard MaxSim scores between
- *      query and document segments, relaxed by the same pair-loss pass the pooled segments loss
- *      runs.
+ *  @brief Late-interaction contrastive loss over per-token vectors: hard MaxSim scores
+ *      between query and document segments, relaxed by the same pair-loss pass the pooled
+ *      segments loss runs.
  *
  *  The score of query segment @c q against document segment @c d is the mean over the query's
- *  tokens of the largest cosine against the document's tokens, @c S(q,d)=(1/|q|)·Σ_t max_s
- *  ⟨q_t,d_s⟩ , over the unit vectors the tower's token head emits, prefixes excluded. The logit is
- *  @c β·S+b with the query's temperature group, and @c contrastive_pair_loss_t turns a whole query
- *  row into @c d(logit) over the relation graph, balanced or ranked, exactly as it does for the
- *  pooled cosines.
+ *  tokens of the largest cosine against the document's tokens, @c S(q,d)=(1/|q|) · Σ_t max_s
+ *  ⟨q_t,d_s⟩ , over the unit vectors the tower's token head emits, prefixes excluded. The logit
+ *  is @c β · S+b with the query's temperature group, and @c contrastive_pair_loss_t turns a whole
+ *  query row into @c d(logit) over the relation graph, balanced or ranked, exactly as it does for
+ *  the pooled cosines.
  *
  *  @section tokens_bands Banded products
  *
  *  The token grid of one query tile against the documents is never materialised. The documents'
  *  compact token rows split into bands of @c band_tokens rows; per band one NumKong BFloat16
- *  product @c P=Q·D_bandᵀ lands in a @b [query_tokens,band_tokens] Float32 block, and an epilogue
- *  folds its rows into the per-document running maximum of every query token; a document never
- *  crosses a band. The backward recomputes each band's product and credits the document's lowest
- *  row that attains the stored maximum, so no argmax is stored and ties resolve to the lowest row;
- *  the credited @b [query_tokens,band_tokens] block then drives two more products, @c dQ+=G·D_band
- *  and @c dD_band=Gᵀ·Q . Every fold runs in a fixed order, so runs and replays agree bitwise.
+ *  product @c P=Q · D_bandᵀ lands in a @b [query_tokens,band_tokens] Float32 block, and an
+ *  epilogue folds its rows into the per-document running maximum of every query token; a document
+ *  never crosses a band. The backward recomputes each band's product and credits the document's
+ *  lowest row that attains the stored maximum, so no argmax is stored and ties resolve to the
+ *  lowest row; the credited @b [query_tokens,band_tokens] block then drives two more products,
+ *  @c dQ+=G · D_band and @c dD_band=Gᵀ · Q . Every fold runs in a fixed order, so runs and
+ *  replays agree bitwise.
  *
  *  @section tokens_distributed Distributed contract
  *
@@ -34,9 +35,9 @@
  *  query-tile forces reduce onto the home GPU. With @c G GPUs, @c S segments, @c T query tokens and
  *  width @c W per GPU, one step moves per GPU and each way:
  *
- *      - query tiles, read in place: @c (G-1)·T·W·2 bytes;
- *      - raw scores out, score gradients back: @c 2·(G-1)·S²·4 bytes;
- *      - query-tile forces: @c (G-1)·T·W·4 bytes, through the domain reduce;
+ *  - query tiles, read in place: @c (G-1) · T · W · 2 bytes;
+ *  - raw scores out, score gradients back: @c 2 · (G-1) · S² · 4 bytes;
+ *  - query-tile forces: @c (G-1) · T · W · 4 bytes, through the domain reduce;
  *      - the live-query count, temperature gradients and loss: @c O(G) scalars.
  */
 #pragma once
@@ -147,8 +148,8 @@ struct contrastive_tokens_t {
                                         f32r1_span_t log_inverse_temperature_grad = {},
                                         f32r1_span_t bias_grad = {}) noexcept;
 
-    /** Lay out this GPU's query tile and documents from the token head's rows, and pack the
-     *  documents. */
+    /** Lay out this GPU's query tile and documents from the token head's rows, and
+     *  pack the documents. */
     [[nodiscard]] expected_t stage(bf16r2_view_t token_vectors, u32r1_view_t token_offsets,
                                    multimodal_batch_view_t const &batch, gpu_stream_t &stream) noexcept;
 
@@ -157,9 +158,9 @@ struct contrastive_tokens_t {
         return {query_tile_.view(), query_segments_.view(), query_offsets_.view()};
     }
 
-    /** Score query tile @p subgraph , numbered @p subgraph_index , against this GPU's documents
-     *  into @p raw_scores @b [segments_per_gpu,segments_per_gpu] , query segments by document
-     *  segments. */
+    /** Score query tile @p subgraph , numbered @p subgraph_index , against this GPU's
+     *  documents into @p raw_scores @b [segments_per_gpu,segments_per_gpu] , query segments
+     *  by document segments. */
     [[nodiscard]] expected_t score(std::size_t subgraph_index, gpu_query_subgraph_t const &subgraph,
                                    f32r2_span_t raw_scores, gpu_stream_t &stream) noexcept;
 
@@ -204,16 +205,16 @@ struct contrastive_tokens_t {
     /** The whole-row pair loss over this GPU's query rows. */
     contrastive_pair_loss_t pair_loss_ {};
 
-    /** @b [query_tokens,width] this GPU's query tile, and each row's segment, @c ~0u past the live
-     *  rows. */
+    /** @b [query_tokens,width] this GPU's query tile, and each row's segment, @c ~0u past
+     *  the live rows. */
     bf16r2_tensor_arena_t query_tile_ {};
     u32r1_tensor_arena_t query_segments_ {};
 
     /** @b [segments+1] each segment's first query row, and @b [segments] its query span. */
     u32r1_tensor_arena_t query_offsets_ {}, query_lengths_ {};
 
-    /** @b [document_tokens,width] this GPU's documents, in document order, and each row's
-     *  document. */
+    /** @b [document_tokens,width] this GPU's documents, in document order, and
+     *  each row's document. */
     bf16r2_tensor_arena_t document_tile_ {};
     u32r1_tensor_arena_t document_of_row_ {};
 
@@ -238,8 +239,8 @@ struct contrastive_tokens_t {
     /** One band's forward and transposed pack bytes, as NumKong sized them at @ref make . */
     std::size_t band_pack_bytes_ = 0, band_pack_transposed_bytes_ = 0;
 
-    /** @b [subgraphs,query_tokens,documents] each query token's running maximum over each
-     *  document. */
+    /** @b [subgraphs,query_tokens,documents] each query token's running maximum
+     *  over each document. */
     f32r3_tensor_arena_t maxima_ {};
 
     /** @b [query_tokens,band_tokens] one band's product and its credited gradient. */
@@ -255,8 +256,8 @@ struct contrastive_tokens_t {
     /** @b [document_tokens,width] this GPU's document force, summed over the subgraphs. */
     f32r2_tensor_arena_t document_grad_ {};
 
-    /** @b [query_tokens,width] the single-GPU query force; @b [segments·segments] the single-GPU
-     *  scores. */
+    /** @b [query_tokens,width] the single-GPU query force; @b [segments·segments]
+     *  the single-GPU scores. */
     f32r2_tensor_arena_t query_grad_ {};
     f32r1_tensor_arena_t scores_ {};
 
@@ -274,8 +275,8 @@ struct contrastive_tokens_t {
 /** One GPU's inputs and output of a distributed tokens step. */
 struct gpu_tokens_inputs_t {
 
-    /** @b [head_tokens_per_gpu,width] the token head's unit vectors, and @b [segments+1] their
-     *  segment offsets. */
+    /** @b [head_tokens_per_gpu,width] the token head's unit vectors, and @b [segments+1]
+     *  their segment offsets. */
     bf16r2_view_t token_vectors {};
     u32r1_view_t token_offsets {};
 
@@ -314,8 +315,8 @@ struct gpu_tokens_inputs_t {
  */
 struct distributed_contrastive_tokens_t {
 
-    /** How many Float32 payload scalars this consumer reserves from the shared domain, for main's
-     *  sizing. */
+    /** How many Float32 payload scalars this consumer reserves from the shared domain,
+     *  for main's sizing. */
     [[nodiscard]] static constexpr std::size_t payload_scalars_needed(contrastive_tokens_config_t config) noexcept {
         std::size_t const subgraphs = config.gpu_subgraphs_per_step, segments = config.segments_per_gpu;
         return 2u * subgraphs * segments * segments +
@@ -329,8 +330,8 @@ struct distributed_contrastive_tokens_t {
      *  @param[in,out] colocated The main-owned level-2 surface; identities in a one-domain world.
      *  @param[in] arenas @b [gpus] per-GPU arenas, every one visible to every local device.
      *  @param[in] streams @b [gpus] per-GPU streams scoping each per-device setup.
-     *  @param[in] config The per-GPU geometry; @c gpu_subgraphs_per_step must equal the world's
-     *      GPUs.
+     *  @param[in] config The per-GPU geometry; @c gpu_subgraphs_per_step must equal
+     *      the world's GPUs.
      *  @param[in] numerics The NumKong kernels every GPU's products call.
      */
     [[nodiscard]] static expected<distributed_contrastive_tokens_t> make(
@@ -342,8 +343,8 @@ struct distributed_contrastive_tokens_t {
     [[nodiscard]] expected_t operator()(std::span<gpu_tokens_inputs_t const> inputs,
                                         std::span<gpu_stream_t> streams) noexcept;
 
-    /** Rank @p rank 's @b [2·temperature_groups] world-summed temperature gradients, log-β then
-     *  bias. */
+    /** Rank @p rank 's @b [2·temperature_groups] world-summed temperature gradients,
+     *  log-β then bias. */
     [[nodiscard]] f32r1_view_t temperature_grads(std::size_t rank) const noexcept {
         return world_scalars_[rank][nk::range(0, 2u * std::size_t {config_.temperature_groups}), nk::slice];
     }
@@ -356,8 +357,8 @@ struct distributed_contrastive_tokens_t {
 
   private:
 
-    /** The scalars reduced across the world: the temperature gradients, the loss and the live-query
-     *  count. */
+    /** The scalars reduced across the world: the temperature gradients, the loss and
+     *  the live-query count. */
     [[nodiscard]] static constexpr std::size_t world_scalar_count_(contrastive_tokens_config_t config) noexcept {
         return 2u * std::size_t {config.temperature_groups} + 2u;
     }
@@ -434,8 +435,8 @@ struct distributed_contrastive_tokens_t {
     per_gpu_array<infiniband_all_gather<u32_t>> description_gathers_ {};
     per_gpu_array<infiniband_all_gather<f32_t>> score_gathers_ {}, gradient_gathers_ {};
 
-    /** Per rank, wired only across several domains: the query forces with the scalars, and the
-     *  live-query count. */
+    /** Per rank, wired only across several domains: the query forces with the scalars, and
+     *  the live-query count. */
     per_gpu_array<infiniband_all_reduce<f32_t>> force_reduces_ {}, count_reduces_ {};
 };
 

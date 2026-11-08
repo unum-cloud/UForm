@@ -1,17 +1,10 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "huggingface_hub",
-#     "pyarrow>=21.0.0",
-# ]
-# ///
 """Download Google Text Normalization (Sproat & Jaitly) English data AND repack it to Parquet.
 
-Modality: text (denoise / normalization pairs).  Written <-> spoken token pairs across the
-semiotic classes PLAIN / PUNCT / DATE / CARDINAL / ORDINAL / DECIMAL / MONEY / MEASURE / TIME /
-TELEPHONE / ELECTRONIC / FRACTION / ADDRESS / LETTERS / VERBATIM / DIGIT — i.e. exactly the
-date / digit / currency / measure / address formatting variants the on-device email / messages /
-notes fuzzy-search use case needs as multi-positive surface-robustness supervision.
+Modality: text (denoise / normalization pairs). Written <-> spoken token pairs across the semiotic
+classes PLAIN / PUNCT / DATE / CARDINAL / ORDINAL / DECIMAL / MONEY / MEASURE / TIME / TELEPHONE /
+ELECTRONIC / FRACTION / ADDRESS / LETTERS / VERBATIM / DIGIT — i.e. exactly the date / digit /
+currency / measure / address formatting variants the on-device email / messages / notes fuzzy-search
+use case needs as multi-positive surface-robustness supervision.
 
 The canonical Google Cloud Storage bucket the original GitHub README points at
 (`storage.googleapis.com/text-normalization/en_with_types.tgz`) is now access-gated, so this
@@ -20,14 +13,15 @@ whose `en_train.csv` is the same Sproat token table with the full
 `(sentence_id, token_id, class, before, after)` schema.  `before` is the WRITTEN form
 (`"2006"`, `"$3.00"`) and `after` is the SPOKEN form (`"two thousand six"`, `"three dollars"`).
 
-This single file does both halves: it pulls the ~325 MB CSV, symlinks the corpus dir, then projects
-each token row to `(written=before, spoken=after, semiotic_class=class)` and writes a single
-GPU-readable Parquet sibling.  The repack is a light CSV-to-columns projection, so it runs inline (no
-separate script).  The CSV is kept (not deleted) so a re-run can rebuild the parquet without re-fetch.
+This single file does both halves: it pulls the ~325 MB CSV, symlinks the corpus dir, then
+projects each token row to `(written=before, spoken=after, semiotic_class=class)` and writes a
+single GPU-readable Parquet sibling. The repack is a light CSV-to-columns projection, so it
+runs inline (no separate script). The CSV is kept (not deleted) so a re-run can rebuild the
+parquet without re-fetch.
 
 VOLUME CONTROL: the source is a SINGLE `en_train.csv`, so there is no shard cap on the download and
-deliberately no fake `--fraction` flag; `--max-records N` caps the repacked token pairs (0 = the whole
-table).  Identity rows are dropped ON DEVICE by the registry extractor, not here.
+deliberately no fake `--fraction` flag; `--max-records N` caps the repacked token pairs (0 = the
+whole table). Identity rows are dropped ON DEVICE by the registry extractor, not here.
 
 Layout: the source CSV lands under `<DATA_ROOT>/google-text-norm/en_train.csv` with a
 `data/google-text-norm` symlink.
@@ -35,7 +29,19 @@ Layout: the source CSV lands under `<DATA_ROOT>/google-text-norm/en_train.csv` w
     uv run scripts/data/download_google_text_norm.py
     uv run scripts/data/download_google_text_norm.py --overwrite
     UFORM_DATA_ROOT=$UFORM_DATA_ROOT uv run scripts/data/download_google_text_norm.py   # env-var root
+
+File: scripts/data/download_google_text_norm.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "huggingface_hub",
+#     "pyarrow>=21.0.0",
+# ]
+# ///
 
 import argparse
 import csv
@@ -62,7 +68,8 @@ SOURCE_FILE = "en_train.csv"
 #: Rows per Parquet row group — bounds writer memory on the ~10M-token table.
 ROW_GROUP_SIZE: int = 200_000
 
-#: The semiotic-class sentence-boundary marker rows the Sproat format inserts; not a real token pair.
+#: The semiotic-class sentence-boundary marker rows the Sproat format inserts; not a
+#: real token pair.
 EOS_MARKER: str = "<eos>"
 
 

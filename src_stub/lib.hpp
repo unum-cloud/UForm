@@ -2,14 +2,15 @@
  *  @file src_stub/lib.hpp
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief Machinery every stand-in verb shares: outcomes, the deferred queue, arenas, scalars, progress,
- *      and the deterministic numbers the encoders write.
+ *  @brief Machinery every stand-in verb shares: outcomes, the deferred queue, arenas, scalars,
+ *      progress, and the deterministic numbers the encoders write.
  *
- *  Nothing here is part of the C ABI. The stand-in answers every verb of the @c c/uform headers with the C++
- *  standard library alone, so a binding suite links and runs in seconds against the interface instead of
- *  waiting on a build of the engine. Its executors start no threads: a deferred call is copied at submission
- *  into one stub-wide queue and runs on the thread of whichever caller next drains its executor, submits a
- *  blocking call to it, waits on the call's outcome, or frees a handle the call names.
+ *  Nothing here is part of the C ABI. The stand-in answers every verb of the @c c/uform headers
+ *  with the C++ standard library alone, so a binding suite links and runs in seconds against the
+ *  interface instead of waiting on a build of the engine. Its executors start no threads: a
+ *  deferred call is copied at submission into one stub-wide queue and runs on the thread of
+ *  whichever caller next drains its executor, submits a blocking call to it, waits on the call's
+ *  outcome, or frees a handle the call names.
  */
 #ifndef UNUM_UFORM_STUB_LIB_HPP
 #define UNUM_UFORM_STUB_LIB_HPP
@@ -32,24 +33,28 @@
 
 #include "uform/uform.h" // every argument structure a call copies
 
-/** What @c uform_executor_t owns: only the size of its share of the deferred queue, since it runs nothing
- *  on threads of its own. */
+/** What @c uform_executor_t owns: only the size of its share of the deferred queue, since it runs
+ *  nothing on threads of its own. */
 struct uform_executor_handle_t {
 
-    /** Deferred calls not yet final beyond which a submission finishes @c uform_status_contended_k. */
+    /** Deferred calls not yet final beyond which a submission
+     *  finishes @c uform_status_contended_k. */
     std::size_t deferred_limit = 64;
 };
 
-/** What @c uform_arena_t owns: one host buffer, rewound by every call and grown to a high-water mark. */
+/** What @c uform_arena_t owns: one host buffer, rewound by every call and grown to
+ *  a high-water mark. */
 struct uform_arena_handle_t {
     std::unique_ptr<std::byte[]> memory;
     std::size_t capacity = 0;
 
-    /** The outcome of the call holding the arena, null while free; read and written under the queue's lock. */
+    /** The outcome of the call holding the arena, null while free; read and written under
+     *  the queue's lock. */
     uform_outcome_t const *holder = nullptr;
 };
 
-/** What @c uform_model_t owns: the geometry a checkpoint would carry, and the bytes it was read from. */
+/** What @c uform_model_t owns: the geometry a checkpoint would carry, and the bytes it
+ *  was read from. */
 struct uform_model_handle_t {
     uform_scalar_t quantization = uform_scalar_bf16_k;
     std::size_t memory_usage = 0;
@@ -107,11 +112,11 @@ inline void propagate_error(uform_status_t status, uform_outcome_t *outcome, cha
 void release_arena(uform_arena_t arena, uform_outcome_t const *call);
 
 /**
- *  @brief A verb's outcome while it runs: deferred from construction, and published once at destruction
- *      with whatever its guards recorded, success when none did.
+ *  @brief A verb's outcome while it runs: deferred from construction, and published once at
+ *      destruction with whatever its guards recorded, success when none did.
  *
- *  Every verb declares it first, so it unwinds last: the arena it was given is let go before the final
- *  status lets a waiter free or reuse what the call named.
+ *  Every verb declares it first, so it unwinds last: the arena it was given is let go before the
+ *  final status lets a waiter free or reuse what the call named.
  */
 class deferred_outcome_t {
     uform_outcome_t *published_;
@@ -130,11 +135,13 @@ class deferred_outcome_t {
     deferred_outcome_t(deferred_outcome_t const &) = delete;
     deferred_outcome_t &operator=(deferred_outcome_t const &) = delete;
 
-    /** The private record every guard writes into, so a verb passes this wherever an outcome goes. */
+    /** The private record every guard writes into, so a verb passes this wherever
+     *  an outcome goes. */
     operator uform_outcome_t *() noexcept { return &recorded_; }
 };
 
-/** Records @p status when @p wrong, answering whether it did, so a caller reads `if (reject_if(...)) return;`. */
+/** Records @p status when @p wrong, answering whether it did, so a caller reads
+ *  `if (reject_if(...)) return;`. */
 inline bool reject_if(bool wrong, uform_status_t status, char const *message, uform_outcome_t *outcome) {
     if (!wrong) return false;
     propagate_error(status, outcome, message);
@@ -152,23 +159,26 @@ using call_arguments_t = std::variant<                                          
 /** A call given to an executor, waiting in the queue or running on some caller's thread. */
 struct call_t {
 
-    /** The executor whose share of the queue the call takes; null for a blocking call, which takes none. */
+    /** The executor whose share of the queue the call takes; null for a blocking call,
+     *  which takes none. */
     uform_executor_handle_t const *deferred_on;
 
-    /** A copy of the arguments with a null executor, so running them goes straight to the verb's body. */
+    /** A copy of the arguments with a null executor, so running them goes straight to
+     *  the verb's body. */
     call_arguments_t arguments;
     void (*verb)(void *);
 
-    /** The call's outcome, its executor, and every model, arena, mesh and trainer it names: the addresses a
-     *  wait or a free looks for before it returns. */
+    /** The call's outcome, its executor, and every model, arena, mesh and trainer it names: the
+     *  addresses a wait or a free looks for before it returns. */
     std::vector<void const *> handles;
 };
 
-/** Queues a deferred @p call, or finishes it contended once its executor has @c deferred_limit calls that are
- *  not final, answering whether it was queued. */
+/** Queues a deferred @p call, or finishes it contended once its executor has @c deferred_limit
+ *  calls that are not final, answering whether it was queued. */
 bool submit_deferred(call_t call, uform_outcome_t *outcome);
 
-/** Runs a blocking @p call on the calling thread, listed while it runs so a free of a handle it names waits. */
+/** Runs a blocking @p call on the calling thread, listed while it runs so a free of a handle
+ *  it names waits. */
 void run_blocking(call_t call);
 
 /** Runs every call queued for @p executor, oldest first, on the calling thread. */
@@ -177,11 +187,12 @@ void drain(uform_executor_handle_t const *executor);
 /** Returns once no call names @p handle, draining the executors whose queue still holds one. */
 void wait_for_calls_using(void const *handle);
 
-/** Holds @p arena for the call whose outcome is @p call, answering whether that call holds it now. A null
- *  arena holds nothing, left for the verb to refuse. */
+/** Holds @p arena for the call whose outcome is @p call, answering whether that call holds it now.
+ *  A null arena holds nothing, left for the verb to refuse. */
 bool hold_arena(uform_arena_t arena, uform_outcome_t const *call);
 
-/** Collects @c call_t::handles from a verb's @p arguments, skipping the outputs, which name no handle yet. */
+/** Collects @c call_t::handles from a verb's @p arguments, skipping the outputs, which name
+ *  no handle yet. */
 template <typename arguments_>
 std::vector<void const *> handles_used_by(arguments_ const &arguments) {
     std::vector<void const *> handles {arguments.outcome, arguments.executor};
@@ -196,11 +207,12 @@ std::vector<void const *> handles_used_by(arguments_ const &arguments) {
 }
 
 /**
- *  @brief Every verb's first act. A call without an executor answers false and runs the verb's body in place.
+ *  @brief Every verb's first act. A call without an executor answers false and runs the verb's
+ *      body in place.
  *
- *  A call with one is copied without it and answers true: a blocking copy runs right after the calls queued
- *  before it, and a deferred one holds its arena and waits in the queue until a drain, a blocking call, a
- *  wait or a free runs it.
+ *  A call with one is copied without it and answers true: a blocking copy runs right after the
+ *  calls queued before it, and a deferred one holds its arena and waits in the queue until a drain,
+ *  a blocking call, a wait or a free runs it.
  */
 template <auto verb_, typename arguments_>
 bool through_executor(arguments_ *arguments) {
@@ -222,8 +234,8 @@ bool through_executor(arguments_ *arguments) {
     return true;
 }
 
-/** Claims @p arena for the call whose outcome is @p call, refusing a null arena, one another call holds, and
- *  any of @p inputs inside the memory the call is about to rewind. */
+/** Claims @p arena for the call whose outcome is @p call, refusing a null arena, one another call
+ *  holds, and any of @p inputs inside the memory the call is about to rewind. */
 inline uform_arena_handle_t *claim_arena(uform_arena_t arena, uform_outcome_t const *call,
                                          std::initializer_list<void const *> inputs, uform_outcome_t *outcome) {
     if (reject_if(!arena, uform_status_invalid_argument_k, "The arena must not be null", outcome)) return nullptr;
@@ -239,8 +251,8 @@ inline uform_arena_handle_t *claim_arena(uform_arena_t arena, uform_outcome_t co
     return arena;
 }
 
-/** Rewinds a claimed @p arena and hands out its first @p bytes, growing it when they outsize its high-water
- *  mark; null once @p outcome records why not. */
+/** Rewinds a claimed @p arena and hands out its first @p bytes, growing it when they outsize its
+ *  high-water mark; null once @p outcome records why not. */
 inline void *rewind(uform_arena_handle_t &arena, std::size_t bytes, uform_outcome_t *outcome) {
     if (bytes <= arena.capacity && arena.memory) return arena.memory.get();
     std::unique_ptr<std::byte[]> grown(new (std::nothrow) std::byte[bytes ? bytes : 1]);
@@ -272,7 +284,8 @@ inline std::uint16_t to_bf16(float value) {
     return static_cast<std::uint16_t>((bits + 0x7FFFu + ((bits >> 16) & 1u)) >> 16);
 }
 
-/** Narrows to IEEE half precision by truncation, flushing what falls below the normal range to zero. */
+/** Narrows to IEEE half precision by truncation, flushing what falls below the normal
+ *  range to zero. */
 inline std::uint16_t to_f16(float value) {
     std::uint32_t const bits = std::bit_cast<std::uint32_t>(value);
     std::uint32_t const sign = (bits >> 16) & 0x8000u;
@@ -283,7 +296,8 @@ inline std::uint16_t to_f16(float value) {
     return static_cast<std::uint16_t>(sign | (static_cast<std::uint32_t>(exponent) << 10) | mantissa);
 }
 
-/** Writes @p value as the @p position -th element of a row of @p scalar, which @c output_scalar_bytes admits. */
+/** Writes @p value as the @p position -th element of a row of @p scalar, which
+ *  @c output_scalar_bytes admits. */
 inline void write_value(std::byte *row, uform_scalar_t scalar, std::size_t position, float value) {
     std::uint16_t const half = scalar == uform_scalar_bf16_k ? to_bf16(value) : to_f16(value);
     if (scalar == uform_scalar_f32_k) std::memcpy(row + position * sizeof(value), &value, sizeof(value));
@@ -308,8 +322,8 @@ inline void write_row(std::byte *row, uform_scalar_t scalar, std::uint64_t seed)
     }
 }
 
-/** How a batch verb splits its items for its handler: @c steps nearly equal slices, reported after each, or one
- *  silent slice without a handler. */
+/** How a batch verb splits its items for its handler: @c steps nearly equal slices, reported after
+ *  each, or one silent slice without a handler. */
 struct progress_ticks_t {
     uform_progress_t progress;
     std::size_t count;

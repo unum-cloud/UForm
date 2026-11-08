@@ -71,9 +71,8 @@ struct vram_nvidia_entries_kit_t {
     /** Zeros into device memory at @p target . */
     static nk_status_t zero(uu::bytes_span_t target, nk_stream_t stream) noexcept;
 
-    /** Prefix sums of @p lengths into @p packed_offsets @b [segments+1] , and
-     *  @c pool_offsets[s]=s over @b [segments+1] , the one query row per item the pool attends
-     *  with. */
+    /** Prefix sums of @p lengths into @p packed_offsets @b [segments+1] , and @c pool_offsets[s]=s
+     *  over @b [segments+1] , the one query row per item the pool attends with. */
     static nk_status_t fill_layout(u32r1_view_t lengths, u32r1_span_t packed_offsets, u32r1_span_t pool_offsets,
                                    nk_stream_t stream) noexcept;
 
@@ -536,8 +535,8 @@ struct cuda_elementwise_kit_t {
 
 #if NUMKONG_TARGET_CUDA && NUMKONG_TARGET_AMPERE
 
-/** Ampere's casts, norms and BFloat16 gates over the generic CUDA sums, Float32 gates and
- *  rotation. */
+/** Ampere's casts, norms and BFloat16 gates over the generic CUDA sums, Float32
+ *  gates and rotation. */
 struct ampere_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_cuda_k | nk_cap_ampere_k;
     static constexpr bool compiled_k = true;

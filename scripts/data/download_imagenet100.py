@@ -1,9 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "huggingface_hub",
-# ]
-# ///
 """Idempotent downloader for ImageNet-100 (130K images, ~13 GB).
 
 Modality: image. ImageNet-100 is a balanced 100-class slice of ImageNet-1K used as the
@@ -14,7 +8,18 @@ CLI usage:
     uv run scripts/data/download_imagenet100.py
     uv run scripts/data/download_imagenet100.py --out-dir /custom/path
     uv run scripts/data/download_imagenet100.py --repo-id ambityga/imagenet100
+
+File: scripts/data/download_imagenet100.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "huggingface_hub",
+# ]
+# ///
 
 import argparse
 import sys

@@ -21,9 +21,9 @@
  *  row of @c segment_choice_targets their probabilities. Segments pack back to back and never cross
  *  a row; the segments past the rows' room PAD and make no choice.
  *
- *  The columns hold the state as a string, the choices as a string or binary of one byte per label,
- *  and the targets as a binary of one little-endian Float32 per label, the forms the Parquet reader
- *  decodes.
+ *  The columns hold the state as a string, the choices as a string or binary of one byte per
+ *  label, and the targets as a binary of one little-endian Float32 per label, the forms the
+ *  Parquet reader decodes.
  */
 #pragma once
 
@@ -83,8 +83,8 @@ struct choices_loader_parquet_t {
      *  @param[in,out] gpu_stream The stream the decode and the packing run on.
      *  @param[in] gpu_rank Ensures different GPUs draw different rows from the same dataset.
      *  @param[in] training_step Ensures subsequent steps sample different data.
-     *  @param[out] batches The batches whose segment table, tokens, choices and targets get
-     *      populated.
+     *  @param[out] batches The batches whose segment table, tokens, choices and
+     *      targets get populated.
      *
      *  @par Statuses:
      *  - @c status_t::unsupported_k The batches carry no choice columns, or the pool holds

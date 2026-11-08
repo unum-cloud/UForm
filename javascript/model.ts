@@ -2,8 +2,8 @@
  *  @file javascript/model.ts
  *  @author Ash Vardanian
  *  @date October 18, 2026
- *  @brief The model lifecycle: loads into RAM or VRAM, the description, and the receivers every encode verb runs
- *      through.
+ *  @brief The model lifecycle: loads into RAM or VRAM, the description, and the receivers every
+ *      encode verb runs through.
  */
 import type { CompiledDescription, CompiledModel } from "./library.js";
 import { EncodeVerbs } from "./encode.js";
@@ -15,21 +15,27 @@ export interface ModelLoadRamConfig {
   executor?: Executor;
   /** NUMA node IDs to place the weights in; absent derives every node. */
   memoryDomains?: number[];
-  /** The CPU class to pack the tower for, spelled like "intel-haswell"; absent derives the CPU's own. */
+  /** The CPU class to pack the tower for, spelled like "intel-haswell"; absent derives
+   *  the CPU's own. */
   cpuClass?: string;
-  /** The scalar the transformer blocks run in: `bf16` as the checkpoint stores it, the default, or `e4m3`. */
+  /** The scalar the transformer blocks run in: `bf16` as the checkpoint stores it, the
+   *  default, or `e4m3`. */
   quantization?: Scalar;
 }
 
 /** Where a checkpoint loaded into device memory lands. Mirrors `uform_model_load_vram_t`. */
 export interface ModelLoadVramConfig {
-  /** The executor the upload runs on, one stream per device; absent uploads on the calling thread. */
+  /** The executor the upload runs on, one stream per device; absent uploads on
+   *  the calling thread. */
   executor?: Executor;
-  /** Device ordinals, positions in `gpuDevices()`, to replicate the weights on; absent takes one free device. */
+  /** Device ordinals, positions in `gpuDevices()`, to replicate the weights on; absent takes
+   *  one free device. */
   devices?: number[];
-  /** The GPU class every replica runs as, spelled like "nvidia-hopper"; absent derives the devices' own. */
+  /** The GPU class every replica runs as, spelled like "nvidia-hopper"; absent derives
+   *  the devices' own. */
   gpuClass?: string;
-  /** The scalar the transformer blocks run in: `bf16` as the checkpoint stores it, the default, or `e4m3`. */
+  /** The scalar the transformer blocks run in: `bf16` as the checkpoint stores it, the
+   *  default, or `e4m3`. */
   quantization?: Scalar;
 }
 
@@ -43,13 +49,16 @@ export interface ModelDescription {
   quantization: Scalar;
   /** Bytes the model holds; activations are the executor's. */
   memoryUsage: number;
-  /** The CPU class a RAM model's tower was packed for, like "intel-haswell"; `null` for a VRAM model. */
+  /** The CPU class a RAM model's tower was packed for, like "intel-haswell"; `null` for
+   *  a VRAM model. */
   cpuClass: string | null;
-  /** The GPU class every replica of a VRAM model runs as, like "nvidia-hopper"; `null` for a RAM model. */
+  /** The GPU class every replica of a VRAM model runs as, like "nvidia-hopper"; `null` for
+   *  a RAM model. */
   gpuClass: string | null;
   /** Scalars per token vector; zero when the checkpoint carries no token head. */
   tokenWidth: number;
-  /** Question types the choice temperatures were calibrated over: zero without the byte decoder, one uncalibrated. */
+  /** Question types the choice temperatures were calibrated over: zero without the byte
+   *  decoder, one uncalibrated. */
   choiceTemperatureGroups: number;
 }
 
@@ -66,8 +75,8 @@ abstract class ModelVerbs<Receiving extends "blocking" | "deferred"> extends Enc
 }
 
 /**
- *  The verbs of one model, blocking on one executor: `model.on(executor)`. Every call starts after every earlier
- *  submission to that executor, and returns with its outputs written.
+ *  The verbs of one model, blocking on one executor: `model.on(executor)`. Every call starts after
+ *  every earlier submission to that executor, and returns with its outputs written.
  */
 export class ModelOn extends ModelVerbs<"blocking"> {
   /** Made by `model.on(executor)`, never directly. */
@@ -77,8 +86,9 @@ export class ModelOn extends ModelVerbs<"blocking"> {
 }
 
 /**
- *  The verbs of one model, submitted to one executor and answered as {@link Deferred} calls: `model.deferred(executor)`.
- *  A verb borrows its arena until final, and waits into the same views a blocking call answers.
+ *  The verbs of one model, submitted to one executor and answered as {@link Deferred} calls:
+ *  `model.deferred(executor)`. A verb borrows its arena until final, and waits into the same views
+ *  a blocking call answers.
  */
 export class ModelDeferredOn extends ModelVerbs<"deferred"> {
   /** Made by `model.deferred(executor)`, never directly. */
@@ -98,8 +108,9 @@ function bufferOf(buffer: ArrayBuffer | ArrayBufferView): ArrayBufferView {
 }
 
 /**
- *  A loaded encoder, running every verb on the calling thread. `on(executor)` and `deferred(executor)` reach the same
- *  verbs on an executor. One model serves every modality it was trained on.
+ *  A loaded encoder, running every verb on the calling thread. `on(executor)` and
+ *  `deferred(executor)` reach the same verbs on an executor. One model serves every modality it
+ *  was trained on.
  */
 export class Model extends ModelOn implements Disposable {
   /** Reached through the loads. */
@@ -110,7 +121,8 @@ export class Model extends ModelOn implements Disposable {
   }
 
   /**
-   *  The same verbs, each blocking on `executor`, after every earlier submission to it. Binding-only.
+   *  The same verbs, each blocking on `executor`, after every earlier submission
+   *  to it. Binding-only.
    *  @param executor - The threads or streams to run on; its residency must match the model's.
    */
   on(executor: Executor): ModelOn {
@@ -126,7 +138,8 @@ export class Model extends ModelOn implements Disposable {
     return new ModelDeferredOn(this.compiled, executor);
   }
 
-  /** Releases the weights now, waiting for every deferred call naming the model; a second `free` does nothing. Calls `uform_model_free`. */
+  /** Releases the weights now, waiting for every deferred call naming the model; a second `free`
+   *  does nothing. Calls `uform_model_free`. */
   free(): void {
     this.compiled.free();
   }
@@ -136,7 +149,8 @@ export class Model extends ModelOn implements Disposable {
   }
 
   /**
-   *  Copies a safetensors checkpoint file into host memory and packs it for the CPU. Calls `uform_model_load_ram`.
+   *  Copies a safetensors checkpoint file into host memory and packs it for the
+   *  CPU. Calls `uform_model_load_ram`.
    *  @param path - The checkpoint, read in full and closed before the load completes.
    *  @param config - The executor, the NUMA nodes, and the block scalar.
    */
@@ -154,7 +168,8 @@ export class Model extends ModelOn implements Disposable {
   }
 
   /**
-   *  Copies a checkpoint held in memory into host memory, which is how a page loads one it fetched. Calls `uform_model_load_ram_buffer`.
+   *  Copies a checkpoint held in memory into host memory, which is how a page loads one it
+   *  fetched. Calls `uform_model_load_ram_buffer`.
    *  @param buffer - The checkpoint bytes, copied before the load completes.
    *  @param config - The executor, the NUMA nodes, and the block scalar.
    */
@@ -172,7 +187,8 @@ export class Model extends ModelOn implements Disposable {
   }
 
   /**
-   *  Copies a checkpoint file onto the named GPUs and packs it there. Calls `uform_model_load_vram`.
+   *  Copies a checkpoint file onto the named GPUs and packs it
+   *  there. Calls `uform_model_load_vram`.
    *  @param path - The checkpoint, read in full and closed before the load completes.
    *  @param config - The executor, the devices, and the block scalar.
    */

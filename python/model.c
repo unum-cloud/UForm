@@ -4,9 +4,10 @@
  *  @date October 17, 2026
  *  @brief CPython model lifecycle: load an encoder into RAM or VRAM, describe it, and free it.
  *
- *  Residency is in the verb name, as in the C interface: @c load_vram places the weights on the devices it
- *  names, and @c load_ram in host memory. A load is a constructor, so it blocks, on the executor it is given or
- *  on the calling thread; @c describe is a verb, reached through every receiver.
+ *  Residency is in the verb name, as in the C interface: @c load_vram places the weights on
+ *  the devices it names, and @c load_ram in host memory. A load is a constructor, so it
+ *  blocks, on the executor it is given or on the calling thread; @c describe is a verb,
+ *  reached through every receiver.
  */
 #include "lib.h"
 
@@ -44,7 +45,8 @@ static void Model_dealloc(Model *self) {
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
-/** Wraps the handle a load produced, a progress handler's own exception outranking the outcome, or frees it. */
+/** Wraps the handle a load produced, a progress handler's own exception outranking the outcome,
+ *  or frees it. */
 static PyObject *model_loaded(PyTypeObject *type, uform_model_t handle, uform_py_call_t *call) {
     if (call->raised || call->outcome.status != uform_status_success_k) {
         uform_model_free(handle);
@@ -75,7 +77,8 @@ typedef struct load_options_t {
  *  @brief Reads what every load takes: the source as @p source_name, the placement as
  *      @p arm_name, the pin of @p classes as @p pin_name, then `executor`, `quantization`,
  *      `progress` and `progress_steps` by name.
- *  @return 0 on success, -1 with an exception set otherwise; release @c options->progress either way.
+ *  @return 0 on success, -1 with an exception set otherwise; release
+ *      @c options->progress either way.
  */
 static int load_parse(char const *verb, PyObject *const *args, Py_ssize_t positional_args_count,
                       PyObject *args_names_tuple, char const *source_name, PyObject **source, char const *arm_name,
@@ -438,7 +441,8 @@ PyMethodDef uform_py_model_verbs[] = {
     {NULL, NULL, 0, NULL},
 };
 
-/** The constructors and receivers only a model offers; `lib.c` appends the verbs it shares with its receivers. */
+/** The constructors and receivers only a model offers; `lib.c` appends the verbs it shares
+ *  with its receivers. */
 PyMethodDef uform_py_model_methods[] = {
     {"load_ram", (PyCFunction)Model_load_ram, uform_py_method_flags_k | METH_CLASS, doc_Model_load_ram},
     {"load_ram_buffer", (PyCFunction)Model_load_ram_buffer, uform_py_method_flags_k | METH_CLASS,

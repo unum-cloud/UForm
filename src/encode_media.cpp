@@ -2,8 +2,8 @@
  *  @file src/encode_media.cpp
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief The verbs of @c encode.h over encoded files: images, clips and recordings, planned from their headers or a
- *      demux and decoded on the host by the codecs of @c src/media.
+ *  @brief The verbs of @c encode.h over encoded files: images, clips and recordings, planned from
+ *      their headers or a demux and decoded on the host by the codecs of @c src/media.
  *
  *  A build without the codecs links @c encode_media_absent.cpp in its place.
  */
@@ -102,7 +102,8 @@ struct videos_packer_t {
     }
 };
 
-/** WAV, FLAC, MP3 or Opus files, decoded into the whole context once to find their length, then into their frames. */
+/** WAV, FLAC, MP3 or Opus files, decoded into the whole context once to find their length, then
+ *  into their frames. */
 struct recordings_packer_t {
     static constexpr modality_t modality_k = modality_t::audio_k;
     tape_view<b8_t const> tape;
@@ -124,8 +125,8 @@ struct recordings_packer_t {
         return {};
     }
 
-    /** The decoder pads a short clip with exact silence, so its frames end with the last nonzero sample; a clip
-     *  reaching the window's last frame counts as cut there. */
+    /** The decoder pads a short clip with exact silence, so its frames end with the last nonzero
+     *  sample; a clip reaching the window's last frame counts as cut there. */
     failure_t plan(std::size_t item, item_plan_t &plan, ue::geometry_t const &geometry,
                    std::size_t thread) const noexcept {
         std::size_t const window_samples = windows.extent(1);

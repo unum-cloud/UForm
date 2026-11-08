@@ -1,10 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "cudf-cu12",
-#     "numpy",
-# ]
-# ///
 """Compute the unigram entropy of masked bytes in the actual MLM training dataset.
 
 Modality: text. Diagnostic answering whether the 3.27 plateau is the same as the unigram entropy
@@ -19,7 +12,19 @@ distribution: this reproduces the loader's floor without the deleted `TextMaskLo
 
 Usage:
     uv run scripts/data/data_unigram_floor.py --batches 20 --batch_size 64 --max_seq 1024
+
+File: scripts/data/data_unigram_floor.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "cudf-cu12",
+#     "numpy",
+# ]
+# ///
 
 import argparse
 import glob as globbing

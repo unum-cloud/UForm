@@ -3,8 +3,8 @@
  *  @author Ash Vardanian
  *  @date July 2, 2026
  *  @brief Device kernels and heavy method bodies of the sharded sigmoid-pairwise segments
- *      contrastive loss declared in @ref contrastive_segments.cuh — the one translation unit behind
- *      its consumers.
+ *      contrastive loss declared in @ref contrastive_segments.cuh — the one translation unit
+ *      behind its consumers.
  */
 #include <cmath> // `std::sqrt`, `std::fmax` — the prefix norms and their floored squares
 
@@ -57,11 +57,12 @@ static __global__ void contrastive_live_vertices_kernel_(contrastive_relations_v
 }
 
 /**
- *  @brief Per-row L2 norms of every Matryoshka prefix in @b one pass over the hidden axis: the running
- *      sum-of-squares is block-reduced at each prefix boundary, so @c norms[prefix,row] = ‖row[:D_p]‖ .
+ *  @brief Per-row L2 norms of every Matryoshka prefix in @b one pass over the hidden axis: the
+ *      running sum-of-squares is block-reduced at each prefix boundary, so @c norms[prefix,row]
+ *      = ‖row[:D_p]‖ .
  *
- *  __grid_size__ @c [rows,1,1] ; one CTA per row; @ref kernel_block_size_default_k threads stripe each
- *  prefix segment; no dynamic shared memory.
+ *  __grid_size__ @c [rows,1,1] ; one CTA per row; @ref kernel_block_size_default_k threads stripe
+ *  each prefix segment; no dynamic shared memory.
  */
 static __global__ void contrastive_prefix_norms_kernel_(bf16r2_view_t embeddings, f32r2_span_t norms,
                                                         matryoshka_prefixes_t prefixes) {
@@ -82,12 +83,12 @@ static __global__ void contrastive_prefix_norms_kernel_(bf16r2_view_t embeddings
 }
 
 /**
- *  @brief The scaled cosines of every subgraph: @c logits[p,s,v,n] = β_v·raw/(‖v‖·‖n‖) , that is
- *      β·cos with @b no bias, with the floored denominator — the epilogue of the tensor-core dot
- *      products.
+ *  @brief The scaled cosines of every subgraph: @c logits[p,s,v,n] = β_v · raw/(‖v‖ · ‖n‖) ,
+ *      that is β · cos with @b no bias, with the floored denominator — the epilogue of the
+ *      tensor-core dot products.
  *
- *  __grid_size__ @c [K·S·R·Rc/block,1,1] rounded up; grid-stride over cells; no dynamic shared
- *  memory.
+ *  __grid_size__ @c [K · S · R · Rc/block,1,1] rounded up; grid-stride over cells; no
+ *  dynamic shared memory.
  */
 static __global__ void contrastive_scaled_cosine_kernel_(f32r4_view_t raw_dot, f32r2_view_t from_vertex_norms,
                                                          f32r3_view_t to_vertex_norms, contrastive_recipe_t recipe,
@@ -117,7 +118,8 @@ static __global__ void contrastive_scaled_cosine_kernel_(f32r4_view_t raw_dot, f
  *      — the operand the gradient matmuls and the self-coefficient folds both consume. A vertex's
  *      cell against its own copy on the self-edge default is zero.
  *
- *  __grid_size__ @c [ceil(K·R·Rc/block),1,1] ; grid-stride over cells; no dynamic shared memory.
+ *  __grid_size__ @c [ceil(K · R · Rc/block),1,1] ; grid-stride over cells; no
+ *      dynamic shared memory.
  */
 static __global__ void contrastive_raw_dot_grad_kernel_(f32r3_view_t logit_grad, f32r2_view_t from_vertex_norms,
                                                         f32r2_view_t to_vertex_norms, contrastive_recipe_t recipe,
@@ -149,8 +151,8 @@ static __global__ void contrastive_raw_dot_grad_kernel_(f32r3_view_t logit_grad,
  *  @brief Deterministic per-vertex cosine self-coefficients of one subgraph block:
  *      @c coefficients[prefix,vertex] = Σ_j raw_dot_grad·raw_dot — a fixed-order block reduce per row.
  *
- *  __grid_size__ @c [num_vertices,num_prefixes,1] ; threads stripe the subgraph's rows; no dynamic shared
- *  memory.
+ *  __grid_size__ @c [num_vertices,num_prefixes,1] ; threads stripe the subgraph's rows; no
+ *  dynamic shared memory.
  */
 static __global__ void contrastive_from_vertex_self_coefficients_kernel_(f32r3_view_t raw_dot_grad,
                                                                          f32r3_view_t raw_dot,
@@ -172,7 +174,8 @@ static __global__ void contrastive_from_vertex_self_coefficients_kernel_(f32r3_v
  *  @brief Deterministic per-neighbor cosine self-coefficients — the column-sum sibling of
  *      @ref contrastive_from_vertex_self_coefficients_kernel_ .
  *
- *  __grid_size__ @c [count,num_prefixes,1] ; threads stripe the vertex rows; no dynamic shared memory.
+ *  __grid_size__ @c [count,num_prefixes,1] ; threads stripe the vertex rows; no
+ *  dynamic shared memory.
  */
 static __global__ void contrastive_to_vertex_self_coefficients_kernel_(f32r3_view_t raw_dot_grad, f32r3_view_t raw_dot,
                                                                        f32r2_span_t to_vertex_self_coefficients) {
@@ -190,12 +193,12 @@ static __global__ void contrastive_to_vertex_self_coefficients_kernel_(f32r3_vie
 }
 
 /**
- *  @brief Suffix-accumulate the per-prefix raw-dot gradients @b in @b place, turning plane @c p into
- *      @c G_p = Σ_{p'>=p} raw_dot_grad_{p'} — the per-segment matmul operand (segment @c s is contained in
- *      exactly the prefixes @c p>=s ).
+ *  @brief Suffix-accumulate the per-prefix raw-dot gradients @b in @b place, turning plane @c p
+ *      into @c G_p = Σ_{p'>=p} raw_dot_grad_{p'} — the per-segment matmul operand (segment @c s is
+ *      contained in exactly the prefixes @c p>=s ).
  *
- *  __grid_size__ @c [ceil(R·Rn/block),1,1] ; each thread owns one (vertex, neighbor) pair and walks the
- *  prefixes high-to-low serially — fixed order, no atomics; no dynamic shared memory.
+ *  __grid_size__ @c [ceil(R · Rn/block),1,1] ; each thread owns one (vertex, neighbor) pair and
+ *      walks the prefixes high-to-low serially — fixed order, no atomics; no dynamic shared memory.
  */
 static __global__ void contrastive_suffix_accumulate_kernel_(f32r3_span_t raw_dot_grad) {
     std::size_t const prefix_count = raw_dot_grad.extent(0);
@@ -213,12 +216,12 @@ static __global__ void contrastive_suffix_accumulate_kernel_(f32r3_span_t raw_do
 }
 
 /**
- *  @brief The owned-vertex cosine self-fold of one subgraph:
- *      @c from_vertices_grad_f32(q,ch) -= Σ_p 1{ch<D_p}·coefficients[p,q]/max(‖q‖²,floor)·q(q,ch) — the term the
- *      cross-product matmuls cannot express.
+ *  @brief The owned-vertex cosine self-fold of one subgraph: @c from_vertices_grad_f32(q,ch) -=
+ *      Σ_p 1{ch<D_p} · coefficients[p,q]/max(‖q‖²,floor) · q(q,ch) — the term the cross-product
+ *      matmuls cannot express.
  *
- *  __grid_size__ @c [num_vertices,1,1] ; threads stripe the hidden channels, prefixes loop inside; no
- *  dynamic shared memory.
+ *  __grid_size__ @c [num_vertices,1,1] ; threads stripe the hidden channels, prefixes loop inside;
+ *  no dynamic shared memory.
  */
 static __global__ void contrastive_from_vertex_self_fold_kernel_(bf16r2_view_t owned_vertices,
                                                                  f32r2_view_t from_vertex_norms,
@@ -244,10 +247,11 @@ static __global__ void contrastive_from_vertex_self_fold_kernel_(bf16r2_view_t o
 
 /**
  *  @brief The neighbor-side cosine self-fold — the column sibling of
- *      @ref contrastive_from_vertex_self_fold_kernel_ , folded into the subgraph's @c to_vertices_grad .
+ *      @ref contrastive_from_vertex_self_fold_kernel_ , folded into the subgraph's
+ *      @c to_vertices_grad .
  *
- *  __grid_size__ @c [count,1,1] ; threads stripe the hidden channels, prefixes loop inside; no dynamic
- *  shared memory.
+ *  __grid_size__ @c [count,1,1] ; threads stripe the hidden channels, prefixes loop inside; no
+ *  dynamic shared memory.
  */
 static __global__ void contrastive_to_vertex_self_fold_kernel_(bf16r2_view_t neighbors, f32r2_view_t to_vertex_norms,
                                                                f32r2_view_t to_vertex_self_coefficients,
@@ -271,10 +275,10 @@ static __global__ void contrastive_to_vertex_self_fold_kernel_(bf16r2_view_t nei
 }
 
 /**
- *  @brief Elementwise Float32 → BFloat16 cast of a matrix into a same-shaped, possibly row-padded
- *      destination.
+ *  @brief Elementwise Float32 → BFloat16 cast of a matrix into a same-shaped,
+ *      possibly row-padded destination.
  *
- *  __grid_size__ @c [rows·columns/block,1,1] rounded up; grid-stride; no dynamic shared memory.
+ *  __grid_size__ @c [rows · columns/block,1,1] rounded up; grid-stride; no dynamic shared memory.
  */
 static __global__ void contrastive_cast_f32_to_bf16_kernel_(f32r2_view_t source, bf16r2_span_t destination) {
     std::size_t const columns = source.extent(1), count = source.extent(0) * columns;
@@ -296,8 +300,8 @@ static __global__ void contrastive_cast_f32_to_bf16_kernel_(f32r2_view_t source,
     return std::fmax(value, 0.0f) + std::log1p(std::exp(-std::fabs(value)));
 }
 
-/** Cell @c (prefix,row,candidate) of a @b [prefixes,subgraphs,rows,per_subgraph] stash by global
- *  candidate. */
+/** Cell @c (prefix,row,candidate) of a @b [prefixes,subgraphs,rows,per_subgraph] stash
+ *  by global candidate. */
 [[nodiscard]] static __device__ f32_t &contrastive_stash_cell_(f32r4_span_t stash, std::size_t prefix, std::size_t row,
                                                                std::size_t candidate) noexcept {
     std::size_t const per_subgraph = stash.extent(3);
@@ -312,10 +316,10 @@ static __global__ void contrastive_cast_f32_to_bf16_kernel_(f32r2_view_t source,
  *  The balanced @p form normalizes the attract and repel halves apart; the sigmoid form weighs
  *  every repel on the attracts' scale.
  *
- *  A non-finite @c t·logit leaves the pair's gradient zero; a @c w==0 pair is skipped in place.
+ *  A non-finite @c t · logit leaves the pair's gradient zero; a @c w==0 pair is skipped in place.
  *
- *  __grid_size__ @c [rows,1,1] ; one CTA per row, the threads stripe the candidates; no dynamic
- *  shared memory.
+ *  __grid_size__ @c [rows,1,1] ; one CTA per row, the threads stripe the candidates; no
+ *  dynamic shared memory.
  */
 static __global__ void contrastive_sigmoid_bce_kernel_(f32r4_span_t logits, f32r2_span_t accumulator,
                                                        contrastive_relations_view_t relations,
@@ -380,8 +384,8 @@ static __global__ void contrastive_sigmoid_bce_kernel_(f32r4_span_t logits, f32r
  *  pass's end in a fixed order. The first prefix assigns the row's summands and every later one
  *  adds; the bias cancels, so its summand stays zero.
  *
- *  __grid_size__ @c [rows,1,1] ; one CTA per row, the threads stripe the candidates; no dynamic
- *  shared memory.
+ *  __grid_size__ @c [rows,1,1] ; one CTA per row, the threads stripe the candidates; no
+ *  dynamic shared memory.
  */
 static __global__ void contrastive_ranked_bce_kernel_(f32r4_view_t logits, f32r2_span_t gradients,
                                                       f32r2_span_t accumulator, contrastive_relations_view_t relations,
@@ -414,8 +418,8 @@ static __global__ void contrastive_ranked_bce_kernel_(f32r4_view_t logits, f32r2
     f32_t thread_loss = 0.0f, thread_log_inverse_temperature_grad = 0.0f;
     u32_t const passes = positives != 0u ? divide_round_up(positives, ranked_positives_per_pass_k) : 1u;
     for (u32_t pass = 0; pass != passes; ++pass) {
-        // The pass takes the positives ranked [pass·k, pass·k+k), each thread's in its stride
-        // order.
+        // The pass takes the positives ranked [pass·k, pass·k+k), each thread's in
+        // its stride order.
         u32_t const first_of_pass = pass * ranked_positives_per_pass_k;
         u32_t const end_of_pass = first_of_pass + ranked_positives_per_pass_k;
         __syncthreads();
@@ -507,8 +511,8 @@ static __global__ void contrastive_ranked_copy_kernel_(f32r2_view_t gradients, f
  *  @brief The pair loss's finalise: the rank-local loss summand and the optional temperature
  *      gradient summands of every group, in fixed-order block reduces over the per-row accumulator.
  *
- *  __grid_size__ @c [1,1,1] ; one CTA, threads stripe the rows once per group; no dynamic shared
- *  memory.
+ *  __grid_size__ @c [1,1,1] ; one CTA, threads stripe the rows once per group; no
+ *  dynamic shared memory.
  */
 static __global__ void contrastive_pair_loss_finalize_kernel_(f32r2_view_t accumulator, contrastive_recipe_t recipe,
                                                               f32r1_span_t loss_out, f32r1_span_t bias_grad,
@@ -547,8 +551,8 @@ static __global__ void contrastive_pair_loss_finalize_kernel_(f32r2_view_t accum
     }
 }
 
-/** The CTA-wide maximum of @p value , broadcast to every thread; the identity is negative
- *  infinity. */
+/** The CTA-wide maximum of @p value , broadcast to every thread; the identity
+ *  is negative infinity. */
 [[nodiscard]] static __device__ f32_t contrastive_block_max_(f32_t value) noexcept {
     __shared__ f32_t warp_maxima[kernel_block_size_default_k / warp_size_k];
     __shared__ f32_t block_maximum;
@@ -585,7 +589,7 @@ static __global__ void contrastive_centre_add_kernel_(bf16r2_view_t vertices, f3
 
 /**
  *  @brief Every row's unit vertex against the world's centre sum,
- *      @c alignment[j]=(v_j/‖v_j‖)·centre , over the centre's width.
+ *      @c alignment[j]=(v_j/‖v_j‖) · centre , over the centre's width.
  *
  *  __grid_size__ @c [rows,1,1] ; one CTA per row; no dynamic shared memory.
  */
@@ -605,11 +609,11 @@ static __global__ void contrastive_centre_alignment_kernel_(bf16r2_view_t vertic
  *      among the scored cells and the mean cosines of its attract and ambient cells.
  *
  *  It also counts the row's hard negatives above that positive, and forms its products with every
- *  live vertex once each unit vertex has the world's mean unit vector @c m subtracted,
- *  @c cos−a_i−a_j+‖m‖² with @c a_j=û_j·m , per cell so no sum of near-unit cosines cancels.
+ *  live vertex once each unit vertex has the world's mean unit vector @c m subtracted, @c cos − a_i
+ *  − a_j+‖m‖² with @c a_j=û_j · m , per cell so no sum of near-unit cosines cancels.
  *
- *  __grid_size__ @c [rows,1,1] ; one CTA per row, the threads stripe the candidates; no dynamic
- *  shared memory.
+ *  __grid_size__ @c [rows,1,1] ; one CTA per row, the threads stripe the candidates; no
+ *  dynamic shared memory.
  */
 static __global__ void contrastive_retrieval_kernel_(f32r4_view_t logits, f32r2_span_t table,
                                                      contrastive_relations_view_t relations,
@@ -929,8 +933,8 @@ expected_t contrastive_segments_t::score_(bf16r2_view_t vertices, nk::tensor_vie
         }
     }
 
-    // The scaled cosines of every subgraph in one pass, which the pair loss or the evaluation
-    // reads.
+    // The scaled cosines of every subgraph in one pass, which the pair loss or
+    // the evaluation reads.
     return launch_kernel(&contrastive_scaled_cosine_kernel_, dim3 {grid_size_for(logits_.numel()), 1u, 1u}, block_shape,
                          stream, raw_dot_.view(), from_vertex_norms_view, to_vertex_norms_.view(), recipe,
                          logits_.span());
@@ -1070,15 +1074,16 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
                                      raw_dot_grad_bf16);
         if (!launched) return launched;
 
-        // Zero the subgraph's whole force so the segment products fill disjoint bands and the channels beyond
-        // the last prefix stay exactly zero.
+        // Zero the subgraph's whole force so the segment products fill disjoint bands and the
+        // channels beyond the last prefix stay exactly zero.
         std::size_t const force_scalars = static_cast<std::size_t>(config_.to_vertices_per_gpu) * config_.hidden;
         if (expected_t reset = zero_async(f32r1_span_t {subgraph.to_vertices_grad.data(), force_scalars}, stream);
             !reset)
             return reset;
 
-        // Gradients per segment: G_seg lives at the suffix-accumulated plane s, and each force fills its band of a
-        // `[·,hidden]` tile — the owned one in the products scratch, added onto the accumulator below.
+        // Gradients per segment: G_seg lives at the suffix-accumulated plane s, and each force
+        // fills its band of a `[·,hidden]` tile — the owned one in the products scratch, added onto
+        // the accumulator below.
         f32r2_span_t const from_vertices_grad_products = from_vertices_grad_products_.span();
         for (u32_t segment = 0; segment != prefix_count; ++segment) {
             u32_t const segment_begin = prefixes_.segment_begin(segment);
@@ -1119,8 +1124,9 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
 }
 
 /**
- *  @brief Fold a reduced Float32 column force into the caller's BFloat16 gradient in place:
- *      @c destination[i] = bf16(f32(destination[i]) + column[i]) — the row force already lives there.
+ *  @brief Fold a reduced Float32 column force into the caller's BFloat16 gradient in
+ *      place: @c destination[i] = bf16(f32(destination[i]) + column[i]) — the row force
+ *      already lives there.
  *
  *  __grid_size__ grid-stride over the flattened tower; no dynamic shared memory.
  */
@@ -1174,8 +1180,8 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
         distributed.relations_[rank] = relations[rank];
         distributed.from_vertices_grads_[rank] = from_vertices_grads[rank];
     }
-    // The caller's tower views are stored once: in the subgraph tables when this process holds the whole world,
-    // in the staging list otherwise — never both.
+    // The caller's tower views are stored once: in the subgraph tables when this process holds the
+    // whole world, in the staging list otherwise — never both.
     bool const whole_world = gpus == subgraphs;
     if (!whole_world) {
         if (distributed.gather_sources_.resize(gpus) != status_t::success_k)
@@ -1223,7 +1229,8 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
         distributed.reduce_buffers_[rank] = std::move(reduce_buffer.value_);
     }
 
-    // The gather member, wired only where member 0 lives, and the per-rank loss summands on the lead device.
+    // The gather member, wired only where member 0 lives, and the per-rank loss summands on
+    // the lead device.
     {
         switch_to_gpu_t gpu_scope {streams[0]};
         if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "context entry failed (rank=0)");
@@ -1257,8 +1264,8 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
 
 expected_t distributed_contrastive_segments_t::stage_world_tower_(std::size_t rank, gpu_stream_t &stream) noexcept {
     std::size_t const member = domain_->member_offset() + rank;
-    // A whole world is read in place from the peers' towers, so every peer's forward must have
-    // landed.
+    // A whole world is read in place from the peers' towers, so every peer's forward
+    // must have landed.
     if (world_tower_window_.scalars == 0) return domain_->barrier(member, stream);
     // Overwrites member 0's window, whose last readers passed the force barrier.
     std::size_t const world_gpu = home_domain_index_ * domain_->member_count() + member;
@@ -1308,8 +1315,9 @@ expected_t distributed_contrastive_segments_t::operator()(std::size_t rank, cont
     nk::tensor_view<gpu_subgraph_t, 1> const table = std::span<gpu_subgraph_t const> {subgraph_tables_[rank]};
     f32r1_span_t const loss_out = loss_outs_[nk::range(rank, rank + 1), nk::slice];
     bf16r1_span_t const grad_flat = from_vertices_grads_[rank].flatten<1>();
-    // The rank's own tower is stored once: in the staging list when the world is staged, otherwise as its
-    // own subgraph's table entry (subgraph index == rank when this process holds the whole world).
+    // The rank's own tower is stored once: in the staging list when the world is staged,
+    // otherwise as its own subgraph's table entry (subgraph index == rank when this process holds
+    // the whole world).
     bf16r2_view_t const own_tower = world_tower_window_.scalars != 0 ? gather_sources_[rank]
                                                                      : subgraph_tables_[rank][rank].to_vertices;
 

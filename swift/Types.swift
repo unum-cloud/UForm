@@ -2,8 +2,8 @@
  *  @file swift/Types.swift
  *  @author Ash Vardanian
  *  @date October 18, 2026
- *  @brief Shared vocabulary of the UForm Swift SDK, mirroring `c/uform/types.h`: statuses, scalars, moods, progress,
- *      deferred calls, executors, arenas, and the rows calls write into arenas.
+ *  @brief Shared vocabulary of the UForm Swift SDK, mirroring `c/uform/types.h`: statuses, scalars,
+ *      moods, progress, deferred calls, executors, arenas, and the rows calls write into arenas.
  */
 
 import Dispatch
@@ -11,8 +11,8 @@ import UFormC
 
 // MARK: - Errors
 
-/// What went wrong, in the vocabulary the library and every binding share - one constant per `uform_status_*_k`,
-/// carrying the C enumerator itself.
+/// What went wrong, in the vocabulary the library and every binding share - one constant per
+/// `uform_status_*_k`, carrying the C enumerator itself.
 ///
 /// A `UFormError` never carries `success` or `deferred`; a `Deferred` call reports both.
 public struct Status: Hashable, Sendable, CustomStringConvertible {
@@ -41,7 +41,8 @@ public struct Status: Hashable, Sendable, CustomStringConvertible {
     public static let `internal` = Status(raw: uform_status_internal_k)
     /// The request contradicts a frozen configuration.
     public static let configMismatch = Status(raw: uform_status_config_mismatch_k)
-    /// A call was refused rather than waited for - a full deferred table, or an arena serving another call.
+    /// A call was refused rather than waited for - a full deferred table, or an arena
+    /// serving another call.
     public static let contended = Status(raw: uform_status_contended_k)
     /// A progress handler asked the call to stop; it unwound and published nothing.
     public static let cancelled = Status(raw: uform_status_cancelled_k)
@@ -84,8 +85,8 @@ public struct UFormError: Swift.Error, CustomStringConvertible, Equatable, Senda
     }
 }
 
-/// Reads `name` through a C `from_name` table, keeping only a value whose own spelling echoes it, since every
-/// table answers some default for a name it does not know.
+/// Reads `name` through a C `from_name` table, keeping only a value whose own spelling echoes it,
+/// since every table answers some default for a name it does not know.
 func parsed<Raw>(
     _ name: String,
     _ read: (uform_bytes_view_t) -> Raw,
@@ -99,8 +100,9 @@ func parsed<Raw>(
 
 // MARK: - Scalars & Moods
 
-/// A scalar type a model computes in and its outputs land as, numbered as USearch numbers it, carrying the C
-/// enumerator. Sub-byte kinds pack several dimensions per byte, as their `xN` suffixes spell.
+/// A scalar type a model computes in and its outputs land as, numbered as USearch numbers
+/// it, carrying the C enumerator. Sub-byte kinds pack several dimensions per byte, as their
+/// `xN` suffixes spell.
 public struct Scalar: Hashable, Sendable, CustomStringConvertible {
     /// The C enumerator.
     let raw: uform_scalar_t
@@ -172,8 +174,8 @@ public struct Mood: Hashable, Sendable, CustomStringConvertible {
 
 // MARK: - Classes & Devices
 
-/// A CPU family UForm ships tuned kernels for, carrying the C enumerator; dispatch reports its pick in this
-/// vocabulary, and a RAM placement may pin one.
+/// A CPU family UForm ships tuned kernels for, carrying the C enumerator; dispatch reports its pick
+/// in this vocabulary, and a RAM placement may pin one.
 public struct CPUClass: Hashable, Sendable, CustomStringConvertible {
     /// The C enumerator.
     let raw: uform_cpu_class_t
@@ -235,8 +237,8 @@ public struct CPUClass: Hashable, Sendable, CustomStringConvertible {
     init(raw: uform_cpu_class_t) { self.raw = raw }
 }
 
-/// A GPU family UForm ships tuned kernels for, carrying the C enumerator; dispatch reports its pick in this
-/// vocabulary, and a VRAM placement may pin one.
+/// A GPU family UForm ships tuned kernels for, carrying the C enumerator; dispatch reports its pick
+/// in this vocabulary, and a VRAM placement may pin one.
 public struct GPUClass: Hashable, Sendable, CustomStringConvertible {
     /// The C enumerator.
     let raw: uform_gpu_class_t
@@ -301,8 +303,8 @@ public struct GPUVendor: Hashable, Sendable {
     public static let apple = GPUVendor(raw: uform_gpu_vendor_apple_k)
 }
 
-/// One GPU this process can drive; its position in `gpuDevices()` is the ordinal every VRAM placement names it by.
-/// Mirrors `uform_gpu_device_t`.
+/// One GPU this process can drive; its position in `gpuDevices()` is the ordinal every VRAM
+/// placement names it by. Mirrors `uform_gpu_device_t`.
 public struct GPUDevice: Sendable {
     /// The vendor whose runtime drives the device.
     public var vendor: GPUVendor
@@ -329,8 +331,8 @@ public struct GPUDevice: Sendable {
     }
 }
 
-/// Every GPU this process can drive, NVIDIA devices first, then AMD; empty on a machine without GPUs. Calls
-/// `uform_gpu_devices`.
+/// Every GPU this process can drive, NVIDIA devices first, then AMD; empty on a machine without
+/// GPUs. Calls `uform_gpu_devices`.
 public func gpuDevices() throws(UFormError) -> [GPUDevice] {
     let landing = Landing()
     let count = landing.slots(0)
@@ -366,11 +368,11 @@ public enum Continuation: Sendable {
     case cancel
 }
 
-/// A periodic report of a long call's advance - units finished and units in total, items for an encoding and
-/// tensors for a load - and the caller's chance to stop it.
+/// A periodic report of a long call's advance - units finished and units in total, items for an
+/// encoding and tensors for a load - and the caller's chance to stop it.
 ///
-/// Never invoked concurrently, so it needs no synchronization of its own, but it runs on whichever thread
-/// advanced the work, hence `@Sendable`.
+/// Never invoked concurrently, so it needs no synchronization of its own, but it runs on whichever
+/// thread advanced the work, hence `@Sendable`.
 public typealias Progress = @Sendable (_ completed: Int, _ total: Int) -> Continuation
 
 /// A progress handler placed in a landing, since a Swift closure has no stable C representation.
@@ -390,9 +392,9 @@ private let progressTrampoline: uform_progress_callback_t = { completed, total, 
 
 /// Everything one call points the library at, held where it cannot move until the call is final.
 ///
-/// Submission copies the argument structure, so only its pointees live here: the outcome, the slots the call
-/// writes, the tapes it reads, and the closures it calls back. A blocking call releases it on return, and a
-/// deferred one is kept by its `Deferred` until final.
+/// Submission copies the argument structure, so only its pointees live here: the outcome, the slots
+/// the call writes, the tapes it reads, and the closures it calls back. A blocking call releases it
+/// on return, and a deferred one is kept by its `Deferred` until final.
 final class Landing {
     /// Whether the call blocks or returns once submitted.
     let completion: uform_completion_t
@@ -410,7 +412,8 @@ final class Landing {
         outcome.initialize(to: uform_outcome_t())
     }
 
-    /// Runs only once the call is final: it returned blocking, its `Deferred` waited, or it never crossed.
+    /// Runs only once the call is final: it returned blocking, its `Deferred` waited, or
+    /// it never crossed.
     deinit {
         for slot in slots { slot.deallocate() }
         outcome.deallocate()
@@ -419,7 +422,8 @@ final class Landing {
     /// Whether the call returns once submitted, so its result is read on a later wait.
     var isDeferred: Bool { completion == uform_completion_deferred_k }
 
-    /// Allocates `count` trivial values, initialized to `initial`, which the call reads or writes through.
+    /// Allocates `count` trivial values, initialized to `initial`, which the call reads
+    /// or writes through.
     func slots<Value>(_ initial: Value, count: Int = 1) -> UnsafeMutablePointer<Value> {
         let values = UnsafeMutablePointer<Value>.allocate(capacity: Swift.max(count, 1))
         values.initialize(repeating: initial, count: Swift.max(count, 1))
@@ -427,7 +431,8 @@ final class Landing {
         return values
     }
 
-    /// Copies trivial `values` into the landing, answering nil for none, as the C side reads an empty list.
+    /// Copies trivial `values` into the landing, answering nil for none, as the C side reads
+    /// an empty list.
     func lend<Element>(_ values: [Element]) -> UnsafePointer<Element>? {
         guard let first = values.first else { return nil }
         let copy = slots(first, count: values.count)
@@ -435,8 +440,8 @@ final class Landing {
         return UnsafePointer(copy)
     }
 
-    /// Lends the UTF-8 bytes of a path or a name, never terminated, by contract, copied once into the landing so a
-    /// deferred call may read them.
+    /// Lends the UTF-8 bytes of a path or a name, never terminated, by contract, copied once into
+    /// the landing so a deferred call may read them.
     func lend(_ text: String) -> uform_bytes_view_t {
         let utf8 = text.utf8
         guard !utf8.isEmpty else { return uform_bytes_view_t(data: nil, length: 0) }
@@ -445,7 +450,8 @@ final class Landing {
         return uform_bytes_view_t(data: bytes, length: utf8.count)
     }
 
-    /// Lends the host placement every RAM load and executor takes; nil `cpuClass` derives the CPU's own.
+    /// Lends the host placement every RAM load and executor takes; nil `cpuClass` derives
+    /// the CPU's own.
     func ram(_ memoryDomains: [Int32], _ cpuClass: CPUClass?) -> uform_ram_options_t {
         uform_ram_options_t(
             memory_domains: lend(memoryDomains),
@@ -454,7 +460,8 @@ final class Landing {
         )
     }
 
-    /// Lends the device placement every VRAM load and executor takes; nil `gpuClass` derives the devices' own.
+    /// Lends the device placement every VRAM load and executor takes; nil `gpuClass` derives
+    /// the devices' own.
     func vram(_ devices: [Int32], _ gpuClass: GPUClass?) -> uform_vram_options_t {
         uform_vram_options_t(
             devices: lend(devices),
@@ -463,8 +470,9 @@ final class Landing {
         )
     }
 
-    /// Lays `items` end to end with Apache Arrow offsets around them, as every ragged input crosses: the one copy a
-    /// verb makes, into the landing, so a deferred call may read the tape after the verb returns.
+    /// Lays `items` end to end with Apache Arrow offsets around them, as every ragged input
+    /// crosses: the one copy a verb makes, into the landing, so a deferred call may read the tape
+    /// after the verb returns.
     func tape<Item: Collection>(_ items: [Item], _ scalar: Scalar) -> uform_tape_view_t
     where Item.Element: BitwiseCopyable {
         let offsets = slots(0, count: items.count + 1)
@@ -483,8 +491,8 @@ final class Landing {
         return uform_tape_view_t(data: UnsafeRawPointer(data), offsets: UnsafePointer(offsets), scalar: scalar.raw)
     }
 
-    /// Lends an optional handler and its report count as the progress every reporting verb takes; nil lends a
-    /// null callback.
+    /// Lends an optional handler and its report count as the progress every reporting verb takes;
+    /// nil lends a null callback.
     func lend(_ progress: Progress?, steps: Int) -> uform_progress_t {
         guard let progress else { return uform_progress_t(callback: nil, state: nil, steps: steps) }
         let state = ProgressState(progress)
@@ -496,16 +504,18 @@ final class Landing {
         )
     }
 
-    /// Lends `arena` to the call, answering the stamp its views carry once `rewind` advances the arena to it.
+    /// Lends `arena` to the call, answering the stamp its views carry once `rewind` advances the
+    /// arena to it.
     func lend(_ arena: Arena) -> ArenaWrite {
         let write = ArenaWrite(arena: arena, generation: arena.generation &+ 1)
         lent = write
         return write
     }
 
-    /// Advances the lent arena once the library took the call, after a blocking one returns or right after a
-    /// deferred one is submitted, so the views earlier calls wrote there stop reading. Failed calls advance it
-    /// too, and only a `contended` one, which never touched the arena, does not.
+    /// Advances the lent arena once the library took the call, after a blocking one returns or
+    /// right after a deferred one is submitted, so the views earlier calls wrote there stop
+    /// reading. Failed calls advance it too, and only a `contended` one, which never touched the
+    /// arena, does not.
     func rewind() {
         guard let write = lent else { return }
         lent = nil
@@ -520,8 +530,8 @@ final class Landing {
         return try result()
     }
 
-    /// The submission of a verb whose result `read` builds once final: at once for a blocking call, and kept
-    /// only by a deferred one, so the blocking path forms no escaping closure.
+    /// The submission of a verb whose result `read` builds once final: at once for a blocking call,
+    /// and kept only by a deferred one, so the blocking path forms no escaping closure.
     func submitted<Value>(_ read: @escaping () throws(UFormError) -> Value) throws(UFormError) -> Submission<Value> {
         try isDeferred ? .pending(self, read) : .final(self.read(read))
     }
@@ -555,8 +565,9 @@ func created<Handle>(_ slot: UnsafeMutablePointer<Handle?>) throws(UFormError) -
 
 /// A call submitted to an executor, which finishes there while the caller does other work.
 ///
-/// It owns the call's outcome, outputs and copied inputs until the call is final. The handles it names, the
-/// arena among them, it borrows as a blocking call does. Releasing an unfinished one waits for it first.
+/// It owns the call's outcome, outputs and copied inputs until the call is final. The handles it
+/// names, the arena among them, it borrows as a blocking call does. Releasing an unfinished one
+/// waits for it first.
 public final class Deferred<Value> {
     /// The landing and the result reader.
     private let submission: Submission<Value>
@@ -571,15 +582,15 @@ public final class Deferred<Value> {
         if case .pending(let landing, _) = submission { _ = uform_outcome_wait(landing.outcome) }
     }
 
-    /// `deferred` until the call is final, then `success` or its failure, read without blocking. Calls
-    /// `uform_outcome_status`.
+    /// `deferred` until the call is final, then `success` or its failure, read without
+    /// blocking. Calls `uform_outcome_status`.
     public var status: Status {
         guard case .pending(let landing, _) = submission else { return .success }
         return Status(raw: uform_outcome_status(landing.outcome))
     }
 
-    /// Blocks until the call is final, then answers its result or throws its failure, the same every time it is
-    /// asked. Calls `uform_outcome_wait`.
+    /// Blocks until the call is final, then answers its result or throws its failure, the same
+    /// every time it is asked. Calls `uform_outcome_wait`.
     public func wait() throws(UFormError) -> Value { try submission.wait() }
 }
 
@@ -587,9 +598,9 @@ public final class Deferred<Value> {
 extension Deferred: @unchecked Sendable where Value: Sendable {}
 
 extension Deferred {
-    /// Waits for the call on a Dispatch thread, so an `async` caller suspends rather than blocks and the
-    /// cooperative pool keeps every thread; the result is read back in the caller's isolation. Binding-only:
-    /// runs `wait`.
+    /// Waits for the call on a Dispatch thread, so an `async` caller suspends rather than blocks
+    /// and the cooperative pool keeps every thread; the result is read back in the caller's
+    /// isolation. Binding-only: runs `wait`.
     nonisolated(nonsending) public var value: Value {
         get async throws(UFormError) {
             if case .pending(let landing, _) = submission {
@@ -608,10 +619,11 @@ extension Deferred {
 
 // MARK: - Executors
 
-/// The host threads or device streams a call runs on, with the activation scratch and the staging they use.
+/// The host threads or device streams a call runs on, with the activation scratch and the
+/// staging they use.
 ///
-/// One executor serves any number of models of its residency, so several models share one machine's cores or
-/// devices; a mismatch reports `device`. Calls on one executor run in submission order.
+/// One executor serves any number of models of its residency, so several models share one machine's
+/// cores or devices; a mismatch reports `device`. Calls on one executor run in submission order.
 public final class Executor: @unchecked Sendable {
     /// The native handle, released by `deinit`.
     let raw: uform_executor_t
@@ -621,9 +633,10 @@ public final class Executor: @unchecked Sendable {
     }
 
     /// Spawns host threads for RAM-resident models, interleaved across the compute domains local to
-    /// `memoryDomains`; an empty list derives every node the process may allocate on. Zero `threads` takes 7/8 of
-    /// the cores those domains carry, and zero `deferredLimit` sizes the deferred table by default. A `cpuClass`
-    /// dispatches as if the CPU were of that class; nil derives its own. Calls `uform_executor_for_ram`.
+    /// `memoryDomains`; an empty list derives every node the process may allocate on. Zero
+    /// `threads` takes 7/8 of the cores those domains carry, and zero `deferredLimit` sizes the
+    /// deferred table by default. A `cpuClass` dispatches as if the CPU were of that class; nil
+    /// derives its own. Calls `uform_executor_for_ram`.
     public static func forRam(
         memoryDomains: [Int32] = [],
         cpuClass: CPUClass? = nil,
@@ -643,8 +656,9 @@ public final class Executor: @unchecked Sendable {
         return try landing.read { () throws(UFormError) in Executor(raw: try created(executor)) }
     }
 
-    /// Creates a RAM executor over a borrowed ForkUnion `fu_pool_t`, which must outlive it. Reports `unsupported`
-    /// until the library wires borrowed pools. A `cpuClass` pins as `forRam` does. Calls `uform_executor_on_pool`.
+    /// Creates a RAM executor over a borrowed ForkUnion `fu_pool_t`, which must outlive it.
+    /// Reports `unsupported` until the library wires borrowed pools. A `cpuClass` pins as `forRam`
+    /// does. Calls `uform_executor_on_pool`.
     public static func onPool(
         memoryDomains: [Int32] = [],
         cpuClass: CPUClass? = nil,
@@ -664,11 +678,12 @@ public final class Executor: @unchecked Sendable {
         return try landing.read { () throws(UFormError) in Executor(raw: try created(executor)) }
     }
 
-    /// Opens one submission stream on every named device, or borrows the caller's `streams`, one per device in
-    /// `devices` order; an empty list derives one free device. A zero `scratchLimit` lets per-device scratch grow
-    /// as batches ask. A `gpuClass` dispatches every device as that class; nil derives theirs. The host decoders take
-    /// 7/8 of the cores local to `memoryDomains` and dispatch as `cpuClass`, where nil derives the CPU's own. Calls
-    /// `uform_executor_for_vram`.
+    /// Opens one submission stream on every named device, or borrows the caller's `streams`,
+    /// one per device in `devices` order; an empty list derives one free device. A zero
+    /// `scratchLimit` lets per-device scratch grow as batches ask. A `gpuClass` dispatches
+    /// every device as that class; nil derives theirs. The host decoders take 7/8 of the
+    /// cores local to `memoryDomains` and dispatch as `cpuClass`, where nil derives the CPU's
+    /// own. Calls `uform_executor_for_vram`.
     public static func forVram(
         devices: [Int32] = [],
         gpuClass: GPUClass? = nil,
@@ -701,8 +716,9 @@ public final class Executor: @unchecked Sendable {
     /// Calls `uform_executor_free`.
     deinit { uform_executor_free(raw) }
 
-    /// Waits for every call submitted before it, then adopts `mood` whenever the executor next goes idle; a
-    /// failure is the executor's own, never one of a drained call. Calls `uform_executor_drain`.
+    /// Waits for every call submitted before it, then adopts `mood` whenever the
+    /// executor next goes idle; a failure is the executor's own, never one of a drained
+    /// call. Calls `uform_executor_drain`.
     public func drain(mood: Mood = .parked) throws(UFormError) {
         let landing = Landing()
         var arguments = uform_executor_drain_t(executor: raw, outcome: landing.outcome, mood: mood.raw)
@@ -713,13 +729,14 @@ public final class Executor: @unchecked Sendable {
 
 // MARK: - Arenas
 
-/// Memory the library writes every output whose length scales with a call into, reused across calls so a steady
-/// loop allocates once.
+/// Memory the library writes every output whose length scales with a call into, reused across calls
+/// so a steady loop allocates once.
 ///
-/// Every output verb requires one and answers views reading it in place. Each call given the arena rewinds it,
-/// so the views an earlier call answered stop reading: any read of them traps, as an out-of-bounds index does.
-/// To keep a result past the next call, give that call another arena. An arena serves one call at a time,
-/// deferred ones included, and a call naming it while another holds it is refused with `contended`.
+/// Every output verb requires one and answers views reading it in place. Each call given the arena
+/// rewinds it, so the views an earlier call answered stop reading: any read of them traps, as an
+/// out-of-bounds index does. To keep a result past the next call, give that call another arena. An
+/// arena serves one call at a time, deferred ones included, and a call naming it while another
+/// holds it is refused with `contended`.
 public final class Arena {
     /// The native handle, released by `deinit`.
     let raw: uform_arena_t
@@ -728,8 +745,8 @@ public final class Arena {
     /// Advanced by every call given the arena, so a view remembers which call wrote it.
     var generation: UInt64 = 0
 
-    /// Makes an arena where `executor` computes, host pages or its GPU's memory, decided once; nil makes host
-    /// pages for calls on the calling thread. Calls `uform_arena_init`.
+    /// Makes an arena where `executor` computes, host pages or its GPU's memory, decided once; nil
+    /// makes host pages for calls on the calling thread. Calls `uform_arena_init`.
     public init(on executor: Executor? = nil) throws(UFormError) {
         let landing = Landing()
         let arena = landing.slots(uform_arena_t?.none)
@@ -768,10 +785,11 @@ struct ArenaWrite {
 
 // MARK: - Rows
 
-/// A run of rows a call wrote packed into its arena, one per item, read in place. Mirrors `uform_rows_view_t`.
+/// A run of rows a call wrote packed into its arena, one per item, read in
+/// place. Mirrors `uform_rows_view_t`.
 ///
-/// Rows of `f32`, `bf16` and `f16` read as `Float`; `withUnsafeBytes` hands any scalar on as stored, such as
-/// to a USearch index.
+/// Rows of `f32`, `bf16` and `f16` read as `Float`; `withUnsafeBytes` hands any scalar on as
+/// stored, such as to a USearch index.
 public struct Rows: RandomAccessCollection {
     /// The arena the rows live in, and which call wrote them.
     let write: ArenaWrite
@@ -865,8 +883,8 @@ private func widened(half bits: UInt16) -> Float {
     }
 }
 
-/// A ragged run of rows a call wrote into its arena, as many per item as the item had tokens left after
-/// truncation, read in place. Mirrors `uform_rows_tape_view_t`.
+/// A ragged run of rows a call wrote into its arena, as many per item as the item had tokens left
+/// after truncation, read in place. Mirrors `uform_rows_tape_view_t`.
 public struct RowsTape: RandomAccessCollection {
     /// Every item's rows, end to end.
     public let rows: Rows
@@ -900,8 +918,8 @@ public struct RowsTape: RandomAccessCollection {
     }
 }
 
-/// A ragged run of `f32` values a call wrote into its arena, as many per item as the item asked for, read in
-/// place. Mirrors `uform_tape_view_t`.
+/// A ragged run of `f32` values a call wrote into its arena, as many per item as the item asked
+/// for, read in place. Mirrors `uform_tape_view_t`.
 public struct Tape: RandomAccessCollection {
     /// The arena the values live in, and which call wrote them.
     let write: ArenaWrite

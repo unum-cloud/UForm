@@ -3,26 +3,28 @@
  *  @author Ash Vardanian
  *  @date July 4, 2026
  *  @brief The byte-level Parquet tokens loader: tied to a @b dataset, not a GPU. @c make reads only
- *      each shard's Parquet footer (host, once per dataset), so the shard metadata is never replicated
- *      per GPU.
+ *      each shard's Parquet footer (host, once per dataset), so the shard metadata is never
+ *      replicated per GPU.
  *
  *  Every @c fill takes the caller's stream and rank, so the @b same loader serves a different GPU
  *  on a different step.
  *
  *  Each @c fill opens @b as many randomly chosen files as it takes to pool at least as many rows as
- *  every batch's segments combined — at least two (unless the whole dataset is one file), so a batch is
- *  never drawn from a single homogeneous shard. The files are drawn by a seeded hash keyed by
- *  @c (seed, step, rank) with probability @b proportional to each file's row count, so a bigger file is
- *  pooled more often, different GPUs tend to work on different files (occasional overlap is fine), and a
- *  restart reproduces the exact draw. The pooled files decode into @b one device reservoir; a keyed
- *  permutation over the whole pool then hands every batch a scatter of rows across those files.
+ *  every batch's segments combined — at least two (unless the whole dataset is one file), so a
+ *  batch is never drawn from a single homogeneous shard. The files are drawn by a seeded hash keyed
+ *  by @c (seed, step, rank) with probability @b proportional to each file's row count, so a bigger
+ *  file is pooled more often, different GPUs tend to work on different files (occasional overlap is
+ *  fine), and a restart reproduces the exact draw. The pooled files decode into @b one device
+ *  reservoir; a keyed permutation over the whole pool then hands every batch a scatter of rows
+ *  across those files.
  *
- *  A big part of the work is on the GPU: the decode (cuDF over GDS), the row-index permutation, and the
- *  geometry + gather packing are all kernels on the caller's stream; only choosing how many files to
- *  open is host arithmetic over the footer row counts. The reservoir and index scratch are re-allocated
- *  per fill and reclaimed once the batches are packed — never hoisted, since shard sizes vary wildly.
- *  The loader fills only this call's batches; the shuffle across batches and across the multimem /
- *  colocated domains is @ref unum::uform::encoder::multimodal_batch_mixer_t 's job, downstream.
+ *  A big part of the work is on the GPU: the decode (cuDF over GDS), the row-index permutation, and
+ *  the geometry + gather packing are all kernels on the caller's stream; only choosing how many
+ *  files to open is host arithmetic over the footer row counts. The reservoir and index scratch are
+ *  re-allocated per fill and reclaimed once the batches are packed — never hoisted, since shard
+ *  sizes vary wildly. The loader fills only this call's batches; the shuffle across batches and
+ *  across the multimem / colocated domains is @ref unum::uform::encoder::multimodal_batch_mixer_t
+ *  's job, downstream.
  */
 #pragma once
 
@@ -56,8 +58,8 @@ using tokens_matrix_span_t = nk::tensor_span<token_id_t, 2>;
  *  @param[in] elements The device indices of the elements to pack, one per segment.
  *  @param[in] prefix The device bytes every segment starts with, such as @c "query: " , often none.
  *  @param[out] tokens The rectangle the bytes land in, as token IDs.
- *  @param[out] segment_offsets @b [segments+1] start positions in @p tokens , the cursor's end at
- *      the back.
+ *  @param[out] segment_offsets @b [segments+1] start positions in @p tokens , the cursor's end
+ *      at the back.
  *  @param[out] segment_lengths @b [segments] the bytes each segment kept, its prefix included.
  *  @param[out] segment_modality @b [segments] @c text_k throughout.
  *  @param[in,out] dropped @b [1] the batch's drop count, which every segment overflowing @p tokens
@@ -100,31 +102,35 @@ struct tokens_loader_parquet_t {
      *  @brief Fills the next few @p batches of training data for the MLM objective on one GPU rank.
      *  @sa multimodal_batch_mixer_t for subsequent cross-GPU mixing.
      *
-     *  This method opens enough randomly chosen files to sample texts segments to fill all the rows in @p batches
-     *  and packs them efficiently, with many segments per row in each matrix. Unless the dataset contains just a
-     *  single shard, it takes ≥2 shards to ensure we don't samplehighly uniform data from the same shard.
+     *  This method opens enough randomly chosen files to sample texts segments to fill all the rows
+     *  in @p batches and packs them efficiently, with many segments per row in each matrix. Unless
+     *  the dataset contains just a single shard, it takes ≥2 shards to ensure we don't samplehighly
+     *  uniform data from the same shard.
      *
      *  @param[in] config Describes which columns we need to take from Parquet tables.
-     *  @param[in,out] gpu_stream The GPU-specific stream on which the staging and packing should
-     *      happen.
-     *  @param[in] gpu_rank Ensures different GPUs won't take the same rows when sampling the same dataset.
+     *  @param[in,out] gpu_stream The GPU-specific stream on which the staging and
+     *      packing should happen.
+     *  @param[in] gpu_rank Ensures different GPUs won't take the same rows when sampling
+     *      the same dataset.
      *  @param[in] training_step Ensures subsequent steps sample different data.
-     *  @param[out] batches Output matrices to be populated with token segments, but not the media modalities.
+     *  @param[out] batches Output matrices to be populated with token segments, but not
+     *      the media modalities.
      */
     [[nodiscard]] expected_t fill(                                            //
         gpu_stream_t &gpu_stream, tokens_base_loader_parquet_config_t config, //
         u32_t gpu_rank, u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept;
 
     /**
-     *  @brief The distinct shard paths this rank draws for @p training_step — the keyed weighted file pick,
-     *      pure over the loader's footer table (no IO), exposed for observability and cross-rank sampling
-     *      conformance.
+     *  @brief The distinct shard paths this rank draws for @p training_step — the keyed weighted
+     *      file pick, pure over the loader's footer table (no IO), exposed for observability and
+     *      cross-rank sampling conformance.
      *
-     *  @p target_segments is the pool target ( @c unroll·segments_per_batch ) a @c fill would
-     *  cover; the returned views borrow the loader's owned paths and pick storage, valid until the
-     *  next draw.
+     *  @p target_segments is the pool target ( @c unroll · segments_per_batch ) a @c fill would
+     *  cover; the returned views borrow the loader's owned paths and pick storage, valid until
+     *  the next draw.
      *
-     *  @param[in] gpu_rank The GPU rank the draw is keyed by — different ranks draw different shard sets.
+     *  @param[in] gpu_rank The GPU rank the draw is keyed by — different ranks draw
+     *      different shard sets.
      *  @param[in] training_step The step the draw is keyed by.
      *  @param[in] target_segments The number of rows the pooled shards must cover.
      */
@@ -162,8 +168,8 @@ struct tokens_base_loader_jsonl_config_t {
 };
 
 /**
- *  @brief The JSONL sibling of @ref tokens_loader_parquet_t — a @b separate class (no format punning),
- *      same dataset-scoped, rank-agnostic shape.
+ *  @brief The JSONL sibling of @ref tokens_loader_parquet_t — a @b separate class (no format
+ *      punning), same dataset-scoped, rank-agnostic shape.
  *
  *  The one difference is footerless: JSONL carries no row count, so @c make weighs files by @b byte
  *  size and @c fill decodes files one at a time until the reservoir covers the batch, rather than
@@ -187,8 +193,9 @@ struct tokens_loader_jsonl_t {
      *  @brief Fill the next few @p batches for the MLM objective on one GPU rank.
      *  @sa multimodal_batch_mixer_t for the cross-GPU mixing.
      *
-     *  Draws files weighted by byte size and keyed by @c (seed, step, rank) , decodes them until the pooled
-     *  rows cover @p batches (≥2 files unless the dataset is one), then packs many documents per row.
+     *  Draws files weighted by byte size and keyed by @c (seed, step, rank) , decodes them until
+     *  the pooled rows cover @p batches (≥2 files unless the dataset is one), then packs many
+     *  documents per row.
      *
      *  @param[in] config Which JSON field to take.
      *  @param[in,out] gpu_stream The GPU-specific stream the decode and packing run on.
@@ -239,8 +246,8 @@ struct tokens_base_loader_csv_config_t {
 };
 
 /**
- *  @brief The CSV sibling of @ref tokens_loader_parquet_t and @ref tokens_loader_jsonl_t — a @b separate
- *      class (no format punning), same dataset-scoped, rank-agnostic shape.
+ *  @brief The CSV sibling of @ref tokens_loader_parquet_t and @ref tokens_loader_jsonl_t — a
+ *      @b separate class (no format punning), same dataset-scoped, rank-agnostic shape.
  *
  *  Footerless like JSONL: @c make weighs files by @b byte size and @c fill decodes files one at a
  *  time until the reservoir covers the batch.
@@ -263,8 +270,9 @@ struct tokens_loader_csv_t {
      *  @brief Fill the next few @p batches for the MLM objective on one GPU rank.
      *  @sa multimodal_batch_mixer_t for the cross-GPU mixing.
      *
-     *  Draws files weighted by byte size and keyed by @c (seed, step, rank) , decodes them until the pooled
-     *  rows cover @p batches (≥2 files unless the dataset is one), then packs many documents per row.
+     *  Draws files weighted by byte size and keyed by @c (seed, step, rank) , decodes them until
+     *  the pooled rows cover @p batches (≥2 files unless the dataset is one), then packs many
+     *  documents per row.
      *
      *  @param[in] config Which CSV column to take, its delimiter, and whether it has a header.
      *  @param[in,out] gpu_stream The GPU-specific stream the decode and packing run on.

@@ -44,13 +44,14 @@ using namespace unum::uform::test;
 static char const *const texts_k[] = {"Hello, world!", "UForm encodes bytes.", "a"};
 static constexpr std::size_t items_k = 3;
 
-/** The largest absolute difference relative to the reference's largest magnitude, and the worst row cosine. */
+/** The largest absolute difference relative to the reference's largest magnitude, and the
+ *  worst row cosine. */
 struct agreement_t {
     double relative = 0, cosine = 1;
 };
 
-/** What one variant encoded from the texts, every surface in Float32; a surface a run skips is
- *  empty. */
+/** What one variant encoded from the texts, every surface in Float32; a surface a run
+ *  skips is empty. */
 struct encoded_t {
     std::vector<float> states, embeddings, token_vectors, masked_logits;
 };
@@ -245,8 +246,8 @@ static void rust_parity(test_suite_t &suite, char const *states_path, char const
     check_agreement(suite, "the Rust crate", rust, reference, hidden, 5e-2);
 }
 
-/** Checks every token vector of the serial floor's @p reference has unit length at the BFloat16
- *  floor. */
+/** Checks every token vector of the serial floor's @p reference has unit length at
+ *  the BFloat16 floor. */
 static void token_vectors_unit_length(test_suite_t &suite, encoded_t const &reference, std::size_t width) {
     if (reference.token_vectors.empty()) return suite.skip("the checkpoint carries no token head");
     f32r2_view_t const vectors {reference.token_vectors.data(), reference.token_vectors.size() / width, width};

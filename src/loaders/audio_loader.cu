@@ -1,11 +1,12 @@
 /**
- *  @brief The audio loader's bodies: the libav + ForkUnion decoder session and the draw → stage → decode →
- *      chunk batch path — see the header for the contract.
+ *  @brief The audio loader's bodies: the libav + ForkUnion decoder session and the draw → stage →
+ *      decode → chunk batch path — see the header for the contract.
  *  @file src/loaders/audio_loader.cu
  *
- *  Host decode is @ref unum::uform::media::decode_audio , one mono Float32 clip per job across the pool; the GPU then
- *  chunks it into frames of @c chunk_samples raw samples and scatters each clip into the batch's @c audio_samples
- *  as one sub-row segment. No cuFFT, no mel — the spectral frontend is a learnable layer of the encoder.
+ *  Host decode is @ref unum::uform::media::decode_audio , one mono Float32 clip per job across the
+ *  pool; the GPU then chunks it into frames of @c chunk_samples raw samples and scatters each clip
+ *  into the batch's @c audio_samples as one sub-row segment. No cuFFT, no mel — the spectral
+ *  frontend is a learnable layer of the encoder.
  */
 #include <algorithm> // `std::min`, `std::find`, `std::upper_bound` — the weighted file draw
 #include <utility>   // `std::move` — expected-channel propagation
@@ -21,7 +22,8 @@ using namespace unum::uform::utilities;
 using namespace ul;
 
 /**
- *  @brief Write one batch's audio-segment geometry with the serial cursor model (the tokens loader's walk).
+ *  @brief Write one batch's audio-segment geometry with the serial cursor model (the
+ *      tokens loader's walk).
  *
  *  Thread 0 packs each clip's @ref media_cells frames into half rows (two clips share a row, at its
  *  start and its middle), and records @c segment_offsets / @c segment_lengths and @c audio_k into
@@ -73,7 +75,8 @@ expected_t ul::decode_audios(pool_view_t pool, column_view_t tape, u64r1_view_t 
     if (columns == 0 || chunk_samples == 0)
         return expected_t::fail(status_t::unsupported_k, "the audio grid is empty (columns={} chunk={})", columns,
                                 chunk_samples);
-    // The shape is the single source of geometry; each representation must match the grid's chunk width.
+    // The shape is the single source of geometry; each representation must match the
+    // grid's chunk width.
     for (audio_batch_shape_t const &representation : representations)
         if (representation.chunk_samples != chunk_samples)
             return expected_t::fail(status_t::unsupported_k,
@@ -87,9 +90,10 @@ expected_t ul::decode_audios(pool_view_t pool, column_view_t tape, u64r1_view_t 
     // One clip fills half a row: `clip_cells` frames, each of `chunk_samples` raw samples.
     u32_t const clip_samples = clip_cells * chunk_samples;
 
-    // Hop each drawn clip's encoded bytes device → pinned back to back — the decoder's host-side source. A pinned
-    // `column_view_t` (packed `encoded` buffer + `[clips+1]` offsets) tapes them, so a per-clip byte range is one
-    // indexed `staged_tape[clip]` read whose length is the adjacent-offset difference — no side table to disagree.
+    // Hop each drawn clip's encoded bytes device → pinned back to back — the decoder's host-side
+    // source. A pinned `column_view_t` (packed `encoded` buffer + `[clips+1]` offsets) tapes them,
+    // so a per-clip byte range is one indexed `staged_tape[clip]` read whose length is the
+    // adjacent-offset difference — no side table to disagree.
     st::basic_vector<b8_t, pinned_alloc<b8_t>> encoded;
     st::basic_vector<u64_t> encoded_offsets;
     if (st::failed(encoded_offsets.resize(st::assume_uninitialized, clips + 1)))
@@ -129,8 +133,9 @@ expected_t ul::decode_audios(pool_view_t pool, column_view_t tape, u64r1_view_t 
     i32_t *const status_base = statuses.data();
     u32_t const *const rate_base = sample_rates.data();
     std::size_t const reps = reps_count;
-    // A job is (clip, representation): job j = (clip j/reps, rep j%reps), resampled to that representation's rate and
-    // chunked into row j. A clip is decoded once per representation (one decode for the single-representation case).
+    // A job is (clip, representation): job j = (clip j/reps, rep j%reps), resampled to that
+    // representation's rate and chunked into row j. A clip is decoded once per representation (one
+    // decode for the single-representation case).
     status_t const dispatched = pool.for_n(job_count, [=](std::size_t job, std::size_t) noexcept {
         std::size_t const clip = job / reps;
         bytes_view_t const bytes = staged_tape[clip];
@@ -139,9 +144,10 @@ expected_t ul::decode_audios(pool_view_t pool, column_view_t tape, u64r1_view_t 
     });
     if (dispatched != status_t::success_k)
         return expected_t::fail(dispatched, "the decode pool refused {} audio jobs", job_count);
-    // Mark-and-continue: a clip that fails to decode is left silence (decode_audio zeros its row), matching
-    // the batch's "existence is read from the data" contract and the video loader's per-clip fault isolation. Only a
-    // wholly failed batch is a systematic error (a bad codec / driver), so fail loud only then.
+    // Mark-and-continue: a clip that fails to decode is left silence (decode_audio zeros its row),
+    // matching the batch's "existence is read from the data" contract and the video loader's
+    // per-clip fault isolation. Only a wholly failed batch is a systematic error (a bad codec /
+    // driver), so fail loud only then.
     std::size_t failures = 0;
     for (std::size_t job = 0; job != job_count; ++job)
         if (statuses[job] != static_cast<i32_t>(status_t::success_k)) ++failures;
@@ -150,9 +156,9 @@ expected_t ul::decode_audios(pool_view_t pool, column_view_t tape, u64r1_view_t 
                                 job_count);
 
     // Climb onto the GPU: one contiguous copy lands the decoded PCM into the grid's leading
-    // `job_count` half rows — the decode buffer already matches those cells, so there is no reshape
-    // or scatter — then the geometry kernel writes the segment table. Both retire at the closing
-    // synchronize.
+    // `job_count` half rows — the decode buffer already matches those cells, so there is no
+    // reshape or scatter — then the geometry kernel writes the segment table. Both retire at
+    // the closing synchronize.
     f32r1_span_t const landing {audio_samples.data(), waveform_samples};
     if (expected_t hopped = copy_host_to_device(std::span<f32_t const> {waveforms}, landing, stream); !hopped)
         return hopped;
@@ -175,7 +181,8 @@ expected<audio_loader_parquet_t> audio_loader_parquet_t::make(gpu_direct_storage
         return result_t::fail(status_t::invalid_argument_k, "audio geometry is empty (chunk_samples={} sample_rate={})",
                               audio.chunk_samples, audio.sample_rate);
 
-    // Expand the glob (or a plain path) into the dataset's sorted absolute shard paths — POSIX glob(3).
+    // Expand the glob (or a plain path) into the dataset's sorted absolute shard paths
+    // — POSIX glob(3).
     auto paths = expand_glob(path_or_glob);
     if (!paths) return result_t::fail(std::move(paths));
 
@@ -186,8 +193,8 @@ expected<audio_loader_parquet_t> audio_loader_parquet_t::make(gpu_direct_storage
     loader.seed_ = seed;
     loader.audio_ = audio;
 
-    // Footer only — host-side, no GPU: a running prefix of each file's row count, the weighted file draw's
-    // search table; its back holds the dataset's total rows.
+    // Footer only — host-side, no GPU: a running prefix of each file's row count, the weighted file
+    // draw's search table; its back holds the dataset's total rows.
     if (st::failed(loader.row_prefix_.resize(loader.absolute_paths_.size() + 1)))
         return result_t::fail(status_t::bad_alloc_k, "shard prefix allocation failed ({} shards)",
                               loader.absolute_paths_.size());
@@ -228,8 +235,8 @@ expected_t audio_loader_parquet_t::fill(gpu_stream_t &gpu_stream, audio_loader_p
     std::size_t const total_rows = row_prefix_[shard_count];
     constexpr splitmix64_hash_t hash {};
 
-    // Open distinct files, drawn with probability proportional to their row count, until the pool covers the
-    // fill's clips; never fewer than two, unless the whole dataset is one file.
+    // Open distinct files, drawn with probability proportional to their row count, until the pool
+    // covers the fill's clips; never fewer than two, unless the whole dataset is one file.
     st::basic_vector<sz::string_view_t> picked_paths;
     st::basic_vector<std::size_t> picked_shards;
     std::size_t pooled_estimate = 0, attempt = 0;
@@ -246,7 +253,8 @@ expected_t audio_loader_parquet_t::fill(gpu_stream_t &gpu_stream, audio_loader_p
         pooled_estimate += row_prefix_[file + 1] - row_prefix_[file];
     }
 
-    // Decode the picked files' clip column into one device reservoir; the true pool is the decoded rows.
+    // Decode the picked files' clip column into one device reservoir; the true pool is
+    // the decoded rows.
     auto reservoir_read = parquet_file_t::make(*storage_, std::span<sz::string_view_t const> {picked_paths},
                                                std::span<sz::string_view_t const> {&config.column, 1}, {}, gpu_stream);
     if (!reservoir_read) return expected_t::fail(std::move(reservoir_read));
@@ -261,7 +269,8 @@ expected_t audio_loader_parquet_t::fill(gpu_stream_t &gpu_stream, audio_loader_p
     if (!gpu_scope.ok())
         return expected_t::fail(status_t::device_error_k, "context entry failed for the loader stream");
 
-    // The reservoir's clip offsets to the host once — every per-row byte bound is then host arithmetic.
+    // The reservoir's clip offsets to the host once — every per-row byte bound is
+    // then host arithmetic.
     column_view_t const column = reservoir.column(0);
     std::size_t const offsets_count = column.size() + 1u;
     st::basic_vector<u64_t> reservoir_offsets;

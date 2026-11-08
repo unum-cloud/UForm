@@ -4,10 +4,11 @@
  *  @author Ash Vardanian
  *  @date July 4, 2026
  *
- *  Its shape mirrors @c tokens_loader.cu : a keyed file pick, one pooled reservoir, a keyed row draw, then a
- *  per-batch decode. The decode is the shared @ref decode_images : JPEG rows through the
- *  @ref nvjpeg_session_t straight off the reservoir tape, PNG/WebP rows on the CPU pool, then one NPP batch
- *  crops each to its factor-pair aspect and resizes it into the batch's shared patch grid.
+ *  Its shape mirrors @c tokens_loader.cu : a keyed file pick, one pooled reservoir, a keyed row
+ *  draw, then a per-batch decode. The decode is the shared @ref decode_images : JPEG rows
+ *  through the @ref nvjpeg_session_t straight off the reservoir tape, PNG/WebP rows on the CPU
+ *  pool, then one NPP batch crops each to its factor-pair aspect and resizes it into the batch's
+ *  shared patch grid.
  */
 #include <unistd.h> // `::write`, `STDERR_FILENO` — the triage-drop diagnostic
 
@@ -37,19 +38,20 @@ using enum um::image_format_t;
 inline constexpr u64_t file_draw_salt_k = 0x9E3779B97F4A7C15ull;
 inline constexpr u64_t row_draw_salt_k = 0xD1B54A32D192ED03ull;
 
-/** Header bytes gathered per drawn blob — enough for the magic sniff and the dimension parse (JPEG
- *  start-of-frame, PNG IHDR, WebP VP8 header) without lifting the whole compressed blob. One device
- *  gather kernel packs these prefixes contiguously so the whole triage reads back in a single D2H. */
+/** Header bytes gathered per drawn blob — enough for the magic sniff and the dimension parse
+ *  (JPEG start-of-frame, PNG IHDR, WebP VP8 header) without lifting the whole compressed blob.
+ *  One device gather kernel packs these prefixes contiguously so the whole triage reads back in
+ *  a single D2H. */
 inline constexpr std::size_t header_probe_bytes_k = 1u << 12;
 
 /**
- *  @brief Write the batch's segment geometry under the token-cursor model: each drawn image is @b one segment
- *      occupying its own column sub-budget ( @c patch_rows·patch_cols , taken from its host-computed
- *      @p grids factorization), and several images pack into one row.
+ *  @brief Write the batch's segment geometry under the token-cursor model: each drawn image is
+ *      @b one segment occupying its own column sub-budget ( @c patch_rows · patch_cols , taken from
+ *      its host-computed @p grids factorization), and several images pack into one row.
  *
- *  Thread 0 walks the segments serially — a strict scan — jumping the cursor past a row boundary a segment
- *  would cross (never crossing a row), dropping (zero length) and counting into @p dropped any
- *  segment that would overflow the @c rows·columns grid, and tagging each placed live segment
+ *  Thread 0 walks the segments serially — a strict scan — jumping the cursor past a row boundary a
+ *  segment would cross (never crossing a row), dropping (zero length) and counting into @p dropped
+ *  any segment that would overflow the @c rows · columns grid, and tagging each placed live segment
  *  @c image_k (a dropped one PADs to @c text_k , length 0). It also lands each live segment's
  *  @c (patch_rows,patch_cols) into @p image_shapes on the device — the descriptors are arena
  *  (device) memory, so the loader never writes them from the host. Segments past @p live_images
@@ -79,7 +81,8 @@ static __global__ void image_segments_kernel_(patch_grid_t const *grids, u32_t l
         if (cursor + columns > capacity) ++overflowed, columns = 0;
         segment_offsets[segment] = cursor;
         segment_lengths[segment] = columns;
-        // A live image that overflowed and dropped (length 0) reads as PAD, not a zero-length image_k segment.
+        // A live image that overflowed and dropped (length 0) reads as PAD, not a
+        // zero-length image_k segment.
         segment_modality[segment] = is_live_image && columns != 0u ? modality_t::image_k : modality_t::text_k;
         cursor += columns;
     }
@@ -87,8 +90,8 @@ static __global__ void image_segments_kernel_(patch_grid_t const *grids, u32_t l
     dropped[0] += overflowed;
 }
 
-/** One image's header-gather descriptor: where its compressed bytes start in the device tape and how
- *  many of them (capped at the probe size) to lift. */
+/** One image's header-gather descriptor: where its compressed bytes start in the device tape and
+ *  how many of them (capped at the probe size) to lift. */
 struct gather_entry_t {
 
     /** Where the image's compressed bytes start in the device tape. */
@@ -99,9 +102,9 @@ struct gather_entry_t {
 };
 
 /**
- *  @brief Gather each drawn blob's header prefix from the scattered device tape into a contiguous staging
- *      buffer — one block per image, threads stripe the copy — so triage reads them back in one D2H instead
- *      of one small transfer per image.
+ *  @brief Gather each drawn blob's header prefix from the scattered device tape into a contiguous
+ *      staging buffer — one block per image, threads stripe the copy — so triage reads them back in
+ *      one D2H instead of one small transfer per image.
  *
  *  __grid_size__ @c [min(images,cap),1,1] , grid-stride over images; no dynamic shared memory.
  */
@@ -120,16 +123,16 @@ static __global__ void gather_headers_kernel_(gather_entry_t const *entries, b8_
 }
 
 /**
- *  @brief Where one plan's pixels are decoded — the single knob that routes the JPEG-device vs CPU-fallback
- *      split.
+ *  @brief Where one plan's pixels are decoded — the single knob that routes the JPEG-device
+ *      vs CPU-fallback split.
  *
  *  The invariant lives here and nowhere else: a plan is @c jpeg_device_k iff its format is JPEG
  *  @b and the device batch was accepted; every other plan, PNG or WebP from the start or a JPEG
- *  whose batch nvJPEG rejected, is @c cpu_fallback_k . @ref triage_images_ sets the format-driven
- *  default, and a rejected batch flips its every JPEG entry to @c cpu_fallback_k in
- *  @ref decode_jpeg_plans_ , so the CPU decode fills the very same native-sized scratch region.
- *  @ref decode_cpu_plans_ then decodes exactly the @c cpu_fallback_k plans. A named route, never a
- *  bool.
+ *  whose batch nvJPEG rejected, is @c cpu_fallback_k . @ref triage_images_ sets the
+ *  format-driven default, and a rejected batch flips its every JPEG entry to @c cpu_fallback_k
+ *  in @ref decode_jpeg_plans_ , so the CPU decode fills the very same native-sized scratch
+ *  region. @ref decode_cpu_plans_ then decodes exactly the @c cpu_fallback_k plans. A named
+ *  route, never a bool.
  */
 enum class route_t : u8_t {
 
@@ -162,8 +165,8 @@ struct image_plan_t {
     /** The target patch factorization the resize/tile scatter honors. */
     patch_grid_t grid {};
 
-    /** Which road the image decodes on — its format-driven default, flipped to @c cpu_fallback_k for a
-     *  JPEG whose device batch was rejected (see @ref route_t for the invariant). */
+    /** Which road the image decodes on — its format-driven default, flipped to @c cpu_fallback_k
+     *  for a JPEG whose device batch was rejected (see @ref route_t for the invariant). */
     route_t route = route_t::cpu_fallback_k;
 };
 
@@ -227,7 +230,8 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
 }
 
 /** Fill an @c NppStreamContext from the driver — NPP needs the device's launch limits, which come
- *  from @c cuDeviceGetAttribute (no CUDA Runtime), and the driver stream, which is already a @c cudaStream_t . */
+ *  from @c cuDeviceGetAttribute (no CUDA Runtime), and the driver stream, which is already a
+ *  @c cudaStream_t . */
 [[nodiscard]] static expected<NppStreamContext> npp_context_(gpu_stream_t const &stream) noexcept {
     using result_t = expected<NppStreamContext>;
     NppStreamContext context {};
@@ -236,7 +240,8 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
     if (cuCtxGetDevice(&device) != CUDA_SUCCESS)
         return result_t::fail(status_t::device_error_k, "NPP device query failed");
     context.nCudaDeviceId = device;
-    // Accumulate the first failing driver result and push it up typed — never collapse it to a bare bool.
+    // Accumulate the first failing driver result and push it up typed — never collapse it to
+    // a bare bool.
     CUresult result = cuStreamGetFlags(stream.get(), &context.nStreamFlags);
     auto attribute = [&](CUdevice_attribute which, int &into) {
         if (result == CUDA_SUCCESS) result = cuDeviceGetAttribute(&into, which, device);
@@ -265,9 +270,9 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
     using result_t = expected<std::size_t>;
     std::size_t const images = drawn_rows.size();
     // Each round lifts one header window per pending image, a device source pointer and a capped
-    // length straight from its tape slice, in one kernel and one D2H. A JPEG whose start-of-frame
-    // lies past its window stays pending at the marker its walk reached, a round per EXIF or ICC
-    // segment.
+    // length straight from its tape slice, in one kernel and one D2H. A JPEG whose
+    // start-of-frame lies past its window stays pending at the marker its walk reached, a round
+    // per EXIF or ICC segment.
     st::basic_vector<gather_entry_t> host_entries;
     st::basic_vector<gather_entry_t, gpu_alloc<gather_entry_t>> device_entries {
         gpu_alloc<gather_entry_t> {stream.get()}};
@@ -380,7 +385,8 @@ struct rgba_expand_entry_t {
  *      nvJPEG has no alpha output, so the device path decodes RGB and this kernel widens it in place of the
  *      library. PNG / WebP keep their real alpha and never pass through here.
  *
- *  __grid_size__ @c [entries,1,1] , one block per entry, grid-stride over both axes; no dynamic shared memory.
+ *  __grid_size__ @c [entries,1,1] , one block per entry, grid-stride over both axes; no
+ *  dynamic shared memory.
  */
 static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u32_t count) {
     for (u32_t index = blockIdx.x; index < count; index += gridDim.x) {
@@ -413,13 +419,15 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
     }
     if (entries.empty()) return {};
 
-    // The nvJPEG batch lands packed RGB into this temporary; the widen kernel then fills each RGBA scratch region.
+    // The nvJPEG batch lands packed RGB into this temporary; the widen kernel then fills each
+    // RGBA scratch region.
     st::basic_vector<u8_t, gpu_alloc<u8_t>> rgb_scratch {gpu_alloc<u8_t> {stream.get()}};
     if (st::failed(rgb_scratch.resize(st::assume_uninitialized, rgb_bytes)))
         return expected_t::fail(status_t::bad_alloc_k, "JPEG RGB scratch allocation failed ({} bytes)", rgb_bytes);
     u8_t *const rgb_base = rgb_scratch.data();
-    // Wire each entry's RGB destination into the fresh scratch; the owning entry table then feeds nvJPEG's
-    // parallel arrays straight from itself, so the split lives only inside `decode_jpeg_batch`.
+    // Wire each entry's RGB destination into the fresh scratch; the owning entry table
+    // then feeds nvJPEG's parallel arrays straight from itself, so the split lives
+    // only inside `decode_jpeg_batch`.
     for (std::size_t index = 0; index != entries.size(); ++index) {
         jpeg_entry_t &entry = entries[index];
         image_plan_t const &plan = plans[entry.plan_index];
@@ -433,7 +441,8 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
         return {};
     }
 
-    // Widen the packed RGB into the RGBA scratch (alpha 255) — one descriptor per decoded entry, uploaded once.
+    // Widen the packed RGB into the RGBA scratch (alpha 255) — one descriptor per decoded
+    // entry, uploaded once.
     st::basic_vector<rgba_expand_entry_t> host_expand;
     st::basic_vector<rgba_expand_entry_t, gpu_alloc<rgba_expand_entry_t>> device_expand {
         gpu_alloc<rgba_expand_entry_t> {stream.get()}};
@@ -459,9 +468,9 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
     return {};
 }
 
-/** Decode the plan's @c cpu_fallback_k rows (PNG, WebP, and any rejected JPEG) on @p pool : one pinned blob
- *  hop in, an RGBA decode per worker at the plan's @c native extent, then one bulk host-to-device
- *  copy into each scratch region. */
+/** Decode the plan's @c cpu_fallback_k rows (PNG, WebP, and any rejected JPEG) on @p pool : one
+ *  pinned blob hop in, an RGBA decode per worker at the plan's @c native extent, then one bulk
+ *  host-to-device copy into each scratch region. */
 [[nodiscard]] static expected_t decode_cpu_plans_(pool_view_t pool, std::span<image_plan_t> plans, u8_t *scratch,
                                                   column_view_t tape, u64r1_view_t drawn_rows,
                                                   gpu_stream_t &stream) noexcept {
@@ -539,24 +548,27 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
             !uploaded)
             return uploaded;
     }
-    // Hold for the uploads: the pinned decode tape (`blobs` / `decoded`) frees synchronously on return,
-    // so it must outlive its in-flight `cuMemcpyHtoDAsync` into the device scratch (a use-after-free otherwise).
+    // Hold for the uploads: the pinned decode tape (`blobs` / `decoded`) frees synchronously
+    // on return, so it must outlive its in-flight `cuMemcpyHtoDAsync` into the device scratch
+    // (a use-after-free otherwise).
     if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
         return expected_t::fail(status_t::device_error_k, "CPU pixel upload synchronization failed");
     return {};
 }
 
 /**
- *  @brief Scatter one image-segment's resized contiguous @b [gr·P,gc·P,C] frame into the batch's shared patch
- *      grid @b [rows,columns,P,P,C].
+ *  @brief Scatter one image-segment's resized contiguous @b [gr·P,gc·P,C] frame into the batch's
+ *      shared patch grid @b [rows,columns,P,P,C].
  *
- *  Patch @c (pr,pc) lands at the flat cell @c offset+pr·gc+pc , i.e.
- *  @c images[row,column_begin+local,:,:,:] where @c row=offset/columns and @c column_begin=offset%columns .
- *  Reads the segment's placement from @p segment_offsets / @p segment_lengths and its resized source base
- *  from @p resized_offsets , so several images share a row and each rides its own column sub-range.
+ *  Patch @c (pr,pc) lands at the flat cell @c offset+pr · gc+pc , i.e.
+ *  @c images[row,column_begin+local,:,:,:] where @c row=offset/columns and
+ *  @c column_begin=offset%columns . Reads the segment's placement from @p segment_offsets /
+ *  @p segment_lengths and its resized source base from @p resized_offsets , so several images share
+ *  a row and each rides its own column sub-range.
  *
- *  __grid_size__ @c [images,1,1] , one block per segment (a PAD / overflow-dropped segment, length 0, exits
- *  immediately); threads stride the segment's @c budget·P²·C elements. No dynamic shared memory.
+ *  __grid_size__ @c [images,1,1] , one block per segment (a PAD / overflow-dropped segment,
+ *  length 0, exits immediately); threads stride the segment's @c budget · P² · C elements. No
+ *  dynamic shared memory.
  */
 static __global__ void tile_patches_kernel_(pixel_patches_span_t images, pixel_t const *resized,
                                             u32_t const *resized_offsets, image_shape_view_t image_shapes,
@@ -592,13 +604,13 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, pixel_t
     }
 }
 
-/** Crop each decoded RGBA scratch image to its factor-pair aspect, Lanczos-resize it into a contiguous
- *  scratch tape (one @c nppiResize per image — NPP's batched variant takes neither single-image batches
- *  nor Lanczos), then scatter each into its column sub-range of the batch's shared patch grid. The
- *  scratch and device-resident offsets free stream-ordered behind it, so nothing waits here.
- *  Budgets vary per image now, so each resized frame's byte size (and its base in the tape) is a
- *  running prefix, not a fixed stride. @p segment_offsets / @p segment_lengths carry the placement the
- *  segment kernel laid down. */
+/** Crop each decoded RGBA scratch image to its factor-pair aspect, Lanczos-resize it into a
+ *  contiguous scratch tape (one @c nppiResize per image — NPP's batched variant takes neither
+ *  single-image batches nor Lanczos), then scatter each into its column sub-range of the batch's
+ *  shared patch grid. The scratch and device-resident offsets free stream-ordered behind it, so
+ *  nothing waits here. Budgets vary per image now, so each resized frame's byte size (and its base
+ *  in the tape) is a running prefix, not a fixed stride. @p segment_offsets / @p segment_lengths
+ *  carry the placement the segment kernel laid down. */
 [[nodiscard]] static expected_t resize_plans_(std::span<image_plan_t const> plans, u8_t *scratch,
                                               pixel_patches_span_t pixels, image_shape_view_t image_shapes,
                                               u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
@@ -611,7 +623,8 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, pixel_t
     st::basic_vector<u32_t> host_resized_offsets; // each image's element base in the packed resized tape
     if (st::failed(host_resized_offsets.resize(images)))
         return expected_t::fail(status_t::bad_alloc_k, "resize offset allocation failed");
-    // Lay the variable-budget resized frames end to end; a prefix scan gives each one's base in the tape.
+    // Lay the variable-budget resized frames end to end; a prefix scan gives each one's base
+    // in the tape.
     std::size_t resized_elements = 0;
     for (std::size_t index = 0; index != images; ++index) {
         image_plan_t const &plan = plans[index];
@@ -620,18 +633,19 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, pixel_t
         resized_elements += budget * patch_size * patch_size * image_channels_k;
     }
 
-    // The batched resize lands each image contiguously in a scratch tape; a tile kernel then scatters it into
-    // the patch grid, since a resized image's row-major pixels are not the batch's [columns,P,P,C] order.
+    // The batched resize lands each image contiguously in a scratch tape; a tile kernel then
+    // scatters it into the patch grid, since a resized image's row-major pixels are not the
+    // batch's [columns,P,P,C] order.
     st::basic_vector<u8_t, gpu_alloc<u8_t>> resized {gpu_alloc<u8_t> {stream.get()}};
     if (st::failed(resized.resize(st::assume_uninitialized, resized_elements)))
         return expected_t::fail(status_t::bad_alloc_k, "resized pixel scratch allocation failed ({} bytes)",
                                 resized_elements);
     pixel_t *const resized_base = resized.data();
 
-    // NPP's batched resize rejects single-image batches (its `nBatchSize` contract demands more than one)
-    // and rejects Lanczos outright (`NPP_INTERPOLATION_ERROR`) — per-image `nppiResize` keeps the
-    // Lanczos quality the training data wants, needs no device-resident descriptor tables, and the calls
-    // serialize on the one stream exactly like a batched launch would.
+    // NPP's batched resize rejects single-image batches (its `nBatchSize` contract demands more
+    // than one) and rejects Lanczos outright (`NPP_INTERPOLATION_ERROR`) — per-image `nppiResize`
+    // keeps the Lanczos quality the training data wants, needs no device-resident descriptor
+    // tables, and the calls serialize on the one stream exactly like a batched launch would.
     for (std::size_t index = 0; index != images; ++index) {
         image_plan_t const &plan = plans[index];
         if (plan.route == route_t::dropped_k) continue; // a triage-dropped blob PADs — nothing to resize
@@ -650,8 +664,9 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, pixel_t
             return expected_t::fail(status_t::device_error_k, "image resize failed (status={} image={})",
                                     static_cast<int>(resized_one), index);
     }
-    // The per-image resized bases must be device-resident for the tile kernel — owning. It reads each
-    // segment's column count straight from the device-side `image_shapes`, no second copy here.
+    // The per-image resized bases must be device-resident for the tile kernel — owning. It
+    // reads each segment's column count straight from the device-side `image_shapes`, no
+    // second copy here.
     st::basic_vector<u32_t, gpu_alloc<u32_t>> device_resized_offsets {gpu_alloc<u32_t> {stream.get()}};
     if (st::failed(device_resized_offsets.resize(st::assume_uninitialized, images)))
         return expected_t::fail(status_t::bad_alloc_k, "resize offset device allocation failed");
@@ -675,8 +690,8 @@ expected_t ul::decode_images(nvjpeg_session_t &jpeg, pool_view_t pool, column_vi
                              modality_span_t segment_modality, u32r1_span_t dropped, gpu_stream_t &stream) noexcept {
     std::size_t const images = drawn_rows.size();
     if (images == 0) return {};
-    // The batch grid names the geometry: columns is the row width, extent(2) the square patch side, extent(4)
-    // the RGBA channel count; the segment axis is the descriptors' leading extent.
+    // The batch grid names the geometry: columns is the row width, extent(2) the square patch side,
+    // extent(4) the RGBA channel count; the segment axis is the descriptors' leading extent.
     u32_t const columns_per_row = static_cast<u32_t>(pixels.extent(1));
     u32_t const patch_size = static_cast<u32_t>(pixels.extent(2));
     u32_t const channels = static_cast<u32_t>(pixels.extent(4));
@@ -687,9 +702,10 @@ expected_t ul::decode_images(nvjpeg_session_t &jpeg, pool_view_t pool, column_vi
         return expected_t::fail(status_t::unsupported_k, "batch segments cannot hold {} images", images);
     if (patch_size == 0 || columns_per_row == 0)
         return expected_t::fail(status_t::unsupported_k, "patch_size and columns must be nonzero");
-    // The shape is the single source of geometry; the grid is the validated destination. Image carries no per-
-    // representation variation yet (footprint is native-derived, patch side and channels are shared), so it consumes
-    // one representation, matching the uniform decode contract while multi-representation awaits a varying field.
+    // The shape is the single source of geometry; the grid is the validated destination. Image
+    // carries no per- representation variation yet (footprint is native-derived, patch side and
+    // channels are shared), so it consumes one representation, matching the uniform decode contract
+    // while multi-representation awaits a varying field.
     if (representations.empty())
         return expected_t::fail(status_t::invalid_argument_k,
                                 "decode_images requires a non-empty representations span");
@@ -705,8 +721,9 @@ expected_t ul::decode_images(nvjpeg_session_t &jpeg, pool_view_t pool, column_vi
     auto scratch_bytes = triage_images_(tape, drawn_rows, patch_size, columns_per_row, plan_span, stream);
     if (!scratch_bytes) return expected_t::fail(std::move(scratch_bytes));
 
-    // Land the host-computed factor pairs device-side and walk the token cursor: it writes image_shapes ,
-    // segment_offsets / lengths , and segment_modality , so the resize/tile then read placement off the device.
+    // Land the host-computed factor pairs device-side and walk the token cursor: it writes
+    // image_shapes , segment_offsets / lengths , and segment_modality , so the resize/tile then
+    // read placement off the device.
     st::basic_vector<patch_grid_t> host_grids;
     st::basic_vector<patch_grid_t, gpu_alloc<patch_grid_t>> device_grids {gpu_alloc<patch_grid_t> {stream.get()}};
     if (st::failed(host_grids.resize(images)) || st::failed(device_grids.resize(st::assume_uninitialized, images)))
@@ -741,7 +758,8 @@ expected<image_loader_parquet_t> image_loader_parquet_t::make(gpu_direct_storage
                                                               pool_view_t pool, image_batch_shape_t image) noexcept {
     using result_t = expected<image_loader_parquet_t>;
 
-    // Expand the glob (or a plain path) into the dataset's sorted absolute shard paths — POSIX glob(3).
+    // Expand the glob (or a plain path) into the dataset's sorted absolute shard paths
+    // — POSIX glob(3).
     auto paths = expand_glob(path_or_glob);
     if (!paths) return result_t::fail(std::move(paths));
 
@@ -752,8 +770,8 @@ expected<image_loader_parquet_t> image_loader_parquet_t::make(gpu_direct_storage
     loader.seed_ = seed;
     loader.image_ = image;
 
-    // Footer only — host-side, no GPU: a running prefix of each file's row count, the weighted file draw's
-    // search table; its back holds the dataset's total rows.
+    // Footer only — host-side, no GPU: a running prefix of each file's row count, the weighted file
+    // draw's search table; its back holds the dataset's total rows.
     if (st::failed(loader.row_prefix_.resize(loader.absolute_paths_.size() + 1)))
         return result_t::fail(status_t::bad_alloc_k, "shard prefix allocation failed ({} shards)",
                               loader.absolute_paths_.size());
@@ -773,8 +791,9 @@ expected_t image_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_session
                                         std::span<multimodal_batch_on_gpu_t> batches) noexcept {
     if (batches.empty()) return {};
     std::size_t const unroll = batches.size();
-    // The draw count is the segment capacity now — many small images pack into a row, so a fill draws up to
-    // max_segments_per_gpu items and the cursor keeps as many as the rows·columns grid holds.
+    // The draw count is the segment capacity now — many small images pack into a row, so a
+    // fill draws up to max_segments_per_gpu items and the cursor keeps as many as the
+    // rows·columns grid holds.
     std::size_t const images_per_batch = batches[0].segment_lengths.extent(0);
     if (images_per_batch == 0 || batches[0].images.extent(0) == 0)
         return expected_t::fail(status_t::unsupported_k, "the batch carries no image segments");
@@ -785,9 +804,9 @@ expected_t image_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_session
     std::size_t const total_rows = row_prefix_[shard_count];
     constexpr splitmix64_hash_t hash {};
 
-    // Open distinct files, drawn with probability proportional to their row count — a keyed row position over
-    // the whole dataset binary-searches the prefix to its owning file — until the pool covers the fill's
-    // images; never fewer than two, unless the whole dataset is one file.
+    // Open distinct files, drawn with probability proportional to their row count — a keyed row
+    // position over the whole dataset binary-searches the prefix to its owning file — until the
+    // pool covers the fill's images; never fewer than two, unless the whole dataset is one file.
     st::basic_vector<sz::string_view_t> picked_paths;
     st::basic_vector<std::size_t> picked_shards;
     std::size_t pooled_estimate = 0, attempt = 0;
@@ -804,7 +823,8 @@ expected_t image_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_session
         pooled_estimate += row_prefix_[file + 1] - row_prefix_[file];
     }
 
-    // Decode the picked files' blob column into one device reservoir; the true pool is the decoded rows.
+    // Decode the picked files' blob column into one device reservoir; the true pool is
+    // the decoded rows.
     auto reservoir_read = parquet_file_t::make(*storage_, std::span<sz::string_view_t const> {picked_paths},
                                                std::span<sz::string_view_t const> {&config.column, 1}, {}, gpu_stream);
     if (!reservoir_read) return expected_t::fail(std::move(reservoir_read));
@@ -819,7 +839,8 @@ expected_t image_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_session
     if (!gpu_scope.ok())
         return expected_t::fail(status_t::device_error_k, "context entry failed for the loader stream");
 
-    // The reservoir's blob offsets to the host once — every per-row byte bound is then host arithmetic.
+    // The reservoir's blob offsets to the host once — every per-row byte bound is
+    // then host arithmetic.
     column_view_t const column = reservoir.column(0);
     std::size_t const offsets_count = column.size() + 1u;
     st::basic_vector<u64_t> reservoir_offsets;
@@ -840,7 +861,8 @@ expected_t image_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_session
     for (std::size_t index = 0; index != total_images; ++index)
         record_indices[index] = epoch_permutation(row_key, data_epoch_t {training_step}, index, pooled_rows);
 
-    // The blob column re-viewed with its offsets on host: device bytes, host-indexable via `tape[row]`.
+    // The blob column re-viewed with its offsets on host: device bytes,
+    // host-indexable via `tape[row]`.
     column_view_t const tape {column.payload, std::span<u64_t const> {reservoir_offsets}};
     u64r2_view_t const batch_records {record_indices.data(), unroll, images_per_batch};
     for (std::size_t batch = 0; batch != unroll; ++batch) {

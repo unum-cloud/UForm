@@ -4,7 +4,8 @@
  *  @author Ash Vardanian
  *  @date July 5, 2026
  *
- *  Every libav handle is checked and folded into @ref expected , so no libav failure leaves this file any other way.
+ *  Every libav handle is checked and folded into @ref expected , so no libav failure leaves this
+ *  file any other way.
  */
 #include <algorithm> // `std::min`, `std::max`
 
@@ -52,7 +53,8 @@ static int video_memory_read_(void *opaque, u8_t *buffer, int buffer_size) noexc
     return static_cast<int>(to_read);
 }
 
-/** @c AVIOContext seek callback: honors @c SEEK_SET/CUR/END and the @c AVSEEK_SIZE query, @c -1 out of range. */
+/** @c AVIOContext seek callback: honors @c SEEK_SET/CUR/END and the @c AVSEEK_SIZE query, @c -1
+ *  out of range. */
 static i64_t video_memory_seek_(void *opaque, i64_t offset, int whence) noexcept {
     auto *reader = static_cast<video_memory_reader_t *>(opaque);
     i64_t const size = static_cast<i64_t>(reader->bytes.size());
@@ -138,7 +140,8 @@ static i64_t video_memory_seek_(void *opaque, i64_t offset, int whence) noexcept
     return AV_CODEC_ID_NONE;
 }
 
-/** The bitstream filter converting a container-wrapped codec to Annex-B; @c nullptr passes packets through. */
+/** The bitstream filter converting a container-wrapped codec to Annex-B; @c nullptr
+ *  passes packets through. */
 [[nodiscard]] static char const *bitstream_filter_name_(video_codec_t codec) noexcept {
     if (codec == video_codec_t::h264_k) return "h264_mp4toannexb";
     if (codec == video_codec_t::h265_k) return "hevc_mp4toannexb";
@@ -162,8 +165,9 @@ expected<demuxed_t> um::demux_video(bytes_view_t container) noexcept {
     }
 
     video_memory_reader_t reader {container, 0u};
-    // Every libav handle is declared up front and freed exactly once by `release_libav`. `avformat_open_input` frees
-    // and nulls `format` itself on failure while leaving our custom-IO `avio` ours to free (AVFMT_FLAG_CUSTOM_IO).
+    // Every libav handle is declared up front and freed exactly once by `release_libav`.
+    // `avformat_open_input` frees and nulls `format` itself on failure while leaving our custom-IO
+    // `avio` ours to free (AVFMT_FLAG_CUSTOM_IO).
     u8_t *avio_buffer = static_cast<u8_t *>(av_malloc(video_avio_buffer_bytes_k));
     AVIOContext *avio = nullptr;
     AVFormatContext *format = nullptr;
@@ -209,8 +213,9 @@ expected<demuxed_t> um::demux_video(bytes_view_t container) noexcept {
         return fail(status_t::invalid_argument_k, "unsupported video codec");
     clip.extent.width = static_cast<u32_t>(std::max(video_stream->codecpar->width, 0));
     clip.extent.height = static_cast<u32_t>(std::max(video_stream->codecpar->height, 0));
-    // Many mp4 / webm containers carry no frame index (`nb_frames == 0`); estimate the count from duration × average
-    // frame rate, in integers since `duration` is in AV_TIME_BASE units, so sampled frames still spread over the clip.
+    // Many mp4 / webm containers carry no frame index (`nb_frames == 0`); estimate the count from
+    // duration × average frame rate, in integers since `duration` is in AV_TIME_BASE units, so
+    // sampled frames still spread over the clip.
     if (video_stream->nb_frames > 0) clip.frames = static_cast<u32_t>(video_stream->nb_frames);
     else {
         AVRational const rate = video_stream->avg_frame_rate;
@@ -257,7 +262,8 @@ expected<demuxed_t> um::demux_video(bytes_view_t container) noexcept {
     return clip;
 }
 
-/** One software decode's libav chain, owned as a unit so its destructor is the single unwind on every return. */
+/** One software decode's libav chain, owned as a unit so its destructor is the single unwind
+ *  on every return. */
 struct video_decoder_ {
 
     /** The decoder context, single-threaded since executors decode clips in parallel. */
@@ -272,7 +278,8 @@ struct video_decoder_ {
     /** The reusable frame the decoder emits into. */
     AVFrame *frame = nullptr; // vendor-boundary
 
-    /** The scaler to RGB24 at the planned grid size, rebuilt only when the decoded format changes. */
+    /** The scaler to RGB24 at the planned grid size, rebuilt only when the
+     *  decoded format changes. */
     SwsContext *scaler = nullptr; // vendor-boundary
 
     ~video_decoder_() noexcept {
@@ -284,8 +291,8 @@ struct video_decoder_ {
     }
 };
 
-/** The sampling state threaded through the receive loop: which displayed frame is next, and the RGB staging of
- *  the one being scattered. */
+/** The sampling state threaded through the receive loop: which displayed frame is next, and the RGB
+ *  staging of the one being scattered. */
 struct frame_sampler_ {
 
     /** Displayed frames seen so far — drives the @c frame_stride subsampling. */
@@ -294,16 +301,16 @@ struct frame_sampler_ {
     /** Frames scattered so far, also the compact index of the next one. */
     std::size_t kept = 0;
 
-    /** The compact frames the segment holds, @c temporal_groups·tube_frames . */
+    /** The compact frames the segment holds, @c temporal_groups · tube_frames . */
     std::size_t wanted = 0;
 
     /** Keep every @c stride -th displayed frame. */
     std::size_t stride = 1;
 
-    /** The planned frame width, @c patch_columns·P . */
+    /** The planned frame width, @c patch_columns · P . */
     u32_t width = 0;
 
-    /** The planned frame height, @c patch_rows·P . */
+    /** The planned frame height, @c patch_rows · P . */
     u32_t height = 0;
 
     /** One planned frame as packed @b [height,width,3] RGB. */
@@ -313,7 +320,8 @@ struct frame_sampler_ {
     status_t status = status_t::success_k;
 };
 
-/** Convert @p frame to RGB at the planned size and scatter it as compact frame @c sampler.kept into @p out . */
+/** Convert @p frame to RGB at the planned size and scatter it as compact frame @c sampler.kept into
+ *  @p out . */
 static void keep_frame_(video_decoder_ &decoder, frame_sampler_ &sampler, AVFrame const *frame,
                         pixel_tubes_span_t out) noexcept {
     SwsContext *const scaler = sws_getCachedContext(
@@ -351,7 +359,8 @@ static void keep_frame_(video_decoder_ &decoder, frame_sampler_ &sampler, AVFram
     ++sampler.kept;
 }
 
-/** Pull every frame the decoder holds, keeping the sampled ones, until it asks for input or the segment is full. */
+/** Pull every frame the decoder holds, keeping the sampled ones, until it asks for input or the
+ *  segment is full. */
 static void receive_frames_(video_decoder_ &decoder, frame_sampler_ &sampler, pixel_tubes_span_t out) noexcept {
     while (sampler.status == status_t::success_k && sampler.kept != sampler.wanted) {
         int const received = avcodec_receive_frame(decoder.context, decoder.frame);

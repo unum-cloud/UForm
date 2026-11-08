@@ -6,16 +6,16 @@
  *      description and one @ref unum::uform::train::base_replica_t model copy per GPU, composed by
  *      @c trainer_t in @c include/uform/train/trainer.hpp .
  *
- *  Declared here, defined in @c src/train/base.cu , and consumed by the composition in @c src/train/trainer.cu ,
- *  which the training binary ( @c tools/base.cu ), the conformance test ( @c test/base.cu ) and the C verbs
- *  ( @c src/train.cpp ) all drive.
+ *  Declared here, defined in @c src/train/base.cu , and consumed by the composition in
+ *  @c src/train/trainer.cu , which the training binary ( @c tools/base.cu ), the conformance test (
+ *  @c test/base.cu ) and the C verbs ( @c src/train.cpp ) all drive.
  *
  *  @section base_mixture Modality mixtures, not per-modality caps
  *
- *  Every batch is a modality mixture: any number of token / image / video / audio rows, constrained only by the
- *  aggregate row and segment budgets @ref unum::uform::train::multimodal_batch_shape_t carries —
- *  the same envelope the loaders fill and @c multimodal_batch_mixer_t shuffles in real training. A
- *  modality participates iff its nested shape slice is live (a nonzero @c patch_side /
+ *  Every batch is a modality mixture: any number of token / image / video / audio rows, constrained
+ *  only by the aggregate row and segment budgets @ref unum::uform::train::multimodal_batch_shape_t
+ *  carries — the same envelope the loaders fill and @c multimodal_batch_mixer_t shuffles in real
+ *  training. A modality participates iff its nested shape slice is live (a nonzero @c patch_side /
  *  @c chunk_samples ), so presence is read off the shape everywhere. The synthetic corpus draws a
  *  keyed per-step partition of the row budget across the live modalities and orders the rows tokens
  *  → image → video → audio (the @ref unum::uform::train::modality_t order), each row
@@ -23,11 +23,12 @@
  *
  *  @section base_regions The step's regions
  *
- *  Each step runs on one per-replica stream: the @b eager preamble fills the batch, snapshots every live head's
- *  clean reconstruction target, and corrupts the batch in place — writing the capture-stable addresses the model
- *  graphs re-read at replay. The @b captured forward region runs the tower and scores every live head into the
- *  one shared @c d(normalized) buffer; the eager contrastive collective, when the objective has one, writes the
- *  pooled vertices' forces; the @b captured backward region folds both through the tower; the collective
+ *  Each step runs on one per-replica stream: the @b eager preamble fills the batch, snapshots
+ *  every live head's clean reconstruction target, and corrupts the batch in place — writing the
+ *  capture-stable addresses the model graphs re-read at replay. The @b captured forward region
+ *  runs the tower and scores every live head into the one shared @c d(normalized) buffer; the
+ *  eager contrastive collective, when the objective has one, writes the pooled vertices' forces;
+ *  the @b captured backward region folds both through the tower; the collective
  *  @c optimizer.step stays eager.
  */
 #pragma once
@@ -65,7 +66,8 @@ enum class objective_t : u32_t {
 /** How the contrastive loss scores the pooled vertices. */
 struct contrastive_config_t {
 
-    /** The Matryoshka prefix widths, strictly ascending multiples of 8; the first @ref matryoshka_count are read. */
+    /** The Matryoshka prefix widths, strictly ascending multiples of 8; the first
+     *  @ref matryoshka_count are read. */
     u32_t matryoshka_dimensions[max_matryoshka_prefixes_k] = {};
 
     /** Prefixes in @ref matryoshka_dimensions ; zero scores the full width alone. */
@@ -122,8 +124,8 @@ struct late_interaction_config_t {
     /** Document segments one GPU's step holds at most; zero derives @c max_segments_per_gpu . */
     u32_t max_documents_per_gpu = 0;
 
-    /** Document token rows one GPU's step holds at most; zero derives the batch's tokens per
-     *  GPU. */
+    /** Document token rows one GPU's step holds at most; zero derives the batch's
+     *  tokens per GPU. */
     u32_t max_document_tokens_per_gpu = 0;
 };
 
@@ -144,9 +146,9 @@ inline constexpr trainer_tier_t trainer_tiers_k[] = {
     {"xl", 2048u, 48u, 4096u, 1024u, 1.0e-4f},
 };
 
-/** One run's whole description, parsed once and threaded by const reference. The modality mixture is the
- *  @ref batch envelope itself: a media modality trains iff its nested slice is live, and the byte
- *  decoder is present whenever the objective reconstructs or the run chooses. */
+/** One run's whole description, parsed once and threaded by const reference. The modality mixture
+ *  is the @ref batch envelope itself: a media modality trains iff its nested slice is live, and the
+ *  byte decoder is present whenever the objective reconstructs or the run chooses. */
 struct trainer_config_t {
 
     /** The batch envelope — the aggregate row / segment / column budgets plus each modality's own
@@ -165,8 +167,8 @@ struct trainer_config_t {
     /** Embedding width, a multiple of the block's head dimension; set by the tier. */
     u32_t hidden = 0;
 
-    /** The run's length in optimizer steps, counted across resumes; the cosine spans all of
-     *  them. */
+    /** The run's length in optimizer steps, counted across resumes; the cosine spans
+     *  all of them. */
     u32_t steps = 100;
 
     /** The peak Adafactor learning rate the warmup ramps to and the cosine decays from. */
@@ -197,12 +199,12 @@ struct trainer_config_t {
     /** The contrastive loss's scoring, read unless the objective is masked alone. */
     contrastive_config_t contrastive {};
 
-    /** The late-interaction loss over the token head, beside the pooled one when its weight is
-     *  positive. */
+    /** The late-interaction loss over the token head, beside the pooled one when its
+     *  weight is positive. */
     late_interaction_config_t late_interaction {};
 
-    /** The calibrated choices over the byte decoder, beside every other term when its weight is
-     *  positive. */
+    /** The calibrated choices over the byte decoder, beside every other term when its
+     *  weight is positive. */
     choices_config_t choices {};
 
     /** The Total Coding Rate's distortion target @c ε² . */
@@ -241,13 +243,13 @@ struct trainer_config_t {
      *  batch. Borrows the storage it was parsed from. */
     sz::string_view_t eval_mixture {};
 
-    /** Warm-start path; empty starts from the keyed seed. Every replica loads the same file and the run
-     *  continues from the file's saved step. Borrows the storage it was parsed from. */
+    /** Warm-start path; empty starts from the keyed seed. Every replica loads the same file and the
+     *  run continues from the file's saved step. Borrows the storage it was parsed from. */
     sz::string_view_t resume {};
 
-    /** The ledger channels this run arms — losses and rounds by default; @c --telemetry adds
-     *  more (e.g. @c signals for the optimizer's gradient-boundary probes). The entry point may
-     *  also arm channels from its launcher contract; the library itself never reads environment. */
+    /** The ledger channels this run arms — losses and rounds by default; @c --telemetry adds more
+     *  (e.g. @c signals for the optimizer's gradient-boundary probes). The entry point may also arm
+     *  channels from its launcher contract; the library itself never reads environment. */
     u32_t telemetry_channels = telemetry_losses_k | telemetry_rounds_k;
 
     /** The mixture JSON the run loads its data from; empty trains on the synthetic draw. Borrows
@@ -261,9 +263,9 @@ struct trainer_config_t {
      *  once per that many steps. */
     std::size_t batches_per_fill = 16;
 
-    /** The device bytes a data source's reservoir takes outside the arena at @c rows rows,
-     *  @c reservoir_fixed_bytes+rows·reservoir_row_bytes , charged by the source from its
-     *  shards. */
+    /** The device bytes a data source's reservoir takes outside the arena at @c rows
+     *  rows, @c reservoir_fixed_bytes+rows · reservoir_row_bytes , charged by the source
+     *  from its shards. */
     std::size_t reservoir_fixed_bytes = 0, reservoir_row_bytes = 0;
 
     /** How many segments a row of the mixture's densest entry holds, charged by the source from
@@ -283,8 +285,8 @@ struct trainer_config_t {
      */
     [[nodiscard]] static expected<trainer_config_t> parse(int argc, char **argv) noexcept;
 
-    /** Step @p optimizer_step 's scheduled learning rate: the linear warmup to @ref learning_rate over
-     *  @ref warmup_steps , then the cosine decay to @ref min_learning_rate over the rest of
+    /** Step @p optimizer_step 's scheduled learning rate: the linear warmup to @ref learning_rate
+     *  over @ref warmup_steps , then the cosine decay to @ref min_learning_rate over the rest of
      *  @ref steps . The ordinal is absolute, so a resumed run continues the same curve. Host math,
      *  bitwise-stable across runs — replicas step in lockstep on it. */
     [[nodiscard]] f32_t learning_rate_for(optimizer_step_t optimizer_step) const noexcept;
@@ -309,17 +311,20 @@ struct trainer_config_t {
 };
 
 /**
- *  @brief One GPU's model replica — the tower, its input batch, every live masked head with its clean
- *      reconstruction target and running summands, and the pooled vertices the contrastive loss scores.
+ *  @brief One GPU's model replica — the tower, its input batch, every live masked head with its
+ *      clean reconstruction target and running summands, and the pooled vertices the
+ *      contrastive loss scores.
  *
- *  "Replica" is literal: every GPU holds bitwise-identical weights, indexed by the same @c member_index the
- *  @ref multimem_domain_t and @ref distributed_adafactor_t take. A head or the contrastive scratch exists iff
- *  the objective and the batch slice call for it, so presence is read off the allocation. Movable: every borrow
- *  points outward at the composition's address-stable session tables, never into this struct.
+ *  "Replica" is literal: every GPU holds bitwise-identical weights, indexed by the same
+ *  @c member_index the @ref multimem_domain_t and @ref distributed_adafactor_t take. A head or the
+ *  contrastive scratch exists iff the objective and the batch slice call for it, so presence is
+ *  read off the allocation. Movable: every borrow points outward at the composition's
+ *  address-stable session tables, never into this struct.
  */
 struct base_replica_t {
 
-    /** The encoder — per-modality entry, block stack, final RMSNorm, pool and head; borrows the placed session. */
+    /** The encoder — per-modality entry, block stack, final RMSNorm, pool and head; borrows
+     *  the placed session. */
     encoder_tower_bf16_t tower {};
 
     /** The input batch; after @ref prepare its tokens / media carry the distorted stream. */
@@ -338,7 +343,8 @@ struct base_replica_t {
     /** The clean bytes kept as the token target while the batch holds the distorted stream. */
     tokens_tensor_arena_t clean_tokens {};
 
-    /** The clean image / video patch targets @b [max_tokens, patch_scalars] staged before corruption. */
+    /** The clean image / video patch targets @b [max_tokens, patch_scalars]
+     *  staged before corruption. */
     bf16r2_tensor_arena_t clean_image_patches {}, clean_video_patches {};
 
     /** The clean audio snapshot @b [frames, chunk_samples] — the frame reconstruction target. */
@@ -347,21 +353,22 @@ struct base_replica_t {
     /** Per-position weights the token corruptor emits and the token cross-entropy reads. */
     u32r1_tensor_arena_t token_loss_weights {};
 
-    /** @c {λ·Σ, count} Float32 pairs per head — the running loss readouts telemetry divides, summed
-     *  over the steps since the last report: @ref prepare zeroes them on every step after a
+    /** @c {λ · Σ, count} Float32 pairs per head — the running loss readouts telemetry divides,
+     *  summed over the steps since the last report: @ref prepare zeroes them on every step after a
      *  multiple of @c report_every . */
     f32r1_tensor_arena_t tokens_summands {}, image_summands {}, video_summands {}, audio_summands {};
 
-    /** The choices term's @c {λ·Σ, count} pair, present when the run chooses, reset with the
-     *  heads'. */
+    /** The choices term's @c {λ · Σ, count} pair, present when the run chooses, reset
+     *  with the heads'. */
     f32r1_tensor_arena_t choices_summands {};
 
-    /** The one shared @c d(normalized) @b [max_tokens, hidden] every live head accumulates into (the
-     *  token head overwrites first, media heads and the choices add) and the tower's backward
-     *  consumes. */
+    /** The one shared @c d(normalized) @b [max_tokens, hidden] every live head accumulates
+     *  into (the token head overwrites first, media heads and the choices add) and the
+     *  tower's backward consumes. */
     bf16r2_tensor_arena_t normalized_grad {};
 
-    /** The pooled vertices @b [max_segments, hidden] the contrastive loss scores, and their forces. */
+    /** The pooled vertices @b [max_segments, hidden] the contrastive loss scores,
+     *  and their forces. */
     bf16r2_tensor_arena_t vertices {}, vertices_grad {};
 
     /** The relation graph over this replica's vertex rows, restaged every step. */
@@ -376,8 +383,8 @@ struct base_replica_t {
     /** The @b [vertices_per_mesh] live length of every vertex of the mesh by global id, zero for PAD. */
     u32r1_tensor_arena_t to_vertex_lengths {};
 
-    /** The @b [max_tokens,width] gradient of the tower's token vectors the late-interaction loss
-     *  writes. */
+    /** The @b [max_tokens,width] gradient of the tower's token vectors the
+     *  late-interaction loss writes. */
     bf16r2_tensor_arena_t token_vectors_grad {};
 
     /** The @b [temperature_groups] late-interaction inverse temperatures and biases, selected by
@@ -386,11 +393,11 @@ struct base_replica_t {
 
     /**
      *  @brief This replica's parameter registrations: one named @ref differentiable_weights_t
-     *      @c {name, weights, weights_grad} entry per matrix — the views non-owning, the checkpoint name
-     *      owned — in one canonical order (tower first, then each live head).
+     *      @c {name, weights, weights_grad} entry per matrix — the views non-owning, the checkpoint
+     *      name owned — in one canonical order (tower first, then each live head).
      *
-     *  The scalars live once inside this GPU's tensors; the optimizer's @c make copies these views into its
-     *  own per-replica state, so the concatenated table is a construction-time transient.
+     *  The scalars live once inside this GPU's tensors; the optimizer's @c make copies these views
+     *  into its own per-replica state, so the concatenated table is a construction-time transient.
      */
     st::basic_vector<differentiable_weights_t> weights {};
 
@@ -402,14 +409,16 @@ struct base_replica_t {
                                                        std::size_t vertices_per_mesh,
                                                        gpu_numerics_t const &numerics) noexcept;
 
-    /** Draw the keyed synthetic mixture into @ref batch — row partition and contents, pure functions of
-     *  @c config.seed , @p data_epoch , and @p gpu_index_in_colocated_domain , the world coordinate, so every
-     *  world GPU draws distinct data. Pure enqueue onto @p stream ; never captured. */
+    /** Draw the keyed synthetic mixture into @ref batch — row partition and contents, pure
+     *  functions of @c config.seed , @p data_epoch , and @p gpu_index_in_colocated_domain ,
+     *  the world coordinate, so every world GPU draws distinct data. Pure enqueue onto
+     *  @p stream ; never captured. */
     [[nodiscard]] expected_t draw(trainer_config_t const &config, u32_t gpu_index_in_colocated_domain,
                                   data_epoch_t data_epoch, gpu_stream_t &stream) noexcept;
 
-    /** The eager preamble over a filled @ref batch : snapshot every live head's clean target, and corrupt each
-     *  modality in place into the tower's distorted input. A no-op without masked heads. */
+    /** The eager preamble over a filled @ref batch : snapshot every live head's clean
+     *  target, and corrupt each modality in place into the tower's distorted input. A no-op
+     *  without masked heads. */
     [[nodiscard]] expected_t prepare(trainer_config_t const &config, data_epoch_t data_epoch,
                                      gpu_stream_t &stream) noexcept;
 
@@ -425,8 +434,8 @@ struct base_replica_t {
     /** The contrastive recipe over this replica's device temperatures and vertex groups. */
     [[nodiscard]] contrastive_recipe_t recipe(trainer_config_t const &config) const noexcept;
 
-    /** The late-interaction recipe over this replica's token temperatures and the same vertex
-     *  groups. */
+    /** The late-interaction recipe over this replica's token temperatures and the
+     *  same vertex groups. */
     [[nodiscard]] contrastive_recipe_t token_recipe(trainer_config_t const &config) const noexcept;
 
   private:
@@ -446,13 +455,13 @@ struct base_replica_t {
 
 /** Re-seed every matrix of @p weights to the identical deterministic init: full matrices from a
  *  keyed hash fill of standard deviation @c 1/√fan_in , the blocks' output projections further by
- *  @c 1/√(2·depth) , and vector scales exactly one. Identical on every replica. */
+ *  @c 1/√(2 · depth) , and vector scales exactly one. Identical on every replica. */
 [[nodiscard]] expected_t seed_weights(st::basic_vector<differentiable_weights_t> const &weights,
                                       gpu_stream_t &stream) noexcept;
 
 /**
- *  @brief Upload every matrix of @p weights from @p checkpoint by name, all or nothing, on @p stream ; the caller
- *      drains before the checkpoint is released.
+ *  @brief Upload every matrix of @p weights from @p checkpoint by name, all or nothing, on
+ *      @p stream ; the caller drains before the checkpoint is released.
  *
  *  A @c masked_tokens decoder or a @c token_head.* matrix the checkpoint misses is re-seeded as
  *  @ref unum::uform::train::seed_weights seeds it, so a run adds the head its base never trained.

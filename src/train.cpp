@@ -2,12 +2,13 @@
  *  @file src/train.cpp
  *  @author Ash Vardanian
  *  @date October 18, 2026
- *  @brief The verbs of @c train.h over @c train::mesh_t and @c train::trainer_t : the mesh bootstrap, a trainer's
- *      construction from the C structs, its steps over caller items, and its checkpoints.
+ *  @brief The verbs of @c train.h over @c train::mesh_t and @c train::trainer_t : the mesh
+ *      bootstrap, a trainer's construction from the C structs, its steps over caller items,
+ *      and its checkpoints.
  *
- *  A mesh is made once per process over a VRAM executor, whose devices are its members, and borrowed by every
- *  trainer made over the same executor; a trainer without one makes a one-process mesh of its own. Every option is
- *  explicit: the library never reads the environment.
+ *  A mesh is made once per process over a VRAM executor, whose devices are its members, and
+ *  borrowed by every trainer made over the same executor; a trainer without one makes a one-process
+ *  mesh of its own. Every option is explicit: the library never reads the environment.
  */
 #include <memory> // `std::unique_ptr` - a handle under construction
 #include <new>    // `std::nothrow`
@@ -37,19 +38,20 @@ using utilities::switch_to_gpu_t;
 using encoder::modality_t;
 using utilities::u32_t;
 
-/** What @c uform_mesh_t owns: the bootstrapped mesh over its executor's devices, and how many trainers borrow it. */
+/** What @c uform_mesh_t owns: the bootstrapped mesh over its executor's devices, and how many
+ *  trainers borrow it. */
 struct uform_mesh_handle_t {
     uform_executor_t executor = nullptr;
 
-    /** Trainers borrowing the mesh, touched through the standard atomic reference; a free waits for
-     *  zero. */
+    /** Trainers borrowing the mesh, touched through the standard atomic reference; a free
+     *  waits for zero. */
     u64_t trainers = 0;
 
     std::unique_ptr<ut::mesh_t> mesh;
 };
 
-/** What @c uform_trainer_t owns: its run, the items source feeding it, and the host columns a step converts into;
- *  the mesh is the caller's borrowed one or a one-process mesh of its own. */
+/** What @c uform_trainer_t owns: its run, the items source feeding it, and the host columns a step
+ *  converts into; the mesh is the caller's borrowed one or a one-process mesh of its own. */
 struct uform_trainer_handle_t {
     uform_executor_t executor = nullptr;
     std::variant<uform_mesh_t, std::unique_ptr<uform_mesh_handle_t>> mesh;
@@ -63,7 +65,8 @@ struct uform_trainer_handle_t {
     st::basic_vector<b8_t> embeddings;
 };
 
-/** The C status a training failure crosses into: an objective or a modality the run left out is unsupported. */
+/** The C status a training failure crosses into: an objective or a modality the run left
+ *  out is unsupported. */
 [[nodiscard]] static uform_status_t train_status_of(expected_t const &failure) noexcept {
     return status_of(failure.status_);
 }
@@ -242,7 +245,8 @@ static bool propagate_train_error(expected_t const &failure, uform_mesh_handle_t
     }
 }
 
-/** Fold every field of @p arguments into the engine's run description, or answer the refusal's message. */
+/** Fold every field of @p arguments into the engine's run description, or answer
+ *  the refusal's message. */
 [[nodiscard]] static char const *configure(uform_trainer_init_vram_t const &arguments,
                                            ut::trainer_config_t &config) noexcept {
     uform_batch_shape_t const &batch = arguments.batch;
@@ -352,8 +356,8 @@ static bool propagate_train_error(expected_t const &failure, uform_mesh_handle_t
     return {{{view.ids, edges}, {view.offsets, count + 1}}, {view.weights, view.weights ? edges : 0}};
 }
 
-/** Land the pooled vertex of every item of the last step in @p memory as @p scalar rows, zero for items that carried
- *  no tokens. False once @p outcome records why not. */
+/** Land the pooled vertex of every item of the last step in @p memory as @p scalar rows, zero for
+ *  items that carried no tokens. False once @p outcome records why not. */
 [[nodiscard]] static bool land_embeddings(uform_trainer_handle_t &handle, std::size_t count, uform_scalar_t scalar,
                                           chunked_arena_t &memory, uform_rows_view_t &rows,
                                           uform_outcome_t *outcome) noexcept {

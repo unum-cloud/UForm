@@ -1,10 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "huggingface_hub",
-#     "pyarrow>=21.0.0",
-# ]
-# ///
 """Build `msmarco_triplet50`: MS MARCO `(query, positive, 50 hard negatives)` triplets, all text.
 
 `msmarco_triplet50` is NOT a single HuggingFace pull — it is a DERIVED artifact joined from three
@@ -40,7 +33,19 @@ Usage:
     uv run scripts/data/download_msmarco.py                    # all labeled-list shards
     uv run scripts/data/download_msmarco.py --max-shards 1     # one shard (a tiny smoke build)
     uv run scripts/data/download_msmarco.py --fraction 0.25    # leading quarter of the shards
+
+File: scripts/data/download_msmarco.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "huggingface_hub",
+#     "pyarrow>=21.0.0",
+# ]
+# ///
 
 import argparse
 from pathlib import Path
@@ -57,7 +62,8 @@ from sharding import already_done, atomic_write, partition, resolve_rank_world
 _REPO_ID = "sentence-transformers/msmarco"
 #: The mixture / catalog name whose column contract the produced shards must satisfy.
 _DATASET_NAME = "msmarco_triplet50"
-#: Output subdirectory under the data root — the `msmarco_triplet50` glob is `data/msmarco/triplet-50/*.parquet`.
+#: Output subdirectory under the data root — the `msmarco_triplet50`
+#: glob is `data/msmarco/triplet-50/*.parquet`.
 _OUT_SUBDIR = ("msmarco", "triplet-50")
 
 

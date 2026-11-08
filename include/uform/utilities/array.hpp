@@ -100,7 +100,8 @@ class stack_array {
     [[nodiscard]] value_type *pointer_at(size_type index) noexcept { return items_ + index; }
     [[nodiscard]] value_type const *pointer_at(size_type index) const noexcept { return items_ + index; }
 
-    /** A union member, so no element is constructed or destroyed until @ref push_back or @ref resize says so. */
+    /** A union member, so no element is constructed or destroyed until @ref push_back or
+     *  @ref resize says so. */
     union {
         value_type_ items_[capacity_limit_];
     };

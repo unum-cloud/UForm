@@ -1,11 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "huggingface_hub",
-#     "img2dataset",
-#     "pyarrow>=21.0.0",
-# ]
-# ///
 """Download DataComp-small: crawl the 12.8M CLIP-filtered (image URL, caption) index into image parquet.
 
 The `mlfoundations/datacomp_small` mirror ships only the URL metadata (`url` + `text` caption + CLIP
@@ -15,7 +7,20 @@ to the CC-12M / LAION-CC3M image sets, so it slots straight into the `image_cont
 training weight. Crawls yield partially (dead links drop out); the per-output-shard atomic rename still
 records each finished shard, and the Slurm array (`acquire.sbatch --acquire-shardable`) fans the 26 index
 shards across workers.
+
+File: scripts/data/download_datacomp_small.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "huggingface_hub",
+#     "img2dataset",
+#     "pyarrow>=21.0.0",
+# ]
+# ///
 
 from acquire import acquire
 

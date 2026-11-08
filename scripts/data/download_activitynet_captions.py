@@ -1,10 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "pyarrow>=21.0.0",
-#     "yt-dlp",
-# ]
-# ///
 """Build the ActivityNet Captions video corpus by fetching each video from YouTube.
 
 Modality: video + text.  ActivityNet Captions (`HuggingFaceM4/ActivitiyNet_Captions` — note the typo
@@ -31,7 +24,19 @@ CLI usage:
     uv run scripts/data/download_activitynet_captions.py                                 # all videos, parallel
     uv run scripts/data/download_activitynet_captions.py --fraction 0.01 --fanout 8      # ~1% slice
     uv run scripts/data/download_activitynet_captions.py --rank 0 --world 16             # this worker's stride
+
+File: scripts/data/download_activitynet_captions.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "pyarrow>=21.0.0",
+#     "yt-dlp",
+# ]
+# ///
 
 import io
 import json

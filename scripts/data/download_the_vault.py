@@ -1,3 +1,10 @@
+"""Download The Vault: multilingual docstring<->function pairs (`docstring` / `code`).
+
+File: scripts/data/download_the_vault.py
+Author: Ash Vardanian
+Date: July 5, 2026
+"""
+
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -5,12 +12,12 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download The Vault: multilingual docstring<->function pairs (`docstring` / `code`)."""
 from acquire import acquire
 
 if __name__ == "__main__":
     # The convert branch is corrupted, so pull the REAL parquet on main
-    # (`data/train/<tier>/<lang>-*.parquet`) — `docstring`/`code` are already present, pure passthrough.
+    # (`data/train/<tier>/<lang>-*.parquet`) — `docstring`/`code` are already
+    # present, pure passthrough.
     raise SystemExit(
         acquire(
             "the_vault",

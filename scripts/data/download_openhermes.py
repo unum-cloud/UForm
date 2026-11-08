@@ -1,3 +1,10 @@
+"""Download OpenHermes-2.5: ~1M curated instruction-response pairs, flattened to (prompt, response).
+
+File: scripts/data/download_openhermes.py
+Author: Ash Vardanian
+Date: July 5, 2026
+"""
+
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -8,7 +15,6 @@
 #     "zstandard",
 # ]
 # ///
-"""Download OpenHermes-2.5: ~1M curated instruction-response pairs, flattened to (prompt, response)."""
 
 from acquire import acquire
 

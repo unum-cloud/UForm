@@ -1,10 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "huggingface_hub",
-#     "pyarrow>=21.0.0",
-# ]
-# ///
 """Download the Tier-4 contrastive-pairs corpora into the host data root and symlink into `data/`.
 
 Each corpus listed in `scripts/data/README.md` under "Text ↔ Text — Contrastive Pairs" that is not already on
@@ -35,7 +28,19 @@ Usage:
     uv run scripts/data/download_text_pairs.py --only all-nli,quora-duplicates
     uv run scripts/data/download_text_pairs.py --tier light    # the four small CC pulls only
     uv run scripts/data/download_text_pairs.py --repack-only --only mmarco --data-root /data/Data
+
+File: scripts/data/download_text_pairs.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "huggingface_hub",
+#     "pyarrow>=21.0.0",
+# ]
+# ///
 
 import argparse
 import gzip
@@ -85,19 +90,21 @@ SOURCES: dict[str, tuple[str, str]] = {
     # High lexical overlap / different meaning = the hardest fuzzy positives+negatives; the
     # registry extractor keeps only `label==1` (true paraphrase) rows.
     "paws-x": ("google-research-datasets/paws-x", "multilingual"),
-    # Natural Questions — Google search queries paired to their Wikipedia answer passage. One `pair/`
-    # config, flat `(query, answer)` parquet — exactly the text_contrastive columns, so a plain snapshot
-    # reproduces `data/natural-questions/pair/train-*.parquet` with no transform. Ungated.
+    # Natural Questions — Google search queries paired to their Wikipedia answer passage.
+    # One `pair/` config, flat `(query, answer)` parquet — exactly the text_contrastive
+    # columns, so a plain snapshot reproduces `data/natural-questions/pair/train-*.parquet`
+    # with no transform. Ungated.
     "natural-questions": ("sentence-transformers/natural-questions", "multilingual"),
-    # PubMedQA — niche MEDICAL retrieval, the biggest distinctive-domain gap (no biomedical signal in
-    # the prior mixture). Flat `(question, long_answer)` parquet under `pqa_artificial/` (211K synthetic)
-    # + `pqa_labeled/` (1K expert) subdirs; the registry extractor pairs question -> long_answer. The
-    # `pqa_unlabeled/` split has no long_answer so the glob omits it. Ungated, ~300 MB.
+    # PubMedQA — niche MEDICAL retrieval, the biggest distinctive-domain gap (no biomedical
+    # signal in the prior mixture). Flat `(question, long_answer)` parquet under
+    # `pqa_artificial/` (211K synthetic) + `pqa_labeled/` (1K expert) subdirs; the registry
+    # extractor pairs question -> long_answer. The `pqa_unlabeled/` split has no long_answer so
+    # the glob omits it. Ungated, ~300 MB.
     "pubmedqa": ("qiaojin/PubMedQA", "niche"),
     # Reddit title->body — CONVERSATIONAL / informal-register robustness (slang, casual phrasing), a
     # register the QA/web mixture lacks. Ships 12 yearly `reddit_title_text_<year>.jsonl.gz` (39 GB
-    # total), each repacked to one `parquet/reddit_<year>.parquet`; the mixture weight, not the pull,
-    # keeps the conversational bucket modest. Ungated; `{title, body, subreddit}` JSONL.
+    # total), each repacked to one `parquet/reddit_<year>.parquet`; the mixture weight, not the
+    # pull, keeps the conversational bucket modest. Ungated; `{title, body, subreddit}` JSONL.
     "reddit-title-body": ("sentence-transformers/reddit-title-body", "conversational"),
 }
 

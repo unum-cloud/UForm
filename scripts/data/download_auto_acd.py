@@ -1,15 +1,7 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "huggingface_hub",
-#     "pyarrow>=21.0.0",
-#     "yt-dlp",
-# ]
-# ///
 """Build the Auto-ACD audio-caption corpus by fetching each clip's audio from YouTube.
 
-Modality: audio + text.  Auto-ACD (`Loie/Auto-ACD`) ships a single CSV of `(youtube_id, caption)`
-rows — 1,920,945 of them — and nothing else; the audio has to be fetched at build time.  This thin
+Modality: audio + text. Auto-ACD (`Loie/Auto-ACD`) ships a single CSV of `(youtube_id, caption)`
+rows — 1,920,945 of them — and nothing else; the audio has to be fetched at build time. This thin
 builder keeps only its bespoke index read + id parse (`_clip_records`); the shared
 `acquire_clips.acquire_clips` orchestrator does the rest — a Slurm `(rank, world)` split so each
 worker fetches a disjoint `clips[rank::world]` stride of the corpus, intra-host GNU-`parallel` fan-out,
@@ -19,10 +11,11 @@ per-shard yt-dlp fetch (bestaudio extracted to mp3), and the uniform registry pa
     audio:   struct<bytes: binary, path: string>   (the mp3 payload + a `<id>.mp3` path tag)
 
 Yields are audited per shard and merged into `<out-dir>/fetch_manifest.json`; dead / private /
-geo-blocked ids are dropped (never silently truncated), so expect a real-world audio yield around
-60-80%.  Auto-ACD is derived from AudioSet/VGGSound, so many `youtube_id` values carry an AudioSet-style
-`_<6-digit-start-second>` suffix (and an occasional leading `Y`); `_parse_clip_id` best-effort recovers
-the watch id and the 10-second window, and any id that does not resolve simply drops.
+geo-blocked ids are dropped (never silently truncated), so expect a real-world audio yield
+around 60-80%. Auto-ACD is derived from AudioSet/VGGSound, so many `youtube_id` values carry an
+AudioSet-style `_<6-digit-start-second>` suffix (and an occasional leading `Y`);
+`_parse_clip_id` best-effort recovers the watch id and the 10-second window, and any id that
+does not resolve simply drops.
 
 This corpus is research-only: fetching is subject to YouTube's Terms of Service and the per-video
 rights, and the audio is not redistributable.
@@ -32,7 +25,20 @@ CLI usage:
     uv run scripts/data/download_auto_acd.py --fraction 0.001 --fanout 4      # tiny slice
     uv run scripts/data/download_auto_acd.py --rank 0 --world 16              # this worker's disjoint stride
     uv run scripts/data/download_auto_acd.py --print-plan --world 2 --rank 0  # dry-run: show the clip stride
+
+File: scripts/data/download_auto_acd.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "huggingface_hub",
+#     "pyarrow>=21.0.0",
+#     "yt-dlp",
+# ]
+# ///
 
 import csv
 import re
@@ -43,7 +49,8 @@ from huggingface_hub import hf_hub_download
 
 _REPO_ID = "Loie/Auto-ACD"
 _CSV_FILENAME = "train.csv"
-#: Auto-ACD inherits AudioSet's fixed 10-second clip window for ids that carry a start-second suffix.
+#: Auto-ACD inherits AudioSet's fixed 10-second clip window for ids that carry
+#: a start-second suffix.
 _CLIP_WINDOW_SECONDS = 10.0
 #: AudioSet-style segment suffix: a real watch id followed by a zero-padded 6-digit start second.
 _SEGMENT_SUFFIX_RE = re.compile(r"^(?P<watch_id>.+)_(?P<start>\d{6})$")

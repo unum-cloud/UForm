@@ -324,8 +324,8 @@ pub trait Calling: Sized {
 
     /// Passes `arguments` to the verb's C entry point.
     ///
-    /// # Safety
-    /// Everything `arguments` points to stays alive and in place until the outcome is final.
+    /// # Safety Everything `arguments` points to stays alive and in place until the
+    /// outcome is final.
     unsafe fn call(arguments: *mut Self::Arguments);
 
     /// What the verb hands back once its outcome is a success.
@@ -342,9 +342,9 @@ pub trait Completion: Sized {
     fn answer<'handle, Verb: Calling>(verb: Verb) -> Self::Answer<'handle, Verb>;
 }
 
-/// The inputs a completion takes: a blocking receiver takes borrows and owned values alike, while
-/// a deferring one takes only what it owns, since the library reads its inputs after the verb returns.
-/// Both borrow the arena, which no call reads as an input.
+/// The inputs a completion takes: a blocking receiver takes borrows and owned values alike, while a
+/// deferring one takes only what it owns, since the library reads its inputs after the verb
+/// returns. Both borrow the arena, which no call reads as an input.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "a deferred receiver needs owned inputs",
@@ -359,9 +359,8 @@ pub trait Accepts<Input> {}
 ///
 /// Rust-only.
 ///
-/// # Safety
-/// The associated scalar must describe the type's in-memory encoding exactly; the library reads
-/// raw buffers under that tag.
+/// # Safety The associated scalar must describe the type's in-memory encoding exactly; the library
+/// reads raw buffers under that tag.
 pub unsafe trait Element: Copy + 'static {
     /// The tag the C interface knows this type by.
     const SCALAR: Scalar;
@@ -394,7 +393,8 @@ pub struct Batch {
     pub(crate) count: usize,
 }
 
-/// The tape a verb lays separate items into end to end, kept beside the inputs until the call is final.
+/// The tape a verb lays separate items into end to end, kept beside the inputs until the
+/// call is final.
 #[doc(hidden)]
 pub struct Gathered<Value> {
     data: Vec<Value>,
@@ -489,7 +489,8 @@ impl<Value: Element, Tape: TapeView<Value> + ?Sized> TapeView<Value> for &Tape {
 pub enum Status {
     /// The call was submitted deferred and is not final yet.
     Deferred = 1,
-    /// Device, pinned, or host memory could not be allocated, or the executor's scratch ceiling is too low.
+    /// Device, pinned, or host memory could not be allocated, or the executor's scratch ceiling
+    /// is too low.
     OutOfMemory = 2,
     /// Item counts, a pixel shape, or a batch envelope disagree with the call or the model.
     ShapeMismatch = 3,
@@ -499,13 +500,15 @@ pub enum Status {
     UnknownKind = 5,
     /// A checkpoint file could not be opened, read, or written.
     Io = 7,
-    /// The driver refused or the device faulted; after a fault the executor refuses every later call.
+    /// The driver refused or the device faulted; after a fault the executor refuses
+    /// every later call.
     Device = 8,
     /// Supplied bytes could not be decoded: a checkpoint, an image, a clip, or a recording.
     Malformed = 9,
     /// The library reported neither success nor a failure.
     Internal = 10,
-    /// The request contradicts a frozen configuration, like resuming a checkpoint of another geometry.
+    /// The request contradicts a frozen configuration, like resuming a checkpoint
+    /// of another geometry.
     ConfigMismatch = 13,
     /// The call was refused rather than waited for, like a submission to a full deferred table.
     Contended = 14,
@@ -687,8 +690,8 @@ pub enum Scalar {
     U8 = 20,
     /// Two unsigned nibbles per byte, even dimensions in the low nibble.
     U4x2 = 21,
-    /// Eight single-bit dimensions per byte, the sign of each embedding dimension - the form USearch's
-    /// Hamming and Jaccard metrics score.
+    /// Eight single-bit dimensions per byte, the sign of each embedding dimension - the form
+    /// USearch's Hamming and Jaccard metrics score.
     U1x8 = 22,
 }
 
@@ -755,18 +758,18 @@ pub enum CPUClass {
     IntelIcelake = 5,
     /// Genoa-class x86 - Zen 4 and newer: native bf16 dot products over AVX-512.
     AmdGenoa = 6,
-    /// Sapphire Rapids-class x86: the Genoa bundle plus AVX-512 FP16 and the AMX-BF16 & AMX-INT8
-    /// tiles.
+    /// Sapphire Rapids-class x86: the Genoa bundle plus AVX-512 FP16 and the AMX-BF16
+    /// & AMX-INT8 tiles.
     IntelSapphire = 7,
     /// Granite Rapids-class x86: the Sapphire Rapids bundle plus the AMX-FP16 tiles.
     IntelGranite = 8,
     /// Diamond Rapids-class x86: the Granite Rapids bundle plus AVX10.2's FP8 conversions.
     IntelDiamond = 9,
-    /// Graviton2-class Arm - Neoverse N1, the bare NEON floor; phones predating Armv8.6 land here
-    /// too.
+    /// Graviton2-class Arm - Neoverse N1, the bare NEON floor; phones predating Armv8.6
+    /// land here too.
     AwsG2 = 10,
-    /// Armv8.6+ NEON: dot products, bf16 & f16 fused multiplies - Apple M2, Cortex-A710 & X2
-    /// class silicon.
+    /// Armv8.6+ NEON: dot products, bf16 & f16 fused multiplies - Apple M2, Cortex-A710 &
+    /// X2 class silicon.
     AppleM2 = 11,
     /// Apple M4-class Arm: the Armv8.6 NEON bundle plus the SME outer-product tiles.
     AppleM4 = 12,
@@ -778,8 +781,7 @@ pub enum CPUClass {
     AlibabaC930 = 15,
     /// WebAssembly every engine loads: 32-bit, single-threaded, the fixed-width simd128 tier.
     Wasm32V128 = 16,
-    /// WebAssembly with relaxed SIMD, shared memory for real thread pools, and 64-bit
-    /// addressing.
+    /// WebAssembly with relaxed SIMD, shared memory for real thread pools, and 64-bit addressing.
     Wasm64Extended = 17,
     /// The one class of a monoversioned build: every capability its floor implies or its preset
     /// vouches for, as the kernel libraries compiled them.
@@ -1165,9 +1167,9 @@ impl<'arena> Tape<'arena> {
         exported_slice(self.view.0.data.cast::<Value>(), length)
     }
 
-    /// The values of one item, refused with [`Status::InvalidArgument`] when `item` is not below
-    /// [`Tape::count`] or the tape holds another scalar type, and with [`Status::Device`] over
-    /// device memory.
+    /// The values of one item, refused with [`Status::InvalidArgument`] when `item` is not
+    /// below [`Tape::count`] or the tape holds another scalar type, and with [`Status::Device`]
+    /// over device memory.
     pub fn item<Value: Element>(&self, item: usize) -> Result<&'arena [Value]> {
         let offsets = self.offsets()?;
         let (Some(&start), Some(&end)) = (offsets.get(item), offsets.get(item + 1)) else {
@@ -1183,8 +1185,8 @@ impl<'arena> Tape<'arena> {
 
 // region: Placements
 
-/// The memory domains a RAM placement or executor names, and the class it pins; `None` derives the
-/// CPU's own.
+/// The memory domains a RAM placement or executor names, and the class it pins; `None` derives
+/// the CPU's own.
 pub(crate) fn ram_options(memory_domains: &[i32], cpu_class: Option<CPUClass>) -> uform_ram_options_t {
     uform_ram_options_t {
         memory_domains: memory_domains.as_ptr(),
@@ -1193,8 +1195,8 @@ pub(crate) fn ram_options(memory_domains: &[i32], cpu_class: Option<CPUClass>) -
     }
 }
 
-/// The devices a VRAM placement or executor names, and the class it pins; `None` derives the
-/// devices' own.
+/// The devices a VRAM placement or executor names, and the class it pins; `None` derives
+/// the devices' own.
 pub(crate) fn vram_options(devices: &[i32], gpu_class: Option<GPUClass>) -> uform_vram_options_t {
     uform_vram_options_t {
         devices: devices.as_ptr(),
@@ -1203,8 +1205,8 @@ pub(crate) fn vram_options(devices: &[i32], gpu_class: Option<GPUClass>) -> ufor
     }
 }
 
-/// Borrows a path as the bytes the C interface exchanges: the OS's own bytes on Unix, not necessarily
-/// UTF-8, and UTF-8 where the OS keeps paths in another encoding.
+/// Borrows a path as the bytes the C interface exchanges: the OS's own bytes on Unix, not
+/// necessarily UTF-8, and UTF-8 where the OS keeps paths in another encoding.
 pub(crate) fn path_view(path: &Path) -> Result<uform_bytes_view_t> {
     #[cfg(unix)]
     {
@@ -1226,8 +1228,8 @@ pub(crate) fn path_view(path: &Path) -> Result<uform_bytes_view_t> {
 // region: Callbacks
 
 /// The handlers one call lends the library, reached by every trampoline through one state pointer,
-/// and the first panic any of them raised, re-raised once the call is final since unwinding out of an
-/// `extern "C"` frame aborts.
+/// and the first panic any of them raised, re-raised once the call is final since unwinding out of
+/// an `extern "C"` frame aborts.
 #[doc(hidden)]
 pub struct Callbacks {
     pub(crate) progress: Cell<*mut c_void>,
@@ -1268,15 +1270,15 @@ impl Callbacks {
 
 /// A periodic report of finished and total units; `Break` stops the call at the next slice.
 ///
-/// It runs on whichever thread advanced the work, never on two at once, so it owes `Send` and may
-/// be `FnMut`. A panic inside it stops the call like a `Break` and is re-raised once the call is final.
+/// It runs on whichever thread advanced the work, never on two at once, so it owes `Send` and
+/// may be `FnMut`. A panic inside it stops the call like a `Break` and is re-raised once the
+/// call is final.
 ///
 /// Mirrors `uform_progress_callback_t`.
 pub type ProgressCallback<'a> = dyn FnMut(usize, usize) -> ControlFlow<()> + Send + 'a;
 
-/// # Safety
-/// `state` must address the live [`Callbacks`] of the call the callback was passed to, lending a
-/// `&mut ProgressCallback`.
+/// # Safety `state` must address the live [`Callbacks`] of the call the callback was passed to,
+/// lending a `&mut ProgressCallback`.
 unsafe extern "C" fn progress_trampoline(completed: usize, total: usize, state: *mut c_void) -> c_int {
     let callbacks = &*state.cast::<Callbacks>();
     let handler = &mut **callbacks.progress.get().cast::<&mut ProgressCallback>();
@@ -1447,8 +1449,7 @@ impl Executor {
     ///
     /// Calls `uform_executor_on_pool`.
     ///
-    /// # Safety
-    /// `pool` must address a live ForkUnion `fu_pool_t` that outlives the executor.
+    /// # Safety `pool` must address a live ForkUnion `fu_pool_t` that outlives the executor.
     pub unsafe fn on_pool(
         memory_domains: &[i32],
         cpu_class: Option<CPUClass>,
@@ -1479,8 +1480,7 @@ impl Executor {
     ///
     /// Calls `uform_executor_for_vram`.
     ///
-    /// # Safety
-    /// Every stream must be a live CUDA stream on its device that outlives the executor.
+    /// # Safety Every stream must be a live CUDA stream on its device that outlives the executor.
     pub unsafe fn for_vram(
         devices: &[i32],
         gpu_class: Option<GPUClass>,
@@ -1546,15 +1546,16 @@ impl Drop for ExecutorShare {
 
 // region: Arenas
 
-/// Memory the library writes every output whose length scales with a call into, reused across calls.
+/// Memory the library writes every output whose length scales with a call into,
+/// reused across calls.
 ///
 /// An executor places it where it computes, host pages or its GPU's memory, decided once, and
 /// nothing is allocated until a call writes into it. Every call rewinds and refills it,
-/// invalidating the previous call's outputs, so a steady loop allocates once.
-/// Every verb, blocking or deferred, borrows it as `&mut Arena` and answers outputs that borrow it in turn.
-/// An arena from a VRAM executor holds device memory, so the host accessors of its outputs refuse
-/// with [`Status::Device`]. It grows, fills and frees on the first stream of the executor that made
-/// it, so it serves only calls on that executor and holds the executor until it drops.
+/// invalidating the previous call's outputs, so a steady loop allocates once. Every verb, blocking
+/// or deferred, borrows it as `&mut Arena` and answers outputs that borrow it in turn. An arena
+/// from a VRAM executor holds device memory, so the host accessors of its outputs refuse with
+/// [`Status::Device`]. It grows, fills and frees on the first stream of the executor that made it,
+/// so it serves only calls on that executor and holds the executor until it drops.
 ///
 /// Mirrors `uform_arena_t`; dropping it calls `uform_arena_free`, which waits for the calls
 /// still writing into it.
@@ -1687,8 +1688,8 @@ impl Completion for Blocking {
         let mut outcome = uform_outcome_t::default();
         let callbacks = Callbacks::default();
         let mut arguments = verb.arguments(&mut outcome, uform_completion_blocking_k, &callbacks)?;
-        // Safety: the arguments point into `verb`, `outcome` and `callbacks`, which stay in place until
-        // the call returns, and a blocking call is final on return.
+        // Safety: the arguments point into `verb`, `outcome` and `callbacks`, which stay in place
+        // until the call returns, and a blocking call is final on return.
         unsafe { Verb::call(&mut arguments) };
         callbacks.raise();
         check(outcome)?;
@@ -1715,8 +1716,8 @@ impl Completion for Deferring {
             arguments: None,
             verb,
         }));
-        // Safety: the box is fresh and reached through `lent` alone, and the arguments point into its
-        // fields, where they stay until the box is freed.
+        // Safety: the box is fresh and reached through `lent` alone, and the arguments point into
+        // its fields, where they stay until the box is freed.
         unsafe {
             let outcome = ptr::addr_of_mut!((*lent).outcome);
             let (callbacks, verb) = (&(*lent).callbacks, &mut (*lent).verb);
@@ -1772,7 +1773,8 @@ pub struct Deferred<'handle, Verb: Calling> {
 }
 
 impl<Verb: Calling> Deferred<'_, Verb> {
-    /// `Err(Status::Deferred)` until the call is final, then its final status, read without blocking.
+    /// `Err(Status::Deferred)` until the call is final, then its final status,
+    /// read without blocking.
     ///
     /// Calls `uform_outcome_status`.
     pub fn status(&self) -> core::result::Result<(), Status> {
@@ -1785,7 +1787,8 @@ impl<Verb: Calling> Deferred<'_, Verb> {
     /// Calls `uform_outcome_wait`.
     pub fn wait(self) -> Result<Verb::Output> {
         let lent = ManuallyDrop::new(self).lent.as_ptr();
-        // Safety: once the outcome is final the library touches the box no more, so it is freed here.
+        // Safety: once the outcome is final the library touches the box no more, so it
+        // is freed here.
         let Lent {
             outcome,
             callbacks,
@@ -1822,7 +1825,8 @@ impl<Verb: Calling> fmt::Debug for Deferred<'_, Verb> {
     }
 }
 
-// Safety: the box moves with the `Deferred`, and until its call is final only the library reaches it.
+// Safety: the box moves with the `Deferred`, and until its call is final only the
+// library reaches it.
 unsafe impl<Verb: Calling + Send> Send for Deferred<'_, Verb> {}
 
 impl<'handle, Verb: Calling> IntoFuture for Deferred<'handle, Verb> {
@@ -1832,7 +1836,8 @@ impl<'handle, Verb: Calling> IntoFuture for Deferred<'handle, Verb> {
     fn into_future(self) -> Wait<'handle, Verb> { Wait(Some(self)) }
 }
 
-/// A [`Deferred`] being awaited: every poll reads its status, and one not yet final asks to be polled again.
+/// A [`Deferred`] being awaited: every poll reads its status, and one not yet final asks to
+/// be polled again.
 ///
 /// The C library has no wake-up, so an executor re-polls it while other tasks run, spinning only
 /// when nothing else is ready; [`Deferred::wait`] blocks without spinning.
@@ -1893,8 +1898,8 @@ mod tests {
         assert_eq!(Scalar::from_raw(9), None);
     }
 
-    /// Every C inverse answers a default for a name it does not know, which must not read back as
-    /// that default.
+    /// Every C inverse answers a default for a name it does not know, which must not read back
+    /// as that default.
     #[test]
     fn names_round_trip_through_the_library_and_refuse_strangers() {
         assert_eq!(Status::ShapeMismatch.to_string(), "shape-mismatch");
@@ -1934,8 +1939,9 @@ mod tests {
             assert_eq!(check(raw).unwrap_err().status, status);
             assert_eq!(status.to_string().parse(), Ok(status));
         }
-        // A final outcome is never deferred, and a status this build has no name for is not success
-        // either, so both read as the contract violation they are; USearch's 6, 11 and 12 stay unused.
+        // A final outcome is never deferred, and a status this build has no name for is not
+        // success either, so both read as the contract violation they are; USearch's 6, 11 and
+        // 12 stay unused.
         for status in [Status::Deferred as i32, 6, 11, 12, 4242] {
             let raw = uform_outcome_t {
                 status,

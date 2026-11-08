@@ -1,3 +1,10 @@
+"""Download ToxiGen: machine-generated toxic/benign statements into a flat safety schema (`text`).
+
+File: scripts/data/download_toxigen.py
+Author: Ash Vardanian
+Date: July 5, 2026
+"""
+
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -5,7 +12,6 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download ToxiGen: machine-generated toxic/benign statements into a flat safety schema (`text`)."""
 import pyarrow as pa
 import pyarrow.compute as pc
 from acquire import acquire

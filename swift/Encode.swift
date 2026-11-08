@@ -2,15 +2,15 @@
  *  @file swift/Encode.swift
  *  @author Ash Vardanian
  *  @date October 18, 2026
- *  @brief The forward passes, mirroring `c/uform/encode.h`: text, images, video and audio in, pooled embeddings,
- *      per-token states and token vectors out, one verb per input form, plus calibrated choices over text, each on
- *      the model and on both of its receivers.
+ *  @brief The forward passes, mirroring `c/uform/encode.h`: text, images, video and audio in,
+ *      pooled embeddings, per-token states and token vectors out, one verb per input form, plus
+ *      calibrated choices over text, each on the model and on both of its receivers.
  */
 
 import UFormC
 
-/// The surfaces an encode call keeps from its one forward, each deciding whether the binding passes the C
-/// output pointer of the same name; `.embeddings` alone by default.
+/// The surfaces an encode call keeps from its one forward, each deciding whether the binding passes
+/// the C output pointer of the same name; `.embeddings` alone by default.
 public struct Outputs: OptionSet, Sendable {
     /// The bits, one per C output pointer the set passes.
     public let rawValue: UInt8
@@ -21,8 +21,8 @@ public struct Outputs: OptionSet, Sendable {
     public static let embeddings = Outputs(rawValue: 1 << 0)
     /// The final-norm states, one row per token each item kept after truncation.
     public static let states = Outputs(rawValue: 1 << 1)
-    /// The token head's unit vectors, one row per token each item kept, its prefix included; a model without a
-    /// token head reports `unsupported`.
+    /// The token head's unit vectors, one row per token each item kept, its prefix included; a
+    /// model without a token head reports `unsupported`.
     public static let tokenVectors = Outputs(rawValue: 1 << 2)
 }
 
@@ -57,7 +57,8 @@ public struct Encoded {
     public let embeddings: Rows?
     /// One run of rows per item, one row per token kept, or nil when `outputs` left the states out.
     public let states: RowsTape?
-    /// One run of token-width rows per item, one row per token kept, or nil when `outputs` left them out.
+    /// One run of token-width rows per item, one row per token kept, or nil when `outputs`
+    /// left them out.
     public let tokenVectors: RowsTape?
     /// What the call counted on the way.
     public let stats: EncodeStats
@@ -94,8 +95,8 @@ extension Model {
         try here.imageEncode(images, outputs: outputs, arena: arena, config: config)
     }
 
-    /// Encodes decoded images of interleaved 8-bit RGB, item `i` holding `heights[i]` rows of `widths[i]` pixels.
-    /// Calls `uform_image_encode_pixels`.
+    /// Encodes decoded images of interleaved 8-bit RGB, item `i` holding `heights[i]` rows of
+    /// `widths[i]` pixels. Calls `uform_image_encode_pixels`.
     public func imageEncodePixels(
         _ pixels: [[UInt8]],
         heights: [UInt32],
@@ -134,8 +135,8 @@ extension Model {
         try here.audioEncode(recordings, outputs: outputs, arena: arena, config: config)
     }
 
-    /// Encodes decoded mono recordings sharing one `sampleRate`, resampled to the model's where it differs.
-    /// Calls `uform_audio_encode_samples`.
+    /// Encodes decoded mono recordings sharing one `sampleRate`, resampled to the model's where it
+    /// differs. Calls `uform_audio_encode_samples`.
     public func audioEncodeSamples(
         _ samples: [[Float]],
         sampleRate: UInt32,
@@ -146,10 +147,11 @@ extension Model {
         try here.audioEncodeSamples(samples, sampleRate: sampleRate, outputs: outputs, arena: arena, config: config)
     }
 
-    /// Scores each text's legal `choices`, one byte each, through one forward, a softmax over them alone at the
-    /// calibrated inverse temperature of the item's `temperatureGroups` entry; nil puts every item in group zero.
-    /// The call appends the mask byte, and a text longer than the context loses its head. A model without the
-    /// byte decoder reports `unsupported`. `progress` hears items scored. Calls `uform_text_choose`.
+    /// Scores each text's legal `choices`, one byte each, through one forward, a softmax over them
+    /// alone at the calibrated inverse temperature of the item's `temperatureGroups` entry; nil
+    /// puts every item in group zero. The call appends the mask byte, and a text longer than the
+    /// context loses its head. A model without the byte decoder reports `unsupported`. `progress`
+    /// hears items scored. Calls `uform_text_choose`.
     public func textChoose(
         _ texts: [String],
         choices: [[UInt8]],
@@ -351,7 +353,8 @@ extension uform_image_encode_stats_t: EncodeStatsFields {}
 extension uform_video_encode_stats_t: EncodeStatsFields {}
 extension uform_audio_encode_stats_t: EncodeStatsFields {}
 
-/// The fields every encode argument structure shares, so one function lowers what the six verbs have in common.
+/// The fields every encode argument structure shares, so one function lowers what the six verbs
+/// have in common.
 protocol EncodeArguments {
     associatedtype Stats: EncodeStatsFields
     init()
@@ -379,8 +382,8 @@ extension uform_audio_encode_t: EncodeArguments {}
 extension uform_audio_encode_samples_t: EncodeArguments {}
 
 extension ModelCall {
-    /// Fills what every encode verb shares into `arguments`, already holding the verb's own inputs, runs `verb`
-    /// over it, and reads the surfaces `outputs` named.
+    /// Fills what every encode verb shares into `arguments`, already holding the verb's own inputs,
+    /// runs `verb` over it, and reads the surfaces `outputs` named.
     private func encode<Arguments: EncodeArguments>(
         _ arguments: Arguments,
         count: Int,

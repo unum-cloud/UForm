@@ -1,11 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "pandas",
-#     "pillow",
-#     "pyarrow>=21.0.0",
-# ]
-# ///
 """Offline ingestion-cleanse: decode-verify every media row and rewrite corrupt-free Parquet.
 
 Modality: omni (images today; audio + video registered). A single truncated PNG in a training
@@ -56,7 +48,20 @@ atomic temp-then-rename, with a per-modality drop manifest JSON.
 
     # CPU/PIL triage pass (GPU-free), threaded:
     uv run scripts/data/clean_media_shards.py --modality images --decoder cpu --workers 64 --dry-run
+
+File: scripts/data/clean_media_shards.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "pandas",
+#     "pillow",
+#     "pyarrow>=21.0.0",
+# ]
+# ///
 
 import argparse
 import concurrent.futures
@@ -79,8 +84,8 @@ from PIL import Image
 LOGGER = logging.getLogger("clean_media_shards")
 
 #: Rows per work chunk. Large shards (imagenet ~98k rows) split into this many chunks so a single
-#: worker never becomes a long pole; small shards (coco ~3k rows) collapse to one chunk. Tuned so a
-#: chunk is a few seconds of decode — small enough to balance, large enough to amortize startup.
+#: worker never becomes a long pole; small shards (coco ~3k rows) collapse to one chunk. Tuned so
+#: a chunk is a few seconds of decode — small enough to balance, large enough to amortize startup.
 DEFAULT_CHUNK_ROWS = 4096
 
 #: ThreadPoolExecutor worker ceiling for the CPU/PIL path. The box has 128 physical cores but two
@@ -94,15 +99,17 @@ DEFAULT_WORKERS = min(64, os.cpu_count() or 1)
 #: that batch, so a small batch also bounds the slow-path cost of a corrupt row.
 DEFAULT_GPU_BATCH = 256
 
-#: Decoded square side for the GPU probe. The probe only asks "does this decode", so the exact
-#: resize target is immaterial; a small side keeps the decode-and-resize workspace tiny. The native
-#: source resolution (what actually rejects) is bounded by `DEFAULT_GPU_MAX_SOURCE_SIDE`.
+#: Decoded square side for the GPU probe.
+#: The probe only asks "does this decode", so the exact resize target is immaterial;
+#: a small side keeps the decode-and-resize workspace tiny.
+#: The native source resolution (what actually rejects) is bounded by `DEFAULT_GPU_MAX_SOURCE_SIDE`.
 DEFAULT_GPU_PROBE_SIDE = 64
 
 #: Native (pre-resize) source-side upper bound the GPU decoder pool's workspace arena is sized for.
 #: `decode_image_tape_resized` stages each image at FULL decoded resolution before resizing, so this
-#: must bound the source side (COCO ~640) or the arena undersizes and decode reports `shape_mismatch`
-#: on a VALID image — a false drop. Matches the omni loader's `max_source_side` default (2048).
+#: must bound the source side (COCO ~640) or the arena undersizes and decode reports
+#: `shape_mismatch` on a VALID image — a false drop. Matches the omni loader's `max_source_side`
+#: default (2048).
 DEFAULT_GPU_MAX_SOURCE_SIDE = 2048
 
 #: Per-image compressed-byte upper bound the GPU decoder pool pins. Sized generously for full-res
@@ -173,10 +180,12 @@ class Modality:
     unavailable_reason: str = ""
 
 
-#: The modality registry. Adding a modality is a single entry here; video is a registered no-op
-#: until msrvtt (or another source) lands Parquet, at which point it gets an `available=True`
-#: decoder. The output tree for any dataset is its directory with a `_clean` suffix on the dataset
-#: root (see `_clean_output_path`), so cleansing never overwrites originals.
+#: The modality registry.
+#: Adding a modality is a single entry here;
+#: video is a registered no-op until msrvtt (or another source) lands Parquet, at which point
+#: it gets an `available=True` decoder.
+#: The output tree for any dataset is its directory with a `_clean` suffix on the dataset root
+#: (see `_clean_output_path`), so cleansing never overwrites originals.
 MODALITY_REGISTRY: dict[str, Modality] = {
     "images": Modality(
         name="images",

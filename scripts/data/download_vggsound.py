@@ -1,15 +1,9 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "huggingface_hub",
-# ]
-# ///
 """Idempotent downloader for VGGSound (Loie/VGGSound mirror, ~338 GB).
 
-Modality: audio + video.  200k YouTube clips x 10s with audio tracks + visual frames +
-class labels.  Cleanly licensed (CC BY 4.0) and the canonical bridge corpus for
-audio-visual cross-modal training - significantly cleaner than AudioSet at a fraction of
-the size.  Pairs naturally with the upcoming audio_codec_pool_t for log-mel features.
+Modality: audio + video. 200k YouTube clips x 10s with audio tracks + visual frames + class labels.
+Cleanly licensed (CC BY 4.0) and the canonical bridge corpus for audio-visual cross-modal training -
+significantly cleaner than AudioSet at a fraction of the size. Pairs naturally with the upcoming
+audio_codec_pool_t for log-mel features.
 
 Shard cap.
 The full corpus is ~338 GB. `--max-shards N` (or `--fraction F`) cap how many of the upstream
@@ -22,7 +16,18 @@ CLI usage:
     uv run scripts/data/download_vggsound.py --max-shards 4        # first 4 archive shards
     uv run scripts/data/download_vggsound.py --fraction 0.30       # leading 30% of the shards
     uv run scripts/data/download_vggsound.py --out-dir $UFORM_DATA_ROOT/vggsound
+
+File: scripts/data/download_vggsound.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "huggingface_hub",
+# ]
+# ///
 
 import argparse
 import sys

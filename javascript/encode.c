@@ -2,13 +2,14 @@
  *  @file javascript/encode.c
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief The Node-API forward passes: text, images, video and audio in, pooled embeddings,
- *      per-token states, token vectors and choice probabilities viewed inside the caller's arena
- *      out.
+ *  @brief The Node-API forward passes: text, images, video and audio in, pooled
+ *      embeddings, per-token states, token vectors and choice probabilities viewed inside
+ *      the caller's arena out.
  *
- *  Every verb takes the executor and the completion first, so one native function serves the calling thread, a
- *  blocking receiver and a deferred one alike, then its tape, then the arena, the surfaces it keeps, the scalar
- *  they land as, and the progress handler a call on the calling thread may take.
+ *  Every verb takes the executor and the completion first, so one native function serves the
+ *  calling thread, a blocking receiver and a deferred one alike, then its tape, then the arena, the
+ *  surfaces it keeps, the scalar they land as, and the progress handler a call on the calling
+ *  thread may take.
  */
 #include "lib.h"
 
@@ -98,8 +99,9 @@ static napi_value uform_js_finish_encode(napi_env env, uform_js_call_t *call, na
 }
 
 /**
- *  @brief Opens an encode call, reading the executor, the completion, the tape in arguments two and three, and the
- *      arena, the surfaces, the scalar and the progress handler from argument @p tail on.
+ *  @brief Opens an encode call, reading the executor, the completion, the tape in arguments two and
+ *      three, and the arena, the surfaces, the scalar and the progress handler from argument
+ *      @p tail on.
  *  @return The call, or @c NULL with an exception pending.
  */
 static uform_js_encode_call_t *uform_js_encode_open(napi_env env, napi_callback_info info, size_t wanted,
@@ -144,8 +146,9 @@ typedef enum uform_js_files_t {
     uform_js_files_audio_k,
 } uform_js_files_t;
 
-/** @c textEncode, @c imageEncode, @c videoEncode and @c audioEncode(executor, completion, bytes, offsets, arena,
- *  outputs, outputsScalar, progress) → @c {embeddings, states, stats}, viewed inside @p arena. */
+/** @c textEncode, @c imageEncode, @c videoEncode and @c audioEncode(executor, completion, bytes,
+ *  offsets, arena, outputs, outputsScalar, progress) → @c {embeddings, states, stats}, viewed
+ *  inside @p arena. */
 static napi_value uform_js_encode_files(napi_env env, napi_callback_info info, uform_js_files_t verb) {
     napi_value arguments[8], self = NULL, deferred = NULL;
     uform_js_encode_call_t local;
@@ -242,8 +245,8 @@ static napi_value uform_js_audio_encode(napi_env env, napi_callback_info info) {
     return uform_js_encode_files(env, info, uform_js_files_audio_k);
 }
 
-/** @c imageEncodePixels(executor, completion, rgb, offsets, heights, widths, arena, outputs, outputsScalar,
- *  progress) → @c {embeddings, states, stats}, viewed inside @p arena. */
+/** @c imageEncodePixels(executor, completion, rgb, offsets, heights, widths, arena, outputs,
+ *  outputsScalar, progress) → @c {embeddings, states, stats}, viewed inside @p arena. */
 static napi_value uform_js_image_encode_pixels(napi_env env, napi_callback_info info) {
     napi_value arguments[10], self = NULL, deferred = NULL;
     uform_js_encode_call_t local;
@@ -286,8 +289,8 @@ static napi_value uform_js_image_encode_pixels(napi_env env, napi_callback_info 
     return uform_js_call_answer(env, &call->call, &local.call, slots, deferred);
 }
 
-/** @c audioEncodeSamples(executor, completion, samples, offsets, sampleRate, arena, outputs, outputsScalar,
- *  progress) → @c {embeddings, states, stats}, viewed inside @p arena. */
+/** @c audioEncodeSamples(executor, completion, samples, offsets, sampleRate, arena, outputs,
+ *  outputsScalar, progress) → @c {embeddings, states, stats}, viewed inside @p arena. */
 static napi_value uform_js_audio_encode_samples(napi_env env, napi_callback_info info) {
     napi_value arguments[9], self = NULL, deferred = NULL;
     uform_js_encode_call_t local;

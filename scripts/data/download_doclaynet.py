@@ -1,3 +1,10 @@
+"""Download DocLayNet: document page images with layout-class-name weak captions, into the image schema.
+
+File: scripts/data/download_doclaynet.py
+Author: Ash Vardanian
+Date: July 5, 2026
+"""
+
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -5,7 +12,6 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download DocLayNet: document page images with layout-class-name weak captions, into the image schema."""
 import pyarrow as pa
 from acquire import acquire
 

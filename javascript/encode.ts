@@ -2,8 +2,9 @@
  *  @file javascript/encode.ts
  *  @author Ash Vardanian
  *  @date October 18, 2026
- *  @brief The forward passes: text, images, video and audio in, pooled embeddings, per-token states and token
- *      vectors out, one verb per input form, and the text choices, written once for every receiver.
+ *  @brief The forward passes: text, images, video and audio in, pooled embeddings, per-token
+ *      states and token vectors out, one verb per input form, and the text choices, written once
+ *      for every receiver.
  */
 import type {
   CompiledChosen,
@@ -18,8 +19,9 @@ import type {
 import { Answer, Arena, ArenaView, Executor, Scalar, Status, fail, scalarCode, submitAs } from "./types.js";
 
 /**
- *  The surfaces an encode call keeps, combined with `|`. The C verb fills whichever of `embeddings`, `states` and
- *  `token_vectors` is non-`NULL`, and these flags decide which it is handed.
+ *  The surfaces an encode call keeps, combined with `|`. The C verb fills whichever of
+ *  `embeddings`, `states` and `token_vectors` is non-`NULL`, and these flags decide which
+ *  it is handed.
  *  @enum {number}
  *  @readonly
  */
@@ -28,7 +30,8 @@ export enum Outputs {
   Embeddings = 1,
   /** The final-norm states, one row per token kept after truncation. */
   States = 2,
-  /** The token head's unit vectors, one row per token kept, `tokenWidth` wide; `unsupported` without a token head. */
+  /** The token head's unit vectors, one row per token kept, `tokenWidth` wide; `unsupported`
+   *  without a token head. */
   TokenVectors = 4,
 }
 
@@ -38,11 +41,13 @@ export interface EncodeConfig {
   outputs?: number;
   /** The scalar every output lands as; absent lands `f32`, which a `Float32Array` reads. */
   outputsScalar?: Scalar;
-  /** Hears the items encoded so far and may stop the call by answering `false`; only a model's own verbs, which run on the calling thread, take one. */
+  /** Hears the items encoded so far and may stop the call by answering `false`; only a model's own
+   *  verbs, which run on the calling thread, take one. */
   progress?: ProgressCallback;
 }
 
-/** One decoded image: `ImageData` as a canvas hands it out, or interleaved RGB or RGBA bytes with their shape. */
+/** One decoded image: `ImageData` as a canvas hands it out, or interleaved RGB or RGBA bytes
+ *  with their shape. */
 export interface Pixels {
   /** Rows end to end, three or four bytes per pixel. */
   data: Uint8Array | Uint8ClampedArray;
@@ -63,8 +68,8 @@ export interface EncodeStats {
 /**
  *  Rows a call landed in its arena. Mirrors a `uform_rows_view_t` output.
  *
- *  `data` is a `Float32Array` for `f32`, a `Float16Array` for `f16` where the runtime has one, a `Uint16Array` for
- *  `bf16`, and raw bytes for the kinds JavaScript spells no element for.
+ *  `data` is a `Float32Array` for `f32`, a `Float16Array` for `f16` where the runtime has one, a
+ *  `Uint16Array` for `bf16`, and raw bytes for the kinds JavaScript spells no element for.
  */
 export class Rows extends ArenaView {
   /** Rows written. */
@@ -103,8 +108,8 @@ export class Rows extends ArenaView {
 }
 
 /**
- *  The final-norm states or the token vectors a call landed in its arena: rows end to end, item `i` spanning rows
- *  `offsets[i]` up to `offsets[i + 1]`. Mirrors `uform_rows_tape_view_t`.
+ *  The final-norm states or the token vectors a call landed in its arena: rows end to end, item `i`
+ *  spanning rows `offsets[i]` up to `offsets[i + 1]`. Mirrors `uform_rows_tape_view_t`.
  */
 export class States extends ArenaView {
   /** Every item's rows, end to end. */
@@ -158,8 +163,9 @@ function encodedOf(landed: CompiledEncoded): Encoded {
 }
 
 /**
- *  One probability per choice a choose call landed in its arena, in the choices' order: item `i` spans
- *  `offsets[i]` up to `offsets[i + 1]`. Mirrors the `probabilities` output of `uform_text_choose_t`.
+ *  One probability per choice a choose call landed in its arena, in the choices' order:
+ *  item `i` spans `offsets[i]` up to `offsets[i + 1]`. Mirrors the `probabilities`
+ *  output of `uform_text_choose_t`.
  */
 export class Probabilities extends ArenaView {
   readonly #data: Float32Array | null;
@@ -193,9 +199,11 @@ export class Probabilities extends ArenaView {
 
 /** Optional per-call settings of `textChoose`. */
 export interface ChooseConfig {
-  /** The question type of each item, below the model's `choiceTemperatureGroups`; absent puts every item in group 0. */
+  /** The question type of each item, below the model's `choiceTemperatureGroups`; absent puts every
+   *  item in group 0. */
   temperatureGroups?: Uint32Array | number[];
-  /** Hears the items scored so far and may stop the call by answering `false`; only a model's own verbs take one. */
+  /** Hears the items scored so far and may stop the call by answering `false`; only a model's own
+   *  verbs take one. */
   progress?: ProgressCallback;
 }
 
@@ -208,12 +216,13 @@ export interface Chosen {
 }
 
 /**
- *  A ragged batch packed as the C interface reads it: elements end to end, and `count + 1` offsets into them. Mirrors
- *  `uform_tape_view_t`.
+ *  A ragged batch packed as the C interface reads it: elements end to end, and `count + 1` offsets
+ *  into them. Mirrors `uform_tape_view_t`.
  *
- *  Every verb taking an array of entries also takes a packed tape, which the Node addon lends to the call as it is when
- *  its offsets are a `BigUint64Array`; an array of entries is first gathered into one tape, the one copy that path makes.
- *  A `Probabilities` answer is itself a tape, so it trains a step's `choiceTargets` as it lands.
+ *  Every verb taking an array of entries also takes a packed tape, which the Node addon lends to
+ *  the call as it is when its offsets are a `BigUint64Array`; an array of entries is first gathered
+ *  into one tape, the one copy that path makes. A `Probabilities` answer is itself a tape, so it
+ *  trains a step's `choiceTargets` as it lands.
  */
 export interface Tape<Elements extends Uint8Array | Float32Array> {
   data: Elements;
@@ -244,8 +253,8 @@ function tapeOf<Entry, Elements extends Uint8Array | Float32Array>(
   return { data, offsets };
 }
 
-/** Lays UTF-8 texts or byte runs end to end, so text and every encoded-file verb share one tape, or lends a packed
- *  tape as it is. */
+/** Lays UTF-8 texts or byte runs end to end, so text and every encoded-file verb share one tape, or
+ *  lends a packed tape as it is. */
 export function bytesTape(entries: readonly (string | Uint8Array)[] | Tape<Uint8Array>): Tape<Uint8Array> {
   if (!Array.isArray(entries)) return packed(entries as Tape<Uint8Array>);
   const encoder = new TextEncoder();
@@ -260,7 +269,8 @@ export function bytesTape(entries: readonly (string | Uint8Array)[] | Tape<Uint8
   );
 }
 
-/** Lays decoded images end to end as interleaved RGB, dropping the alpha of RGBA entries such as `ImageData`. */
+/** Lays decoded images end to end as interleaved RGB, dropping the alpha of RGBA entries
+ *  such as `ImageData`. */
 function pixelsTape(images: readonly Pixels[]): Tape<Uint8Array> & { heights: Uint32Array; widths: Uint32Array } {
   const heights = new Uint32Array(images.length);
   const widths = new Uint32Array(images.length);
@@ -304,9 +314,10 @@ export function samplesTape(recordings: readonly Float32Array[] | Tape<Float32Ar
 /**
  *  The encode verbs every receiver of a model shares, written once.
  *
- *  The receiver chooses where a verb runs and how it completes, and the verb stays the same: a `Model` runs it on the
- *  calling thread, `model.on(executor)` blocks on an executor, and `model.deferred(executor)` submits it there and
- *  answers a {@link Deferred}. Every verb lands its outputs in `arena` and answers views into it.
+ *  The receiver chooses where a verb runs and how it completes, and the verb stays the same: a
+ *  `Model` runs it on the calling thread, `model.on(executor)` blocks on an executor, and
+ *  `model.deferred(executor)` submits it there and answers a {@link Deferred}. Every verb lands its
+ *  outputs in `arena` and answers views into it.
  */
 export abstract class EncodeVerbs<Receiving extends "blocking" | "deferred"> {
   /** The backend handle every verb is called on; shared by every receiver of one model. */
@@ -322,7 +333,8 @@ export abstract class EncodeVerbs<Receiving extends "blocking" | "deferred"> {
     this.receiving = receiving;
   }
 
-  /** Submits one call with this receiver's completion, and hands its answer back as this receiver does. */
+  /** Submits one call with this receiver's completion, and hands its answer back as
+   *  this receiver does. */
   protected submit<Raw, Answered>(
     call: (completion: Completion) => unknown,
     answer: (raw: Raw) => Answered,
@@ -368,8 +380,9 @@ export abstract class EncodeVerbs<Receiving extends "blocking" | "deferred"> {
   }
 
   /**
-   *  Scores each item's legal choices through one forward, a softmax over them alone at the item's group's calibrated
-   *  inverse temperature; a model without the byte decoder reports `unsupported`. Calls `uform_text_choose`.
+   *  Scores each item's legal choices through one forward, a softmax over them alone at the item's
+   *  group's calibrated inverse temperature; a model without the byte decoder reports
+   *  `unsupported`. Calls `uform_text_choose`.
    *
    *  @param texts - The states, each ending where its choice goes.
    *  @param choices - Each item's legal choices, one byte each, like "yn".
@@ -410,7 +423,8 @@ export abstract class EncodeVerbs<Receiving extends "blocking" | "deferred"> {
   }
 
   /**
-   *  Decodes and encodes JPEG, PNG or WebP files; the browser build reports `unsupported`. Calls `uform_image_encode`.
+   *  Decodes and encodes JPEG, PNG or WebP files; the browser build reports
+   *  `unsupported`. Calls `uform_image_encode`.
    *
    *  @param images - One encoded file per item, or a tape of them.
    *  @param arena - The memory the outputs land in, rewound by the call.
@@ -457,7 +471,8 @@ export abstract class EncodeVerbs<Receiving extends "blocking" | "deferred"> {
   }
 
   /**
-   *  Decodes and encodes MP4 or WebM clips; the browser build reports `unsupported`. Calls `uform_video_encode`.
+   *  Decodes and encodes MP4 or WebM clips; the browser build reports
+   *  `unsupported`. Calls `uform_video_encode`.
    *
    *  @param videos - One encoded file per item, or a tape of them.
    *  @param arena - The memory the outputs land in, rewound by the call.
@@ -478,7 +493,8 @@ export abstract class EncodeVerbs<Receiving extends "blocking" | "deferred"> {
   }
 
   /**
-   *  Decodes and encodes WAV, FLAC, MP3 or Opus files; the browser build reports `unsupported`. Calls `uform_audio_encode`.
+   *  Decodes and encodes WAV, FLAC, MP3 or Opus files; the browser build reports
+   *  `unsupported`. Calls `uform_audio_encode`.
    *
    *  @param recordings - One encoded file per item, or a tape of them.
    *  @param arena - The memory the outputs land in, rewound by the call.
@@ -499,7 +515,8 @@ export abstract class EncodeVerbs<Receiving extends "blocking" | "deferred"> {
   }
 
   /**
-   *  Encodes decoded mono recordings, resampled to the model's rate where `sampleRate` differs. Calls `uform_audio_encode_samples`.
+   *  Encodes decoded mono recordings, resampled to the model's rate where `sampleRate`
+   *  differs. Calls `uform_audio_encode_samples`.
    *
    *  @param recordings - One run of samples per item, or a tape of them.
    *  @param sampleRate - Samples per second shared by every recording.

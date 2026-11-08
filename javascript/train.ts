@@ -2,9 +2,9 @@
  *  @file javascript/train.ts
  *  @author Ash Vardanian
  *  @date October 18, 2026
- *  @brief Training: the mesh a run's processes join, and the trainer whose steps join masked reconstruction and the
- *      pairwise contrastive loss into one optimizer step. GPU-only, so the WebAssembly backend reports
- *      `unsupported`.
+ *  @brief Training: the mesh a run's processes join, and the trainer whose steps join masked
+ *      reconstruction and the pairwise contrastive loss into one optimizer step. GPU-only, so the
+ *      WebAssembly backend reports `unsupported`.
  */
 import type { CompiledMesh, CompiledMeshDescription, CompiledStepped, CompiledTrainer, Completion } from "./library.js";
 import { Rows, type Tape, bytesTape, samplesTape } from "./encode.js";
@@ -29,7 +29,8 @@ import {
   submitAs,
 } from "./types.js";
 
-/** Where this process sits among the processes training one model, and how they meet. Mirrors `uform_mesh_options_t`. */
+/** Where this process sits among the processes training one model, and how they
+ *  meet. Mirrors `uform_mesh_options_t`. */
 export interface MeshOptions {
   /** This process's index among `hostDomainCount`. */
   hostDomainIndex?: number;
@@ -37,7 +38,8 @@ export interface MeshOptions {
   hostDomainCount?: number;
   /** GPUs one NVLink multicast domain spans; absent derives the host. */
   gpusPerMultimemDomain?: number;
-  /** The path of the directory every host sees, crossing as its UTF-8 bytes; required with peers. */
+  /** The path of the directory every host sees, crossing as its UTF-8 bytes;
+   *  required with peers. */
   directory?: string;
   /** The run's unique name, naming one directory inside `directory`; required with peers. */
   job?: string;
@@ -66,7 +68,8 @@ export class Mesh implements Disposable {
   }
 
   /**
-   *  Joins this process to the run's mesh, once every process has joined. Calls `uform_mesh_bootstrap`.
+   *  Joins this process to the run's mesh, once every process has
+   *  joined. Calls `uform_mesh_bootstrap`.
    *  @param executor - A VRAM executor whose devices are this process's members of the mesh.
    *  @param options - Where this process sits and how the processes meet.
    */
@@ -90,7 +93,8 @@ export class Mesh implements Disposable {
   }
 }
 
-/** What one device's step carries at most. Mirrors `uform_batch_shape_t`; every absent field reads zero. */
+/** What one device's step carries at most. Mirrors `uform_batch_shape_t`; every absent
+ *  field reads zero. */
 export interface BatchShape {
   maxRowsPerDevice?: number;
   maxSegmentsPerDevice?: number;
@@ -103,7 +107,8 @@ export interface BatchShape {
   audio?: { chunkSamples?: number; sampleRate?: number };
 }
 
-/** How the masked objective corrupts a batch and weighs its heads. Mirrors `uform_masking_t`; absent fields derive. */
+/** How the masked objective corrupts a batch and weighs its heads. Mirrors `uform_masking_t`;
+ *  absent fields derive. */
 export interface Masking {
   tokenMaskProbability?: number;
   tokenMeanSpan?: number;
@@ -118,7 +123,8 @@ export interface Masking {
   audioWeight?: number;
 }
 
-/** How the contrastive loss scores the pooled embeddings. Mirrors `uform_contrastive_t`; absent fields derive. */
+/** How the contrastive loss scores the pooled embeddings. Mirrors `uform_contrastive_t`;
+ *  absent fields derive. */
 export interface Contrastive {
   matryoshkaDimensions?: number[];
   temperatureGroups?: number;
@@ -131,7 +137,8 @@ export interface Contrastive {
   pairLoss?: PairLossForm;
 }
 
-/** How the late-interaction loss scores token vectors. Mirrors `uform_late_interaction_t`; absent fields derive. */
+/** How the late-interaction loss scores token vectors. Mirrors `uform_late_interaction_t`;
+ *  absent fields derive. */
 export interface LateInteraction {
   /** The loss weight; absent trains no token head. */
   weight?: number;
@@ -147,7 +154,8 @@ export interface LateInteraction {
   pairLoss?: PairLossForm;
 }
 
-/** The calibrated choices over the byte decoder. Mirrors `uform_choices_t`; absent fields derive. */
+/** The calibrated choices over the byte decoder. Mirrors `uform_choices_t`;
+ *  absent fields derive. */
 export interface Choices {
   /** The loss weight; absent trains no choices. */
   weight?: number;
@@ -207,12 +215,13 @@ export interface TrainerBatch {
   /** The late-interaction side of each item; absent makes every item `LateInteractionSide.None`. */
   sides?: readonly LateInteractionSide[];
   /**
-   *  Each item's legal choices, one byte each, as `textChoose` takes them; an item offering none makes no choice. Read
-   *  when the run trains choices; the call appends the mask byte to each choosing text.
+   *  Each item's legal choices, one byte each, as `textChoose` takes them; an item offering
+   *  none makes no choice. Read when the run trains choices; the call appends the mask byte to
+   *  each choosing text.
    */
   choices?: readonly (string | Uint8Array)[] | Tape<Uint8Array>;
-  /** The target probability of each choice, an entry per item as long as its choices and summing to one, as
-   *  `textChoose` answers its `Probabilities`; required with `choices`. */
+  /** The target probability of each choice, an entry per item as long as its choices and summing to
+   *  one, as `textChoose` answers its `Probabilities`; required with `choices`. */
   choiceTargets?: readonly Float32Array[] | Tape<Float32Array>;
   /** The contrastive targets. */
   relations?: { attract?: Edges; repel?: Edges; ignore?: Edges };
@@ -249,7 +258,8 @@ abstract class TrainerVerbs<Receiving extends "blocking" | "deferred"> {
   ) {}
 
   /**
-   *  Applies one optimizer step over this process's items and every peer's. Calls `uform_trainer_step`.
+   *  Applies one optimizer step over this process's items and every
+   *  peer's. Calls `uform_trainer_step`.
    *  @param batch - This process's items, their modalities, bags and relations.
    *  @param config - Where the scored embeddings land.
    */
@@ -298,7 +308,8 @@ abstract class TrainerVerbs<Receiving extends "blocking" | "deferred"> {
   }
 
   /**
-   *  Writes the weights and the step as a safetensors checkpoint; only process zero writes. Calls `uform_trainer_save`.
+   *  Writes the weights and the step as a safetensors checkpoint; only process zero
+   *  writes. Calls `uform_trainer_save`.
    *  @param path - The destination, written whole and renamed into place.
    */
   save(path: string): Answer<Receiving, void> {
@@ -310,7 +321,8 @@ abstract class TrainerVerbs<Receiving extends "blocking" | "deferred"> {
   }
 }
 
-/** The trainer's verbs, submitted to its executor and answered as {@link Deferred} calls: `trainer.deferred()`. */
+/** The trainer's verbs, submitted to its executor and answered as {@link
+ *  Deferred} calls: `trainer.deferred()`. */
 export class TrainerDeferredOn extends TrainerVerbs<"deferred"> {
   /** Made by `trainer.deferred()`, never directly. */
   constructor(compiled: CompiledTrainer, executor: Executor) {
@@ -322,8 +334,8 @@ export class TrainerDeferredOn extends TrainerVerbs<"deferred"> {
 const trainerSeal = Symbol("Trainer");
 
 /**
- *  A training run on a VRAM executor's devices, every verb blocking on that executor; `deferred()` submits them there
- *  instead.
+ *  A training run on a VRAM executor's devices, every verb blocking on that executor; `deferred()`
+ *  submits them there instead.
  */
 export class Trainer extends TrainerVerbs<"blocking"> implements Disposable {
   /** Reached through `Trainer.initVram`. */
@@ -350,7 +362,8 @@ export class Trainer extends TrainerVerbs<"blocking"> implements Disposable {
     return new Trainer(trainerSeal, backend().CompiledTrainer.initVram(executor.compiled, mesh?.compiled, coded), executor);
   }
 
-  /** The same verbs, each submitted to the trainer's executor and answered as a {@link Deferred}. Binding-only. */
+  /** The same verbs, each submitted to the trainer's executor and answered as a
+   *  {@link Deferred}. Binding-only. */
   deferred(): TrainerDeferredOn {
     return new TrainerDeferredOn(this.compiled, this.executor);
   }

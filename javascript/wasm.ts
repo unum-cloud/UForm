@@ -2,17 +2,19 @@
  *  @file javascript/wasm.ts
  *  @author Ash Vardanian
  *  @date October 18, 2026
- *  @brief The WebAssembly backend and the browser entry point: the same API as the Node addon, over the Emscripten
- *      build of the C library that `uform.mjs` and `uform.wasm` carry.
+ *  @brief The WebAssembly backend and the browser entry point: the same API as the Node addon, over
+ *      the Emscripten build of the C library that `uform.mjs` and `uform.wasm` carry.
  *
- *      Calls run blocking on the calling thread with a `NULL` executor, which is all one single-threaded module
- *      offers, so executors only order calls and a deferred receiver answers a call that is final once submitted.
- *      Argument structures are laid into the module's heap at offsets computed once from the C headers' field order,
- *      as wasm32 lays them out: pointers, `size_t` and enumerations are four bytes. Outputs are copied out of the
- *      arena before the call returns, since a later heap growth would invalidate any view into it, and the copies are
- *      detached when the arena next rewinds, as the addon's views are. Encoded media need host decoders this build
- *      does not carry, so those verbs, the VRAM residency, the mesh and the trainer report `unsupported`; decode in
- *      the page and use the pixels and samples verbs instead.
+ *      Calls run blocking on the calling thread with a `NULL` executor, which is all one
+ *      single-threaded module offers, so executors only order calls and a deferred receiver
+ *      answers a call that is final once submitted. Argument structures are laid into the module's
+ *      heap at offsets computed once from the C headers' field order, as wasm32 lays them out:
+ *      pointers, `size_t` and enumerations are four bytes. Outputs are copied out of the arena
+ *      before the call returns, since a later heap growth would invalidate any view into it, and
+ *      the copies are detached when the arena next rewinds, as the addon's views are. Encoded
+ *      media need host decoders this build does not carry, so those verbs, the VRAM residency, the
+ *      mesh and the trainer report `unsupported`; decode in the page and use the pixels and
+ *      samples verbs instead.
  *
  *      ```js
  *      import { initialize, Arena, Model } from "@unum-cloud/uform/wasm";
@@ -36,7 +38,8 @@ import type {
 } from "./library.js";
 import { Status, backend, bind, fail } from "./types.js";
 
-/** The Emscripten module surface this backend calls: the heap, the runtime helpers, and the exported C verbs. */
+/** The Emscripten module surface this backend calls: the heap, the runtime helpers, and the
+ *  exported C verbs. */
 export interface WasmModule {
   HEAPU8: Uint8Array;
   UTF8ToString(pointer: number): string;
@@ -68,20 +71,23 @@ export interface WasmModule {
 /** The ES module factory `uform.mjs` exports by default. */
 export type WasmFactory = (options?: object) => Promise<WasmModule>;
 
-/** The C scalar types a wasm32 argument structure holds, every one of them four bytes wide and aligned. */
+/** The C scalar types a wasm32 argument structure holds, every one of them four bytes
+ *  wide and aligned. */
 type Primitive = "pointer" | "size" | "enum" | "u32";
 
 /** Bytes each primitive takes on wasm32, which is also its alignment. */
 const primitiveBytes: Record<Primitive, number> = { pointer: 4, size: 4, enum: 4, u32: 4 };
 
-/** A structure's size, alignment, and the offset of every field, nested ones spelled `outer.inner`. */
+/** A structure's size, alignment, and the offset of every field, nested
+ *  ones spelled `outer.inner`. */
 interface Layout {
   size: number;
   alignment: number;
   at: Record<string, number>;
 }
 
-/** Lays out the fields of a C structure in declaration order, padding each to its alignment as the C compiler does. */
+/** Lays out the fields of a C structure in declaration order, padding each to its alignment as the
+ *  C compiler does. */
 function struct(fields: ReadonlyArray<readonly [string, Primitive | Layout]>): Layout {
   const at: Record<string, number> = {};
   let offset = 0;
@@ -139,7 +145,8 @@ const describeLayout = struct([
   ["description", "pointer"],
 ]);
 
-/** The fields every encode structure opens with, then its inputs, then the fields it closes with. */
+/** The fields every encode structure opens with, then its inputs, then the fields
+ *  it closes with. */
 const encodeHead = [
   ["model", "pointer"],
   ["executor", "pointer"],
@@ -319,7 +326,8 @@ function wasmBackend(module: WasmModule): Compiled {
       }
     }
 
-    /** Detaches every copy handed out since the last rewind, as a call rewinding the arena invalidates them. */
+    /** Detaches every copy handed out since the last rewind, as a call rewinding the
+     *  arena invalidates them. */
     rewind(): void {
       for (const buffer of this.#views) buffer.transfer();
       this.#views.length = 0;
@@ -331,7 +339,8 @@ function wasmBackend(module: WasmModule): Compiled {
       return buffer;
     }
 
-    /** Copies `bytes` bytes at `address` out of the heap into a buffer this arena detaches on its next rewind. */
+    /** Copies `bytes` bytes at `address` out of the heap into a buffer this arena detaches on
+     *  its next rewind. */
     copy(address: number, bytes: number): ArrayBuffer {
       return this.adopt(module.HEAPU8.slice(address, address + bytes).buffer);
     }
@@ -352,7 +361,8 @@ function wasmBackend(module: WasmModule): Compiled {
     return { data: viewOf(scalar, data), rows: count, columns: frame.load(address + rowsLayout.at.columns), stride, scalar };
   }
 
-  /** Copies the `count + 1` wasm32 `size_t` offsets at `address` into 64-bit words owned by `arena`. */
+  /** Copies the `count + 1` wasm32 `size_t` offsets at `address` into 64-bit words
+   *  owned by `arena`. */
   function offsetsAt(frame: Frame, arena: WasmArena, address: number, count: number): BigUint64Array {
     const offsets = new BigUint64Array(arena.adopt(new ArrayBuffer((count + 1) * 8)));
     for (let position = 0; position <= count; position++)
@@ -366,10 +376,12 @@ function wasmBackend(module: WasmModule): Compiled {
     return { ...rowsAt(frame, arena, address, Number(offsets[count])), offsets };
   }
 
-  /** The tape fields of an encode structure: elements and `size_t` offsets, which a `Uint32Array` matches on wasm32. */
+  /** The tape fields of an encode structure: elements and `size_t` offsets, which a `Uint32Array`
+   *  matches on wasm32. */
   type Inputs = { data: ArrayBufferView; offsets: Offsets; scalar: number };
 
-  /** Lays `inputs` into the tape `tape` of the structure at `call`, narrowing 64-bit offsets to wasm32's `size_t`. */
+  /** Lays `inputs` into the tape `tape` of the structure at `call`, narrowing 64-bit offsets
+   *  to wasm32's `size_t`. */
   function storeTape(frame: Frame, call: number, layout: Layout, tape: string, inputs: Inputs): void {
     const offsets = inputs.offsets instanceof BigUint64Array ? Uint32Array.from(inputs.offsets, Number) : inputs.offsets;
     frame.store(call + layout.at[`${tape}.data`], frame.copy(inputs.data));
@@ -384,7 +396,8 @@ function wasmBackend(module: WasmModule): Compiled {
     return arena;
   }
 
-  /** Rewinds `arena` and runs `verb` on the structure at `call`, rethrowing what a progress handler threw. */
+  /** Rewinds `arena` and runs `verb` on the structure at `call`, rethrowing what a
+   *  progress handler threw. */
   function invoke(
     frame: Frame,
     verb: (arguments_: number) => void,
@@ -732,7 +745,8 @@ function wasmBackend(module: WasmModule): Compiled {
 }
 
 /**
- *  Instantiates the WebAssembly module and binds it, so every class made afterwards runs on it. Binding-only.
+ *  Instantiates the WebAssembly module and binds it, so every class made afterwards runs
+ *  on it. Binding-only.
  *
  *  @param factory - The `uform.mjs` factory, or the URL to import it from; absent imports the
  *      copy the package ships beside this module.

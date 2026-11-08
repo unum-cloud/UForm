@@ -1,13 +1,18 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = []
-# ///
 """Unit checks for the acquisition-layer sizing primitives: cap_shards, index-cap, budget allocator.
 
 Plain-script test (mirrors `test_mixtures.py`): `uv run scripts/data/test_staging.py` or `python3 ...`;
 exits non-zero on the first failed assertion. Pure stdlib — imports `acquire_shared` / `acquire_clips` /
 `acquire_manifest`, none of which pull a heavy dependency at import time.
+
+File: scripts/data/test_staging.py
+Author: Ash Vardanian
+Date: July 6, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
 
 import math
 import os

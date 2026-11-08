@@ -106,13 +106,13 @@ struct device_t {
     gpu_numerics_t numerics {};
 };
 
-/** Bytes one case's arena reserves: the omni replica at the test geometry needs about a quarter of
- *  it. */
+/** Bytes one case's arena reserves: the omni replica at the test geometry needs about a
+ *  quarter of it. */
 inline constexpr std::size_t case_arena_bytes_k = 1ull << 30;
 
-/** The relative error a finite difference may show against the analytic gradient: the BFloat16
- *  activations' loss noise over a quarter-nat step, with room left to catch a 15% Jacobian
- *  error. */
+/** The relative error a finite difference may show against the analytic gradient: the
+ *  BFloat16 activations' loss noise over a quarter-nat step, with room left to catch a
+ *  15% Jacobian error. */
 inline constexpr f64_t finite_difference_tolerance_k = 0x1.0p-4;
 
 /** A two-block, two-head tower over four rows of 64 columns, scoring the masked objective; @p omni
@@ -222,8 +222,8 @@ static void finite_differences(test_suite_t &suite, device_t &device, bool omni)
         if (largest == 0) continue;
         f64_t const weight_rms = std::sqrt(dot(weights, weights) / static_cast<f64_t>(scalars));
         f64_t predicted = 0;
-        // Double the step until the BF16-rounded move predicts an eighth of a nat, never past the
-        // matrix's RMS.
+        // Double the step until the BF16-rounded move predicts an eighth of a nat, never past
+        // the matrix's RMS.
         f64_t const first_step = largest / (8.0 * dot(gradient, gradient));
         for (f64_t step = first_step; step == first_step || (predicted < 0.125 && step <= weight_rms); step *= 2) {
             for (std::size_t index = 0; index != scalars; ++index)
@@ -454,8 +454,8 @@ static void token_head_finite_differences(test_suite_t &suite, device_t &device)
     }
 }
 
-/** Every text row with bytes carries at least one masked position, over sixteen 64-byte rows and
- *  eight epochs. */
+/** Every text row with bytes carries at least one masked position, over sixteen 64-byte rows
+ *  and eight epochs. */
 static void masked_text_rows(test_suite_t &suite, device_t &device) {
     switch_to_gpu_t scope {device.stream};
     trainer_config_t config = test_geometry_(false);
@@ -489,8 +489,8 @@ static void masked_text_rows(test_suite_t &suite, device_t &device) {
     }
 }
 
-/** Each media head counts only masked cells of its own modality, and some of them, across four
- *  epochs. */
+/** Each media head counts only masked cells of its own modality, and some of them,
+ *  across four epochs. */
 static void masked_media_rows(test_suite_t &suite, device_t &device) {
     switch_to_gpu_t scope {device.stream};
     trainer_config_t config = test_geometry_(true);
@@ -546,8 +546,8 @@ static void chance_cross_entropy(test_suite_t &suite, device_t &device) {
                 uniform);
 }
 
-/** One matrix and its gradient on the device beside their widened host copies, for the Adafactor
- *  cases. */
+/** One matrix and its gradient on the device beside their widened host copies, for
+ *  the Adafactor cases. */
 struct optimized_matrix_t {
     bf16r2_tensor_arena_t weights {}, gradient {};
     st::basic_vector<f64_t> host_weights {}, host_gradient {};
@@ -747,8 +747,8 @@ static void adafactor_small_steps(test_suite_t &suite, device_t &device) {
         return suite.check(false, "weights readback failed");
     f64_t const total = nk::reduce_moments<nk::f64_t>(matrix.host_weights).value.sum;
     f64_t const mean_step = 1.0 - total / static_cast<f64_t>(rows * columns);
-    // Each scalar moves by 2^-8 with probability 1/4, so the mean of 16384 carries a 1.3e-5
-    // standard error.
+    // Each scalar moves by 2^-8 with probability 1/4, so the mean of 16384 carries a
+    // 1.3e-5 standard error.
     suite.check(std::fabs(mean_step - learning_rate) < 0.1 * learning_rate,
                 "the mean step is {:.4g}, the learning rate {:.4g}", mean_step, learning_rate);
 }
@@ -1019,8 +1019,8 @@ static void block_host_replay(test_suite_t &suite, device_t &device) {
                                                          static_cast<f32_t>(rope_base_k));
     if (!angles) return suite.check(false, "angles: {}", angles.description_);
 
-    // Weights of unit-variance outputs, unit norm scales, and unit-variance inputs and output
-    // gradients.
+    // Weights of unit-variance outputs, unit norm scales, and unit-variance inputs
+    // and output gradients.
     st::basic_vector<f64_t> weights[6];
     if (!seed_block_(*block, suite.settings.seed, 32u, weights)) return suite.check(false, "weights upload failed");
     st::basic_vector<f32_t> input, output_grad, output;
@@ -1102,8 +1102,8 @@ static void block_host_replay(test_suite_t &suite, device_t &device) {
             output_grad_rows[token, channel] = sum;
         }
 
-    // The host forward: pre-norm, QKV, the QK-norm, attention per segment and head, then the MLP
-    // half.
+    // The host forward: pre-norm, QKV, the QK-norm, attention per segment and head, then
+    // the MLP half.
     st::basic_vector<f64_t> products, normalized, attended, normalized_row, branch, mlp_input, gate_up, activated;
     if (st::failed(products.resize(tokens * 3 * hidden)) || st::failed(normalized.resize(tokens * 3 * hidden)) ||
         st::failed(attended.resize(tokens * hidden)) || st::failed(normalized_row.resize(hidden)) ||
@@ -1219,9 +1219,9 @@ static void block_host_replay(test_suite_t &suite, device_t &device) {
                     roles[role], worst_grad[role], largest_grad[role], segments);
 }
 
-/** A block's forward replayed from its own @c input() after another block's forward overwrote
- *  their shared scratch reproduces its backward bitwise, as the tower's recomputing backward
- *  relies on. */
+/** A block's forward replayed from its own @c input() after another block's forward
+ *  overwrote their shared scratch reproduces its backward bitwise, as the tower's
+ *  recomputing backward relies on. */
 static void block_recompute_replays(test_suite_t &suite, device_t &device) {
     switch_to_gpu_t scope {device.stream};
     std::size_t const hidden = 256, sequence = 64, segments = 2, tokens = sequence * segments;
@@ -1323,8 +1323,8 @@ static void normalize_rows_(f64r2_view_t pooled, f64r2_span_t units, std::span<f
     }
 }
 
-/** The coding rate @c ½·logdet(I+α·ZᵀZ) of the unit rows @p units in Float64, leaving the
- *  Cholesky factor of @c I+α·ZᵀZ in the lower triangle of @p lower . */
+/** The coding rate @c ½ · logdet(I+α · ZᵀZ) of the unit rows @p units in Float64, leaving the
+ *  Cholesky factor of @c I+α · ZᵀZ in the lower triangle of @p lower . */
 [[nodiscard]] static f64_t coding_rate_replay_(f64r2_view_t units, f64_t alpha, f64r2_span_t lower) noexcept {
     std::size_t const rows = units.extent(0), hidden = units.extent(1);
     for (std::size_t row = 0; row != hidden; ++row)
@@ -1348,8 +1348,8 @@ static void normalize_rows_(f64r2_view_t pooled, f64r2_span_t units, std::span<f
     return rate;
 }
 
-/** The pooled-code loss @c −λ_tcr·R+λ_lip·‖Z·v‖² of the raw rows @p pooled at the fixed direction
- *  @p direction , in Float64. */
+/** The pooled-code loss @c −λ_tcr · R+λ_lip · ‖Z · v‖² of the raw rows @p pooled at the fixed
+ *  direction @p direction , in Float64. */
 [[nodiscard]] static f64_t spectrum_loss_replay_(f64r2_view_t pooled, pooled_spectrum_config_t config,
                                                  std::span<f64_t const> direction) noexcept {
     std::size_t const rows = pooled.extent(0), hidden = pooled.extent(1);

@@ -29,11 +29,12 @@ using namespace unum::uform::utilities;
 inline constexpr unsigned infiniband_doorbell_block_threads_k = 32u;
 
 /**
- *  @brief Post-and-drain step of one all-reduce round: lane 0 posts this domain's shard, then the arrival
- *      flag, to the round's partner, and drains the one signaled completion.
+ *  @brief Post-and-drain step of one all-reduce round: lane 0 posts this domain's shard, then the
+ *      arrival flag, to the round's partner, and drains the one signaled completion.
  *
- *  The payload write is unsignaled; only the 4-byte inline flag write is signaled — exactly one
- *  completion per round is produced and drained, so the small send ring never overflows across replays.
+ *  The payload write is unsignaled; only the 4-byte inline flag write is signaled —
+ *  exactly one completion per round is produced and drained, so the small send ring never
+ *  overflows across replays.
  */
 static __global__ void infiniband_allreduce_post_kernel_(infiniband_links_view_t links, u32_t round,
                                                          std::span<f32_t const> shard,
@@ -53,9 +54,9 @@ static __global__ void infiniband_allreduce_post_kernel_(infiniband_links_view_t
 }
 
 /** Flag-wait step of one round: lane 0 acquire-spins until the inbound flag reaches the absolute
- *  target (monotonic @c >= — the flag never resets), then a system fence orders the partner's landed
- *  payload before the next kernel, propagated to the block by the closing @c __syncthreads . Traps
- *  once the spin outlasts @c link.wait_nanoseconds . */
+ *  target (monotonic @c >= — the flag never resets), then a system fence orders the partner's
+ *  landed payload before the next kernel, propagated to the block by the closing @c __syncthreads .
+ *  Traps once the spin outlasts @c link.wait_nanoseconds . */
 static __global__ void infiniband_flag_wait_kernel_(infiniband_links_view_t links, u32_t round,
                                                     infiniband_round_view_t flag_round) {
     if (threadIdx.x == 0) {
@@ -72,10 +73,10 @@ static __global__ void infiniband_flag_wait_kernel_(infiniband_links_view_t link
     __syncthreads();
 }
 
-/** Accumulate step of one all-reduce round: fold the partner's landed shard into this domain's,
- *  one explicit round-to-nearest-even add per element — no fused-multiply-add contraction, so the
- *  SPMD-static fold order is bit-identical on every domain. The heap is symmetric with the shard at its
- *  offset 0, so the landing sits at its own offset past the shard. */
+/** Accumulate step of one all-reduce round: fold the partner's landed shard into this domain's, one
+ *  explicit round-to-nearest-even add per element — no fused-multiply-add contraction, so the
+ *  SPMD-static fold order is bit-identical on every domain. The heap is symmetric with the shard at
+ *  its offset 0, so the landing sits at its own offset past the shard. */
 static __global__ void infiniband_accumulate_f32_kernel_(infiniband_links_view_t links, u32_t round,
                                                          std::span<f32_t> shard, infiniband_round_view_t flag_round) {
     infiniband_link_t const link = links[round];
@@ -89,22 +90,23 @@ static __global__ void infiniband_accumulate_f32_kernel_(infiniband_links_view_t
 }
 
 /**
- *  @brief Post-and-drain step of one all-gather round: lane 0 posts the contiguous run of domain blocks
- *      this domain currently holds into the partner's symmetric @c gathered buffer at the @b same byte
- *      offset, then the flag, and drains the one completion.
+ *  @brief Post-and-drain step of one all-gather round: lane 0 posts the contiguous run of domain
+ *      blocks this domain currently holds into the partner's symmetric @c gathered buffer at the
+ *      @b same byte offset, then the flag, and drains the one completion.
  *
  *  At round @c r the held run spans domains @c [base,base+2^r) with @c base=this_domain&~(2^r-1) ;
- *  symmetric buffers make identical byte offsets address identical logical cells, so the partner receives
- *  exactly the half it lacks at the right domain-major position.
+ *  symmetric buffers make identical byte offsets address identical logical cells, so the partner
+ *  receives exactly the half it lacks at the right domain-major position.
  */
 static __global__ void infiniband_allgather_post_kernel_(infiniband_links_view_t links, u32_t round,
                                                          infiniband_allgather_plan_t plan, b8_t const *gathered_bytes,
                                                          infiniband_round_view_t flag_round) {
     if (threadIdx.x != 0) return;
     infiniband_link_t const link = links[round];
-    // The recursive-doubling bit math keys on the link's true round; the loop index drives only the
-    // table entry and the monotonic flag window. The gathered payload sits at heap offset 0 on every
-    // domain — the symmetric contract — so identical byte offsets address identical logical cells.
+    // The recursive-doubling bit math keys on the link's true round; the loop index drives
+    // only the table entry and the monotonic flag window. The gathered payload sits at heap
+    // offset 0 on every domain — the symmetric contract — so identical byte offsets address
+    // identical logical cells.
     u32_t const bit_round = link.round_index;
     u32_t const group_base = plan.this_multimem_domain & ~((1u << bit_round) - 1u);
     std::size_t const send_byte_offset = static_cast<std::size_t>(group_base) * plan.block_bytes;
@@ -122,12 +124,12 @@ static __global__ void infiniband_allgather_post_kernel_(infiniband_links_view_t
 }
 
 /**
- *  @brief Post one all-to-all round: ship this domain's send block destined for the round's partner to that
- *      partner's landing, then a completion flag.
+ *  @brief Post one all-to-all round: ship this domain's send block destined for the round's partner
+ *      to that partner's landing, then a completion flag.
  *
- *  The partner is baked in @c links[round] — its @c remote_multimem_domain_index selects which send block to
- *  ship — and the symmetric heap puts each side's round landing at the same @c landing_offset , so the write
- *  needs no partner-specific arithmetic.
+ *  The partner is baked in @c links[round] — its @c remote_multimem_domain_index selects which send
+ *  block to ship — and the symmetric heap puts each side's round landing at the same
+ *  @c landing_offset , so the write needs no partner-specific arithmetic.
  *
  *  __grid_size__ @c [1,1,1] , one warp; no dynamic shared memory.
  */
@@ -180,10 +182,10 @@ inline constexpr u8_t ipv4_mapped_prefix_k[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
 expected<infiniband_nic_t> infiniband_nic_t::make(u32_t local_gpu_index, u8_t infiniband_port) noexcept {
     infiniband_nic_t nic;
     nic.port_ = infiniband_port;
-    // The NIC's page registrations (`cuMemHostRegister`) are scoped to its GPU's primary context, so
-    // the NIC holds one reference for its lifetime — otherwise a transient wiring stream releasing the
-    // last reference resets the context and silently destroys every registration the doorbell kernels
-    // still dereference.
+    // The NIC's page registrations (`cuMemHostRegister`) are scoped to its GPU's primary context,
+    // so the NIC holds one reference for its lifetime — otherwise a transient wiring stream
+    // releasing the last reference resets the context and silently destroys every registration the
+    // doorbell kernels still dereference.
     CUdevice paired_gpu = 0;
     if (CUresult resolved = cuDeviceGet(&paired_gpu, static_cast<int>(local_gpu_index)); resolved != CUDA_SUCCESS)
         return cuda_failure<infiniband_nic_t>(resolved, "paired GPU {} resolution failed", local_gpu_index);
@@ -574,10 +576,10 @@ expected<infiniband_reach_t> infiniband_reach_t::make_(mesh_topology_t const &to
             return result_t::fail(std::move(exchanged));
         if (expected_t connected = member.endpoints_[round].connect(peer); !connected)
             return result_t::fail(std::move(connected));
-        // The connect above arms only THIS side; the first post must find the partner's queue pair in
-        // Ready-to-Receive too, or the responder NIC silently drops until the ~0.5s retry budget dies
-        // (transport-retry-exceeded on the wire — loopback's lockstep pacing never exposes it). One more
-        // tiny rendezvous proves both ends armed before either member returns wired.
+        // The connect above arms only THIS side; the first post must find the partner's queue pair
+        // in Ready-to-Receive too, or the responder NIC silently drops until the ~0.5s retry budget
+        // dies (transport-retry-exceeded on the wire — loopback's lockstep pacing never exposes
+        // it). One more tiny rendezvous proves both ends armed before either member returns wired.
         sz::string_t wired_key;
         if (!format_into(wired_key, "{}.{}.wired", key_prefix, round))
             return result_t::fail(status_t::bad_alloc_k, "wired key formatting failed");
@@ -604,14 +606,16 @@ expected<infiniband_reach_t> infiniband_reach_t::make_(mesh_topology_t const &to
         link.queue = member.queues_[round].device_handles();
         link.completion = member.completions_[round].device_handles();
         if (layout.landing_bytes != 0) {
-            // Each round its own even/odd landing pair, so a fast partner's next-step write never lands
-            // on a buffer the slower side is still folding — the flag proves arrival, not consumption.
+            // Each round its own even/odd landing pair, so a fast partner's next-step write
+            // never lands on a buffer the slower side is still folding — the flag proves
+            // arrival, not consumption.
             std::size_t const landing = layout.landings_offset() + round * 2u * layout.landing_bytes;
             link.landing_offset = landing;
             link.landing_parity_stride = static_cast<u32_t>(layout.landing_bytes);
         }
         else {
-            // The payload doubles as the landing — the all-gather's domain-major buffer, parity-free.
+            // The payload doubles as the landing — the all-gather's
+            // domain-major buffer, parity-free.
             link.landing_offset = 0;
             link.landing_parity_stride = 0;
         }
@@ -713,8 +717,9 @@ expected<colocated_domain_t> colocated_domain_t::make(mesh_topology_t &topology)
 expected<infiniband_reach_t> colocated_domain_t::reach_(u32_t member_index, gpu_arena_t &arena, gpu_stream_t &stream,
                                                         infiniband_reach_t::heap_layout_t layout,
                                                         f64_t timeout_seconds) noexcept {
-    // The single-domain identity: no partners exist, every collective is a no-op — but the rendezvous id
-    // still advances, so every rank's key sequence stays aligned whatever the world's shape.
+    // The single-domain identity: no partners exist, every collective is a no-op — but the
+    // rendezvous id still advances, so every rank's key sequence stays aligned whatever
+    // the world's shape.
     u32_t const collective_id = topology_->next_collective_id();
     if (multimem_domain_count() == 1) return expected<infiniband_reach_t> {infiniband_reach_t {}};
     sz::string_t key;

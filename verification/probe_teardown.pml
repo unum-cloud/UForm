@@ -32,7 +32,7 @@
 #define created 1
 #define destroyed 2
 
-byte queue_pair[4]; // host·generations+generation: zero until wired, then created, then destroyed
+byte queue_pair[4]; // host · generations+generation: zero until wired, then created, then destroyed
 bool armed[4];      // the published coordinates and armed marker of each queue pair
 bool posted[4];     // per writer's queue pair, its payload and flag write on the wire
 bool landed[4];     // per writer's queue pair, its flag in the partner's memory

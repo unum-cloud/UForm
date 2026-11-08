@@ -1,7 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = []
-# ///
 """Drive the balanced multi-modal corpus staging on `$UFORM_DATA_ROOT` from `acquire_manifest.py`.
 
 Reads the declarative `STAGING_ROWS` manifest and, for each selected dataset THIS worker owns, runs its
@@ -27,7 +23,16 @@ Usage:
     uv run scripts/data/acquire_corpus.py --modality audio          # stage audio for real (single host)
     uv run scripts/data/acquire_corpus.py --rank 0 --world 2        # this worker's share of a local 2-way split
     srun ... uv run scripts/data/acquire_corpus.py --modality all   # cluster-wide (rank/world from Slurm)
+
+File: scripts/data/acquire_corpus.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
 
 import argparse
 import glob

@@ -15,9 +15,9 @@
  *    activations per token, multiplies against per-tensor-scaled E4M3 weights, and rescales with
  *    the residual folded in; Q, K and V cast unscaled into E4M3 for attention.
  *
- *  Entries, the pool and the head stay BFloat16 in both. Attention runs over ragged segments with a
- *  bidirectional band, each item one segment, on packed rows that skip the zero cells of short
- *  items.
+ *  Entries, the pool and the head stay BFloat16 in both. Attention runs over ragged segments
+ *  with a bidirectional band, each item one segment, on packed rows that skip the zero cells
+ *  of short items.
  *
  *  The towers of @ref ram_tower.hpp and @ref vram_tower.hpp each own one
  *  @ref unum::uform::encoder::tower_weights_t and run @c encode_steps through steps of their own:
@@ -85,8 +85,8 @@ struct outputs_t {
     /** @b [segments,hidden] one embedding per item, PAD items zero. */
     rows_span_t embeddings {};
 
-    /** @b [tokens,hidden] the final-norm states of every live token, items back to back in
-     *  order. */
+    /** @b [tokens,hidden] the final-norm states of every live token, items back to
+     *  back in order. */
     rows_span_t states {};
 
     /** @b [tokens,token_width] the token head's unit vectors of every live token, items back to
@@ -116,8 +116,8 @@ struct packed_weight_t {
     f32_t descale = 1.0f;
 };
 
-/** One block's weights: the four products in the load's dtype, and the two norm gains widened to
- *  Float32. */
+/** One block's weights: the four products in the load's dtype, and the two norm gains
+ *  widened to Float32. */
 struct block_weights_t {
 
     /** @c qkv , @c out , @c gate_up and @c down , in that order. */
@@ -174,8 +174,8 @@ struct tower_weights_t {
     rope_grids_t angle_grids {};
 };
 
-/** Rows one product tile spans, so threads share each streamed weight panel across a few dozen
- *  rows. */
+/** Rows one product tile spans, so threads share each streamed weight panel across a
+ *  few dozen rows. */
 inline constexpr std::size_t product_tile_rows_k = 64;
 
 /** The four block products, in @ref block_weights_t::products order. */
@@ -203,8 +203,8 @@ inline constexpr std::size_t product_qkv_k = 0, product_out_k = 1, product_gate_
 
 #pragma region Activations
 
-/** A bump cursor over a call's scratch; over an empty scratch it only measures, handing out null
- *  views. */
+/** A bump cursor over a call's scratch; over an empty scratch it only measures, handing
+ *  out null views. */
 struct scratch_cursor_t {
     uu::bytes_span_t scratch {};
     std::size_t used = 0;
@@ -225,10 +225,10 @@ struct scratch_cursor_t {
     }
 };
 
-/** Every activation one call writes, reserved in its scratch. The wide buffers carry the BFloat16
- *  recipe's Float32 residual stream, the narrow ones the E4M3 recipe's BFloat16 stream and every
- *  operand. The products, patches and shadow rows serve steps of several widths, so they stay
- *  flat. */
+/** Every activation one call writes, reserved in its scratch. The wide buffers carry the
+ *  BFloat16 recipe's Float32 residual stream, the narrow ones the E4M3 recipe's BFloat16 stream
+ *  and every operand. The products, patches and shadow rows serve steps of several widths, so
+ *  they stay flat. */
 struct activations_t {
     u32r1_span_t packed_offsets {}, pool_offsets {};
     i16r2_span_t coords {};

@@ -2,81 +2,86 @@
  *  @file include/uform/utilities/mesh.hpp
  *  @author Ash Vardanian
  *  @date July 2, 2026
- *  @brief The multi-level GPU mesh: nested domain sizes, this rank's coordinate, and the world
- *      bootstrap.
+ *  @brief The multi-level GPU mesh: nested domain sizes, this rank's coordinate, and
+ *      the world bootstrap.
  *
  *  Four artifacts every distributed primitive keys on:
  *
  *      1. @ref mesh_shape_t — the three nested domain sizes, the single source of truth for cluster
  *         geometry; every grouping question is integer arithmetic off them.
- *      2. @ref mesh_location_t — this rank's coordinate plus the reachability handle mesh-wide kernels
- *         read, passed by value through kernel-argument lists.
- *      3. @ref mesh_topology_t — the bootstrapped world: the shape, this host_domain's identity, every
- *         peer host_domain's published facts, and the once-per-job exchange primitives later wiring
- *         phases reuse.
+ *      2. @ref mesh_location_t — this rank's coordinate plus the reachability handle mesh-wide
+ *         kernels read, passed by value through kernel-argument lists.
+ *      3. @ref mesh_topology_t — the bootstrapped world: the shape, this host_domain's identity,
+ *         every peer host_domain's published facts, and the once-per-job exchange primitives later
+ *         wiring phases reuse.
  *      4. @ref make_mesh_shape / @ref discover_mesh_shape /
- *         @ref unum::uform::utilities::mesh_topology_t::bootstrap — the validated construction
- *         paths.
+ *         @ref unum::uform::utilities::mesh_topology_t::bootstrap — the
+ *         validated construction paths.
  *
  *  @section mesh_purpose Purpose — why a bootstrap exchange exists at all
  *
- *  The launcher (SSH fan-out, Slurm, Kubernetes) hands every process what is known @b before it starts:
+ *  The launcher (SSH fan-out, Slurm, Kubernetes) hands every process what is known
+ *  @b before it starts:
  *  identity, count, binary, environment. What it cannot hand out is minted at runtime, by each
- *  host_domain, after boot — and there is no transport to send it over, because the transport is exactly
- *  what it wires:
+ *  host_domain, after boot — and there is no transport to send it over, because the transport is
+ *  exactly what it wires:
  *
- *      1. InfiniBand queue-pair coordinates — QP numbers, PSNs, LIDs / GIDs — assigned by the NIC driver
- *         at queue-pair creation.
+ *      1. InfiniBand queue-pair coordinates — QP numbers, PSNs, LIDs / GIDs — assigned by the NIC
+ *         driver at queue-pair creation.
  *      2. Memory-region @c rkeys — produced by each host_domain's MR registration of its own arena.
  *      3. GPU heap base addresses — produced by each host_domain's VMM reservation.
- *      4. Multicast-object fabric handles — exported by one process per multimem_domain, imported by its
- *         siblings before the domain-wide bind.
+ *      4. Multicast-object fabric handles — exported by one process per multimem_domain, imported
+ *         by its siblings before the domain-wide bind.
  *
- *  Secondary roles, in descending importance: @b phase @b ordering (arenas allocated → MRs registered → QPs
- *  connected → training starts; @ref unum::uform::utilities::mesh_topology_t::barrier keeps any
- *  host_domain from running ahead), @b agreement @b validation (GPU model, count and class, world
- *  size, multimem extent, schema and job identity), and @b boot @b verification (a bounded await
- *  turns a wedged host_domain into a named failure, never a hang). The exchange runs once per job,
- *  before step 0; the moment the transport is wired, all synchronization moves onto NVLink /
- *  InfiniBand and the directory is never touched again.
+ *  Secondary roles, in descending importance: @b phase @b ordering (arenas allocated → MRs
+ *  registered → QPs connected → training starts;
+ *  @ref unum::uform::utilities::mesh_topology_t::barrier keeps any host_domain from running ahead),
+ *  @b agreement @b validation (GPU model, count and class, world size, multimem extent, schema and
+ *  job identity), and @b boot @b verification (a bounded await turns a wedged host_domain into a
+ *  named failure, never a hang). The exchange runs once per job, before step 0; the moment the
+ *  transport is wired, all synchronization moves onto NVLink / InfiniBand and the directory is
+ *  never touched again.
  *
  *  @section mesh_worlds Three concrete worlds
  *
- *      - Two HGX H100 boxes over InfiniBand: one process per box drives all 8 GPUs, and the multicast
- *        reach ends at the box — shape @c {8,8,16} : 2 host_domains, each its own multimem_domain.
- *      - Two GB200 NVL72 racks: 18 compute trays per rack, one process per tray driving its 4 Blackwell
- *        GPUs, NVLink multicast spanning the whole rack — shape @c {4,72,144} : 36 host_domains, 18 per
- *        multimem_domain, 2 multimem_domains.
- *      - Two Vera Rubin NVL144 racks: the same tray topology, one process per tray driving its 8 Rubin
- *        GPU dies, rack-wide multicast — shape @c {8,144,288} : 36 host_domains, 2 multimem_domains.
+ *      - Two HGX H100 boxes over InfiniBand: one process per box drives all 8 GPUs, and
+ *        the multicast reach ends at the box — shape @c {8,8,16} : 2 host_domains, each
+ *        its own multimem_domain.
+ *      - Two GB200 NVL72 racks: 18 compute trays per rack, one process per tray driving its 4
+ *        Blackwell GPUs, NVLink multicast spanning the whole rack — shape @c {4,72,144} : 36
+ *        host_domains, 18 per multimem_domain, 2 multimem_domains.
+ *      - Two Vera Rubin NVL144 racks: the same tray topology, one process per tray driving
+ *        its 8 Rubin GPU dies, rack-wide multicast — shape @c {8,144,288} : 36
+ *        host_domains, 2 multimem_domains.
  *
- *  The middle number is why @c gpus_per_multimem_domain is @b explicit configuration: a process on an
- *  NVL72 tray sees 4 devices, and the 72-GPU multicast reach is a fabric property no local probe can
- *  observe — it is asserted at launch, cross-checked during the exchange, and proven when the multicast
- *  object binds. Per-multimem_domain wiring (the fabric handle, the domain's heap and QP digest) is
- *  published once per domain by its lead, so cross-rack setup reads O(domains) files, not O(processes).
+ *  The middle number is why @c gpus_per_multimem_domain is @b explicit configuration: a process on
+ *  an NVL72 tray sees 4 devices, and the 72-GPU multicast reach is a fabric property no local
+ *  probe can observe — it is asserted at launch, cross-checked during the exchange, and proven
+ *  when the multicast object binds. Per-multimem_domain wiring (the fabric handle, the domain's
+ *  heap and QP digest) is published once per domain by its lead, so cross-rack setup reads
+ *  O(domains) files, not O(processes).
  *
  *  @section mesh_stance Design stance
  *
- *      - The colocation is @b homogeneous for now: every host_domain carries the same count of identical
- *        GPUs, so three integers describe the whole world; heterogeneity is rejected at bootstrap, never
- *        papered over.
- *      - No failure recovery: the project is built around @b over-provisioning instead — a hot-spare
- *        host_domain takes a dead peer's index and the world re-bootstraps at the same shape from the
- *        last checkpoint. Membership is fixed for a job's lifetime; detection is bounded waits plus
- *        supervisor exit codes.
+ *      - The colocation is @b homogeneous for now: every host_domain carries the same count of
+ *        identical GPUs, so three integers describe the whole world; heterogeneity is rejected at
+ *        bootstrap, never papered over.
+ *      - No failure recovery: the project is built around @b over-provisioning instead — a
+ *        hot-spare host_domain takes a dead peer's index and the world re-bootstraps at the same
+ *        shape from the last checkpoint. Membership is fixed for a job's lifetime; detection is
+ *        bounded waits plus supervisor exit codes.
  *      - Launcher-agnostic through a deliberately tiny contract: identity and configuration come in
  *        through environment variables ( @c $UFORM_HOST_DOMAIN_INDEX or a scheduler's equivalent,
- *        @c $UFORM_GPUS_PER_MULTIMEM_DOMAIN , @c $UFORM_EXCHANGE_DIR , @c $UFORM_JOB_ID ), the exit code
- *        goes out. Raw SSH fan-out, Slurm ( @c $SLURM_NODEID ), and Kubernetes indexed Jobs all satisfy
- *        it without touching this code.
+ *        @c $UFORM_GPUS_PER_MULTIMEM_DOMAIN , @c $UFORM_EXCHANGE_DIR , @c $UFORM_JOB_ID ), the exit
+ *        code goes out. Raw SSH fan-out, Slurm ( @c $SLURM_NODEID ), and Kubernetes indexed Jobs
+ *        all satisfy it without touching this code.
  *      - Why not NCCL, NVSHMEM, or MPI + PMI, which solve the same bootstrap: each drags a runtime
- *        dependency and its own failure modes for a once-per-job exchange of a few hundred bytes. NCCL's
- *        store needs a TCP server and open ports; NVSHMEM itself bootstraps over MPI / PMI; and none
- *        offers failure recovery anyway — transparent member replacement is incompatible with captured
- *        graphs and symmetric heaps, whose addresses are baked at capture time. A shared filesystem is
- *        the one channel a GPU cluster already has (the datasets and checkpoints live on it), and it
- *        stays inspectable with @c ls and @c cat at 3 a.m.
+ *        dependency and its own failure modes for a once-per-job exchange of a few hundred bytes.
+ *        NCCL's store needs a TCP server and open ports; NVSHMEM itself bootstraps over MPI / PMI;
+ *        and none offers failure recovery anyway — transparent member replacement is incompatible
+ *        with captured graphs and symmetric heaps, whose addresses are baked at capture time. A
+ *        shared filesystem is the one channel a GPU cluster already has (the datasets and
+ *        checkpoints live on it), and it stays inspectable with @c ls and @c cat at 3 a.m.
  */
 #pragma once
 
@@ -109,24 +114,26 @@ namespace sz = ashvardanian::stringzilla;
 /**
  *  @brief The three-domain mesh shape — the host-side single source of truth for cluster geometry.
  *
- *  Names the three @b nested GPU domains a run spans, smallest to largest, and stores @b only their three
- *  sizes — every grouping question is integer arithmetic off them, never stored:
+ *  Names the three @b nested GPU domains a run spans, smallest to largest, and stores @b only their
+ *  three sizes — every grouping question is integer arithmetic off them, never stored:
  *
- *      - @c host_domain — the GPUs @b one process drives (one OS image; a whole HGX box, or one NVL72
- *        compute tray).
+ *      - @c host_domain — the GPUs @b one process drives (one OS image; a whole HGX box, or one
+ *        NVL72 compute tray).
  *      - @c multimem_domain — the GPUs reachable by @c multimem.* over NVLink / NVSwitch (HGX = 8,
- *        NVL72 = 72, NVL144 = 144), addressed by a single multimem VA. One or more host_domains compose
- *        a multimem_domain.
- *      - @c colocated_domain — the whole InfiniBand world (~10^5), reached by device-initiated one-sided
- *        RDMA. One or more multimem_domains compose the colocated_domain; it shares @b one global batch.
+ *        NVL72 = 72, NVL144 = 144), addressed by a single multimem VA. One or more host_domains
+ *        compose a multimem_domain.
+ *      - @c colocated_domain — the whole InfiniBand world (~10^5), reached by device-initiated
+ *        one-sided RDMA. One or more multimem_domains compose the colocated_domain; it shares
+ *        @b one global batch.
  *
- *  Invariant: @c host≤multimem≤colocated , @c multimem%host==0 , @c colocated%multimem==0 — enforced by
- *  @ref make_mesh_shape . The mesh is uniform @b by design: every host_domain carries the same count of
- *  identical GPUs, so three integers describe the whole world — heterogeneous worlds are rejected at
- *  bootstrap, never papered over. The concrete worlds in the file header: two HGX H100 boxes are
- *  @c {8,8,16} , two GB200 NVL72 racks are @c {4,72,144} , two Vera Rubin NVL144 racks are @c {8,144,288} .
- *  Immutable after rendezvous — the topology is identity, not state. A rank is one GPU, named by a single
- *  @c u32_t @c gpu_index in @c [0,gpus_per_colocated_domain) ; there are no rank/index aliases.
+ *  Invariant: @c host ≤ multimem ≤ colocated , @c multimem%host==0 , @c colocated%multimem==0 —
+ *  enforced by @ref make_mesh_shape . The mesh is uniform @b by design: every host_domain carries
+ *  the same count of identical GPUs, so three integers describe the whole world — heterogeneous
+ *  worlds are rejected at bootstrap, never papered over. The concrete worlds in the file header:
+ *  two HGX H100 boxes are @c {8,8,16} , two GB200 NVL72 racks are @c {4,72,144} , two Vera Rubin
+ *  NVL144 racks are @c {8,144,288} . Immutable after rendezvous — the topology is identity, not
+ *  state. A rank is one GPU, named by a single @c u32_t @c gpu_index in
+ *  @c [0,gpus_per_colocated_domain) ; there are no rank/index aliases.
  */
 struct mesh_shape_t {
 
@@ -136,7 +143,8 @@ struct mesh_shape_t {
     /** GPUs in one NVLink domain reachable by @c multimem.* (8 on HGX, 72 / 144 on NVL racks). */
     u32_t gpus_per_multimem_domain = 1u;
 
-    /** Total data-parallel GPUs sharing @b one global batch — the whole InfiniBand world (~10^5). */
+    /** Total data-parallel GPUs sharing @b one global batch — the whole
+     *  InfiniBand world (~10^5). */
     u32_t gpus_per_colocated_domain = 1u;
 
     /** Which host_domain a global @p gpu_index belongs to. */
@@ -147,7 +155,8 @@ struct mesh_shape_t {
         return gpu_index / gpus_per_multimem_domain;
     }
 
-    /** A global @p gpu_index 's position @b within its multimem_domain — the intra-domain collective rank. */
+    /** A global @p gpu_index 's position @b within its multimem_domain — the
+     *  intra-domain collective rank. */
     [[nodiscard]] u32_t index_in_multimem_domain(u32_t gpu_index) const noexcept {
         return gpu_index % gpus_per_multimem_domain;
     }
@@ -160,7 +169,8 @@ struct mesh_shape_t {
     }
 
     /** The colocated_domain (world) coordinate of multimem_domain @p multimem_domain_index 's
-     *  member @p member_index — the inverse of @ref multimem_domain_of + @ref index_in_multimem_domain . */
+     *  member @p member_index — the inverse of @ref multimem_domain_of +
+     *  @ref index_in_multimem_domain . */
     [[nodiscard]] u32_t gpu_index_of_multimem_member(u32_t multimem_domain_index, u32_t member_index) const noexcept {
         return multimem_domain_index * gpus_per_multimem_domain + member_index;
     }
@@ -178,18 +188,19 @@ struct mesh_shape_t {
  *  @brief This rank's mesh coordinate plus the reachability handle mesh-wide kernels read — passed
  *      @b by value into kernels: device-readable only, no stream, no host pointers, no ownership.
  *
- *  Everything else a kernel needs derives from @c topology + @c gpu_index (the intra-domain collective
- *  rank is @c topology.index_in_multimem_domain(gpu_index) , the global reduce divisor is
- *  @c topology.gpus_per_colocated_domain ). The cross-host_domain reachability table — one link per
- *  remote multimem_domain, reached over InfiniBand — joins this struct with the RDMA transport primitive;
- *  until then a single multimem_domain is the whole reachable world.
+ *  Everything else a kernel needs derives from @c topology + @c gpu_index (the intra-domain
+ *  collective rank is @c topology.index_in_multimem_domain(gpu_index) , the global reduce divisor
+ *  is @c topology.gpus_per_colocated_domain ). The cross-host_domain reachability table — one link
+ *  per remote multimem_domain, reached over InfiniBand — joins this struct with the RDMA transport
+ *  primitive; until then a single multimem_domain is the whole reachable world.
  */
 struct mesh_location_t {
 
     /** The three nested-domain sizes (by value) — domains derived from @c gpu_index . */
     mesh_shape_t topology {};
 
-    /** This rank's global coordinate in @c [0,gpus_per_colocated_domain) — the only coordinate stored. */
+    /** This rank's global coordinate in @c [0,gpus_per_colocated_domain) — the
+     *  only coordinate stored. */
     u32_t gpu_index = 0u;
 
     /** Multicast VA of this rank's multimem_domain; a @c multimem.* op against @c +offset fans
@@ -204,7 +215,8 @@ struct mesh_location_t {
  *
  *  @param[in] gpus_per_host_domain GPUs this process drives; @c >=1 .
  *  @param[in] gpus_per_multimem_domain One NVLink multicast domain; a multiple of the host domain.
- *  @param[in] gpus_per_colocated_domain The whole data-parallel world; a multiple of the multimem domain.
+ *  @param[in] gpus_per_colocated_domain The whole data-parallel world; a multiple of
+ *      the multimem domain.
  */
 [[nodiscard]] inline expected<mesh_shape_t> make_mesh_shape(u32_t gpus_per_host_domain, u32_t gpus_per_multimem_domain,
                                                             u32_t gpus_per_colocated_domain) noexcept {
@@ -228,11 +240,11 @@ struct mesh_location_t {
  *  without multicast runs its peer-read tier, and only a domain asks
  *  @ref unum::uform::utilities::peers_reach_each_other of its own members.
  *
- *  Covers the common one-box world (an HGX box driven by one process); the multi-host_domain world builds
- *  on it through @ref unum::uform::utilities::mesh_topology_t::bootstrap . The probe sees @b only
- *  this process's devices — a wider fabric extent (NVL72 / NVL144) is explicit configuration,
- *  cross-checked during the exchange and proven when the multicast object binds. Requires @c cuInit
- *  to have run; needs no CUDA context.
+ *  Covers the common one-box world (an HGX box driven by one process); the multi-host_domain world
+ *  builds on it through @ref unum::uform::utilities::mesh_topology_t::bootstrap . The probe sees
+ *  @b only this process's devices — a wider fabric extent (NVL72 / NVL144) is explicit
+ *  configuration, cross-checked during the exchange and proven when the multicast object binds.
+ *  Requires @c cuInit to have run; needs no CUDA context.
  */
 [[nodiscard]] inline expected<mesh_shape_t> discover_mesh_shape() noexcept {
     int device_count = 0;
@@ -243,9 +255,9 @@ struct mesh_location_t {
     return mesh_shape_t {gpus, gpus, gpus};
 }
 
-/** Whether every ordered pair of @p devices has a P2P path, failing with @c unsupported_k on the
- *  first pair without one — what the members of one domain need, since they read each other's
- *  memory. */
+/** Whether every ordered pair of @p devices has a P2P path, failing with @c unsupported_k
+ *  on the first pair without one — what the members of one domain need, since they read
+ *  each other's memory. */
 [[nodiscard]] inline expected_t peers_reach_each_other(std::span<i32_t const> devices) noexcept {
     for (i32_t const device_index : devices) {
         CUdevice device = 0;
@@ -278,18 +290,21 @@ inline constexpr std::size_t device_name_capacity_k = 64u;
  *  directory fails loudly on its first line instead of misparsing. */
 inline constexpr char mesh_schema_k[] = "uform.mesh.3";
 
-/** One host_domain's published facts — the payload of the bootstrap exchange, one entry per
- *  host_domain in @ref mesh_topology_t::host_domains . POD, so an @c st::basic_vector holds the
- *  table. */
+/** One host_domain's published facts — the payload of the bootstrap exchange, one entry
+ *  per host_domain in @ref mesh_topology_t::host_domains . POD, so an @c st::basic_vector
+ *  holds the table. */
 struct mesh_host_domain_t {
 
-    /** The host_domain's index in @c [0,host_domain_count) — identity from the launcher, never derived. */
+    /** The host_domain's index in @c [0,host_domain_count) — identity from the
+     *  launcher, never derived. */
     u32_t host_domain_index = 0;
 
-    /** GPUs the host_domain probed locally; the bootstrap validates this is uniform across the world. */
+    /** GPUs the host_domain probed locally; the bootstrap validates this is uniform
+     *  across the world. */
     u32_t device_count = 0;
 
-    /** The host_domain's hostname — for diagnostics and for the transport wiring to name its peers. */
+    /** The host_domain's hostname — for diagnostics and for the transport wiring to
+     *  name its peers. */
     char hostname[hostname_capacity_k] = {};
 
     /** The GPU model, spaces replaced with underscores; the bootstrap validates the world runs
@@ -297,8 +312,8 @@ struct mesh_host_domain_t {
     char device_name[device_name_capacity_k] = {};
 };
 
-/** Why a kernel trapped — the meaning of a @ref unum::uform::utilities::gpu_fault_t 's three
- *  operands. */
+/** Why a kernel trapped — the meaning of a @ref unum::uform::utilities::gpu_fault_t
+ *  's three operands. */
 enum class gpu_fault_code_t : u32_t {
     none_k = 0,
 
@@ -368,9 +383,9 @@ __device__ inline void trap_with(gpu_fault_t *fault, gpu_fault_code_t code, u32_
 using mesh_pause_t = void (*)() noexcept;
 
 /**
- *  @brief The bootstrapped world: the validated @ref mesh_shape_t , this host_domain's identity, every
- *      peer host_domain's published facts, and the once-per-job exchange primitives later wiring phases
- *      reuse.
+ *  @brief The bootstrapped world: the validated @ref mesh_shape_t , this host_domain's identity,
+ *      every peer host_domain's published facts, and the once-per-job exchange primitives later
+ *      wiring phases reuse.
  *
  *  @ref bootstrap composes the two discovery levels: the local hardware probe (
  *  @ref discover_mesh_shape — the device count — plus the GPU model name) and a cross-host_domain
@@ -420,9 +435,9 @@ using mesh_pause_t = void (*)() noexcept;
  *  @endcode
  *
  *  A single-host_domain world ( @c host_domain_count()==1 ) never touches the filesystem. The whole
- *  exchange happens once per job, on the host, outside any CUDA-graph capture. Move-only; the shape is
- *  immutable after @ref bootstrap returns — the topology is identity, not state. It also owns the
- *  @ref faults table its local GPUs' kernels record into before they trap.
+ *  exchange happens once per job, on the host, outside any CUDA-graph capture. Move-only; the shape
+ *  is immutable after @ref bootstrap returns — the topology is identity, not state. It also owns
+ *  the @ref faults table its local GPUs' kernels record into before they trap.
  */
 struct mesh_topology_t {
 
@@ -456,8 +471,8 @@ struct mesh_topology_t {
     mesh_pause_t poll_pause = nullptr;
 
     /** Number of host_domains in the world — the table's extent, agreeing with
-     *  @c shape.host_domain_count() by construction: @ref bootstrap sizes both from the same argument
-     *  and never resizes either. */
+     *  @c shape.host_domain_count() by construction: @ref bootstrap sizes both from the same
+     *  argument and never resizes either. */
     [[nodiscard]] u32_t host_domain_count() const noexcept { return static_cast<u32_t>(host_domains.size()); }
 
     /** This host_domain's own published facts. */
@@ -468,7 +483,7 @@ struct mesh_topology_t {
     [[nodiscard]] bool is_lead() const noexcept { return host_domain_index == 0; }
 
     /** The global @c gpu_index of this host_domain's local CUDA device ordinal 0 —
-     *  @c host_domain_index·gpus_per_host_domain . This is the local↔global mapping every wiring
+     *  @c host_domain_index · gpus_per_host_domain . This is the local↔global mapping every wiring
      *  phase relies on: local ordinal @c d is global @c gpu_index @c first_gpu_index()+d . */
     [[nodiscard]] u32_t first_gpu_index() const noexcept { return host_domain_index * shape.gpus_per_host_domain; }
 
@@ -488,28 +503,30 @@ struct mesh_topology_t {
     }
 
     /**
-     *  @brief Probe the local hardware, exchange facts with every peer host_domain, validate agreement,
-     *      and assemble the world — the one construction path for @ref mesh_topology_t .
+     *  @brief Probe the local hardware, exchange facts with every peer host_domain, validate
+     *      agreement, and assemble the world — the one construction path for @ref mesh_topology_t .
      *
-     *  @param[in] host_domain_index This host_domain's identity in @c [0,host_domain_count) , from the
-     *      launcher (see @ref host_domain_index_from_environment ).
+     *  @param[in] host_domain_index This host_domain's identity in @c [0,host_domain_count) , from
+     *      the launcher (see @ref host_domain_index_from_environment ).
      *  @param[in] host_domain_count Number of host_domains in the job — explicit, never guessed: a
      *      host_domain cannot know how many peers will eventually arrive.
      *  @param[in] poll_pause The wait between two reads of the exchange directory, kept as
      *      @ref poll_pause for every later wiring phase.
-     *  @param[in] gpus_per_multimem_domain The NVLink multicast extent — a fabric property no local probe
-     *      can observe, so it is explicit: @c 0 resolves @c $UFORM_GPUS_PER_MULTIMEM_DOMAIN , then
-     *      defaults to the host_domain itself (every pre-NVL72 box, where multicast ends at the box).
+     *  @param[in] gpus_per_multimem_domain The NVLink multicast extent — a fabric property no
+     *      local probe can observe, so it is explicit: @c 0 resolves
+     *      @c $UFORM_GPUS_PER_MULTIMEM_DOMAIN , then defaults to the host_domain itself (every
+     *      pre-NVL72 box, where multicast ends at the box).
      *  @param[in] directory The shared directory every host_domain sees; empty resolves
-     *      @c $UFORM_EXCHANGE_DIR . A multi-host_domain bootstrap without one fails loudly — there is no
-     *      guessable default.
+     *      @c $UFORM_EXCHANGE_DIR . A multi-host_domain bootstrap without one fails loudly — there
+     *      is no guessable default.
      *  @param[in] job_id The launch's unique namespace; empty resolves @c $UFORM_JOB_ID , and a
-     *      multi-host_domain bootstrap without one fails loudly — an anonymous shared namespace is how
-     *      node families collide.
-     *  @param[in] timeout_seconds Upper bound on every await; a missing peer fails loudly, never hangs.
-     *  @param[in] gpu_class The class ordinal this host_domain's GPUs train as after any pin, from
-     *      the C ABI's enumeration, which every peer must share, so no two replicas run different
-     *      kernels.
+     *      multi-host_domain bootstrap without one fails loudly — an anonymous shared namespace is
+     *      how node families collide.
+     *  @param[in] timeout_seconds Upper bound on every await; a missing peer fails
+     *      loudly, never hangs.
+     *  @param[in] gpu_class The class ordinal this host_domain's GPUs train as after any
+     *      pin, from the C ABI's enumeration, which every peer must share, so no two
+     *      replicas run different kernels.
      */
     [[nodiscard]] static expected<mesh_topology_t> bootstrap(
         u32_t host_domain_index, u32_t host_domain_count, mesh_pause_t poll_pause, u32_t gpus_per_multimem_domain = 0,
@@ -524,8 +541,9 @@ struct mesh_topology_t {
         if (!local) return expected<mesh_topology_t>::fail(std::move(local));
         u32_t const local_devices = local.value_.gpus_per_host_domain;
 
-        // The multimem extent is explicit configuration (see the parameter docs); the nesting invariants
-        // are enforced by the same make_mesh_shape every hand-configured world goes through.
+        // The multimem extent is explicit configuration (see the parameter docs); the
+        // nesting invariants are enforced by the same make_mesh_shape every hand-configured
+        // world goes through.
         if (gpus_per_multimem_domain == 0)
             if (char const *value = std::getenv("UFORM_GPUS_PER_MULTIMEM_DOMAIN"); value != nullptr) // vendor-boundary
                 if (!parse_u32_(sz::string_view_t {value}, gpus_per_multimem_domain))
@@ -606,8 +624,9 @@ struct mesh_topology_t {
     [[nodiscard]] u32_t next_collective_id() noexcept { return next_collective_id_++; }
 
     /** Durably publish this host_domain's @p text under the exchange @p key : written to a
-     *  temporary file, @c fsync -ed, then atomically @c rename -d into place, so a peer never reads a
-     *  half-written payload. The primitive every wiring phase reuses to add payloads, not machinery. */
+     *  temporary file, @c fsync -ed, then atomically @c rename -d into place, so a peer
+     *  never reads a half-written payload. The primitive every wiring phase reuses to add
+     *  payloads, not machinery. */
     [[nodiscard]] expected_t publish_text(sz::string_view_t key, sz::string_view_t text) const noexcept {
         if (host_domain_count() <= 1) return {};
         expected<sz::string_t> final_path = host_domain_file_path_(host_domain_index, key);
@@ -679,7 +698,8 @@ struct mesh_topology_t {
 
   private:
 
-    /** One parsed facts payload: the decimal fields plus views @b borrowing from the payload text. */
+    /** One parsed facts payload: the decimal fields plus views @b borrowing from
+     *  the payload text. */
     struct facts_t {
         sz::string_view_t schema {};
         sz::string_view_t job {};
@@ -698,16 +718,17 @@ struct mesh_topology_t {
         u32_t gpu_class = 0;
     };
 
-    /** One probed physical GPU identity paired with the host_domain that claims it — the flat table
-     *  the lead sorts once to prove no GPU is owned twice (an unpartitioned @c CUDA_VISIBLE_DEVICES ). */
+    /** One probed physical GPU identity paired with the host_domain that claims it — the flat
+     *  table the lead sorts once to prove no GPU is owned twice (an unpartitioned
+     *  @c CUDA_VISIBLE_DEVICES ). */
     struct claimed_gpu_t {
         CUuuid uuid {};
         u32_t owner = 0;
     };
 
     /** The local hardware probe: this host_domain's published facts plus the CUDA UUIDs of its
-     *  visible GPUs — kept @b probe-local (the world table stores identity, not per-GPU uuids), fed to
-     *  @c build_facts_ on publish and to @c collect_world_as_lead_ for the uniqueness proof. */
+     *  visible GPUs — kept @b probe-local (the world table stores identity, not per-GPU uuids), fed
+     *  to @c build_facts_ on publish and to @c collect_world_as_lead_ for the uniqueness proof. */
     struct local_probe_t {
         mesh_host_domain_t facts {};
         per_gpu_array<CUuuid> uuids {};
@@ -733,7 +754,8 @@ struct mesh_topology_t {
         return built;
     }
 
-    /** Parse a 32-hex GPU UUID token back into a @c CUuuid ; @c false on any non-hex or short token. */
+    /** Parse a 32-hex GPU UUID token back into a @c CUuuid ; @c false on any non-hex
+     *  or short token. */
     [[nodiscard]] static bool parse_uuid_(sz::string_view_t token, CUuuid &uuid) noexcept {
         if (token.size() != 2u * sizeof(uuid.bytes)) return false;
         for (std::size_t byte_index = 0; byte_index != sizeof(uuid.bytes); ++byte_index) {
@@ -746,8 +768,8 @@ struct mesh_topology_t {
         return true;
     }
 
-    /** Probe this host_domain's own facts: hostname plus the GPU model, verified uniform across
-     *  the local devices too — the shape describes identical GPUs, and a box with mixed cards would
+    /** Probe this host_domain's own facts: hostname plus the GPU model, verified uniform across the
+     *  local devices too — the shape describes identical GPUs, and a box with mixed cards would
      *  break every "three integers describe the world" derivation downstream. */
     [[nodiscard]] static expected<local_probe_t> probe_local_host_domain_(u32_t host_domain_index,
                                                                           u32_t device_count) noexcept {
@@ -896,8 +918,8 @@ struct mesh_topology_t {
                                                     u32_t self_gpu_class, f64_t timeout_seconds) noexcept {
         mesh_host_domain_t const &self = probed.facts;
         st::basic_vector<claimed_gpu_t> claimed;
-        // The world's physical GPU identities, this host_domain's first; sorted once at the end to prove
-        // none is claimed twice — O(world log world), never a pairwise scan.
+        // The world's physical GPU identities, this host_domain's first; sorted once at the end to
+        // prove none is claimed twice — O(world log world), never a pairwise scan.
         if (st::failed(claimed.reserve(shape.gpus_per_colocated_domain)))
             return expected_t::fail(status_t::bad_alloc_k, "GPU-uniqueness table allocation failed ({} GPUs)",
                                     shape.gpus_per_colocated_domain);
@@ -970,7 +992,8 @@ struct mesh_topology_t {
             return std::memcmp(left.uuid.bytes, right.uuid.bytes, sizeof(left.uuid.bytes)) < 0;
         };
         // No physical GPU is owned by two host_domains — the guard against an unpartitioned
-        // CUDA_VISIBLE_DEVICES (co-located processes seeing the same devices). One sort, one adjacent scan.
+        // CUDA_VISIBLE_DEVICES (co-located processes seeing the same devices). One sort,
+        // one adjacent scan.
         std::sort(claimed.data(), claimed.data() + claimed.size(), by_uuid);
         for (std::size_t index = 1; index < claimed.size(); ++index)
             if (std::memcmp(claimed[index].uuid.bytes, claimed[index - 1u].uuid.bytes,
@@ -1087,10 +1110,11 @@ struct mesh_topology_t {
 
 /** This host_domain's index in the world, read from whichever launcher spawned the process —
  *  @c $UFORM_HOST_DOMAIN_INDEX , then Slurm's @c $SLURM_NODEID , then Open MPI's
- *  @c $OMPI_COMM_WORLD_RANK ; 0 if none is set. Reading the launcher's environment costs nothing and
- *  links nothing — no MPI library enters the build. Identity only: it selects @b which host_domain,
- *  never a count — the counts are explicit @ref unum::uform::utilities::mesh_topology_t::bootstrap
- *  arguments, so a misconfigured launcher cannot change the math. */
+ *  @c $OMPI_COMM_WORLD_RANK ; 0 if none is set. Reading the launcher's environment costs nothing
+ *  and links nothing — no MPI library enters the build. Identity only: it selects @b which
+ *  host_domain, never a count — the counts are explicit
+ *  @ref unum::uform::utilities::mesh_topology_t::bootstrap arguments, so a misconfigured launcher
+ *  cannot change the math. */
 [[nodiscard]] inline u32_t host_domain_index_from_environment() noexcept {
     // `std::getenv` speaks C strings; the names never escape this loop.
     char const *const variables[] = {"UFORM_HOST_DOMAIN_INDEX", "SLURM_NODEID", // vendor-boundary

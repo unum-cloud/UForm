@@ -1,31 +1,24 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "pyarrow>=21.0.0",
-# ]
-# ///
 """Download the Enron Email corpus (CMU FERC release), symlink into `data/`, AND repack to Parquet.
 
-Modality: text (email pairs).  The only large real email corpus in the public domain: ~500K
-messages across ~150 users' maildirs, released by FERC and hosted by CMU.  Thread structure yields
-`subject -> body` and `thread -> reply` pairs, plus same-thread messages as in-batch positives and
-cross-thread as hard negatives — the closest real signal to the on-device personal-email search
-use case.
+Modality: text (email pairs). The only large real email corpus in the public domain: ~500K messages
+across ~150 users' maildirs, released by FERC and hosted by CMU. Thread structure yields `subject ->
+body` and `thread -> reply` pairs, plus same-thread messages as in-batch positives and cross-thread
+as hard negatives — the closest real signal to the on-device personal-email search use case.
 
-The corpus ships as a single ~443 MB gzipped tar (`enron_mail_20150507.tar.gz`) of a `maildir/`
-tree (one file per message, RFC-822 headers + body).  This single file does both halves: it fetches
-the tarball, symlinks the corpus dir, then streams the tarball member-by-member (no full extraction
-to disk), parses each message with the stdlib `email` module, and emits `(subject, body)` rows: the
-subject line is a terse "query" over the message body.  The repack is a light streaming projection,
-so it runs inline (no separate script).  The tarball is kept (not deleted) so a wider `--max-messages`
-pass can be re-run without re-fetching.
+The corpus ships as a single ~443 MB gzipped tar (`enron_mail_20150507.tar.gz`) of a `maildir/` tree
+(one file per message, RFC-822 headers + body). This single file does both halves: it fetches the
+tarball, symlinks the corpus dir, then streams the tarball member-by-member (no full extraction to
+disk), parses each message with the stdlib `email` module, and emits `(subject, body)` rows: the
+subject line is a terse "query" over the message body. The repack is a light streaming projection,
+so it runs inline (no separate script). The tarball is kept (not deleted) so a wider
+`--max-messages` pass can be re-run without re-fetching.
 
-DISK / DEFERRAL: the tarball is ~443 MB compressed / ~1.4 GB extracted (~500K messages).  The repack
+DISK / DEFERRAL: the tarball is ~443 MB compressed / ~1.4 GB extracted (~500K messages). The repack
 defaults to a bounded `--max-messages 50000` sample (enough for the parse-gate and a representative
 pair set); pass `--max-messages 0` to repack the whole corpus.
 
 VOLUME CONTROL: the source is a SINGLE ~443 MB tarball, so there is no shard cap to apply on the
-download and deliberately no fake `--fraction` flag.  Corpus volume is controlled by the
+download and deliberately no fake `--fraction` flag. Corpus volume is controlled by the
 `--max-messages` knob (`0` repacks all ~500K messages).
 
 Layout: the tarball lands under `<DATA_ROOT>/enron/` with a `data/enron` symlink.
@@ -33,7 +26,18 @@ Layout: the tarball lands under `<DATA_ROOT>/enron/` with a `data/enron` symlink
     uv run scripts/data/download_enron.py
     uv run scripts/data/download_enron.py --max-messages 0 --overwrite
     UFORM_DATA_ROOT=$UFORM_DATA_ROOT uv run scripts/data/download_enron.py      # env-var root
+
+File: scripts/data/download_enron.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "pyarrow>=21.0.0",
+# ]
+# ///
 
 import argparse
 import email

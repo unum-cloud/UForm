@@ -6,8 +6,8 @@
  *      JSON in @c scripts/mixtures names, and @ref unum::uform::train::dataset_source_t , the batch
  *      source that loads them through the loaders and the mixer.
  *
- *  Linked into the @c uform_base binary alone, since the C library links neither the loaders nor
- *  cuDF.
+ *  Linked into the @c uform_base binary alone, since the C library links neither the
+ *  loaders nor cuDF.
  *
  *  @section datasets_mixture A mixture is all text or all pairs
  *
@@ -23,10 +23,10 @@
  *  @ref unum::uform::train::mixture_sampler_t retires it. Pairs route as bags, so one mixture never
  *  mixes them with plain text, whose segments route alone.
  *
- *  A choices entry names its columns in a @c choices object: the text @c state an answer follows,
- *  the legal @c choices bytes, their @c targets probabilities, and the @c group of each question,
- *  which the calibration pass reads and training does not. Its segments route alone, beside plain
- *  text.
+ *  A choices entry names its columns in a @c choices object: the text @c state an answer
+ *  follows, the legal @c choices bytes, their @c targets probabilities, and the @c group of each
+ *  question, which the calibration pass reads and training does not. Its segments route alone,
+ *  beside plain text.
  */
 #pragma once
 
@@ -52,8 +52,8 @@ struct mixture_entry_t {
     /** The dataset's name. */
     sz::string_t name {};
 
-    /** The shard paths or glob; a relative one resolves against the working directory, the
-     *  repository root. */
+    /** The shard paths or glob; a relative one resolves against the working directory,
+     *  the repository root. */
     sz::string_t glob {};
 
     /** The share of the draws this entry takes, relative to the other entries. */
@@ -112,8 +112,8 @@ struct mixture_t {
 
     /** @p shape with the slice of every media modality the entries name lit at the mixture
      *  geometry: RGBA images in 16-pixel patches, RGB video in 2-frame tubes of 16 pixels, and
-     *  256-sample audio frames at 16 kHz, and with room for every byte value as a choice when an
-     *  entry chooses. */
+     *  256-sample audio frames at 16 kHz, and with room for every byte value as a choice when
+     *  an entry chooses. */
     [[nodiscard]] multimodal_batch_shape_t shape(multimodal_batch_shape_t shape) const noexcept;
 };
 
@@ -131,13 +131,11 @@ struct mixture_t {
 struct mixture_sampler_t {
 
     /**
-     *  @brief Size the counters for @p entries , borrowed, whose shards hold @p rows rows each,
-     *      for @p world_gpus GPUs packing @p batches_per_fill batches of @p segments segments per
-     *      fill.
+     *  @brief Size the counters for @p entries , borrowed, whose shards hold @p rows rows each, for
+     *      @p world_gpus GPUs packing @p batches_per_fill batches of @p segments segments per fill.
      *
      *  @par Statuses:
-     *  - @c status_t::invalid_argument_k An entry caps its passes over shards that count no
-     *    rows.
+     *  - @c status_t::invalid_argument_k An entry caps its passes over shards that count no rows.
      */
     [[nodiscard]] static expected<mixture_sampler_t> make(std::span<mixture_entry_t const> entries,
                                                           std::span<std::size_t const> rows, std::size_t world_gpus,
@@ -164,8 +162,8 @@ struct mixture_sampler_t {
     /** The entries the weights, modalities and caps come from. */
     std::span<mixture_entry_t const> entries_ {};
 
-    /** @b [entries] each entry's rows, the pairs or documents one fill draws from it, and those the
-     *  replay counted. */
+    /** @b [entries] each entry's rows, the pairs or documents one fill draws from it, and those
+     *  the replay counted. */
     st::basic_vector<std::size_t> rows_ {}, fill_pairs_ {}, drawn_pairs_ {};
 
     /** @b [entries+1] cumulative live weights, the draw's search table. */

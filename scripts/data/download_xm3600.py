@@ -1,10 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "huggingface_hub",
-#     "pyarrow>=21.0.0",
-# ]
-# ///
 """Download XM3600: 3,600 images captioned by humans in 36 languages, into the image registry schema.
 
 Each source shard is one language file (`data/<lang>-00000-of-00001.parquet`) carrying that language's
@@ -12,7 +5,19 @@ Each source shard is one language file (`data/<lang>-00000-of-00001.parquet`) ca
 LANGUAGE (rebuilding the null-`path` source struct as `struct<bytes, path=image_id>`); the original
 downloader's cross-language group-by `image_id` into a single multilingual `captions` list is not
 expressible in the per-shard `acquire` model and is dropped.
+
+File: scripts/data/download_xm3600.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "huggingface_hub",
+#     "pyarrow>=21.0.0",
+# ]
+# ///
 import pyarrow as pa
 from acquire import acquire
 

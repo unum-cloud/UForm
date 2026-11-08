@@ -1,14 +1,14 @@
 //! Builds the library through CMake and links what it produced.
 //!
-//! No C or C++ is compiled here directly: the `CMakeLists.txt` files own the targets, the per-target
-//! compiler flags and the GPU backends, and duplicating any of that in Rust would be a second source
-//! of truth that drifts. So this drives CMake into Cargo's own output directory and consumes what it
-//! leaves there, never a shared build tree.
+//! No C or C++ is compiled here directly: the `CMakeLists.txt` files own the targets, the
+//! per-target compiler flags and the GPU backends, and duplicating any of that in Rust would be a
+//! second source of truth that drifts. So this drives CMake into Cargo's own output directory and
+//! consumes what it leaves there, never a shared build tree.
 //!
 //! One implementation of the C interface is linked, never two. Each names a CMake target and the
-//! directory it lands in; all of them answer the same verbs, and the engine and the stand-in even
-//! carry the same archive name, so choosing between them is a search path rather than a different
-//! link line.
+//! directory it lands in; all of them answer the same verbs, and the engine and the stand-in
+//! even carry the same archive name, so choosing between them is a search path rather than a
+//! different link line.
 //!
 //! File: build.rs
 //! Author: Ash Vardanian
@@ -146,8 +146,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let chosen = selected()?;
     let target_os = env::var("CARGO_CFG_TARGET_OS")?;
 
-    // A directory holding the chosen archive that CMake already built, like a parent project's build
-    // tree or a release, skips the build here. Pass the archive's exact directory.
+    // A directory holding the chosen archive that CMake already built, like a parent project's
+    // build tree or a release, skips the build here. Pass the archive's exact directory.
     println!("cargo:rerun-if-env-changed=UFORM_LIBRARY_DIR");
     match env::var_os("UFORM_LIBRARY_DIR") {
         Some(directory) => {
@@ -173,8 +173,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     match target_os.as_str() {
         "windows" => {}
         "macos" | "ios" => println!("cargo:rustc-link-lib=dylib=c++"),
-        // wasi-sdk ships libc++ and libc++abi as archives under its sysroot, in the `noeh` multilib the
-        // toolchain file compiles against.
+        // wasi-sdk ships libc++ and libc++abi as archives under its sysroot, in the `noeh` multilib
+        // the toolchain file compiles against.
         "wasi" => {
             let sysroot = PathBuf::from(env::var("WASI_SDK_PATH")?).join("share/wasi-sysroot/lib/wasm32-wasip1/noeh");
             println!("cargo:rustc-link-search=native={}", sysroot.display());
@@ -204,7 +204,8 @@ fn build_library(manifest: &Path, chosen: Implementation, target_os: &str) -> Re
         library.define(option, if chosen.options.contains(option) { on } else { off });
     }
 
-    // `FetchContent` builds each sibling crate's tree rather than downloading the pinned revision again.
+    // `FetchContent` builds each sibling crate's tree rather than downloading the
+    // pinned revision again.
     for (variable, links) in [
         ("FETCHCONTENT_SOURCE_DIR_FORKUNION", "forkunion"),
         ("FETCHCONTENT_SOURCE_DIR_NUMKONG", "numkong"),
@@ -214,7 +215,8 @@ fn build_library(manifest: &Path, chosen: Implementation, target_os: &str) -> Re
         library.define(variable, sibling_source(links)?);
     }
 
-    // Every preset compiles with Clang, so an unset `CXX` takes `clang++` rather than the platform default.
+    // Every preset compiles with Clang, so an unset `CXX` takes `clang++` rather than
+    // the platform default.
     println!("cargo:rerun-if-env-changed=CC");
     println!("cargo:rerun-if-env-changed=CXX");
     let compiler = env::var("CXX").unwrap_or_else(|_| String::from("clang++"));
@@ -227,8 +229,8 @@ fn build_library(manifest: &Path, chosen: Implementation, target_os: &str) -> Re
         library.define("CMAKE_CUDA_HOST_COMPILER", &compiler);
     }
 
-    // `cmake-rs` has no WASI system name to hand CMake, so the checked-in toolchain names the SDK and the
-    // sysroot; the one thing a user sets is `WASI_SDK_PATH`.
+    // `cmake-rs` has no WASI system name to hand CMake, so the checked-in toolchain names the SDK
+    // and the sysroot; the one thing a user sets is `WASI_SDK_PATH`.
     if target_os == "wasi" {
         println!("cargo:rerun-if-env-changed=WASI_SDK_PATH");
         println!("cargo:rerun-if-env-changed=CARGO_CFG_TARGET_FEATURE");
@@ -236,8 +238,9 @@ fn build_library(manifest: &Path, chosen: Implementation, target_os: &str) -> Re
             "CMAKE_TOOLCHAIN_FILE",
             manifest.join("cmake/toolchain-wasm32-wasi.cmake"),
         );
-        // An engine validates a module whole, so the SIMD tier is the one the Rust target declares; the flags
-        // `cmake-rs` passes replace the toolchain's initial ones, so the tier and `-fno-exceptions` ride with them.
+        // An engine validates a module whole, so the SIMD tier is the one the Rust target declares;
+        // the flags `cmake-rs` passes replace the toolchain's initial ones, so the tier and
+        // `-fno-exceptions` ride with them.
         let target_features = env::var("CARGO_CFG_TARGET_FEATURE").unwrap_or_default();
         if !target_features.split(',').any(|declared| declared == "simd128") {
             return Err("UForm on WebAssembly needs `-C target-feature=+simd128`".into());

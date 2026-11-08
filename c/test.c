@@ -4,16 +4,17 @@
  *  @date October 17, 2026
  *  @brief Unit tests for the pure-C ABI of UForm.
  *
- *  Exercises the interface every binding consumes: executors, model loading and description, every encode
- *  verb's output shapes and stats, the arenas every output lands in, the contract of @c uform_outcome_t,
- *  deferred calls and their progress, and every refusal a caller can provoke. A blocking call's outcome is
- *  final once it returns; a deferred one is polled, drained or waited on.
+ *  Exercises the interface every binding consumes: executors, model loading and description,
+ *  every encode verb's output shapes and stats, the arenas every output lands in, the contract
+ *  of @c uform_outcome_t, deferred calls and their progress, and every refusal a caller can
+ *  provoke. A blocking call's outcome is final once it returns; a deferred one is polled,
+ *  drained or waited on.
  *
- *  The same file runs against the engine and against the synchronous stand-in of @c src_stub/, so it asserts
- *  contracts rather than numbers: widths come from @c uform_model_describe, and only text, where every byte is
- *  a token, pins exact token counts. The checkpoint comes from @c argv[1] or @c UFORM_TEST_CHECKPOINT, as
- *  written by @c test/tiny_checkpoint.cpp; without either, a small file is written to the temporary directory,
- *  which only the stand-in loads.
+ *  The same file runs against the engine and against the synchronous stand-in of @c src_stub/, so
+ *  it asserts contracts rather than numbers: widths come from @c uform_model_describe, and only
+ *  text, where every byte is a token, pins exact token counts. The checkpoint comes from @c argv[1]
+ *  or @c UFORM_TEST_CHECKPOINT, as written by @c test/tiny_checkpoint.cpp; without either, a small
+ *  file is written to the temporary directory, which only the stand-in loads.
  */
 #include <stdbool.h> // `bool`
 #include <stdint.h>  // `uint8_t`, `uint32_t`
@@ -66,7 +67,8 @@ static uform_arena_t create_arena(uform_executor_t executor) {
     return arena;
 }
 
-/** Loads the checkpoint in BFloat16 through @p executor and reports its geometry into @p description. */
+/** Loads the checkpoint in BFloat16 through @p executor and reports its geometry
+ *  into @p description. */
 static uform_model_t load_model(uform_executor_t executor, uform_model_description_t* description) {
     uform_outcome_t outcome = {0};
     uform_model_t model = NULL;
@@ -118,8 +120,8 @@ static void check_rows(uform_rows_view_t const* rows, size_t dimensions, uform_s
     expect(rows->stride == dimensions * scalar_bytes(scalar), "Rows are written packed");
 }
 
-/** Checks per-token states against the call's stats: offsets from zero, never decreasing, no item past the
- *  context, and the last offset the tokens counted. */
+/** Checks per-token states against the call's stats: offsets from zero, never decreasing, no item
+ *  past the context, and the last offset the tokens counted. */
 static void check_states(uform_rows_tape_view_t const* states, size_t count, uform_model_description_t const* model,
                          uform_scalar_t scalar, size_t tokens) {
     check_rows(&states->rows, model->dimensions, scalar);
@@ -132,7 +134,8 @@ static void check_states(uform_rows_tape_view_t const* states, size_t count, ufo
     expect(states->offsets[count] == tokens, "The last offset is the tokens counted");
 }
 
-/** The library-wide probes, which take no handle and cannot fail, and every name table read back. */
+/** The library-wide probes, which take no handle and cannot fail, and every name
+ *  table read back. */
 static void test_library_probes(void) {
     printf("Test: Library Probes\n");
     expect(uform_capabilities_compiled() != NULL, "The compiled capabilities must be reported");
@@ -204,8 +207,8 @@ static void test_library_probes(void) {
     printf("Test: Library Probes - PASSED\n");
 }
 
-/** Every executor kind: RAM always, VRAM where the build and the machine have one, a borrowed pool nowhere
- *  yet; a drain of an idle executor succeeds, and every free takes @c NULL. */
+/** Every executor kind: RAM always, VRAM where the build and the machine have one, a borrowed pool
+ *  nowhere yet; a drain of an idle executor succeeds, and every free takes @c NULL. */
 static void test_executors(void) {
     printf("Test: Executors\n");
     uform_executor_t const executor = create_executor(0);
@@ -229,8 +232,9 @@ static void test_executors(void) {
     printf("Test: Executors - PASSED\n");
 }
 
-/** A checkpoint loads from a path and from a buffer, in either quantization, and its description echoes the
- *  quantization asked for; another quantization and a missing file are refused, leaving no model. */
+/** A checkpoint loads from a path and from a buffer, in either quantization, and its description
+ *  echoes the quantization asked for; another quantization and a missing file are refused,
+ *  leaving no model. */
 static void test_model_load(void) {
     printf("Test: Model Load\n");
     uform_executor_t const executor = create_executor(0);
@@ -333,8 +337,9 @@ static void test_model_load(void) {
     printf("Test: Model Load - PASSED\n");
 }
 
-/** Text in every output scalar: one embedding per item, one state per byte up to the context, and an item past
- *  the context cut there and counted; a scalar no output takes is refused with every output left null. */
+/** Text in every output scalar: one embedding per item, one state per byte up to the context, and
+ *  an item past the context cut there and counted; a scalar no output takes is refused with every
+ *  output left null. */
 static void test_text_shapes(void) {
     printf("Test: Text Shapes\n");
     uform_executor_t const executor = create_executor(0);
@@ -488,7 +493,8 @@ static void put_big_endian(uint8_t* at, uint32_t value) {
     at[3] = (uint8_t)value;
 }
 
-/** Appends one PNG chunk of @p type around @p length bytes of @p data at @p at, answering the bytes written. */
+/** Appends one PNG chunk of @p type around @p length bytes of @p data at @p at, answering
+ *  the bytes written. */
 static size_t put_png_chunk(uint8_t* at, char const* type, uint8_t const* data, size_t length) {
     put_big_endian(at, (uint32_t)length);
     memcpy(at + 4, type, 4);
@@ -499,8 +505,8 @@ static size_t put_png_chunk(uint8_t* at, char const* type, uint8_t const* data, 
 
 enum { png_side = 8, png_raw_bytes = png_side * (1 + png_side * 3), png_capacity = 320 };
 
-/** Writes a valid 8 x 8 RGB PNG of a gradient into @p png, its pixels in one stored deflate block, answering its
- *  length; the buffer must hold @c png_capacity bytes. */
+/** Writes a valid 8 x 8 RGB PNG of a gradient into @p png, its pixels in one stored deflate block,
+ *  answering its length; the buffer must hold @c png_capacity bytes. */
 static size_t write_png(uint8_t* png) {
     static uint8_t const signature[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
     memcpy(png, signature, 8);
@@ -563,9 +569,9 @@ static void check_media(media_outputs_t const* outputs, size_t count, uform_mode
         expect(outputs->states.offsets[item + 1] > outputs->states.offsets[item], "Every media item spans a token");
 }
 
-/** Every media verb lands one embedding per item and states whose offsets agree with its stats. A file the
- *  engine cannot decode fails whole as malformed, leaving its outputs null; the stand-in decodes nothing, so it
- *  encodes any bytes. */
+/** Every media verb lands one embedding per item and states whose offsets agree with its stats. A
+ *  file the engine cannot decode fails whole as malformed, leaving its outputs null; the stand-in
+ *  decodes nothing, so it encodes any bytes. */
 static void test_media_shapes(void) {
     printf("Test: Media Shapes\n");
     uform_executor_t const executor = create_executor(0);
@@ -598,7 +604,8 @@ static void test_media_shapes(void) {
     }
     else expect(outputs.embeddings.data == NULL && outputs.states.offsets == NULL, "A refused call leaves outputs NULL");
 
-    /* A JPEG cut after its frame header plans from the header, then fails whole as malformed, and the process lives. */
+    /* A JPEG cut after its frame header plans from the header, then fails whole as malformed, and
+     *  the process lives. */
     uint8_t const cut_jpeg[] = {0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x10, 0x00, 0x10,
                                 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01};
     size_t const cut_offsets[] = {0, sizeof(cut_jpeg)};
@@ -711,7 +718,8 @@ static void test_media_shapes(void) {
     printf("Test: Media Shapes - PASSED\n");
 }
 
-/** One text call's outputs, the arena they land in, and its outcome, which a deferred call holds until final. */
+/** One text call's outputs, the arena they land in, and its outcome, which a deferred call
+ *  holds until final. */
 typedef struct text_outputs_t {
     uform_outcome_t outcome;
     uform_rows_view_t embeddings;
@@ -750,8 +758,9 @@ static void drain(uform_executor_t executor) {
     expect(!outcome.message, outcome.message);
 }
 
-/** A deferred call reads deferred through @c uform_outcome_status until drained, then lands what a blocking
- *  one does, though its descriptor died at submission; without an executor a call is final when it returns. */
+/** A deferred call reads deferred through @c uform_outcome_status until drained, then lands what a
+ *  blocking one does, though its descriptor died at submission; without an executor a call is final
+ *  when it returns. */
 static void test_blocking_and_deferred(void) {
     printf("Test: Blocking and Deferred\n");
     uform_executor_t const executor = create_executor(0);
@@ -799,8 +808,8 @@ static void test_blocking_and_deferred(void) {
     printf("Test: Blocking and Deferred - PASSED\n");
 }
 
-/** An executor over a pool its lender spawned encodes what an owned one does, and a null pool is
- *  refused. */
+/** An executor over a pool its lender spawned encodes what an owned one does, and a null
+ *  pool is refused. */
 static void test_executor_on_pool(void) {
     printf("Test: Executor On Pool\n");
     fu_topology_t topology = NULL;
@@ -848,7 +857,8 @@ static void test_executor_on_pool(void) {
     printf("Test: Executor On Pool - PASSED\n");
 }
 
-/** A submission past the deferred limit is refused at once and lets go of its arena, and a drain makes room. */
+/** A submission past the deferred limit is refused at once and lets go of its arena, and a
+ *  drain makes room. */
 static void test_deferred_limit(void) {
     printf("Test: Deferred Limit\n");
     uform_executor_t const executor = create_executor(1);
@@ -877,8 +887,8 @@ static void test_deferred_limit(void) {
     printf("Test: Deferred Limit - PASSED\n");
 }
 
-/** An arena keeps its high-water mark, so a repeated call lands where the last did; inputs inside it are
- *  refused; a deferred call holds it, refusing another call meanwhile, until final; and it
+/** An arena keeps its high-water mark, so a repeated call lands where the last did; inputs inside
+ *  it are refused; a deferred call holds it, refusing another call meanwhile, until final; and it
  *  describes the host pages a RAM executor gave it. */
 static void test_arenas(void) {
     printf("Test: Arenas\n");
@@ -914,7 +924,8 @@ static void test_arenas(void) {
 
     encode_texts(model, executor, uform_completion_deferred_k, &texts, &outputs, silent);
     expect(uform_outcome_status(&outputs.outcome) == uform_status_deferred_k, "A submitted call is deferred");
-    // Without an executor the call runs at once, draining nothing, so it meets the deferred call's hold.
+    // Without an executor the call runs at once, draining nothing, so it meets the
+    // deferred call's hold.
     uform_text_encode_t other = {.model = model,
                                  .outcome = &outcome,
                                  .count = texts.count,
@@ -949,7 +960,8 @@ static void test_arenas(void) {
     printf("Test: Arenas - PASSED\n");
 }
 
-/** What a progress handler heard over one call, and the report at which it stops the call; zero never stops. */
+/** What a progress handler heard over one call, and the report at which it stops the call;
+ *  zero never stops. */
 typedef struct progress_reports_t {
     size_t calls;
     size_t completed;
@@ -967,9 +979,9 @@ static uform_continuation_t record_progress(size_t completed, size_t total, void
     return reports->calls == reports->cancel_at ? uform_cancel_k : uform_continue_k;
 }
 
-/** A handler asking for four reports hears four, in order, the last covering the batch; zero steps derive ten;
- *  a handler stopping the call at its first report cancels it with every output left null, blocking or
- *  deferred. */
+/** A handler asking for four reports hears four, in order, the last covering the batch; zero steps
+ *  derive ten; a handler stopping the call at its first report cancels it with every output left
+ *  null, blocking or deferred. */
 static void test_progress(void) {
     printf("Test: Progress\n");
     uform_executor_t const executor = create_executor(0);
@@ -1012,8 +1024,8 @@ static void test_progress(void) {
     printf("Test: Progress - PASSED\n");
 }
 
-/** Every refusal a caller can provoke: a null arena, a null model, no output named, a tape without storage or
- *  with decreasing offsets, and GPU-only verbs given a RAM executor. */
+/** Every refusal a caller can provoke: a null arena, a null model, no output named, a tape without
+ *  storage or with decreasing offsets, and GPU-only verbs given a RAM executor. */
 static void test_refusals(void) {
     printf("Test: Refusals\n");
     uform_executor_t const executor = create_executor(0);

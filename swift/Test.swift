@@ -1,13 +1,14 @@
 //
-//  Test.swift
-//  UForm
+//  Test.swift UForm
 //
-//  The boundary suite: what the binding itself decides - name tables, handle lifetimes, tape lowering, which
-//  surfaces a call keeps, the rows it wrote, the progress trampoline, the arena views, and how blocking and
-//  deferred calls complete. The checkpoint is the one `UFORM_TEST_CHECKPOINT` names, or else stand-in bytes only
-//  the stub loads, so widths come from the model's description and only text, a byte per token, pins counts.
+//  The boundary suite: what the binding itself decides - name tables, handle lifetimes, tape
+//  lowering, which surfaces a call keeps, the rows it wrote, the progress trampoline, the arena
+//  views, and how blocking and deferred calls complete. The checkpoint is the one
+//  `UFORM_TEST_CHECKPOINT` names, or else stand-in bytes only the stub loads, so widths come from
+//  the model's description and only text, a byte per token, pins counts.
 //
-//  Suites run in parallel and every test gets a fresh instance, so each test spawns the executor it drives.
+//  Suites run in parallel and every test gets a fresh instance, so each test spawns the
+//  executor it drives.
 //
 
 import Foundation
@@ -104,7 +105,8 @@ private final class Reports: @unchecked Sendable {
 @Suite("Vocabulary")
 struct VocabularyTests {
 
-    /// Every closed set spells itself through the library's own tables, and reads only those spellings back.
+    /// Every closed set spells itself through the library's own tables, and reads only
+    /// those spellings back.
     @Test func namesAreTheLibrarys() {
         #expect(UForm.Status.invalidArgument.description == "invalid-argument")
         #expect(UForm.Status(name: "contended") == .contended)
@@ -132,7 +134,8 @@ struct VocabularyTests {
         #expect(GPUClass(name: "amd-cdna4") == .amdCDNA4)
     }
 
-    /// Every listed device carries a vendor, and a machine without GPUs lists none rather than failing.
+    /// Every listed device carries a vendor, and a machine without GPUs lists none
+    /// rather than failing.
     @Test func gpuDevicesListWhatTheProcessDrives() throws {
         #expect(try gpuDevices().allSatisfy { $0.vendor != .unknown && $0.gpuClass != nil })
     }
@@ -183,7 +186,8 @@ struct ModelTests {
         #expect(try Model.loadRamBuffer(bytes.span.bytes).describe().dimensions == description.dimensions)
     }
 
-    /// Serial is every build's floor, so a pin to it loads and is described, and a RAM model names no GPU class.
+    /// Serial is every build's floor, so a pin to it loads and is described, and a RAM model names
+    /// no GPU class.
     @Test func aSerialPinIsDescribed() throws {
         let description = try Model.loadRam(path: try checkpoint(), cpuClass: .serial).describe()
         #expect(description.cpuClass == .serial && description.gpuClass == nil)
@@ -215,7 +219,8 @@ struct ModelTests {
 @Suite("Encoding")
 struct EncodeTests {
 
-    /// Both surfaces come from one call, the states one row per byte of text, and nothing past what was written.
+    /// Both surfaces come from one call, the states one row per byte of text, and nothing past
+    /// what was written.
     @Test func textLandsBothSurfaces() throws {
         let model = try model()
         let dimensions = try model.describe().dimensions
@@ -232,7 +237,8 @@ struct EncodeTests {
         #expect(embeddings.withUnsafeBytes(\.count) == 2 * dimensions * 4)
     }
 
-    /// `outputs` decides which C pointers cross, so a surface it leaves out is nil, and naming none is refused.
+    /// `outputs` decides which C pointers cross, so a surface it leaves out is nil, and naming
+    /// none is refused.
     @Test func outputsChooseTheSurfaces() throws {
         let model = try model()
         let arena = try Arena()
@@ -243,7 +249,8 @@ struct EncodeTests {
         #expect(failureStatus(of: try model.textEncode(["blue house"], outputs: [], arena: arena)) == .invalidArgument)
     }
 
-    /// Token vectors share the states' offsets and have unit length, or are refused by a model without a token head.
+    /// Token vectors share the states' offsets and have unit length, or are refused by a model
+    /// without a token head.
     @Test func tokenVectorsFollowTheTokenHead() throws {
         let model = try model()
         let tokenWidth = try model.describe().tokenWidth
@@ -261,7 +268,8 @@ struct EncodeTests {
         #expect(vectors.rows.allSatisfy { row in abs(row.reduce(0) { $0 + $1 * $1 } - 1) < 0.02 })
     }
 
-    /// Each item's probabilities cover its choices and sum to one, or a model without the byte decoder refuses.
+    /// Each item's probabilities cover its choices and sum to one, or a model without the
+    /// byte decoder refuses.
     @Test func choicesSumToOnePerItem() throws {
         let model = try model()
         let groups = try model.describe().choiceTemperatureGroups
@@ -294,7 +302,8 @@ struct EncodeTests {
         #expect(encoded.stats.truncated == 1 && encoded.stats.tokens == context + 5)
     }
 
-    /// Every verb lowers its inputs into the tape its C structure reads, and equal items span equal tokens.
+    /// Every verb lowers its inputs into the tape its C structure reads, and equal items
+    /// span equal tokens.
     @Test func everyVerbLandsItsShapes() throws {
         let model = try model()
         let arena = try Arena()
@@ -303,7 +312,8 @@ struct EncodeTests {
         #expect(images[0].count > 0 && images.map(\.count) == [images[0].count, images[0].count])
         let recordings = try #require(try model.audioEncode([wav(), wav()], outputs: .states, arena: arena).states)
         #expect(recordings[0].count > 0 && recordings.map(\.count) == [recordings[0].count, recordings[0].count])
-        // The engine fails an undecodable file whole as malformed; the stub decodes nothing, so it encodes any bytes.
+        // The engine fails an undecodable file whole as malformed; the stub decodes nothing, so it
+        // encodes any bytes.
         let clip: [UInt8] = Array(repeating: 1, count: 40)
         if let status = failureStatus(of: try model.videoEncode([clip], arena: arena)) { #expect(status == .malformed) }
 
@@ -328,7 +338,8 @@ struct EncodeTests {
             failureStatus(of: try model.imageEncodePixels(pixels, heights: [2], widths: [2], arena: arena))
                 == .shapeMismatch
         )
-        // The heights and widths cross behind pointers that carry no count, so the binding counts them.
+        // The heights and widths cross behind pointers that carry no count, so the
+        // binding counts them.
         #expect(
             failureStatus(of: try model.imageEncodePixels(pixels, heights: [], widths: [], arena: arena))
                 == .shapeMismatch
@@ -372,7 +383,8 @@ struct EncodeTests {
         #expect(try model.textEncode(texts, arena: arena).embeddings?.count == 8)
     }
 
-    /// A view keeps its arena alive, so a result outlives the caller's references to the model and the arena.
+    /// A view keeps its arena alive, so a result outlives the caller's references to the model
+    /// and the arena.
     @Test func resultsOutliveTheirModelAndArena() throws {
         var model: Model? = try model()
         var arena: Arena? = try Arena()
@@ -383,8 +395,8 @@ struct EncodeTests {
         #expect(values(encoded.embeddings) == expected)
     }
 
-    /// The arena's next call rewinds it, so a view an earlier call answered traps on its next read rather than
-    /// reading what the later call wrote there.
+    /// The arena's next call rewinds it, so a view an earlier call answered traps on its next read
+    /// rather than reading what the later call wrote there.
     #if os(macOS) || os(Linux)
         @Test func aLaterCallEndsTheEarlierViews() async {
             let exit = await #expect(processExitsWith: .failure, observing: [\.standardErrorContent]) {
@@ -403,8 +415,8 @@ struct EncodeTests {
 @Suite("Deferred")
 struct DeferredTests {
 
-    /// The calling thread, a blocking executor call and a deferred one land the same rows, and a deferred call
-    /// answers the same every time it is waited on.
+    /// The calling thread, a blocking executor call and a deferred one land the same rows, and a
+    /// deferred call answers the same every time it is waited on.
     @Test func everyReceiverLandsTheSameRows() throws {
         let model = try model()
         let executor = try Executor.forRam()
@@ -441,7 +453,8 @@ struct DeferredTests {
         #expect(try call.wait().states?[0].count == 6)
     }
 
-    /// Awaiting suspends rather than blocks, and reads the views back in the awaiting actor's isolation.
+    /// Awaiting suspends rather than blocks, and reads the views back in the
+    /// awaiting actor's isolation.
     @MainActor @Test func awaitingSuspendsOnTheConcurrencyRuntime() async throws {
         let model = try model()
         let executor = try Executor.forRam()
@@ -480,8 +493,8 @@ struct DeferredTests {
         #expect(try held.wait().embeddings?.count == 1)
     }
 
-    /// A deferred call holds its arena until final, so another call naming it meanwhile is refused without ending
-    /// the holder's views, and the arena serves again once the call is final.
+    /// A deferred call holds its arena until final, so another call naming it meanwhile is refused
+    /// without ending the holder's views, and the arena serves again once the call is final.
     @Test func aDeferredCallHoldsItsArena() throws {
         let model = try model()
         let executor = try Executor.forRam()

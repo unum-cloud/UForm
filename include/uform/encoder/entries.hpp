@@ -17,8 +17,8 @@
  *      quantize_tokens_e4m3  transformer_token_quantize_kernel_
  *      rescale_tokens        transformer_token_rescale_kernel_
  *
- *  The batch grid keeps an item's cells at its segment offset; the tower runs on @b packed rows instead, every
- *  segment's live cells back to back, so the zero cells of short items cost nothing.
+ *  The batch grid keeps an item's cells at its segment offset; the tower runs on @b packed rows
+ *  instead, every segment's live cells back to back, so the zero cells of short items cost nothing.
  *  @ref unum::uform::encoder::segment_layout_t maps one onto the other, and each step reads the
  *  grid and writes the packed rows.
  */
@@ -66,7 +66,8 @@ using e4m3r1_span_t = nk::tensor_span<nk_e4m3_t, 1>;
 using e4m3r2_view_t = nk::tensor_view<nk_e4m3_t, 2>;
 using e4m3r2_span_t = nk::tensor_span<nk_e4m3_t, 2>;
 
-/** Where every segment's live cells sit in the batch grid, and where they land in the packed rows. */
+/** Where every segment's live cells sit in the batch grid, and where they land in
+ *  the packed rows. */
 struct segment_layout_t {
 
     /** @b [segments] the first grid cell of each segment, the batch's own @c segment_offsets . */
@@ -82,16 +83,19 @@ struct segment_layout_t {
     nk::tensor_view<modality_t, 1> modality {};
 };
 
-/** The three rotary angle grids @b [positions,pairs] one call reads, temporal first, in any memory. */
+/** The three rotary angle grids @b [positions,pairs] one call reads, temporal first,
+ *  in any memory. */
 struct rope_grids_t {
     f32r2_view_t temporal {}, height {}, width {};
 };
 
-/** The three rotary angle grids, @c angle[position,pair]=position·base^(−2·pair/denominator) , temporal pairs
- *  first; the temporal denominator is the whole head width, so text coordinates match 1-D RoPE. */
+/** The three rotary angle grids, @c angle[position,pair]=position · base^(−2 · pair/denominator) ,
+ *  temporal pairs first; the temporal denominator is the whole head width, so text coordinates
+ *  match 1-D RoPE. */
 struct rope_angles_t {
 
-    /** Fill the grids for @p positions positions of each axis, @p temporal / @p height / @p width channels. */
+    /** Fill the grids for @p positions positions of each axis, @p temporal / @p height /
+     *  @p width channels. */
     [[nodiscard]] static expected<rope_angles_t> make(u32_t positions, u32_t temporal, u32_t height, u32_t width,
                                                       f32_t base) noexcept;
 

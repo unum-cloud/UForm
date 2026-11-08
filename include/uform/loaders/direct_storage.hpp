@@ -5,14 +5,15 @@
  *  @brief The storage configuration handle: one process-wide setup of cuDF's KvikIO layer, made at
  *      the composition root and threaded by reference into every reader.
  *
- *  KvikIO @b is cuDF's GPU Direct Storage path — it reads Parquet column chunks straight into device memory
- *  over cuFile where the filesystem supports it, and transparently falls back to threaded POSIX where it
- *  does not — so this cell owns no cuFile handle, no staging buffers, and no read code of its own; it exists
- *  to make that setup happen exactly once and to be the token a reader requires as proof it ran.
+ *  KvikIO @b is cuDF's GPU Direct Storage path — it reads Parquet column chunks straight into
+ *  device memory over cuFile where the filesystem supports it, and transparently falls back to
+ *  threaded POSIX where it does not — so this cell owns no cuFile handle, no staging buffers, and
+ *  no read code of its own; it exists to make that setup happen exactly once and to be the token a
+ *  reader requires as proof it ran.
  *
- *  KvikIO chooses its read path from the environment ( @c KVIKIO_COMPAT_MODE — unset or @c ON forces
- *  POSIX, @c OFF enables GDS) and the target filesystem, per read. The session records which path the
- *  environment selected for diagnostics (
+ *  KvikIO chooses its read path from the environment ( @c KVIKIO_COMPAT_MODE — unset or @c ON
+ *  forces POSIX, @c OFF enables GDS) and the target filesystem, per read. The session records which
+ *  path the environment selected for diagnostics (
  *  @ref unum::uform::loaders::gpu_direct_storage_session_t::read_path ); it never branches on it —
  *  that decision lives inside cuDF, one level below this boundary.
  */
@@ -41,12 +42,13 @@ enum class storage_read_path_t : u8_t {
 }
 
 /**
- *  @brief Move-only RAII token proving cuDF's KvikIO storage layer was configured — construct one at
- *      the composition root, thread it by reference into every reader.
+ *  @brief Move-only RAII token proving cuDF's KvikIO storage layer was configured — construct one
+ *      at the composition root, thread it by reference into every reader.
  *
- *  Owns nothing: KvikIO's state is process-global, so construction is a one-shot @c set_up_kvikio call
- *  behind the exception firewall of this cell's @c .cpp . That call also gives KvikIO a thread per
- *  core and every device a stream-ordered RMM pool, so cuDF's frees never synchronize the device.
+ *  Owns nothing: KvikIO's state is process-global, so construction is a one-shot
+ *  @c set_up_kvikio call behind the exception firewall of this cell's @c .cpp . That call also
+ *  gives KvikIO a thread per core and every device a stream-ordered RMM pool, so cuDF's frees
+ *  never synchronize the device.
  */
 struct gpu_direct_storage_session_t {
 

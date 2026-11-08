@@ -1,9 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "huggingface_hub",
-# ]
-# ///
 """Top-level smoke dataset downloader.
 
 Wraps every per-modality `scripts/data/download_<dataset>.py` into one entry point with a `--only`
@@ -15,7 +9,18 @@ CLI usage:
     uv run scripts/data/download_smokes.py
     uv run scripts/data/download_smokes.py --only coco_val,hmdb51
     uv run scripts/data/download_smokes.py --force
+
+File: scripts/data/download_smokes.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "huggingface_hub",
+# ]
+# ///
 
 import argparse
 import importlib

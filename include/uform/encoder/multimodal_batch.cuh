@@ -31,8 +31,9 @@ using multimodal_batch_on_gpu_t = multimodal_batch<gpu_arena_alloc_t>;
 using multimodal_batch_on_cpu_t = multimodal_batch<pinned_alloc_t>;
 
 /**
- *  @brief Write every live segment's coordinate @c (t,h,w) into @p coords @b [tokens,3] , one CTA per
- *      segment, dispatching on @p segment_modality and reading the matching per-modality shape tensor.
+ *  @brief Write every live segment's coordinate @c (t,h,w) into @p coords @b [tokens,3] , one
+ *      CTA per segment, dispatching on @p segment_modality and reading the matching
+ *      per-modality shape tensor.
  *
  *  It is one segment walk over every modality: a segment reads its @c (offset,length) , then threads stripe
  *  @c [0,length) writing @c coords[offset+k] as @c text_k / @c audio_k → (k,0,0) (both 1-D sequences — audio
@@ -48,7 +49,8 @@ using multimodal_batch_on_cpu_t = multimodal_batch<pinned_alloc_t>;
  *  @param[in] image_shapes The shape descriptor of each image segment.
  *  @param[in] video_shapes The shape descriptor of each video segment.
  *  @param[in] tube_frames The video tube depth — the batch's fixed value.
- *  @param[in] frame_stride The source frames between two sampled ones — the batch's fixed value, 0 read as 1.
+ *  @param[in] frame_stride The source frames between two sampled ones — the batch's fixed value, 0
+ *      read as 1.
  *  @param[in,out] coords The coordinates to write, which the caller has pre-zeroed.
  *  @param[in,out] stream The stream the kernel is enqueued on.
  */
@@ -66,18 +68,18 @@ using multimodal_batch_on_cpu_t = multimodal_batch<pinned_alloc_t>;
  *      across the colocated_domain via InfiniBand — so every step trains on a fresh cross-GPU mix.
  *      Borrows the composition root's single @c multimem_domain_t and @c colocated_domain_t .
  *
- *  A mix reads every member's @b loaded batch and writes each member's @b mixed batch — two distinct
- *  per-GPU instances, so no barrier separates reads from overwrites within one mix. Routing is a
- *  keyed bijection every member derives identically in-kernel (an implementation detail of the
- *  translation unit), so it needs no exchange; the multimem_domain's barrier brackets the exchange,
- *  and the ordering contract's cross-consumer sequence starts here. Runs eagerly, outside any
- *  captured graph, in the same phase as the loader fills.
+ *  A mix reads every member's @b loaded batch and writes each member's @b mixed batch — two
+ *  distinct per-GPU instances, so no barrier separates reads from overwrites within one mix.
+ *  Routing is a keyed bijection every member derives identically in-kernel (an implementation
+ *  detail of the translation unit), so it needs no exchange; the multimem_domain's barrier brackets
+ *  the exchange, and the ordering contract's cross-consumer sequence starts here. Runs eagerly,
+ *  outside any captured graph, in the same phase as the loader fills.
  */
 struct multimodal_batch_mixer_t {
 
-    /** How many Float32 payload scalars @ref make will @c reserve from the multimem_domain over @p mesh — zero
-     *  when one process holds the whole world and reads every loaded batch in place; otherwise one packed batch
-     *  per multimem_domain in every member's window. */
+    /** How many Float32 payload scalars @ref make will @c reserve from the multimem_domain over
+     *  @p mesh — zero when one process holds the whole world and reads every loaded batch in place;
+     *  otherwise one packed batch per multimem_domain in every member's window. */
     [[nodiscard]] static std::size_t payload_scalars_needed(multimodal_batch_shape_t const &shape,
                                                             mesh_shape_t const &mesh) noexcept;
 
@@ -86,18 +88,22 @@ struct multimodal_batch_mixer_t {
      *      the window every member packs its batch into, plus one @c infiniband_all_gather buffer per local
      *      member when the world spans several multimem_domains.
      *
-     *  A process holding the whole world reads its loaded batches in place, peer addresses travelling as
-     *  kernel arguments bounded by @ref max_gpus_per_host_k . Otherwise world GPU @c (domain,member) is read
-     *  from that member's window, block @c domain , resolved arithmetically, so the world is unbounded. Every
-     *  arena must be visible to every local member (validated, never granted here).
+     *  A process holding the whole world reads its loaded batches in place, peer addresses
+     *  travelling as kernel arguments bounded by @ref max_gpus_per_host_k . Otherwise world GPU
+     *  @c (domain,member) is read from that member's window, block @c domain , resolved
+     *  arithmetically, so the world is unbounded. Every arena must be visible to every local member
+     *  (validated, never granted here).
      *
      *  @param[in,out] multimem The multimem domain this process's members belong to.
      *  @param[in,out] colocated The domain the world's colocated members share.
-     *  @param[in] arenas One per member this process drives, @c [multimem.member_offset(),+arenas.size()) .
+     *  @param[in] arenas One per member this process drives,
+     *      @c [multimem.member_offset(),+arenas.size()) .
      *  @param[in] shape The batch shape every member loads.
      *  @param[in] seed The seed the routing key is baked from.
-     *  @param[in] streams Each local member's stream — the all-gather wiring seeds its round scalar there.
-     *  @param[in] timeout_seconds The coordinate-exchange deadline handed to each all-gather wiring.
+     *  @param[in] streams Each local member's stream — the all-gather wiring seeds its
+     *      round scalar there.
+     *  @param[in] timeout_seconds The coordinate-exchange deadline handed to
+     *      each all-gather wiring.
      */
     [[nodiscard]] static expected<multimodal_batch_mixer_t> make(multimem_domain_t &multimem,
                                                                  colocated_domain_t &colocated,
@@ -111,12 +117,14 @@ struct multimodal_batch_mixer_t {
      *      incoming segments from every world GPU's loaded batch into its own @p mixed batch.
      *
      *  Every member barriers (its own self-advancing round) before its peer reads, and members are
-     *  enqueued in order @c 0..members-1 within a step. Packed windows and gather payloads are reused by the
-     *  next mix, which the step's later domain barriers order after this mix's reads.
+     *  enqueued in order @c 0..members-1 within a step. Packed windows and gather payloads are
+     *  reused by the next mix, which the step's later domain barriers order after this mix's reads.
      *
      *  @param[in] local This GPU's index among the process's members — domain member
-     *      @c multimem.member_offset()+local , world GPU @c first_gpu_index_in_colocated_domain_+that .
-     *  @param[in] data_epoch The keyed-draw counter the routing bijection folds with the run's seed.
+     *      @c multimem.member_offset()+local , world GPU
+     *      @c first_gpu_index_in_colocated_domain_+that .
+     *  @param[in] data_epoch The keyed-draw counter the routing bijection folds with
+     *      the run's seed.
      *  @param[in] loaded Every local member's freshly loaded batch, in local order.
      *  @param[out] mixed This member's destination batch — distinct storage from every @p loaded .
      *  @param[in] stream This member's stream; the caller holds no context around the call.
@@ -136,7 +144,7 @@ struct multimodal_batch_mixer_t {
     [[nodiscard]] u32r2_view_t world_lengths(std::size_t local) const noexcept { return world_lengths_[local].view(); }
 
     /** Local member @p local 's @b [world_gpus,max_segments_per_gpu] world sources of every world
-     *  GPU's last mix, each @c source_gpu·max_segments_per_gpu+source_segment , @c ~0u for PAD. */
+     *  GPU's last mix, each @c source_gpu · max_segments_per_gpu+source_segment , @c ~0u for PAD. */
     [[nodiscard]] u32r2_view_t world_sources(std::size_t local) const noexcept { return world_sources_[local].view(); }
 
     /** Local member @p local 's @b [world_gpus,max_segments_per_gpu] keys of every world GPU's last
@@ -149,18 +157,19 @@ struct multimodal_batch_mixer_t {
     /** The main-owned multimem_domain — borrowed; its barrier brackets every mix. */
     multimem_domain_t *multimem_ = nullptr;
 
-    /** The run's routing seed; combined with the per-call data epoch inside the routing bijection. */
+    /** The run's routing seed; combined with the per-call data epoch inside
+     *  the routing bijection. */
     u64_t seed_ = 0;
 
     /** The baked batch capacities every route and repack cursor is bounded by. */
     multimodal_batch_shape_t shape_ {};
 
-    /** Every member's packed batch per multimem_domain, domain-major — empty when this process holds the whole
-     *  world and reads the loaded batches in place. */
+    /** Every member's packed batch per multimem_domain, domain-major — empty when this process
+     *  holds the whole world and reads the loaded batches in place. */
     multimem_window_t window_ {};
 
-    /** One cross-domain full-batch all-gather per local member, pairing same-index members of every domain —
-     *  empty on a single-multimem_domain world. */
+    /** One cross-domain full-batch all-gather per local member, pairing same-index members of every
+     *  domain — empty on a single-multimem_domain world. */
     per_gpu_array<infiniband_all_gather<b8_t>> gather_buffers_ {};
 
     /** Per-member @b [world_gpus,max_segments_per_gpu] routing tables of every world GPU's mix,
@@ -181,8 +190,8 @@ struct multimodal_batch_mixer_t {
     u32_t multimem_domain_index_ = 0;
 
     /** This multimem_domain's first member's world coordinate (the mesh's inverse mapping) — member
-     *  @c m 's routing destination is @c first+m , so the domains claim disjoint destination ranges in
-     *  the @c members·domains world. */
+     *  @c m 's routing destination is @c first+m , so the domains claim disjoint destination ranges
+     *  in the @c members · domains world. */
     u32_t first_gpu_index_in_colocated_domain_ = 0;
 };
 

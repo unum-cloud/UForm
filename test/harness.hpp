@@ -6,10 +6,10 @@
  *
  *  A suite's @c main makes one @ref test_suite_t and passes it by reference into every case
  *  through @ref test_suite_t::run , which prints one result line per case and a rerun line under
- *  each failure; there is no file-scope counter and no singleton. @ref test_suite_t::check mirrors
- *  @ref expected::fail , a format string plus its operands with the call site captured through
- *  @ref format_at_t , so a failing check names its file, line and values, and a passing one is
- *  silent.
+ *  each failure; there is no file-scope counter and no singleton. @ref test_suite_t::check
+ *  mirrors @ref expected::fail , a format string plus its operands with the call site captured
+ *  through @ref format_at_t , so a failing check names its file, line and values, and a passing
+ *  one is silent.
  *
  *  Every suite reads its settings once, in @ref test_suite_t::make :
  *
@@ -142,9 +142,9 @@ struct settings_t {
     return listed;
 }
 
-/** The ordinals @c UFORM_DEVICES lists, comma-separated, or the first listed device of every vendor
- *  when it is unset; exits with status 1 on text that does not parse or names a device past the
- *  listing. */
+/** The ordinals @c UFORM_DEVICES lists, comma-separated, or the first listed device of every
+ *  vendor when it is unset; exits with status 1 on text that does not parse or names a device
+ *  past the listing. */
 [[nodiscard]] inline per_gpu_array<i32_t> read_devices() noexcept {
     per_gpu_array<uform_gpu_device_t> const listed = listed_gpu_devices();
     std::size_t const listed_count = listed.size();
@@ -351,8 +351,8 @@ using f64r4_span_t = nk::tensor_span<f64_t, 4>;
 /** ⟨a,b⟩ of two equally long contiguous Float64 runs, compensated by NumKong. */
 [[nodiscard]] inline f64_t dot(auto const &a, auto const &b) noexcept { return nk::dot<nk::f64_t>(a, b).value; }
 
-/** Narrow @p values onto the BFloat16 grid in place, leaving their bit patterns in @p staging for a
- *  device upload. */
+/** Narrow @p values onto the BFloat16 grid in place, leaving their bit patterns in @p staging for
+ *  a device upload. */
 [[nodiscard]] inline bool narrow_to_bf16(std::span<f64_t> values, std::span<nk_bf16_t> staging) noexcept {
     return nk::cast<nk::f64_t, nk::bf16_t>(values, staging) == nk::status_t::success_k &&
            nk::cast<nk::bf16_t, nk::f64_t>(std::span<nk_bf16_t const> {staging}, values) == nk::status_t::success_k;

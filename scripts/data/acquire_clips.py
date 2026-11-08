@@ -6,18 +6,18 @@
 # ///
 r"""Host-side YouTube media-clip fetcher shared by the fetch-dependent dataset builders.
 
-Modality: audio + video.  Several research corpora (Auto-ACD, VATEX, ActivityNet Captions) ship
-only captions plus a YouTube id and an optional `[start, end]` window — the media itself has to be
-fetched at repack time.  This module is the single host-side helper those builders call: given an
-iterable of `MediaClip` records it downloads each clip with `yt-dlp` (audio: `bestaudio` extracted to
-mp3; video: an H.264 `bestvideo+bestaudio` mux trimmed to the requested window, written as mp4),
+Modality: audio + video. Several research corpora (Auto-ACD, VATEX, ActivityNet Captions) ship only
+captions plus a YouTube id and an optional `[start, end]` window — the media itself has to be
+fetched at repack time. This module is the single host-side helper those builders call: given an
+iterable of `MediaClip` records it downloads each clip with `yt-dlp` (audio: `bestaudio` extracted
+to mp3; video: an H.264 `bestvideo+bestaudio` mux trimmed to the requested window, written as mp4),
 retries transient failures with exponential backoff, skips permanently dead / private / geo-blocked
 ids, and accounts for every attempted id in a `FetchManifest` so a shard's yield is auditable and is
 never silently truncated.
 
-Concurrency: this module never spawns an in-process `Pool` / `ThreadPool`; it fetches
-one clip at a time.  Shard-level parallelism is the caller's job — each dataset builder runs one
-process per shard under GNU `parallel`, and every such process drives this helper serially.
+Concurrency: this module never spawns an in-process `Pool` / `ThreadPool`; it fetches one clip at a
+time. Shard-level parallelism is the caller's job — each dataset builder runs one process per shard
+under GNU `parallel`, and every such process drives this helper serially.
 
 `yt-dlp` is declared in the PEP 723 header above so `uv run scripts/data/acquire_clips.py ...`
 provisions it (and the binary is invoked as `python -m yt_dlp`, so the module is never imported into
@@ -61,8 +61,9 @@ DEFAULT_BACKOFF_SECONDS: float = 2.0
 #: Default wall-clock ceiling for one `yt-dlp` invocation before it is killed and retried.
 DEFAULT_TIMEOUT_SECONDS: float = 240.0
 
-#: Substrings (matched case-insensitively in yt-dlp output) that mark a PERMANENT failure: the clip is
-#: gone / private / geo-blocked / rights-stripped, so retrying cannot help and the id is dropped at once.
+#: Substrings (matched case-insensitively in yt-dlp output) that mark a PERMANENT failure: the
+#: clip is gone / private / geo-blocked / rights-stripped, so retrying cannot help and the id
+#: is dropped at once.
 PERMANENT_ERROR_MARKERS: tuple[str, ...] = (
     "video unavailable",
     "this video is unavailable",
@@ -84,12 +85,15 @@ PERMANENT_ERROR_MARKERS: tuple[str, ...] = (
     "requested format is not available",
 )
 
-#: Cap the fetched video rendition to this height (pixels). The encoder trains at a small patch grid, so
-#: there is no benefit to pulling 1080p+; 480p slashes bandwidth, disk, and per-clip memory.
+#: Cap the fetched video rendition to this height (pixels).
+#: The encoder trains at a small patch grid, so there is no
+#: benefit to pulling 1080p+; 480p slashes bandwidth, disk,
+#: and per-clip memory.
 _MAX_VIDEO_HEIGHT: int = 480
 
-#: Env var naming a Netscape `cookies.txt` (or a DIRECTORY of them) that authenticates yt-dlp against
-#: YouTube's bot-wall. An off-repo secret; when unset the media scrapers will almost certainly bot-wall.
+#: Env var naming a Netscape `cookies.txt` (or a DIRECTORY of them) that authenticates
+#: yt-dlp against YouTube's bot-wall. An off-repo secret; when unset the media scrapers
+#: will almost certainly bot-wall.
 _COOKIES_ENV: str = "UFORM_YTDLP_COOKIES"
 
 
@@ -599,10 +603,11 @@ def fetch_shard(
         yield record, result
 
 
-#: One clip's work record consumed by the shared orchestrator: the `MediaClip.to_json()` fields plus a
-#: single `caption` string. The dataset's `clip_records(out_dir, index_cap)` builds these — enumerating at
-#: most `index_cap` records (None = the source's natural size) so a streaming reader can stop early — and
-#: the shared repack writes them as a uniform `{caption: string, <media_column>: struct<bytes, path>}` parquet.
+#: One clip's work record consumed by the shared orchestrator: the `MediaClip.to_json()` fields plus
+#: a single `caption` string. The dataset's `clip_records(out_dir, index_cap)` builds these —
+#: enumerating at most `index_cap` records (None = the source's natural size) so a streaming reader
+#: can stop early — and the shared repack writes them as a uniform `{caption: string,
+#: <media_column>: struct<bytes, path>}` parquet.
 ClipRecords = Callable[[Path, int | None], list[dict[str, object]]]
 
 

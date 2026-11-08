@@ -1,4 +1,9 @@
-"""Every `UFORM_*` variable the `test_*.py` suites read, parsed once at import into `SETTINGS`."""
+"""Every `UFORM_*` variable the `test_*.py` suites read, parsed once at import into `SETTINGS`.
+
+File: scripts/data/base.py
+Author: Ash Vardanian
+Date: October 1, 2026
+"""
 
 import os
 import re

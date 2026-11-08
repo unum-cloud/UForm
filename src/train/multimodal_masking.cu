@@ -3,8 +3,8 @@
  *  @author Ash Vardanian
  *  @date July 3, 2026
  *  @brief The multimodal masked-modeling objective's implementation: the corruption and
- *      reconstruction kernels and the construction bodies — compiled once into the @c uform_train
- *      library.
+ *      reconstruction kernels and the construction bodies — compiled once into the
+ *      @c uform_train library.
  */
 #include <cmath> // `std::fmax` — the row maxima and the floored counts
 
@@ -67,14 +67,15 @@ static __device__ void mask_token_(tokens_span_t distorted, u32r1_span_t loss_we
  *      each covered position write the distorted byte (MASK / random / kept clean) and a loss
  *      weight of one.
  *
- *  PAD breaks and never opens a span; uncovered positions were already copied clean with weight
- *  zero.
+ *  PAD breaks and never opens a span; uncovered positions were already copied clean
+ *  with weight zero.
  *
  *  A segment the walk leaves uncovered gets one span from a keyed anchor, at its first byte that is
  *  not PAD, so every text row with bytes is scored. A non- @c text_k segment and a choice segment
  *  are skipped outright — they keep their clean tokens and zero weight.
  *
- *  __grid_size__ @c [grid_size_for(segments),1,1] , one thread per segment; no dynamic shared memory.
+ *  __grid_size__ @c [grid_size_for(segments),1,1] , one thread per segment; no
+ *  dynamic shared memory.
  */
 static __global__ void masked_token_corrupt_kernel_(tokens_view_t clean, tokens_span_t distorted,
                                                     u32r1_span_t loss_weights, u32r1_view_t segment_offsets,
@@ -125,8 +126,8 @@ static __global__ void masked_token_corrupt_kernel_(tokens_view_t clean, tokens_
 }
 
 /**
- *  @brief Count the loss-bearing positions and publish @c {λ/max(count,1), count} — one scalar the CE
- *      kernel scales gradients by, so the masked count never visits the host.
+ *  @brief Count the loss-bearing positions and publish @c {λ/max(count,1), count} — one scalar the
+ *      CE kernel scales gradients by, so the masked count never visits the host.
  *
  *  __grid_size__ @c [1,1,1] , one block; no dynamic shared memory.
  */
@@ -176,8 +177,8 @@ static __global__ void masked_cross_entropy_kernel_(f32r2_view_t logits, tokens_
 }
 
 /**
- *  @brief Fold the per-position summands and add @c {λ·Σ, count} onto the rank's running loss
- *      surface.
+ *  @brief Fold the per-position summands and add @c {λ · Σ, count} onto the rank's
+ *      running loss surface.
  *
  *  __grid_size__ @c [1,1,1] , one block, fixed-order tree; no dynamic shared memory.
  */
@@ -222,13 +223,13 @@ static __global__ void choices_gather_kernel_(bf16r2_view_t normalized, multimod
 }
 
 /**
- *  @brief SLCD over one choice segment: softmax restricted to its bytes, soft-target cross-entropy
- *      plus λ_B·Brier, and the pre-scaled gradient written only at its bytes' columns, zeros
- *      elsewhere.
+ *  @brief SLCD over one choice segment: softmax restricted to its bytes, soft-target
+ *      cross-entropy plus λ_B · Brier, and the pre-scaled gradient written only at its bytes'
+ *      columns, zeros elsewhere.
  *
  *  With @c p_c the restricted softmax and @c t_c the targets, the logit gradient of a byte is
- *  @c (p_c−t_c)+λ_B·2·p_c·((p_c−t_c)−r) for @c r=Σ(p_v−t_v)·p_v . A pad entry is no choice, and a
- *  segment making none, a PAD among them, writes zeros and scores nothing.
+ *  @c (p_c − t_c)+λ_B · 2 · p_c · ((p_c − t_c) − r) for @c r=Σ(p_v − t_v) · p_v . A pad entry is no
+ *  choice, and a segment making none, a PAD among them, writes zeros and scores nothing.
  *
  *  __grid_size__ @c [segments,1,1] , one block per segment; no dynamic shared memory.
  */
@@ -298,9 +299,10 @@ static __global__ void choices_scatter_kernel_(f32r2_view_t gathered_grad, multi
                                                         gathered_grad[segment, column]);
 }
 
-/** Allocate off @p arena one linear head's NumKong packs and transients: its @b [outputs,hidden] weight packed
- *  both ways, the weight gradient's transposes over @p rows states (the input one wide enough to stage the
- *  weight's padded transpose too), the @c normalizedᵀ pack, and the Float32 products of all three products. */
+/** Allocate off @p arena one linear head's NumKong packs and transients: its @b [outputs,hidden]
+ *  weight packed both ways, the weight gradient's transposes over @p rows states (the input one
+ *  wide enough to stage the weight's padded transpose too), the @c normalizedᵀ pack, and the
+ *  Float32 products of all three products. */
 static expected_t allocate_head_products_(gpu_arena_t &arena, gpu_numerics_t const &numerics, std::size_t outputs,
                                           std::size_t hidden, std::size_t rows, b8r1_tensor_arena_t &packed_weight,
                                           b8r1_tensor_arena_t &packed_weight_transposed,
@@ -555,8 +557,8 @@ static __global__ void media_mask_sample_kernel_(u32r1_span_t mask, u32r1_view_t
 }
 
 /**
- *  @brief Zero the raw patch rows the mask selects, in place; visible rows keep their pixels. The driver
- *      calls this on the live batch media so the tower re-patchifies the corrupted pixels.
+ *  @brief Zero the raw patch rows the mask selects, in place; visible rows keep their pixels. The
+ *      driver calls this on the live batch media so the tower re-patchifies the corrupted pixels.
  *
  *  __grid_size__ @c [grid_size_for(patches),1,1] , persistent stride; no dynamic shared memory.
  */
@@ -753,8 +755,9 @@ expected_t masked_patches_t::fill(sz::string_view_t name,
 }
 
 /**
- *  @brief Zero the raw waveform frames the mask selects, in place; visible frames keep their Float32
- *      samples. The driver calls this on the live batch audio so the tower re-projects the corrupted samples.
+ *  @brief Zero the raw waveform frames the mask selects, in place; visible frames keep their
+ *      Float32 samples. The driver calls this on the live batch audio so the tower re-projects
+ *      the corrupted samples.
  *
  *  __grid_size__ @c [grid_size_for(frames),1,1] , persistent stride; no dynamic shared memory.
  */
@@ -789,8 +792,8 @@ static __global__ void frame_count_kernel_(u32r1_view_t mask, f32r1_span_t scale
  *      its own mean / standard deviation, accumulate the squared difference to the raw prediction,
  *      and write the pre-scaled gradient — visible frames write zeros and score nothing.
  *
- *  The prediction rides BFloat16 off the decode matmul; the target is the raw waveform frame, read
- *  as Float32.
+ *  The prediction rides BFloat16 off the decode matmul; the target is the raw waveform frame,
+ *  read as Float32.
  *
  *  __grid_size__ @c [max_frames,1,1] , one block per frame; no dynamic shared memory.
  */

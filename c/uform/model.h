@@ -2,15 +2,16 @@
  *  @file c/uform/model.h
  *  @author Ash Vardanian
  *  @date October 8, 2026
- *  @brief The model lifecycle of the UForm C interface: load an encoder into RAM or VRAM, describe it, and
- *      free it.
+ *  @brief The model lifecycle of the UForm C interface: load an encoder into RAM or VRAM, describe
+ *      it, and free it.
  *
- *  A @c uform_model_t owns the weights and their packed copies, and on a GPU the session its attention runs
- *  on. Residency is in the verb name, as in USearch and UStore - @c uform_model_load_vram places the weights
- *  on the devices its @c vram options name, and @c uform_model_load_ram in host memory - so a residency a
- *  build lacks has no verb to call. One model serves every modality it was trained on; every verb of
- *  @c encode.h takes it. A model only infers: training runs on a @c uform_trainer_t of @c train.h, which
- *  saves the checkpoints these verbs load.
+ *  A @c uform_model_t owns the weights and their packed copies, and on a GPU the session its
+ *  attention runs on. Residency is in the verb name, as in USearch and UStore -
+ *  @c uform_model_load_vram places the weights on the devices its @c vram options name, and
+ *  @c uform_model_load_ram in host memory - so a residency a build lacks has no verb to call. One
+ *  model serves every modality it was trained on; every verb of @c encode.h takes it. A model
+ *  only infers: training runs on a @c uform_trainer_t of @c train.h, which saves the checkpoints
+ *  these verbs load.
  *
  *  A call sequence, encoding images on one GPU:
  *
@@ -50,8 +51,9 @@
 extern "C" {
 #endif
 
-/** A loaded encoder: its weights, their packed copies, and on a GPU the session its attention runs on.
- *  Shared by every executor of its residency; calls through different executors take turns on its session. */
+/** A loaded encoder: its weights, their packed copies, and on a GPU the session its attention
+ *  runs on. Shared by every executor of its residency; calls through different executors take
+ *  turns on its session. */
 typedef struct uform_model_handle_t* uform_model_t;
 
 /** The arguments of @c uform_model_load_ram. */
@@ -75,16 +77,17 @@ typedef struct uform_model_load_ram_t {
     /** The memory domains to place the weights in. */
     uform_ram_options_t ram;
 
-    /** The scalar the transformer blocks run in: @c uform_scalar_bf16_k as the checkpoint stores it, or
-     *  @c uform_scalar_e4m3_k quantized at load, with BFloat16 entries, attention pool and head. */
+    /** The scalar the transformer blocks run in: @c uform_scalar_bf16_k as the checkpoint
+     *  stores it, or @c uform_scalar_e4m3_k quantized at load, with BFloat16 entries, attention
+     *  pool and head. */
     uform_scalar_t quantization;
 
     /** The @b optional handler, called with tensors placed. */
     uform_progress_t progress;
 } uform_model_load_ram_t;
 
-/** Copies a checkpoint file into host memory and packs its products for the CPU. The checkpoint carries the
- *  model's geometry. */
+/** Copies a checkpoint file into host memory and packs its products for the CPU. The checkpoint
+ *  carries the model's geometry. */
 UFORM_EXPORT void uform_model_load_ram(uform_model_load_ram_t* arguments);
 
 /** The arguments of @c uform_model_load_ram_buffer. */
@@ -102,7 +105,8 @@ typedef struct uform_model_load_ram_buffer_t {
     /** Whether the call blocks or returns once queued; zero blocks. */
     uform_completion_t completion;
 
-    /** The safetensors checkpoint itself, copied before the load completes; nothing of it is kept. */
+    /** The safetensors checkpoint itself, copied before the load completes; nothing of
+     *  it is kept. */
     uform_bytes_view_t buffer;
 
     /** The memory domains to place the weights in. */
@@ -165,7 +169,8 @@ typedef struct uform_model_load_vram_buffer_t {
     /** Whether the call blocks or returns once queued; zero blocks. */
     uform_completion_t completion;
 
-    /** The safetensors checkpoint itself, in host or device memory, copied before the load completes. */
+    /** The safetensors checkpoint itself, in host or device memory, copied before
+     *  the load completes. */
     uform_bytes_view_t buffer;
 
     /** The devices to place the weights on, replicated on each. */
@@ -187,8 +192,8 @@ typedef struct uform_model_description_t {
     /** Scalars per embedding row; Matryoshka prefixes of it are embeddings too. */
     size_t dimensions;
 
-    /** Tokens one item may span before it is truncated: bytes of text, patches of an image, tubes of a
-     *  clip, frames of a recording. */
+    /** Tokens one item may span before it is truncated: bytes of text, patches of an image, tubes
+     *  of a clip, frames of a recording. */
     size_t context;
 
     /** The scalar the transformer blocks run in. */
@@ -197,13 +202,13 @@ typedef struct uform_model_description_t {
     /** Bytes the model holds; activations are the executor's. */
     size_t memory_usage;
 
-    /** The class a RAM model's tower was packed for; @c uform_cpu_class_unknown_k for a VRAM
-     *  model. */
+    /** The class a RAM model's tower was packed for; @c uform_cpu_class_unknown_k for
+     *  a VRAM model. */
     uform_cpu_class_t cpu_class;
 
-    /** The class every replica of a VRAM model runs as; @c uform_gpu_class_unknown_k for a RAM
-     *  model, and for one on its vendor's generic kernels, whose devices have no class of their
-     *  own. */
+    /** The class every replica of a VRAM model runs as; @c uform_gpu_class_unknown_k for a
+     *  RAM model, and for one on its vendor's generic kernels, whose devices have no class
+     *  of their own. */
     uform_gpu_class_t gpu_class;
 
     /** Scalars per token vector; zero when the checkpoint carries no token head. */
@@ -236,8 +241,8 @@ typedef struct uform_model_describe_t {
 /** Reports a model's geometry and placement in one call. */
 UFORM_EXPORT void uform_model_describe(uform_model_describe_t* arguments);
 
-/** Frees a model; @c NULL is safe, and it cannot fail, so takes no outcome. Every call using it must be
- *  final. */
+/** Frees a model; @c NULL is safe, and it cannot fail, so takes no outcome. Every call using it
+ *  must be final. */
 UFORM_EXPORT void uform_model_free(uform_model_t model);
 
 #ifdef __cplusplus

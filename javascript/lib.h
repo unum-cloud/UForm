@@ -4,24 +4,26 @@
  *  @date October 17, 2026
  *  @brief Declarations shared by every UForm Node-API translation unit.
  *
- *  One addon, one file per header: @c types.c owns the vocabulary every verb shares, @c model.c the model
- *  lifecycle, @c encode.c the forward passes, @c train.c the mesh and the trainer, and @c lib.c the module glue.
+ *  One addon, one file per header: @c types.c owns the vocabulary every verb shares, @c model.c the
+ *  model lifecycle, @c encode.c the forward passes, @c train.c the mesh and the trainer, and
+ *  @c lib.c the module glue.
  *
  *  @section javascript_threading Threading
  *
- *  Every verb is a batch and the library fans it out itself, so this layer spawns nothing: it borrows the
- *  caller's @c TypedArray storage, hands the library one tape, and views the outputs it lands in the caller's
- *  @c Arena without copying them. A verb handed no executor runs on the calling thread, as the C interface's
- *  @c NULL executor does.
+ *  Every verb is a batch and the library fans it out itself, so this layer spawns nothing: it
+ *  borrows the caller's @c TypedArray storage, hands the library one tape, and views the outputs it
+ *  lands in the caller's @c Arena without copying them. A verb handed no executor runs on the
+ *  calling thread, as the C interface's @c NULL executor does.
  *
- *  Every verb takes the C @c completion beside its executor. A blocking call answers its result; a deferred one
- *  answers a @c CompiledDeferred holding the outcome and strong references to every JavaScript value the library
- *  borrows until the call is final. Its @c wait blocks the calling thread in @c uform_outcome_wait, and its
- *  @c settled hands that wait to the libuv pool through @c napi_async_work, the one thread this layer ever
- *  borrows, and only while a caller awaits.
+ *  Every verb takes the C @c completion beside its executor. A blocking call answers its result; a
+ *  deferred one answers a @c CompiledDeferred holding the outcome and strong references to every
+ *  JavaScript value the library borrows until the call is final. Its @c wait blocks the calling
+ *  thread in @c uform_outcome_wait, and its @c settled hands that wait to the libuv pool through
+ *  @c napi_async_work, the one thread this layer ever borrows, and only while a caller awaits.
  *
- *  A JavaScript function runs only on the thread owning its context, which no executor's thread is, so a
- *  progress handler is taken only by a call without an executor, where the library calls it in place.
+ *  A JavaScript function runs only on the thread owning its context, which no executor's thread
+ *  is, so a progress handler is taken only by a call without an executor, where the library calls
+ *  it in place.
  */
 #ifndef UNUM_UFORM_JAVASCRIPT_LIB_H
 #define UNUM_UFORM_JAVASCRIPT_LIB_H
@@ -63,8 +65,8 @@ typedef enum uform_js_outputs_t {
     uform_js_outputs_token_vectors_k = 4,
 } uform_js_outputs_t;
 
-/** Everything the addon owns per environment: the constructors its verbs type-check against, reached through
- *  @c napi_get_instance_data rather than a namespace-scope global. */
+/** Everything the addon owns per environment: the constructors its verbs type-check against,
+ *  reached through @c napi_get_instance_data rather than a namespace-scope global. */
 typedef struct uform_js_addon_t {
 
     /** The @c Executor constructor, kept alive for @c napi_instanceof. */
@@ -91,7 +93,8 @@ typedef struct uform_js_addon_t {
 
 struct uform_js_call_t;
 
-/** The threads or streams a verb runs on, owned apart from any model so one executor serves many. */
+/** The threads or streams a verb runs on, owned apart from any model so one
+ *  executor serves many. */
 typedef struct uform_js_executor_t {
 
     /** The library handle, freed by @c free or when the JavaScript wrapper is collected. */
@@ -101,14 +104,15 @@ typedef struct uform_js_executor_t {
     size_t arenas;
 } uform_js_executor_t;
 
-/** Memory every output whose length scales with a call lands in, and the views handed out over it. */
+/** Memory every output whose length scales with a call lands in, and the views handed
+ *  out over it. */
 typedef struct uform_js_arena_t {
 
     /** The library handle, made with the wrapper and @c NULL once freed. */
     uform_arena_t handle;
 
-    /** The executor a GPU arena grows, fills and frees on, held until the arena is freed; @c NULL for host
-     *  pages, which may outlive theirs. */
+    /** The executor a GPU arena grows, fills and frees on, held until the arena is freed; @c NULL
+     *  for host pages, which may outlive theirs. */
     uform_js_executor_t *executor;
 
     /** The strong reference keeping @c executor's wrapper alive alongside it. */
@@ -147,12 +151,13 @@ typedef struct uform_js_trainer_t {
     /** The library handle, freed by @c free or the collector. */
     uform_trainer_t handle;
 
-    /** The strong reference keeping the borrowed mesh's wrapper alive until the trainer is freed; @c NULL
-     *  for a run without peers. */
+    /** The strong reference keeping the borrowed mesh's wrapper alive until the trainer is freed;
+     *  @c NULL for a run without peers. */
     napi_ref mesh_reference;
 } uform_js_trainer_t;
 
-/** The JavaScript values a call reads or writes; a deferred call holds every one until it is final. */
+/** The JavaScript values a call reads or writes; a deferred call holds every one until
+ *  it is final. */
 typedef enum uform_js_slot_t {
 
     /** The handle the verb runs on. */
@@ -178,9 +183,9 @@ typedef napi_value (*uform_js_finish_t)(napi_env env, struct uform_js_call_t *ca
  *  @brief One call submitted to the library: its outcome, how its answer is built, what it holds.
  *
  *  Every verb family extends it with the outputs its verbs land, keeping this header first, so one
- *  @c CompiledDeferred serves them all. A blocking call lives on the stack of its verb and holds nothing, since
- *  its arguments are reachable for as long as it runs; a deferred one lives on the heap and holds strong
- *  references to every slot until it is final and settled.
+ *  @c CompiledDeferred serves them all. A blocking call lives on the stack of its verb and holds
+ *  nothing, since its arguments are reachable for as long as it runs; a deferred one lives on the
+ *  heap and holds strong references to every slot until it is final and settled.
  */
 typedef struct uform_js_call_t {
 
@@ -205,7 +210,8 @@ typedef struct uform_js_call_t {
     /** The @b optional progress handler of a call on the calling thread. */
     napi_value progress;
 
-    /** The first exception the progress handler threw, thrown instead of the cancellation it caused. */
+    /** The first exception the progress handler threw, thrown instead of the
+     *  cancellation it caused. */
     napi_ref failure;
 } uform_js_call_t;
 
@@ -213,8 +219,8 @@ typedef struct uform_js_call_t {
 
 #pragma region Argument Parsing
 
-/** Throws @p message with the canonical name of @p status as its @c code; always returns false, so a caller
- *  returns straight through. */
+/** Throws @p message with the canonical name of @p status as its @c code; always returns false, so
+ *  a caller returns straight through. */
 bool uform_js_throw(napi_env env, uform_status_t status, char const *message);
 
 /** Throws an @c invalid-argument error saying what @p field expected; always returns false. */
@@ -314,14 +320,14 @@ bool uform_js_tape_from_value(napi_env env, napi_value data_value, napi_value of
 bool uform_js_offsets_from_value(napi_env env, napi_value value, char const *field, uform_js_call_t *call,
                                  size_t const **offsets, size_t *count);
 
-/** Borrows an @b optional @c Uint32Array of exactly @p count entries, one per item; @c NULL when
- *  absent. */
+/** Borrows an @b optional @c Uint32Array of exactly @p count entries, one per item;
+ *  @c NULL when absent. */
 bool uform_js_per_item_from_value(napi_env env, napi_value value, char const *field, size_t count,
                                   uint32_t const **result);
 
 /**
- *  @brief Reads an @b optional progress handler, refused beside an executor, whose threads never own a
- *      JavaScript context.
+ *  @brief Reads an @b optional progress handler, refused beside an executor, whose threads never
+ *      own a JavaScript context.
  *  @param[out] progress The C handler and its state, pointing at @p call; zeroed when absent.
  */
 bool uform_js_progress_from_value(napi_env env, napi_value value, uform_executor_t executor, uform_js_call_t *call,
@@ -362,35 +368,37 @@ napi_value uform_js_arena_define(napi_env env);
  *  @brief Unwraps the @c arena a verb's outputs land in for @p call.
  *
  *  A freed arena is refused; one a deferred call still writes is the library's to refuse with
- *  @c uform_status_contended_k. The views of the previous call are detached once the library took this one,
- *  in @c uform_js_call_answer.
+ *  @c uform_status_contended_k. The views of the previous call are detached once the library took
+ *  this one, in @c uform_js_call_answer.
  */
 bool uform_js_arena_from_value(napi_env env, napi_value value, uform_js_call_t *call, uform_arena_t *handle);
 
 /**
  *  @brief Views @p bytes an arena holds as a @c TypedArray of @p type, without copying.
  *
- *  The backing @c ArrayBuffer references @p arena, so the memory outlives every view of it, and the arena
- *  remembers the buffer, empty ones included, so its next call or its @c free detaches the view rather than
- *  leaving it dangling. A VRAM arena holds device memory, which is never viewed as host memory, so its views
- *  read as @c null.
+ *  The backing @c ArrayBuffer references @p arena, so the memory outlives every view of it, and the
+ *  arena remembers the buffer, empty ones included, so its next call or its @c free detaches the
+ *  view rather than leaving it dangling. A VRAM arena holds device memory, which is never viewed as
+ *  host memory, so its views read as @c null.
  *
  *  @return The view, or @c NULL with an exception pending.
  */
 napi_value uform_js_arena_view(napi_env env, napi_value arena, napi_typedarray_type type, void const *data,
                                size_t bytes, size_t elements);
 
-/** Views @p count rows a call landed inside @p arena as @c {data, rows, columns, stride, scalar}. */
+/** Views @p count rows a call landed inside @p arena as @c {data, rows,
+ *  columns, stride, scalar}. */
 napi_value uform_js_rows_object(napi_env env, napi_value arena, uform_rows_view_t const *rows, size_t count);
 
-/** Views @p count + 1 @c size_t offsets a call landed inside @p arena, as a @c BigUint64Array on
- *  64-bit hosts. */
+/** Views @p count + 1 @c size_t offsets a call landed inside @p arena, as a @c BigUint64Array
+ *  on 64-bit hosts. */
 napi_value uform_js_offsets_view(napi_env env, napi_value arena, size_t const *offsets, size_t count);
 
 /** Defines the @c CompiledDeferred class; the module glue keeps the reference. */
 napi_value uform_js_deferred_define(napi_env env);
 
-/** Unwraps an instance of the class @p reference holds, or throws naming @p field and answers @c NULL. */
+/** Unwraps an instance of the class @p reference holds, or throws naming @p field and
+ *  answers @c NULL. */
 void *uform_js_unwrap_instance(napi_env env, napi_value value, napi_ref reference, char const *field,
                                char const *expectation);
 
@@ -403,8 +411,8 @@ bool uform_js_sealed(napi_env env, napi_callback_info info, napi_value *self);
 /** Instantiates one of the addon's classes, handing its constructor the seal. */
 napi_value uform_js_instantiate(napi_env env, napi_ref constructor);
 
-/** Defines a class whose constructor only accepts the seal, and whose instances get a @c [Symbol.dispose]
- *  calling their @c free. */
+/** Defines a class whose constructor only accepts the seal, and whose instances get a
+ *  @c [Symbol.dispose] calling their @c free. */
 napi_value uform_js_class_define(napi_env env, char const *name, size_t count,
                                  napi_property_descriptor const *properties);
 
@@ -427,8 +435,8 @@ bool uform_js_call_hold(napi_env env, uform_js_call_t *call, uform_js_call_t con
 /**
  *  @brief Answers a submitted call: a blocking one's finished result, a deferred one's wrapper.
  *
- *  Unless the library refused it as contended, the call rewound its arena, so the views of the call before it
- *  are detached here and the arena remembers this one as its holder.
+ *  Unless the library refused it as contended, the call rewound its arena, so the views of the call
+ *  before it are detached here and the arena remembers this one as its holder.
  */
 napi_value uform_js_call_answer(napi_env env, uform_js_call_t *call, uform_js_call_t const *local,
                                 napi_value const *slots, napi_value deferred);
@@ -436,8 +444,8 @@ napi_value uform_js_call_answer(napi_env env, uform_js_call_t *call, uform_js_ca
 /** Releases a call that never reached the library, after its arguments failed to parse. */
 void uform_js_call_abandon(uform_js_call_t *call, uform_js_call_t const *local);
 
-/** Opens the call every instance verb runs through, reading the executor and the completion from the first
- *  two arguments. */
+/** Opens the call every instance verb runs through, reading the executor and the completion from
+ *  the first two arguments. */
 uform_js_call_t *uform_js_call_open_on(napi_env env, napi_value const *arguments, uform_js_call_t *local, size_t bytes,
                                        uform_executor_t *executor, uform_completion_t *completion);
 

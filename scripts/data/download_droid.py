@@ -1,13 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "av",
-#     "huggingface_hub",
-#     "numpy",
-#     "pillow",
-#     "pyarrow>=21.0.0",
-# ]
-# ///
 """Idempotent downloader for the DROID 1K-trajectory subset (~5 GB) — pulls AND repacks in one file.
 
 Modality: video-text act (vision-language-action). The full DROID release is 1.7 TB across 76K demos;
@@ -31,7 +21,22 @@ CLI usage:
     uv run scripts/data/download_droid.py
     uv run scripts/data/download_droid.py --out-dir /custom/path
     uv run scripts/data/download_droid.py --camera observation.images.wrist_image_left --max-frames 400
+
+File: scripts/data/download_droid.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "av",
+#     "huggingface_hub",
+#     "numpy",
+#     "pillow",
+#     "pyarrow>=21.0.0",
+# ]
+# ///
 
 import argparse
 import glob

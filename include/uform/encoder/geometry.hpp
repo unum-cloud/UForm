@@ -4,8 +4,9 @@
  *  @date October 17, 2026
  *  @brief The shape and numerics of one encoder tower, read back from a checkpoint alone.
  *
- *  Every extent comes from two places that must agree: the tensor shapes and the metadata keys training
- *  writes at save. A media modality whose patch side or chunk is zero is absent, and so is its projection.
+ *  Every extent comes from two places that must agree: the tensor shapes and the metadata keys
+ *  training writes at save. A media modality whose patch side or chunk is zero is absent, and so
+ *  is its projection.
  */
 #pragma once
 
@@ -54,16 +55,16 @@ struct geometry_t {
 
     u32_t audio_chunk_samples = 0, audio_sample_rate = 0;
 
-    /** Scalars per token vector of the late-interaction head, from its projection's rows; zero
-     *  without one. */
+    /** Scalars per token vector of the late-interaction head, from its projection's rows;
+     *  zero without one. */
     u32_t token_width = 0;
 
-    /** Rows of the byte decoder @c masked_tokens , the choices a masked position scores; zero
-     *  without one. */
+    /** Rows of the byte decoder @c masked_tokens , the choices a masked position scores;
+     *  zero without one. */
     u32_t masked_vocabulary = 0;
 
-    /** Question types the choice temperatures were calibrated over: zero without a decoder, one
-     *  when uncalibrated. */
+    /** Question types the choice temperatures were calibrated over: zero without a decoder,
+     *  one when uncalibrated. */
     u32_t choice_temperature_groups = 0;
 
     [[nodiscard]] u32_t heads() const noexcept { return hidden / head_width; }
@@ -74,8 +75,8 @@ struct geometry_t {
     }
 
     /**
-     *  @brief Read the geometry from @p checkpoint 's metadata and cross-check it against its
-     *      tensor shapes.
+     *  @brief Read the geometry from @p checkpoint 's metadata and cross-check it against
+     *      its tensor shapes.
      *
      *  @par Statuses:
      *  - @c status_t::invalid_argument_k A key is missing or unparsable, or a shape disagrees;

@@ -4,50 +4,51 @@
  *  @date October 17, 2026
  *  @brief Declarations shared by every UForm CPython translation unit.
  *
- *  One extension, one file per header of the C interface: @c types.c owns the vocabulary every header shares,
- *  @c model.c, @c encode.c and @c train.c own their verbs, and @c lib.c owns the module glue alone. Types are
- *  defined once here and readied once in @c lib.c, so an @c Arena made for an encoding is the very object a
- *  training step accepts.
+ *  One extension, one file per header of the C interface: @c types.c owns the vocabulary every
+ *  header shares, @c model.c, @c encode.c and @c train.c own their verbs, and @c lib.c owns the
+ *  module glue alone. Types are defined once here and readied once in @c lib.c, so an @c Arena made
+ *  for an encoding is the very object a training step accepts.
  *
  *  @section python_calling_convention Latency, Quality, and Arguments Parsing
  *
- *  No PyBind11, NanoBind, or SWIG - only the CPython API, and never @c PyArg_ParseTupleAndKeywords, whose format
- *  specifiers are parsed at runtime and which cannot use the fast calling convention. Every verb is
- *  @c METH_FASTCALL | @c METH_KEYWORDS and binds its arguments through one table of names,
- *  @c uform_py_arguments_parse.
+ *  No PyBind11, NanoBind, or SWIG - only the CPython API, and never
+ *  @c PyArg_ParseTupleAndKeywords, whose format specifiers are parsed at runtime and which cannot
+ *  use the fast calling convention. Every verb is @c METH_FASTCALL | @c METH_KEYWORDS and binds
+ *  its arguments through one table of names, @c uform_py_arguments_parse.
  *
  *  @section python_receivers Receivers and Deferred Calls
  *
- *  The type of the object a verb is called on chooses where its call runs and how it completes: a model runs it
- *  on the calling thread, a trainer blocks on the executor it was created on, an @c On blocks on its executor,
- *  and a @c DeferredOn submits it there and answers a @c Deferred. A verb fills one call structure, kept on the
- *  stack while it blocks and inside its @c Deferred once submitted, so one body serves every receiver and
- *  nothing the library borrows ever moves. The binding starts no threads and keeps two counts: an arena's
- *  @c exports, since a buffer it exported cannot be revoked before C rewinds the memory under it, to which a call
- *  adds one until it is waited on or dropped, and an executor's GPU @c arenas, since each frees on the
- *  executor's stream, so a close leaves its handle to the last of them. Dropping a @c Deferred waits on its
+ *  The type of the object a verb is called on chooses where its call runs and how it completes: a
+ *  model runs it on the calling thread, a trainer blocks on the executor it was created on, an
+ *  @c On blocks on its executor, and a @c DeferredOn submits it there and answers a @c Deferred. A
+ *  verb fills one call structure, kept on the stack while it blocks and inside its @c Deferred once
+ *  submitted, so one body serves every receiver and nothing the library borrows ever moves. The
+ *  binding starts no threads and keeps two counts: an arena's @c exports, since a buffer it
+ *  exported cannot be revoked before C rewinds the memory under it, to which a call adds one until
+ *  it is waited on or dropped, and an executor's GPU @c arenas, since each frees on the executor's
+ *  stream, so a close leaves its handle to the last of them. Dropping a @c Deferred waits on its
  *  outcome, and every other wait belongs to the C library.
  *
  *  @section python_buffers Buffer Protocol
  *
- *  Every input arrives through PEP 3118, so NumPy is never a build-time or a runtime dependency. A batch of
- *  separate objects is gathered into one tape the call owns, and a @c (data, offsets) pair of buffers is lent
- *  to the library as a tape without a copy. Every output whose length scales with the call lands in the
- *  @c Arena the caller passes and leaves as zero-copy results over it. An arena exporting a buffer refuses to
- *  rewind, as a @c bytearray refuses to resize, and a result whose arena a later call rewound raises
- *  @c InvalidArgumentError when read.
+ *  Every input arrives through PEP 3118, so NumPy is never a build-time or a runtime dependency. A
+ *  batch of separate objects is gathered into one tape the call owns, and a @c (data, offsets) pair
+ *  of buffers is lent to the library as a tape without a copy. Every output whose length scales
+ *  with the call lands in the @c Arena the caller passes and leaves as zero-copy results over it.
+ *  An arena exporting a buffer refuses to rewind, as a @c bytearray refuses to resize, and a result
+ *  whose arena a later call rewound raises @c InvalidArgumentError when read.
  *
  *  @section python_naming Naming
  *
- *  A Python object's structure takes its class name, @c Model for @c uform.Model, and its type object
- *  @c ModelType. A C helper shared through this header takes the @c uform_py_ prefix and the @c _t suffix,
- *  since C has no namespaces. A helper one file keeps to itself takes only @c _t.
+ *  A Python object's structure takes its class name, @c Model for @c uform.Model, and its type
+ *  object @c ModelType. A C helper shared through this header takes the @c uform_py_ prefix and the
+ *  @c _t suffix, since C has no namespaces. A helper one file keeps to itself takes only @c _t.
  */
 #ifndef UNUM_UFORM_PYTHON_LIB_H
 #define UNUM_UFORM_PYTHON_LIB_H
 
-/*  CPython defines preprocessor macros that reach into the standard headers, so it leads rather than joining the
- *  third-party group; every unit here includes this file before anything else. */
+/*  CPython defines preprocessor macros that reach into the standard headers, so it leads rather
+ *  than joining the third-party group; every unit here includes this file before anything else. */
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
@@ -86,10 +87,11 @@ typedef struct uform_py_argument_t {
 } uform_py_argument_t;
 
 /**
- *  @brief Binds a fast-call's arguments to @p arguments, refusing unknown names, duplicates and missing ones.
+ *  @brief Binds a fast-call's arguments to @p arguments, refusing unknown names, duplicates
+ *      and missing ones.
  *
- *  The first @p positional_only arguments bind by position alone and must be given; the ones after them up to
- *  @p positional_max bind by position or by name; the rest bind by name alone.
+ *  The first @p positional_only arguments bind by position alone and must be given; the ones after
+ *  them up to @p positional_max bind by position or by name; the rest bind by name alone.
  *
  *  @return 0 on success, -1 with a @c TypeError set otherwise.
  */
@@ -134,14 +136,16 @@ extern PyStructSequence_Desc uform_py_mesh_description_desc;
 /** The base of the one exception class per failing status, subclassing @c RuntimeError. */
 extern PyObject *ErrorType;
 
-/** The threads or streams a verb runs on, owned apart from any model so one executor serves many. */
+/** The threads or streams a verb runs on, owned apart from any model so one
+ *  executor serves many. */
 typedef struct Executor {
     PyObject ob_base;
 
     /** The library's executor, NULL once a `with` block closed it. */
     uform_executor_t handle;
 
-    /** The GPU arenas it made that are still alive, each holding it, since they free on its first stream. */
+    /** The GPU arenas it made that are still alive, each holding it, since they free on
+     *  its first stream. */
     Py_ssize_t arenas;
 
     /** The handle a close left to those arenas, freed with the last of them. */
@@ -149,10 +153,11 @@ typedef struct Executor {
 } Executor;
 
 /**
- *  @brief The memory every output whose length scales with a call lands in, rewound by the next call handed it.
+ *  @brief The memory every output whose length scales with a call lands in, rewound by the next
+ *      call handed it.
  *
- *  A call is refused while a buffer over the previous outputs is still exported, and every result over them
- *  refuses to be read once a later call rewound it.
+ *  A call is refused while a buffer over the previous outputs is still exported, and every result
+ *  over them refuses to be read once a later call rewound it.
  */
 typedef struct Arena {
     PyObject ob_base;
@@ -164,7 +169,8 @@ typedef struct Arena {
     /** Calls that claimed it so far, which a result compares against the one it was written by. */
     size_t generation;
 
-    /** The @c Executor a GPU arena serves alone, held until the arena is freed; NULL for host pages. */
+    /** The @c Executor a GPU arena serves alone, held until the arena is freed; NULL
+     *  for host pages. */
     PyObject *executor;
 } Arena;
 
@@ -174,7 +180,8 @@ typedef struct Model {
     uform_model_t handle;
 } Model;
 
-/** A C enum mirrored as an `enum.IntEnum`, or a binding flag set as an `enum.IntFlag`, spelled by a name table. */
+/** A C enum mirrored as an `enum.IntEnum`, or a binding flag set as an `enum.IntFlag`, spelled by
+ *  a name table. */
 typedef struct uform_py_enum_t {
 
     /** The class name, as `uform` exports it, such as "Status". */
@@ -183,7 +190,8 @@ typedef struct uform_py_enum_t {
     /** The base class in the `enum` module, "IntEnum" or "IntFlag". */
     char const *base;
 
-    /** The lowest and highest values spelled; a gap spelling NULL, "unknown" or "unrecognized" is no member. */
+    /** The lowest and highest values spelled; a gap spelling NULL, "unknown" or "unrecognized"
+     *  is no member. */
     int first, last;
 
     /** A one-line wrapper over `uform_status_name` and its siblings. */
@@ -198,19 +206,21 @@ extern uform_py_enum_t uform_py_status, uform_py_scalar, uform_py_mood, uform_py
     uform_py_pair_loss_form, uform_py_late_interaction_side, uform_py_multimem_tier;
 
 /**
- *  @brief Builds every mirrored enum's class and adds it to @p module, one member per value spelled,
- *      `out-of-memory` becoming `OUT_OF_MEMORY`.
+ *  @brief Builds every mirrored enum's class and adds it to @p module, one member per value
+ *      spelled, `out-of-memory` becoming `OUT_OF_MEMORY`.
  *  @return 0 on success, -1 with an exception set otherwise.
  */
 int uform_py_register_enums(PyObject *module);
 
 /**
- *  @brief Reads a member of @p mirrored from an `int`, refusing a `bool`, text and values no member carries.
+ *  @brief Reads a member of @p mirrored from an `int`, refusing a `bool`, text and values
+ *      no member carries.
  *  @return 0 on success, -1 with an exception set otherwise.
  */
 int uform_py_enum_from_object(PyObject *object, char const *field, uform_py_enum_t const *mirrored, int *value);
 
-/** The member of @p mirrored valued @p value; returns a new reference, or @c NULL with an exception set. */
+/** The member of @p mirrored valued @p value; returns a new reference, or @c NULL with
+ *  an exception set. */
 PyObject *uform_py_enum_to_object(uform_py_enum_t const *mirrored, int value);
 
 /**
@@ -238,8 +248,8 @@ typedef enum uform_py_field_kind_t {
     /** A member of the @c uform_py_enum_t the field's detail names, written as an @c int. */
     uform_py_field_enum_k,
 
-    /** Another keyword-built structure, of the type the field's detail names, written in place; a tuple fills
-     *  its fields in order. */
+    /** Another keyword-built structure, of the type the field's detail names, written in place; a
+     *  tuple fills its fields in order. */
     uform_py_field_struct_k,
 
     /** Any object, kept as given, which the verb reading the structure converts itself. */
@@ -254,19 +264,22 @@ typedef struct uform_py_field_t {
     /** Where the field lands inside the C structure; unused for an object field. */
     size_t offset;
 
-    /** The @c uform_py_enum_t of an enum field, or the @c uform_py_fields_t of a structure field. */
+    /** The @c uform_py_enum_t of an enum field, or the @c uform_py_fields_t of
+     *  a structure field. */
     void const *detail;
     char const *doc;
 } uform_py_field_t;
 
-/** The type of a keyword-built structure, leading with the type object so an instance finds its fields. */
+/** The type of a keyword-built structure, leading with the type object so an instance
+ *  finds its fields. */
 typedef struct uform_py_fields_t {
     PyTypeObject type;
     uform_py_field_t const *fields;
     size_t count;
 } uform_py_fields_t;
 
-/** An instance of a keyword-built structure: the value of each field, in the order its type lists them. */
+/** An instance of a keyword-built structure: the value of each field, in the order its
+ *  type lists them. */
 typedef struct Fields {
     PyObject ob_base;
     PyObject *values[uform_py_fields_max_k];
@@ -275,13 +288,13 @@ typedef struct Fields {
 extern uform_py_fields_t ImageShapeType, VideoShapeType, AudioShapeType, BatchShapeType, MaskingType, ContrastiveType,
     LateInteractionType, ChoicesType, ScheduleType, MeshOptionsType, EdgesType, RelationsType;
 
-/** Readies @p fields, its members generated from its field table and kept as long as the process, like the module;
- *  returns 0 or -1 with an exception set. */
+/** Readies @p fields, its members generated from its field table and kept as long as the process,
+ *  like the module; returns 0 or -1 with an exception set. */
 int uform_py_fields_ready(uform_py_fields_t *fields);
 
 /**
- *  @brief Writes every field of @p object but its object fields into the C structure at @p target, nested
- *      structures included; @c None or a NULL @p object leaves @p target zeroed.
+ *  @brief Writes every field of @p object but its object fields into the C structure at @p target,
+ *      nested structures included; @c None or a NULL @p object leaves @p target zeroed.
  *  @return 0 on success, -1 with a @c TypeError set when @p object is not of @p fields.
  */
 int uform_py_fields_write(PyObject *object, char const *field, uform_py_fields_t const *fields, void *target);
@@ -298,7 +311,8 @@ static inline PyObject *uform_py_fields_value(PyObject *object, size_t index) {
 /** What a verb's receiver names: the handle, the executor the call runs on and how it completes. */
 typedef struct uform_py_receiver_t {
 
-    /** The receiver object, which a deferred call holds so its handle and executor outlive the call. */
+    /** The receiver object, which a deferred call holds so its handle and executor
+     *  outlive the call. */
     PyObject *origin;
 
     /** The model or trainer the verb addresses, borrowed from @c origin. */
@@ -311,7 +325,8 @@ typedef struct uform_py_receiver_t {
     uform_completion_t completion;
 } uform_py_receiver_t;
 
-/** The verbs a model or trainer shares with its receivers, which `lib.c` merges into each type's methods. */
+/** The verbs a model or trainer shares with its receivers, which `lib.c` merges into
+ *  each type's methods. */
 extern PyMethodDef uform_py_model_verbs[];
 extern PyMethodDef uform_py_encode_verbs[];
 extern PyMethodDef uform_py_trainer_verbs[];
@@ -321,31 +336,34 @@ extern PyMethodDef uform_py_model_methods[];
 extern PyMethodDef uform_py_trainer_methods[];
 
 /**
- *  @brief Reads what @p self names, a model or trainer on the calling thread, or an @c On or a @c DeferredOn on
- *      its executor, refusing a receiver over another type than @p type.
- *  @return 0 on success, -1 with an exception set when the receiver's executor was closed or names another type.
+ *  @brief Reads what @p self names, a model or trainer on the calling thread, or an @c On or a
+ *      @c DeferredOn on its executor, refusing a receiver over another type than @p type.
+ *  @return 0 on success, -1 with an exception set when the receiver's executor was closed or
+ *      names another type.
  */
 int uform_py_receiver_from_object(PyObject *self, PyTypeObject *type, uform_py_receiver_t *receiver);
 
-/** A new @c On or @c DeferredOn, as @p type names, holding @p target and the @c Executor @p executor; NULL on
- *  failure. */
+/** A new @c On or @c DeferredOn, as @p type names, holding @p target and the @c Executor
+ *  @p executor; NULL on failure. */
 PyObject *uform_py_on_new(PyTypeObject *type, PyObject *target, PyObject *executor);
 
-/** What every call keeps until it is final, leading its verb's call structure: on the stack while it blocks,
- *  inside its @c Deferred once submitted. */
+/** What every call keeps until it is final, leading its verb's call structure: on the stack while
+ *  it blocks, inside its @c Deferred once submitted. */
 typedef struct uform_py_call_t {
 
     /** The outcome the library finishes. */
     uform_outcome_t outcome;
 
-    /** The first exception a callback raised, which outranks the outcome it turned into; NULL while none has. */
+    /** The first exception a callback raised, which outranks the outcome it turned into; NULL
+     *  while none has. */
     PyObject *raised;
 
     /** The claimed @c Arena the call's outputs land in, or NULL for a verb with none. */
     PyObject *arena;
 } uform_py_call_t;
 
-/** One Python callable a call re-enters from library threads, and the call its first failure lands in. */
+/** One Python callable a call re-enters from library threads, and the call its first
+ *  failure lands in. */
 typedef struct uform_py_callback_t {
 
     /** The callable, held, or NULL when the caller passed none. */
@@ -355,7 +373,8 @@ typedef struct uform_py_callback_t {
     uform_py_call_t *call;
 } uform_py_callback_t;
 
-/** How a verb runs a call it filled: the bytes of its call, how it reaches the library, answers and lets go. */
+/** How a verb runs a call it filled: the bytes of its call, how it reaches the library, answers
+ *  and lets go. */
 typedef struct uform_py_verb_t {
 
     /** Bytes of the verb's call structure, which leads with a @c uform_py_call_t. */
@@ -370,12 +389,13 @@ typedef struct uform_py_verb_t {
     /** Lets go of whatever the fill gathered and the answer did not take. */
     void (*release)(void *call);
 
-    /** Visits the callables and reports the call holds beyond its header, for the collector; NULL when none. */
+    /** Visits the callables and reports the call holds beyond its header, for the collector;
+     *  NULL when none. */
     int (*traverse)(void *call, visitproc visit, void *arg);
 } uform_py_verb_t;
 
-/** A deferred call owning everything the library touches until it is final, the object being the allocation, so
- *  nothing it lends ever moves. */
+/** A deferred call owning everything the library touches until it is final, the object being the
+ *  allocation, so nothing it lends ever moves. */
 typedef struct Deferred {
 
     /** The object header, sized in bytes of the verb's call. */
@@ -398,13 +418,14 @@ typedef struct Deferred {
 } Deferred;
 
 /**
- *  @brief Opens the call of @p verb: the zeroed @p stack for a blocking receiver, or the storage of a new
- *      @c Deferred holding @p receiver for a deferred one.
+ *  @brief Opens the call of @p verb: the zeroed @p stack for a blocking receiver, or the storage of
+ *      a new @c Deferred holding @p receiver for a deferred one.
  *  @return The call to fill, or NULL with an exception set.
  */
 void *uform_py_call_open(uform_py_receiver_t const *receiver, uform_py_verb_t const *verb, void *stack);
 
-/** Runs a filled @p call: blocks and answers for a blocking receiver, or submits and answers its @c Deferred. */
+/** Runs a filled @p call: blocks and answers for a blocking receiver, or submits and answers
+ *  its @c Deferred. */
 PyObject *uform_py_call_run(uform_py_receiver_t const *receiver, uform_py_verb_t const *verb, void *call);
 
 /** Lets go of a call whose fill failed, keeping the exception set; always returns NULL. */
@@ -423,8 +444,8 @@ PyObject *uform_py_call_answer_none(void *call);
 int uform_py_callback_from_object(PyObject *object, char const *field, uform_py_call_t *call,
                                   uform_py_callback_t *callback);
 
-/** The progress to register for @p callback and @p steps; its trampoline is NULL when the caller passed no
- *  handler. */
+/** The progress to register for @p callback and @p steps; its trampoline is NULL when the caller
+ *  passed no handler. */
 uform_progress_t uform_py_progress_registered(uform_py_callback_t *callback, size_t steps);
 
 #pragma endregion Calls
@@ -437,21 +458,23 @@ uform_progress_t uform_py_progress_registered(uform_py_callback_t *callback, siz
  */
 int uform_py_raise_on_outcome(uform_outcome_t const *outcome);
 
-/** Raises the @c Error subclass @p status maps to, with a formatted message, its @c status a @c Status member;
- *  always returns -1. */
+/** Raises the @c Error subclass @p status maps to, with a formatted message, its @c status a
+ *  @c Status member; always returns -1. */
 int uform_py_raise(uform_status_t status, char const *format, ...);
 
-/** Readies and registers @c ErrorType and one subclass per failing status on @p module; returns 0 or -1. */
+/** Readies and registers @c ErrorType and one subclass per failing status on @p module; returns
+ *  0 or -1. */
 int uform_py_register_error_types(PyObject *module);
 
 /**
- *  @brief Stores @p value under @p key in @p dict and drops the caller's reference to it, whether or not the
- *      store succeeds.
+ *  @brief Stores @p value under @p key in @p dict and drops the caller's reference to it, whether
+ *      or not the store succeeds.
  *  @return -1 with an exception set when @p value is null or the store failed, 0 otherwise.
  */
 int uform_py_dict_steal_item(PyObject *dict, char const *key, PyObject *value);
 
-/** A new struct sequence of @p type taking every one of @p fields, or NULL dropping them all when any is NULL. */
+/** A new struct sequence of @p type taking every one of @p fields, or NULL dropping them all when
+ *  any is NULL. */
 PyObject *uform_py_struct_sequence_steal(PyTypeObject *type, PyObject **fields, Py_ssize_t count);
 
 /**
@@ -460,21 +483,22 @@ PyObject *uform_py_struct_sequence_steal(PyTypeObject *type, PyObject **fields, 
  */
 int uform_py_scalar_from_object(PyObject *object, char const *field, uform_scalar_t *kind);
 
-/** Reads a non-negative count, leaving @p value alone when @p object is NULL; returns 0 or -1 with an exception
- *  set. */
+/** Reads a non-negative count, leaving @p value alone when @p object is NULL; returns 0 or -1 with
+ *  an exception set. */
 int uform_py_size_from_object(PyObject *object, char const *field, size_t *value);
 
 /**
  *  @brief Reads a sequence of NUMA node IDs or device ordinals into a caller-freed array.
- *  @param[out] ordinals Receives a @c PyMem_Free -able array; @c NULL when @p object is NULL or @c None.
+ *  @param[out] ordinals Receives a @c PyMem_Free -able array; @c NULL when @p object is NULL
+ *      or @c None.
  *  @return 0 on success, -1 with an exception set otherwise.
  */
 int uform_py_ordinals_from_object(PyObject *object, char const *field, int32_t **ordinals, size_t *count);
 
 /**
- *  @brief Borrows a filesystem path from a @c str, @c bytes, or @c os.PathLike, as the OS's own
- *      bytes that @c os.fsencode gives, not necessarily UTF-8; an embedded NUL raises
- *      @c ValueError.
+ *  @brief Borrows a filesystem path from a @c str, @c bytes, or @c os.PathLike, as the
+ *      OS's own bytes that @c os.fsencode gives, not necessarily UTF-8; an embedded NUL
+ *      raises @c ValueError.
  *  @param[out] decoded A new reference the caller must release once @p path is spent.
  *  @return 0 on success, -1 with an exception set otherwise.
  */
@@ -506,7 +530,8 @@ typedef enum uform_py_element_t {
     uform_py_element_pixels_k,
 } uform_py_element_t;
 
-/** A batch as the library reads it, gathered into one block the call owns, or lent from a pair of buffers. */
+/** A batch as the library reads it, gathered into one block the call owns, or lent from a
+ *  pair of buffers. */
 typedef struct uform_py_tape_t {
 
     /** What the library reads. */
@@ -526,8 +551,9 @@ typedef struct uform_py_tape_t {
 } uform_py_tape_t;
 
 /**
- *  @brief Reads a batch of @p element entries: a sequence of separate objects, gathered with one copy, or, for
- *      every element but pixels, a @c (data, offsets) tuple whose offsets buffer holds @c size_t words, lent.
+ *  @brief Reads a batch of @p element entries: a sequence of separate objects, gathered with one
+ *      copy, or, for every element but pixels, a @c (data, offsets) tuple whose offsets buffer
+ *      holds @c size_t words, lent.
  *  @return 0 on success, -1 with an exception set otherwise; release @p tape either way.
  */
 int uform_py_tape_from_object(PyObject *object, char const *field, uform_py_element_t element, uform_py_tape_t *tape);
@@ -550,10 +576,11 @@ int uform_py_words_from_object(PyObject *object, char const *field, size_t count
 void uform_py_words_release(uform_py_words_t *words);
 
 /**
- *  @brief Claims the @c Arena @p object for one call, rewinding it: every result over its previous outputs goes
- *      stale.
+ *  @brief Claims the @c Arena @p object for one call, rewinding it: every result over its previous
+ *      outputs goes stale.
  *  @param[out] arena A new reference to the claimed @c Arena; hand it to @c uform_py_arena_unclaim.
- *  @return 0 on success, -1 with an exception set when @p object is no @c Arena, serves a call, or still exports.
+ *  @return 0 on success, -1 with an exception set when @p object is no @c Arena, serves a call,
+ *      or still exports.
  */
 int uform_py_arena_claim(PyObject *object, PyObject **arena);
 
@@ -561,10 +588,11 @@ int uform_py_arena_claim(PyObject *object, PyObject **arena);
 void uform_py_arena_unclaim(PyObject *arena);
 
 /**
- *  @brief An @c ArenaBuffer over the @p count rows a call wrote packed into the @c Arena @p arena it claimed.
+ *  @brief An @c ArenaBuffer over the @p count rows a call wrote packed into the @c Arena
+ *      @p arena it claimed.
  *
- *  Scalars a @c memoryview can format leave as a @c (count, columns) matrix, and the rest - @c bf16 and the
- *  mini-floats among them - as a @c (count, stride) run of @c 'B'.
+ *  Scalars a @c memoryview can format leave as a @c (count, columns) matrix, and the rest - @c bf16
+ *  and the mini-floats among them - as a @c (count, stride) run of @c 'B'.
  *
  *  @param[in] type @c ArenaBufferType or a subtype.
  *  @return A new reference, or NULL with an exception set.
@@ -572,8 +600,8 @@ void uform_py_arena_unclaim(PyObject *arena);
 PyObject *uform_py_rows_answer(PyTypeObject *type, PyObject *arena, uform_rows_view_t const *rows, size_t count);
 
 /**
- *  @brief A @c RowsTape over the @p tokens rows of @p states a call wrote into @p arena, its @c offsets an
- *      @c ArenaBuffer of the @p count + 1 @c 'N' words beside them.
+ *  @brief A @c RowsTape over the @p tokens rows of @p states a call wrote into @p arena, its
+ *      @c offsets an @c ArenaBuffer of the @p count + 1 @c 'N' words beside them.
  *  @return A new reference, or NULL with an exception set.
  */
 PyObject *uform_py_rows_tape_answer(PyObject *arena, uform_rows_tape_view_t const *states, size_t count, size_t tokens);

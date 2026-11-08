@@ -154,10 +154,10 @@ static void slices_match_world(test_suite_t &suite, u32_t host, u32_t multimem, 
     return true;
 }
 
-/** One bag of an anchor, two positives and two weighted negatives, then a PAD and a singleton, from
- *  vertex 100: the anchor and positives attract each other, the anchor and each negative repel each
- *  other at the negative's weight, every other pair inside the bag is ignored, and no vertex ever
- *  names itself. */
+/** One bag of an anchor, two positives and two weighted negatives, then a PAD and a singleton,
+ *  from vertex 100: the anchor and positives attract each other, the anchor and each negative
+ *  repel each other at the negative's weight, every other pair inside the bag is ignored, and no
+ *  vertex ever names itself. */
 static void bag_roles(test_suite_t &suite) {
     constexpr u32_t segments = 7, base = 100;
     using role_t = segment_role_t;

@@ -4,8 +4,8 @@
  *  @date October 17, 2026
  *  @brief The Node-API model lifecycle: loads into RAM or VRAM, the description, and the release.
  *
- *  The @c CompiledModel class carries the encode verbs of @c encode.c beside these, so one handle serves every
- *  modality the model was trained on.
+ *  The @c CompiledModel class carries the encode verbs of @c encode.c beside these, so one handle
+ *  serves every modality the model was trained on.
  */
 #include <stdlib.h> // `calloc`, `free`
 #include <string.h> // `memcpy`

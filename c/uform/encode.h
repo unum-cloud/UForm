@@ -2,24 +2,25 @@
  *  @file c/uform/encode.h
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief The forward passes of the UForm C interface: text, images, video and audio in, pooled embeddings
- *      and per-token states out, one verb per input form.
+ *  @brief The forward passes of the UForm C interface: text, images, video and audio in, pooled
+ *      embeddings and per-token states out, one verb per input form.
  *
- *  Every verb runs the same tower - the modality's entry, the transformer blocks, and the final norm - and
- *  keeps whichever surfaces the caller names, from one forward:
+ *  Every verb runs the same tower - the modality's entry, the transformer blocks, and the final
+ *  norm - and keeps whichever surfaces the caller names, from one forward:
  *
  *      Output        Rows                           Read past the final norm
  *      embeddings    one per item                   the attention pool and the projection head
  *      states        one per token left per item    nothing; the surface rerankers and masked heads read
  *
  *  A @c NULL output skips its surface, and naming neither is refused with
- *  @c uform_status_invalid_argument_k. Both land in the call's arena, written as @c outputs_scalar, and the
- *  embeddings come without normalization. An item longer than the model's @c context is truncated, and the
- *  call's stats count how many were.
+ *  @c uform_status_invalid_argument_k. Both land in the call's arena, written as @c outputs_scalar,
+ *  and the embeddings come without normalization. An item longer than the model's @c context is
+ *  truncated, and the call's stats count how many were.
  *
- *  Encoded files and decoded signals are separate verbs rather than one verb with a layout tag, so each takes
- *  only the fields its input needs. Models are tokenizer-free: text arrives as UTF-8 bytes and every byte is a
- *  token. JPEG decodes on the device; PNG, WebP, container demux and audio on the executor's host threads.
+ *  Encoded files and decoded signals are separate verbs rather than one verb with a layout tag, so
+ *  each takes only the fields its input needs. Models are tokenizer-free: text arrives as UTF-8
+ *  bytes and every byte is a token. JPEG decodes on the device; PNG, WebP, container demux and
+ *  audio on the executor's host threads.
  *
  *  @code{.c}
  *  uform_rows_view_t embeddings = {0};
@@ -72,12 +73,12 @@ typedef struct uform_text_encode_t {
     /** UTF-8 texts, one item per entry, in bytes. */
     uform_tape_view_t texts;
 
-    /** The @b optional output for one pooled embedding of the model's @c dimensions per item, inside
-     *  @c arena; @c NULL skips the pool and the head. */
+    /** The @b optional output for one pooled embedding of the model's @c dimensions per item,
+     *  inside @c arena; @c NULL skips the pool and the head. */
     uform_rows_view_t* embeddings;
 
-    /** The @b optional output for the final-norm states, one row of the model's @c dimensions per token left
-     *  after truncation, inside @c arena; @c NULL skips them. */
+    /** The @b optional output for the final-norm states, one row of the model's @c dimensions per
+     *  token left after truncation, inside @c arena; @c NULL skips them. */
     uform_rows_tape_view_t* states;
 
     /** The @b optional output for the token head's unit vectors, one row of the model's
@@ -104,8 +105,8 @@ UFORM_EXPORT void uform_text_encode(uform_text_encode_t* arguments);
 /** The arguments of @c uform_text_choose. */
 typedef struct uform_text_choose_t {
 
-    /** The model to choose with; it must carry the byte decoder, its @c choice_temperature_groups
-     *  nonzero. */
+    /** The model to choose with; it must carry the byte decoder, its
+     *  @c choice_temperature_groups nonzero. */
     uform_model_t model;
 
     /** The executor the call runs on; it must share the model's residency. */
@@ -124,8 +125,8 @@ typedef struct uform_text_choose_t {
      *  byte, and a state longer than the model's context loses its head, never its end. */
     uform_tape_view_t texts;
 
-    /** Each item's legal choices, one byte each, @c uform_scalar_u8_k; an item with none chooses
-     *  nothing. */
+    /** Each item's legal choices, one byte each, @c uform_scalar_u8_k; an item with
+     *  none chooses nothing. */
     uform_tape_view_t choices;
 
     /** The @b optional question type of each item, @c count of them, below the model's
@@ -188,8 +189,8 @@ typedef struct uform_image_encode_t {
     /** The @b optional output for the final-norm states, one row per patch, inside @c arena. */
     uform_rows_tape_view_t* states;
 
-    /** The @b optional output for the token head's unit vectors, one row per patch, inside
-     *  @c arena. */
+    /** The @b optional output for the token head's unit vectors, one row per patch,
+     *  inside @c arena. */
     uform_rows_tape_view_t* token_vectors;
 
     /** Memory for every output, rewound by the call. */
@@ -243,8 +244,8 @@ typedef struct uform_image_encode_pixels_t {
     /** The @b optional output for the final-norm states, one row per patch, inside @c arena. */
     uform_rows_tape_view_t* states;
 
-    /** The @b optional output for the token head's unit vectors, one row per patch, inside
-     *  @c arena. */
+    /** The @b optional output for the token head's unit vectors, one row per patch,
+     *  inside @c arena. */
     uform_rows_tape_view_t* token_vectors;
 
     /** Memory for every output, rewound by the call. */
@@ -260,8 +261,8 @@ typedef struct uform_image_encode_pixels_t {
     uform_image_encode_stats_t* stats;
 } uform_image_encode_pixels_t;
 
-/** Encodes @c count decoded images, resizing on the executor's side; a tape entry whose length isn't
- *  @c heights[i] × @c widths[i] × 3 fails with @c uform_status_shape_mismatch_k. */
+/** Encodes @c count decoded images, resizing on the executor's side; a tape entry whose length
+ *  isn't @c heights[i] × @c widths[i] × 3 fails with @c uform_status_shape_mismatch_k. */
 UFORM_EXPORT void uform_image_encode_pixels(uform_image_encode_pixels_t* arguments);
 
 /** What a video call reports beside its outputs. */
@@ -292,7 +293,8 @@ typedef struct uform_video_encode_t {
     /** Items in @c videos, and the batch axis of every output. */
     size_t count;
 
-    /** MP4 or WebM files, one item per entry, in bytes, demuxed on the host and decoded by NVDEC. */
+    /** MP4 or WebM files, one item per entry, in bytes, demuxed on the host and
+     *  decoded by NVDEC. */
     uform_tape_view_t videos;
 
     /** The @b optional output for one pooled embedding per item, inside @c arena. */
@@ -301,8 +303,8 @@ typedef struct uform_video_encode_t {
     /** The @b optional output for the final-norm states, one row per tube, inside @c arena. */
     uform_rows_tape_view_t* states;
 
-    /** The @b optional output for the token head's unit vectors, one row per tube, inside
-     *  @c arena. */
+    /** The @b optional output for the token head's unit vectors, one row per tube,
+     *  inside @c arena. */
     uform_rows_tape_view_t* token_vectors;
 
     /** Memory for every output, rewound by the call. */
@@ -349,7 +351,8 @@ typedef struct uform_audio_encode_t {
     /** Items in @c recordings, and the batch axis of every output. */
     size_t count;
 
-    /** WAV, FLAC, MP3 or Opus files, one item per entry, in bytes, decoded and resampled to mono on the host. */
+    /** WAV, FLAC, MP3 or Opus files, one item per entry, in bytes, decoded and resampled to mono
+     *  on the host. */
     uform_tape_view_t recordings;
 
     /** The @b optional output for one pooled embedding per item, inside @c arena. */
@@ -358,8 +361,8 @@ typedef struct uform_audio_encode_t {
     /** The @b optional output for the final-norm states, one row per frame, inside @c arena. */
     uform_rows_tape_view_t* states;
 
-    /** The @b optional output for the token head's unit vectors, one row per frame, inside
-     *  @c arena. */
+    /** The @b optional output for the token head's unit vectors, one row per frame,
+     *  inside @c arena. */
     uform_rows_tape_view_t* token_vectors;
 
     /** Memory for every output, rewound by the call. */
@@ -408,8 +411,8 @@ typedef struct uform_audio_encode_samples_t {
     /** The @b optional output for the final-norm states, one row per frame, inside @c arena. */
     uform_rows_tape_view_t* states;
 
-    /** The @b optional output for the token head's unit vectors, one row per frame, inside
-     *  @c arena. */
+    /** The @b optional output for the token head's unit vectors, one row per frame,
+     *  inside @c arena. */
     uform_rows_tape_view_t* token_vectors;
 
     /** Memory for every output, rewound by the call. */

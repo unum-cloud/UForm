@@ -1,3 +1,14 @@
+"""Download LAION-aesthetics: the high-aesthetic slice of reLAION-2B as a URL-index parquet, passthrough.
+
+The `laion/relaion2B-multi-aesthetic` repo ships metadata + image URLs only (no image bytes); the
+media crawl over those URLs is a deferred next step, so `url_index` normalizes the URL parquet exactly
+like a snapshot.
+
+File: scripts/data/download_laion_aesthetics.py
+Author: Ash Vardanian
+Date: July 5, 2026
+"""
+
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -5,12 +16,6 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download LAION-aesthetics: the high-aesthetic slice of reLAION-2B as a URL-index parquet, passthrough.
-
-The `laion/relaion2B-multi-aesthetic` repo ships metadata + image URLs only (no image bytes); the
-media crawl over those URLs is a deferred next step, so `url_index` normalizes the URL parquet exactly
-like a snapshot.
-"""
 
 from acquire import acquire
 

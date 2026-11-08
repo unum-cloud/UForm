@@ -1,7 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = []
-# ///
 """Print every training mixture and source corpus registered in this repo.
 
 The discoverability entry point — when in doubt, run it before launching any trainer. Mixtures are
@@ -15,7 +11,16 @@ Usage:
     uv run scripts/data/list_registry.py--mixtures   # per-trainer corpus mixtures
     uv run scripts/data/list_registry.py--sources    # the DATASETS corpus registry
     uv run scripts/data/list_registry.py--json       # machine-readable
+
+File: scripts/data/list_registry.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
 
 import argparse
 import glob
@@ -24,7 +29,8 @@ import os
 
 from mixtures import datasets, mixtures
 
-#: Full name->spec corpus map, the flat cross-mixture dataset view replacing the old `registry.DATASETS`.
+#: Full name->spec corpus map, the flat cross-mixture dataset view replacing
+#: the old `registry.DATASETS`.
 DATASETS: dict[str, dict] = datasets()
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -32,18 +38,20 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 #: The `scripts/data/` directory holding the `download_*.py` acquisition scripts.
 PKG_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# The text trainers collapsed into one objective-weighted unified trainer (`python -m python_train`).
-# Its MLM + contrastive-pair mixtures are the single-source-of-truth `scripts/data/*.json` mixtures.
-#: Canonical mixture registry — keyed by the `<MODALITY>_<NATURE>` slug, each a `(corpus, weight)` list.
+# The text trainers collapsed into one objective-weighted unified trainer (`python
+# -m python_train`). Its MLM + contrastive-pair mixtures are the
+# single-source-of-truth `scripts/data/*.json` mixtures.
+#: Canonical mixture registry — keyed by the `<MODALITY>_<NATURE>` slug, each a
+#: `(corpus, weight)` list.
 MIXTURES: dict[str, list[tuple[str, float]]] = {
     name: [(dataset["name"], float(dataset["weight"])) for dataset in mixture["datasets"]]
     for name, mixture in mixtures().items()
 }
 
 
-#: One row per text-modality trainer, describing how it consumes data.
-#: Keys: cli (entry point), task, data_arg (what to pass), mixture (the module
-#: constant the trainer defaults to), example (a concrete known-good arg), notes.
+#: One row per text-modality trainer, describing how it consumes data. Keys: cli (entry point),
+#: task, data_arg (what to pass), mixture (the module constant the trainer defaults to), example
+#: (a concrete known-good arg), notes.
 _TRAINERS: list[dict] = [
     {
         "cli": "uform_base --mixture scripts/mixtures/text_masked.json --objective masked",

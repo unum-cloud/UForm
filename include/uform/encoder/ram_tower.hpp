@@ -23,15 +23,15 @@
 
 namespace unum::uform::encoder {
 
-/** The Float32 rows the host entries work in, reserved in a call's scratch before its
- *  activations. */
+/** The Float32 rows the host entries work in, reserved in a call's scratch
+ *  before its activations. */
 struct entries_rows_t {
 
     /** @b [threads,width] each thread's row, as wide as the widest row an entry widens. */
     f32r2_span_t workers {};
 
-    /** @b [2·patch_scalars] the gain and bias rows of @c fill_patch_affine , refilled per staged
-     *  modality. */
+    /** @b [2·patch_scalars] the gain and bias rows of @c fill_patch_affine , refilled
+     *  per staged modality. */
     f32r1_span_t affine {};
 };
 
@@ -64,10 +64,10 @@ struct ram_placer_t {
     }
 };
 
-/** The steps of @c encode_steps over host memory, split across a pool's threads, through the kits a
- *  CPU class picked; a step's first failure latches through @p atomic_ref_template_ . The host
- *  entries are @c inline @c static templates over the element-wise kit, so no two class units share
- *  a copy. */
+/** The steps of @c encode_steps over host memory, split across a pool's threads, through the kits
+ *  a CPU class picked; a step's first failure latches through @p atomic_ref_template_ . The host
+ *  entries are @c inline @c static templates over the element-wise kit, so no two class units
+ *  share a copy. */
 template <typename products_kit_type_, typename attention_kit_type_, typename elementwise_kit_type_,
           template <typename> class atomic_ref_template_>
 struct ram_steps {
@@ -100,8 +100,8 @@ struct ram_steps {
         return checked(failure, what); // `for_n` joined every worker
     }
 
-    /** Run @p body over @p tasks in tiles of @p tile on every thread, reporting the first NumKong
-     *  failure. */
+    /** Run @p body over @p tasks in tiles of @p tile on every thread, reporting the
+     *  first NumKong failure. */
     template <typename body_type_>
     [[nodiscard]] expected_t split(std::size_t tasks, std::size_t tile, sz::string_view_t what,
                                    body_type_ const &body) noexcept {

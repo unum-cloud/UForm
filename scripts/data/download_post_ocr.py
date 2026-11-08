@@ -1,3 +1,10 @@
+"""Download PleIAs Post-OCR-Correction: flat (text, corrected_text) OCR-denoise parquet, passthrough.
+
+File: scripts/data/download_post_ocr.py
+Author: Ash Vardanian
+Date: July 5, 2026
+"""
+
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -5,7 +12,6 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download PleIAs Post-OCR-Correction: flat (text, corrected_text) OCR-denoise parquet, passthrough."""
 
 from acquire import acquire
 

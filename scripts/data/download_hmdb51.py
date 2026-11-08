@@ -1,9 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "huggingface_hub",
-# ]
-# ///
 """Idempotent downloader for HMDB-51 (51 actions, 6.8K clips, ~2 GB).
 
 Modality: video. HMDB-51 is the smallest competitive video classification benchmark, used as the
@@ -19,7 +13,18 @@ CLI usage:
     uv run scripts/data/download_hmdb51.py
     uv run scripts/data/download_hmdb51.py --out-dir /custom/path
     uv run scripts/data/download_hmdb51.py --repo-id jxie/hmdb51
+
+File: scripts/data/download_hmdb51.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "huggingface_hub",
+# ]
+# ///
 
 import argparse
 import sys

@@ -135,9 +135,10 @@ __global__ void ut::rmscast_backward_kernel(f32r2_view_t input, bf16r1_view_t sc
     }
 }
 
-/** Inverted keyed dropout, in place — external linkage; see the header. The @p salt selects the
- *  site (per layer, per residual join) and @p data_epoch , read from device memory, advances the mask per
- *  step; @ref splitmix64_hash_t re-derives the identical keep decision wherever this runs. */
+/** Inverted keyed dropout, in place — external linkage; see the header. The @p salt selects
+ *  the site (per layer, per residual join) and @p data_epoch , read from device memory,
+ *  advances the mask per step; @ref splitmix64_hash_t re-derives the identical keep decision
+ *  wherever this runs. */
 __global__ void ut::dropout_kernel(bf16r1_span_t values, u32r1_view_t data_epoch, u32_t salt, f32_t drop_probability) {
     u32_t const key = salt ^ (data_epoch[0] * 2654435761u);
     f32_t const keep_scale = 1.0f / (1.0f - drop_probability);
@@ -184,13 +185,13 @@ expected<rope_angles_t> rope_angles_t::make(gpu_arena_t &arena, u32_t max_positi
 }
 
 /**
- *  @brief Unit RMSNorm backward for the QK-norm, in place on the packed Q|K gradient:
- *      @c dx = (dy − x̂·mean(dy·x̂))·(1/rms) over each 128-channel head vector, recomputing @c 1/rms from the
- *      Float32 pre-norm product the forward's rmscast read.
+ *  @brief Unit RMSNorm backward for the QK-norm, in place on the packed Q|K gradient: @c dx = (dy −
+ *      x̂ · mean(dy · x̂)) · (1/rms) over each 128-channel head vector, recomputing @c 1/rms from
+ *      the Float32 pre-norm product the forward's rmscast read.
  *
- *  __grid_size__ @c [⌈tokens·vectors·32/block⌉,1,1] with one @b warp per head vector, the Q heads
- *  then the K heads of each token; each lane holds its 4 channels of both operands in registers; no
- *  dynamic shared memory.
+ *  __grid_size__ @c [⌈tokens · vectors · 32/block⌉,1,1] with one @b warp per head vector, the Q
+ *      heads then the K heads of each token; each lane holds its 4 channels of both operands in
+ *      registers; no dynamic shared memory.
  *
  *  @note @p grads is read-modified in place (the QK-norm backward rescales each head vector here).
  */
@@ -229,8 +230,8 @@ static __global__ void transformer_qk_norm_backward_kernel_(bf16r2_span_t grads,
  *      @b t takes the axis angle its index selects, scaled by @p angle_sign , which @c -1 turns
  *      into the inverse rotation the backward applies to the post-RoPE gradients.
  *
- *  __grid_size__ @c [⌈tokens·64/block⌉,1,1] , one thread per token and pair; no dynamic shared
- *  memory.
+ *  __grid_size__ @c [⌈tokens · 64/block⌉,1,1] , one thread per token and pair; no
+ *  dynamic shared memory.
  */
 static __global__ void transformer_rope_rows_kernel_(f32r2_span_t cosines, f32r2_span_t sines,
                                                      rope_angles_view_t angles, i16r2_view_t coords, f32_t angle_sign) {
@@ -245,9 +246,10 @@ static __global__ void transformer_rope_rows_kernel_(f32r2_span_t cosines, f32r2
     sines[token, pair] = sine;
 }
 
-/** Rotate every Q and K head vector of the packed QKV @p values in place — the split-half pair
- *  @b (k,k+64) by its axis angle, the NeoX convention — through NumKong's RoPE over the rows
- *  @ref transformer_rope_rows_kernel_ builds into @p rows , at least @c tokens·head_dim scalars. */
+/** Rotate every Q and K head vector of the packed QKV @p values in place — the
+ *  split-half pair @b (k,k+64) by its axis angle, the NeoX convention — through
+ *  NumKong's RoPE over the rows @ref transformer_rope_rows_kernel_ builds into @p rows ,
+ *  at least @c tokens · head_dim scalars. */
 [[nodiscard]] static expected_t transformer_rotate_(bf16r2_span_t values, f32r1_span_t rows, rope_angles_view_t angles,
                                                     i16r2_view_t coords, u32_t heads, f32_t angle_sign,
                                                     gpu_numerics_t const &numerics, gpu_stream_t &stream) noexcept {
@@ -284,11 +286,12 @@ static __global__ void transformer_zero_gaps_kernel_(f32r2_span_t rows, u32r1_vi
 }
 
 /**
- *  @brief SwiGLU activation backward over the Float32 gate|up product, writing the packed @b [tokens,2·ffn]
- *      BFloat16 gate|up gradient: @c d_up = dy·SiLU(gate) and @c d_gate = dy·up·σ(gate)·(1+gate·(1−σ(gate))) .
+ *  @brief SwiGLU activation backward over the Float32 gate|up product, writing the packed
+ *      @b [tokens,2·ffn] BFloat16 gate|up gradient: @c d_up = dy · SiLU(gate) and @c d_gate = dy ·
+ *      up · σ(gate) · (1+gate · (1 − σ(gate))) .
  *
- *  __grid_size__ @c [tokens,1,1] , one CTA per token whose threads stripe its features; no dynamic
- *  shared memory.
+ *  __grid_size__ @c [tokens,1,1] , one CTA per token whose threads stripe its features; no
+ *  dynamic shared memory.
  */
 static __global__ void transformer_swiglu_backward_kernel_(f32r2_view_t gate_up, f32r2_view_t silu_up_grad,
                                                            bf16r2_span_t gate_up_grad) {
@@ -319,7 +322,8 @@ static __global__ void transformer_absolute_max_kernel_(bf16r1_view_t values, u3
     for (std::size_t cell = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; cell < total;
          cell += stride)
         thread_max = std::fmax(thread_max, std::fabs(__bfloat162float(values[cell])));
-    // Non-negative floats compare identically as unsigned integers, so one atomic per thread suffices.
+    // Non-negative floats compare identically as unsigned integers, so one atomic
+    // per thread suffices.
     cuda::atomic_ref<u32_t, cuda::thread_scope_device> {max_bits[0]}.fetch_max(__float_as_uint(thread_max),
                                                                                cuda::std::memory_order_relaxed);
 }
@@ -386,7 +390,7 @@ static __global__ void transformer_token_quantize_kernel_(nk::tensor_view<value_
  *      @c values[t,o] = products[t,o]·token_scales[t]·weight_descale[0] + residual[t,o] , where an empty
  *      @p token_scales or @p residual drops its term.
  *
- *  __grid_size__ grid-stride over @c tokens·width cells; no dynamic shared memory.
+ *  __grid_size__ grid-stride over @c tokens · width cells; no dynamic shared memory.
  */
 static __global__ void transformer_token_rescale_kernel_(f32r2_view_t products, f32r1_view_t token_scales,
                                                          f32r1_view_t weight_descale, bf16r2_view_t residual,
@@ -512,7 +516,8 @@ expected<transformer_block_bf16_t> transformer_block_bf16_t::make(gpu_arena_t &a
     std::size_t const heads = hidden / transformer_head_dim_k;
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     gpu_arena_alloc<f32_t> f32_alloc {arena};
-    // Plain `uninitialized` allocations, checked in named groups so a failure names the arena pressure.
+    // Plain `uninitialized` allocations, checked in named groups so a failure names
+    // the arena pressure.
 
     // Weights and their per-block gradient buffers, `[out,in]` row-major.
     block.qkv_weight_ = bf16r2_tensor_arena_t::uninitialized({3 * hidden, hidden}, bf16_alloc).value;
@@ -540,7 +545,8 @@ expected<transformer_block_bf16_t> transformer_block_bf16_t::make(gpu_arena_t &a
         return expected<transformer_block_bf16_t>::fail(status_t::bad_alloc_k,
                                                         "input stash allocation failed (arena_used={})", arena.used());
 
-    // Each weight packs as the forward's B operand [out,in] and, transposed, as the data gradient's [in,out].
+    // Each weight packs as the forward's B operand [out,in] and, transposed, as the
+    // data gradient's [in,out].
     bf16r2_tensor_arena_t const *const weights[] = {&block.qkv_weight_, &block.out_weight_, &block.gate_up_weight_,
                                                     &block.down_weight_};
     for (std::size_t product = 0; product != 4; ++product) {
@@ -575,8 +581,8 @@ expected_t transformer_block_bf16_t::forward(f32r2_view_t input, f32r2_span_t ou
         return expected_t::fail(status_t::invalid_argument_k, "rope coordinates cover {} of {} tokens",
                                 coords.extent(0), tokens);
     // Every stash's live extent records the step's token count — the shape the backward reads back,
-    // never a shadow scalar. Resizing within the reserved capacity moves no address, and the `tokens
-    // <= max_tokens` check above guarantees every one of these succeeds.
+    // never a shadow scalar. Resizing within the reserved capacity moves no address, and the
+    // `tokens <= max_tokens` check above guarantees every one of these succeeds.
 
     bool const resized = nk::succeeded(input_stash_.resize({tokens, hidden})) &&
                          nk::succeeded(scratch_->qkv_products.resize({tokens, 3 * hidden})) &&
@@ -661,7 +667,8 @@ expected_t transformer_block_bf16_t::forward(f32r2_view_t input, f32r2_span_t ou
             "attention narrowing");
     if (!staged) return staged;
 
-    // Out-projection, the residual into the Float32 stream, and the post-attention norm narrowing it.
+    // Out-projection, the residual into the Float32 stream, and the post-attention
+    // norm narrowing it.
     staged = multiply_bf16(scratch_->attn_output.view(), packed_weights_[product_out_k].view(),
                            scratch_->attn_residual.span(), numerics_, stream);
     if (staged)
@@ -675,7 +682,8 @@ expected_t transformer_block_bf16_t::forward(f32r2_view_t input, f32r2_span_t ou
                                    hidden * sizeof(f32_t), hidden * sizeof(bf16_t), epsilon, stream.numkong()),
             "post-attention norm");
 
-    // SwiGLU MLP: fused gate/up product, SiLU·up in Float32 narrowed by a cast, down product, residual.
+    // SwiGLU MLP: fused gate/up product, SiLU·up in Float32 narrowed by a cast,
+    // down product, residual.
     if (staged)
         staged = multiply_bf16(scratch_->mlp_normalized.view(), packed_weights_[product_gate_up_k].view(),
                                scratch_->gate_up_products.span(), numerics_, stream);
@@ -741,7 +749,8 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
                                     numerics_, stream);
     };
 
-    // MLP backward: the output gradient narrows into the A operand of both down-projection gradients.
+    // MLP backward: the output gradient narrows into the A operand of
+    // both down-projection gradients.
     expected_t staged = numkong_result(numerics_.cast(output_grad.data(), nk_f32_k, hidden_narrowed.data(), nk_bf16_k,
                                                       tokens * hidden, stream.numkong()),
                                        "output gradient narrowing");
@@ -749,7 +758,8 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
         staged = multiply_bf16(hidden_narrowed, packed_weights_transposed_[product_down_k].view(), silu_up_grad,
                                numerics_, stream);
     if (staged) staged = weight_gradient(hidden_narrowed, scratch_->silu_up.view(), down_weight_grad_.span());
-    // The gate/up gradient overwrites the narrowed output gradient both down-projection products consumed.
+    // The gate/up gradient overwrites the narrowed output gradient both
+    // down-projection products consumed.
     if (staged)
         staged = launch_kernel(&transformer_swiglu_backward_kernel_, dim3 {static_cast<u32_t>(tokens), 1u, 1u},
                                block_shape, stream, scratch_->gate_up_products.view(), f32r2_view_t {silu_up_grad},
@@ -806,15 +816,16 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
     std::size_t const head_vectors = tokens * heads;
     dim3 const vector_grid {
         static_cast<u32_t>(divide_round_up(2 * head_vectors * warp_size_k, kernel_block_size_default_k)), 1u, 1u};
-    // The attention backward has read its output gradient out of the products, so they hold the
-    // rotary rows.
+    // The attention backward has read its output gradient out of the products, so they hold
+    // the rotary rows.
     staged = transformer_rotate_(scratch.packed_qkv.span(), scratch.products.span(), angles, coords, heads, -1.0f,
                                  numerics_, stream);
     if (staged)
         staged = launch_kernel(&transformer_qk_norm_backward_kernel_, vector_grid, block_shape, stream,
                                scratch.packed_qkv.span(), scratch_->qkv_products.view(), 2u * heads, epsilon);
 
-    // QKV projection backward, then the pre-attention norm backward adding the residual-stream gradient.
+    // QKV projection backward, then the pre-attention norm backward adding
+    // the residual-stream gradient.
     if (staged)
         staged = multiply_bf16(scratch.packed_qkv.view(), packed_weights_transposed_[product_qkv_k].view(),
                                hidden_products, numerics_, stream);
@@ -910,8 +921,9 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
                                    stream);
     if (!launched) return launched;
 
-    // QK-norm leaves Q and K at unit RMS per head and V stays well inside E4M3's range, so all three cast
-    // unscaled. The gaps between segments ride along as extra query rows of the segment before; nothing reads them.
+    // QK-norm leaves Q and K at unit RMS per head and V stays well inside E4M3's range, so all
+    // three cast unscaled. The gaps between segments ride along as extra query rows of the segment
+    // before; nothing reads them.
     std::size_t const segments = segment_lengths.extent(0);
     if (nk_status_t const status = numerics_.cast(qkv_.data(), nk_bf16_k, qkv_e4m3_.data(), nk_e4m3_k,
                                                   tokens * 3 * hidden, stream.numkong());
@@ -932,7 +944,8 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
     if (status != nk_success_k)
         return expected_t::fail(status_t::device_error_k, "E4M3 attention failed: {}", nk_status_name(status));
 
-    // Out-projection consumes the attention output under per-token scales, adding the residual input.
+    // Out-projection consumes the attention output under per-token scales, adding
+    // the residual input.
     launched = launch_kernel(&transformer_token_quantize_kernel_<f32_t>, token_grid, block_shape, stream,
                              products_.view(), attn_output_e4m3_.span(), token_scales_.span());
     if (launched)
@@ -994,7 +1007,8 @@ expected<transformer_block_e4m3_t> transformer_block_bf16_t::quantize_weights(gp
     gpu_arena_alloc<f32_t> f32_alloc {arena};
     gpu_arena_alloc<u32_t> u32_alloc {arena};
     gpu_arena_alloc<b8_t> b8_alloc {arena};
-    // Plain `uninitialized` allocations, checked in named groups so a failure names the arena pressure.
+    // Plain `uninitialized` allocations, checked in named groups so a failure names
+    // the arena pressure.
 
     // Static FP8 weights, their descales, and the Float32 norm scales.
     u32r1_tensor_arena_t max_bits {};
@@ -1047,9 +1061,10 @@ expected<transformer_block_e4m3_t> transformer_block_bf16_t::quantize_weights(gp
     if (widened != nk_success_k)
         return result_t::fail(status_t::device_error_k, "norm scale widening failed: {}", nk_status_name(widened));
 
-    // Per-weight static quantisation: order-free max-abs, descale = max_abs/240, divide-and-cast, then the
-    // one-time pack into NumKong's layout. Every weight is a rank-2 [out,in] matrix; the quantisation itself
-    // is purely elementwise, so each job flattens to the rank-1 handle the house kernels take.
+    // Per-weight static quantisation: order-free max-abs, descale = max_abs/240, divide-and-cast,
+    // then the one-time pack into NumKong's layout. Every weight is a rank-2 [out,in] matrix; the
+    // quantisation itself is purely elementwise, so each job flattens to the rank-1 handle the
+    // house kernels take.
     struct quantize_job_t {
         bf16r2_tensor_arena_t const *source;
         e4m3r2_tensor_arena_t *shadow;

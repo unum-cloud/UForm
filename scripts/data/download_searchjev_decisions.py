@@ -1,10 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "huggingface_hub",
-#     "pyarrow>=21.0.0",
-# ]
-# ///
 """Download SearchDecision-Bench and convert its questions into choice rows.
 
 Every `choice` question and every `noul` proposition becomes one row: the state, the question and
@@ -19,7 +12,19 @@ question type as `group`: 0 for a choice, 1 for a proposition.
 
 Usage:
     uv run scripts/data/download_searchjev_decisions.py [--data-root data]
+
+File: scripts/data/download_searchjev_decisions.py
+Author: Ash Vardanian
+Date: October 27, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "huggingface_hub",
+#     "pyarrow>=21.0.0",
+# ]
+# ///
 
 import argparse
 import json

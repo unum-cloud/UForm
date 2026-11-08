@@ -1,16 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "cudf-cu12",
-#     "huggingface_hub",
-#     "orjson",
-#     "pandas",
-#     "pyarrow>=21.0.0",
-#     "xxhash",
-#     "yt-dlp",
-#     "zstandard",
-# ]
-# ///
 """Shared acquisition helper the thin per-dataset downloaders call — one function, one dataset to parquet.
 
 Folds the per-source-kind fetch engines (`hf_snapshot` / `webdataset` / `text_jsonl` / the `url_index`
@@ -36,7 +23,25 @@ committed. The one addition over the old engines is the column ASSERT: after `tr
 mixture JSONs declare for this dataset (`mixtures.dataset_columns`) must be present in the produced shard,
 so a broken reshape fails at acquisition instead of silently mistraining. Enumeration, the tar-mux, the
 zstd/cuDF repack, and the round-trip verify are reused verbatim from the repack cores.
+
+File: scripts/data/acquire.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "cudf-cu12",
+#     "huggingface_hub",
+#     "orjson",
+#     "pandas",
+#     "pyarrow>=21.0.0",
+#     "xxhash",
+#     "yt-dlp",
+#     "zstandard",
+# ]
+# ///
 
 import argparse
 import os
@@ -54,14 +59,16 @@ from acquire_shared import artifact_path, cap_shards
 from huggingface_hub import list_repo_files, snapshot_download
 from sharding import already_done, atomic_write, partition, resolve_rank_world
 
-# The repack cores (`repack_one` pulls cuDF at import; `repack_webdataset` pulls orjson/xxhash) are imported
-# lazily inside the source-kind branch that needs them, so a passthrough hf_snapshot downloader that declares
-# only huggingface_hub + pyarrow can `import acquire` without those heavier deps in its uv env.
+# The repack cores (`repack_one` pulls cuDF at import; `repack_webdataset` pulls orjson/xxhash) are
+# imported lazily inside the source-kind branch that needs them, so a passthrough hf_snapshot
+# downloader that declares only huggingface_hub + pyarrow can `import acquire` without those heavier
+# deps in its uv env.
 
-#: Source kinds whose shards enumerate as sorted repo files filtered by suffix (a HuggingFace dataset repo).
-#: `url_index` normalizes its URL-index parquet exactly like a snapshot (a metadata pass-through); `url_crawl`
-#: enumerates the same index parquet but then fetches the images those URLs point at (see `_crawl_url_index`);
-#: `youtube_fetch` still needs the per-dataset index-column names and is unimplemented.
+#: Source kinds whose shards enumerate as sorted repo files filtered by suffix (a HuggingFace
+#: dataset repo). `url_index` normalizes its URL-index parquet exactly like a snapshot (a metadata
+#: pass-through); `url_crawl` enumerates the same index parquet but then fetches the images those
+#: URLs point at (see `_crawl_url_index`); `youtube_fetch` still needs the per-dataset index-column
+#: names and is unimplemented.
 _repo_source_kinds = ("hf_snapshot", "webdataset", "text_jsonl", "url_index", "url_crawl")
 
 

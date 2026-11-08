@@ -5,12 +5,13 @@
  *  @date July 6, 2026
  *
  *  Builds the composition root ( @ref mesh_topology_t::bootstrap → per-GPU arenas / streams →
- *  @ref multimem_domain_t → @ref colocated_domain_t → the mixer), fabricates every member's loaded batch
- *  with a token signature distinct per @c (gpu_index,segment,column) — the world coordinate — runs one
- *  mix, and asserts each mixed segment equals its @ref epoch_permutation source: the routing bijection,
- *  the length / modality descriptor travel, and the token content. One process per host_domain under the same
- *  @c UFORM_HOST_DOMAIN_COUNT contract as the base suite: one node exercises the NVLink multimem_domain
- *  alone, two nodes add the InfiniBand full-batch exchange to same-index landings.
+ *  @ref multimem_domain_t → @ref colocated_domain_t → the mixer), fabricates every member's
+ *  loaded batch with a token signature distinct per @c (gpu_index,segment,column) — the world
+ *  coordinate — runs one mix, and asserts each mixed segment equals its @ref epoch_permutation
+ *  source: the routing bijection, the length / modality descriptor travel, and the token content.
+ *  One process per host_domain under the same @c UFORM_HOST_DOMAIN_COUNT contract as the base
+ *  suite: one node exercises the NVLink multimem_domain alone, two nodes add the InfiniBand
+ *  full-batch exchange to same-index landings.
  */
 #include <cstddef> // `std::size_t`
 #include <cstdlib> // `::setenv`, `std::getenv`, `std::atoi` — eager module loading, the host_domain contract
@@ -40,32 +41,37 @@ using ue::multimodal_batch_shape_t;
 using namespace unum::uform::utilities;
 using namespace unum::uform::test;
 
-/** Segments per member — the routing axis; small, so the whole world permutation is easy to mirror. */
+/** Segments per member — the routing axis; small, so the whole world permutation is
+ *  easy to mirror. */
 inline constexpr u32_t segments_per_member_k = 8u;
 
 /** Tokens per segment — a short run whose per-column signature the oracle reproduces exactly. */
 inline constexpr u32_t tokens_per_segment_k = 3u;
 
-/** Members to exercise on one box — one multimem_domain's worth, capped by the visible device count. */
+/** Members to exercise on one box — one multimem_domain's worth, capped by the
+ *  visible device count. */
 inline constexpr u32_t members_cap_k = 8u;
 
-/** A rank-1 pinned host tensor of @p value_type_ — the sanctioned host staging / readback buffer. */
+/** A rank-1 pinned host tensor of @p value_type_ — the sanctioned host staging
+ *  / readback buffer. */
 template <typename value_type_>
 using pinned1_t = nk::tensor<value_type_, pinned_alloc<value_type_>, 1>;
 
-/** The deterministic token a member's segment writes at a column — distinct per @c (member,segment,column)
- *  so a mislaid route mismatches. Wraps into @ref token_id_t ; the oracle wraps identically. */
+/** The deterministic token a member's segment writes at a column — distinct per
+ *  @c (member,segment,column) so a mislaid route mismatches. Wraps into @ref token_id_t ; the
+ *  oracle wraps identically. */
 [[nodiscard]] static token_id_t signature_token_(u32_t member, u32_t segment, u32_t column) noexcept {
     return static_cast<token_id_t>((member * 131u + segment) * 17u + column + 1u);
 }
 
 /**
- *  @brief Fabricate member @p member 's loaded batch: @ref segments_per_member_k text segments, each
- *      @ref tokens_per_segment_k columns, packed contiguously into row 0, tokens carrying @ref signature_token_ .
- *      Staged host → device through the pinned + @ref copy_host_to_device path, synchronized before returning.
+ *  @brief Fabricate member @p member 's loaded batch: @ref segments_per_member_k text segments,
+ *      each @ref tokens_per_segment_k columns, packed contiguously into row 0, tokens carrying
+ *      @ref signature_token_ . Staged host → device through the pinned + @ref copy_host_to_device
+ *      path, synchronized before returning.
  *  @param[in,out] batch The member's loaded batch, its geometry and tokens overwritten.
- *  @param[in] member This member's world coordinate ( @c gpu_index_in_colocated_domain ), folded into every
- *      token signature.
+ *  @param[in] member This member's world coordinate ( @c gpu_index_in_colocated_domain ), folded
+ *      into every token signature.
  *  @param[in,out] stream The member's stream the staging enqueues on.
  */
 [[nodiscard]] static expected_t fabricate_loaded_(multimodal_batch_on_gpu_t &batch, u32_t member,
@@ -108,9 +114,10 @@ using pinned1_t = nk::tensor<value_type_, pinned_alloc<value_type_>, 1>;
 }
 
 /**
- *  @brief Read member @p member 's mixed batch back and assert every segment equals its @ref epoch_permutation
- *      source: destination @c member·S+s pulls world source @c src , whose member is @c src/S and segment
- *      @c src%S ; the mixed segment must carry that source's length, its @c text_k modality, and its tokens.
+ *  @brief Read member @p member 's mixed batch back and assert every segment equals its
+ *      @ref epoch_permutation source: destination @c member · S+s pulls world source @c src , whose
+ *      member is @c src/S and segment @c src%S ; the mixed segment must carry that source's length,
+ *      its @c text_k modality, and its tokens.
  *  @param[in,out] suite The conformance suite the checks report into.
  *  @param[in,out] mixed The member's mixed batch to read back.
  *  @param[in] member This member's world coordinate ( @c gpu_index_in_colocated_domain ) — its destination
@@ -208,8 +215,9 @@ inline constexpr u32_t pad_bag_k = bags_per_member_k;
 
 /**
  *  @brief Fabricate member @p member 's bagged loaded batch: @ref bags_per_member_k bags of
- *      @ref bag_degree_ segments packed contiguously in bag order, each @ref tokens_per_segment_k columns
- *      of @ref signature_token_ , the tail PAD (zero length). Mirrors @ref fabricate_loaded_ 's staging.
+ *      @ref bag_degree_ segments packed contiguously in bag order, each @ref tokens_per_segment_k
+ *      columns of @ref signature_token_ , the tail PAD (zero length). Mirrors
+ *      @ref fabricate_loaded_ 's staging.
  *  @param[in,out] batch The member's loaded batch, its geometry, bags, and tokens overwritten.
  *  @param[in] member This member's world coordinate, folded into every token signature.
  *  @param[in,out] stream The member's stream the staging enqueues on.
@@ -287,9 +295,9 @@ struct mirrored_segment_t {
 using mirrored_geometry_t = stack_array<mirrored_segment_t, segments_per_member_k>;
 
 /**
- *  @brief Host-mirror the bag-cohesive geometry walk for destination @p member — the same trial-then-commit
- *      cursor scan the kernel runs, over the fabrication's known degrees. A bag that cannot land whole is
- *      skipped whole, exactly as the kernel drops it.
+ *  @brief Host-mirror the bag-cohesive geometry walk for destination @p member — the same
+ *      trial-then-commit cursor scan the kernel runs, over the fabrication's known degrees. A bag
+ *      that cannot land whole is skipped whole, exactly as the kernel drops it.
  *  @param[in] member The destination's world coordinate — its bag range's base.
  *  @param[in] world_member_count The world's member count — the bag permutation spans
  *      @c bags_per_member_k·world_member_count .
@@ -345,11 +353,12 @@ using mirrored_geometry_t = stack_array<mirrored_segment_t, segments_per_member_
 }
 
 /**
- *  @brief Read member @p member 's bagged mixed batch back and assert it equals the host mirror exactly.
+ *  @brief Read member @p member 's bagged mixed batch back and assert it equals the
+ *      host mirror exactly.
  *
- *  It checks every placed segment's offset, length, destination-local bag, and tokens; contiguous bag runs
- *  in ascending order (cohesion); and a zero-length, no-bag tail — so a dropped bag is provably dropped
- *  @b whole and a surviving one provably intact.
+ *  It checks every placed segment's offset, length, destination-local bag, and tokens; contiguous
+ *  bag runs in ascending order (cohesion); and a zero-length, no-bag tail — so a dropped bag is
+ *  provably dropped @b whole and a surviving one provably intact.
  *
  *  @param[in,out] suite The conformance suite the checks report into.
  *  @param[in,out] mixed The member's mixed batch to read back.
@@ -417,9 +426,9 @@ using mirrored_geometry_t = stack_array<mirrored_segment_t, segments_per_member_
     return {};
 }
 
-/** One tier's per-member surfaces — the movable half of the world stand-up both tiers share; the
- *  domains and the mixer pin references into it, so they are constructed in the tier itself and never
- *  moved. */
+/** One tier's per-member surfaces — the movable half of the world stand-up both tiers share;
+ *  the domains and the mixer pin references into it, so they are constructed in the tier itself
+ *  and never moved. */
 struct mixer_members_t {
 
     /** The visible device ordinals, table-shaped for the arena visibility lists. */
@@ -472,13 +481,13 @@ struct mixer_members_t {
 }
 
 /**
- *  @brief The mixer tier: stand up the domains over every visible GPU — one process per host_domain,
- *      reading the same @c UFORM_HOST_DOMAIN_COUNT contract as the base suite, so a two-node run exercises
- *      the InfiniBand full-batch exchange.
+ *  @brief The mixer tier: stand up the domains over every visible GPU — one process per
+ *      host_domain, reading the same @c UFORM_HOST_DOMAIN_COUNT contract as the base suite, so a
+ *      two-node run exercises the InfiniBand full-batch exchange.
  *
- *  It fabricates each member's loaded batch under its @b global member signature, runs one mix through
- *  the eager overload, and verifies every mixed segment against its world source. Skips cleanly when the
- *  box cannot host a multicast multimem_domain (the make fails loudly).
+ *  It fabricates each member's loaded batch under its @b global member signature, runs one mix
+ *  through the eager overload, and verifies every mixed segment against its world source. Skips
+ *  cleanly when the box cannot host a multicast multimem_domain (the make fails loudly).
  */
 static void mixer_routes_segments(test_suite_t &suite) {
     int device_count = 0;
@@ -541,13 +550,13 @@ static void mixer_routes_segments(test_suite_t &suite) {
 }
 
 /**
- *  @brief The bag-cohesion tier: the same bring-up as @ref mixer_routes_segments but with a nonzero bag
- *      budget, bagged fabrication, and the exact host mirror of the bag walk as the oracle.
+ *  @brief The bag-cohesion tier: the same bring-up as @ref mixer_routes_segments but with a nonzero
+ *      bag budget, bagged fabrication, and the exact host mirror of the bag walk as the oracle.
  *
- *  Runs twice — @p rows × @p columns_per_row sized roomy (every bag lands) and tight (the grid barely holds one
- *  member's own load, so a permutation draw that concentrates heavy bags on one destination forces
- *  whole-bag drops; the mirror predicts each drop exactly, so the tier is a strict oracle either
- *  way). Every source batch stays valid — only the receive side can overflow.
+ *  Runs twice — @p rows × @p columns_per_row sized roomy (every bag lands) and tight (the grid
+ *  barely holds one member's own load, so a permutation draw that concentrates heavy bags on one
+ *  destination forces whole-bag drops; the mirror predicts each drop exactly, so the tier is a
+ *  strict oracle either way). Every source batch stays valid — only the receive side can overflow.
  */
 static void mixer_routes_bags(test_suite_t &suite, u32_t rows, u32_t columns_per_row) {
     int device_count = 0;
@@ -617,8 +626,9 @@ int main(int, char **argv) {
     [[maybe_unused]] CUresult const initialized = cuInit(0); // a failure leaves no device to count, so each case skips
     suite.run("routes_segments", mixer_routes_segments);
     suite.run("routes_bags/roomy", mixer_routes_bags, 2u, 64u); // every bag lands whole
-    // Tight: 20 cells hold one member's own 18-token load (sources stay valid) but not every receive
-    // combination — a destination drawing two heavy bags overflows and must drop whole, mirror-verified.
+    // Tight: 20 cells hold one member's own 18-token load (sources stay valid) but not
+    // every receive combination — a destination drawing two heavy bags overflows and must
+    // drop whole, mirror-verified.
     suite.run("routes_bags/tight", mixer_routes_bags, 1u, 20u);
     return suite.finish();
 }

@@ -8,24 +8,25 @@
  *  Five cases, the first four proving an operation that must @b succeed — the integer accessors
  *  are one-line divisions and carry no test:
  *
- *      - @ref exchange_round_trips — the durable primitive every wiring phase reuses: `publish_text`
- *        writes atomically and `await_text` reads the bytes back verbatim. Hand-built topology, no GPU.
+ *      - @ref exchange_round_trips — the durable primitive every wiring phase reuses:
+ *        `publish_text` writes atomically and `await_text` reads the bytes back verbatim.
+ *        Hand-built topology, no GPU.
  *      - @ref rendezvous_generations — two forked processes wire one phase three times over one
  *        directory, and every round reads its own generation's payload. No GPU.
- *      - @ref single_box_world — the common one-box case: `bootstrap(0,1)` assembles the whole topology
- *        from the local probe and never opens the exchange directory.
- *      - @ref world_reconciles — the substance: a lead reads a peer's facts, validates agreement, and
- *        assembles the world; a follower adopts the lead's manifest. Both are driven against a @b matching
- *        simulated peer planted with this box's real GPU identity, so agreement genuinely passes,
- *        and a peer of another GPU class is refused. Needs a visible GPU (bootstrap front-loads
- *        `discover_mesh_shape`); a box without one SKIPs.
+ *      - @ref single_box_world — the common one-box case: `bootstrap(0,1)` assembles the whole
+ *        topology from the local probe and never opens the exchange directory.
+ *      - @ref world_reconciles — the substance: a lead reads a peer's facts, validates agreement,
+ *        and assembles the world; a follower adopts the lead's manifest. Both are driven against a
+ *        @b matching simulated peer planted with this box's real GPU identity, so agreement
+ *        genuinely passes, and a peer of another GPU class is refused. Needs a visible GPU
+ *        (bootstrap front-loads `discover_mesh_shape`); a box without one SKIPs.
  *      - @ref barrier_traps_past_deadline — a domain barrier no other arrival reaches traps after
  *        the domain's timeout rather than hanging, and leaves the sentence naming why in the mesh's
  *        fault table. Needs a visible GPU and runs last, since the trap poisons the context.
  *
  *  The genuine multi-node happy path is @ref run_cluster_exchange , driven by
- *  `scripts/slurm/test_mesh-4-8-16.sbatch`: every rank bootstraps for real and must assemble a @b byte-identical
- *  world table.
+ *  `scripts/slurm/test_mesh-4-8-16.sbatch`: every rank bootstraps for real and must assemble a
+ *  @b byte-identical world table.
  */
 #include <cstdio>  // `std::fopen`, `std::fwrite`, `std::fclose` — planting a simulated peer's exchange files
 #include <cstdlib> // `std::getenv`, `std::atoi`
@@ -60,15 +61,16 @@ static sz::string_t facts_payload(sz::string_view_t job, u32_t index, u32_t coun
                       "schema {}\njob {}\nhost_domain_index {}\nhost_domain_count {}\n" //
                       "multimem {}\ngpu_class {}\nhostname {}\ndevices {}\ndevice_name {}\nuuids",
                       mesh_schema_k, job, index, count, multimem, gpu_class, hostname, devices, device_name);
-    // Synthetic per-GPU UUIDs, distinct across host_domains and never colliding with a real GPU id, so the
-    // lead's world-uniqueness check sees this faux peer's devices as its own disjoint set.
+    // Synthetic per-GPU UUIDs, distinct across host_domains and never colliding with a real GPU id,
+    // so the lead's world-uniqueness check sees this faux peer's devices as its own disjoint set.
     for (u32_t gpu = 0; gpu != devices; ++gpu)
         (void)format_into(text, " fa11ba55fa11ba55fa11ba55{:08x}", (index << 16) | gpu);
     return text;
 }
 
-/** A merged manifest in the wire format `build_manifest_` emits — what the lead publishes for every
- *  follower to adopt; every row carries @p device_name so a follower's self-row agrees with its probe. */
+/** A merged manifest in the wire format `build_manifest_` emits — what the lead publishes for
+ *  every follower to adopt; every row carries @p device_name so a follower's self-row agrees
+ *  with its probe. */
 static sz::string_t manifest_payload(sz::string_view_t job, u32_t multimem, u32_t rows, u32_t devices,
                                      sz::string_view_t device_name) {
     sz::string_t text;
@@ -89,8 +91,8 @@ static void plant(fs::path const &path, sz::string_view_t content) {
 }
 
 /** The device-0 model name with spaces replaced by underscores — exactly what
- *  `probe_local_host_domain_` records, so a planted peer's `device_name` matches this box's probe and
- *  the uniformity check passes. */
+ *  `probe_local_host_domain_` records, so a planted peer's `device_name` matches this box's probe
+ *  and the uniformity check passes. */
 static bool probe_local_device_name(sz::string_t &name) {
     CUdevice device = 0;
     if (cuDeviceGet(&device, 0) != CUDA_SUCCESS) return false;
@@ -101,9 +103,10 @@ static bool probe_local_device_name(sz::string_t &name) {
     return sz::succeeded(name.assign(sz::string_view_t {raw}));
 }
 
-/** The durable exchange round-trips a payload byte-for-byte: `publish_text` writes it atomically
- *  (temp + rename, no leftover), `await_text` reads it whole, and a second publish replaces the first —
- *  the primitive every wiring phase carries its coordinates over. Hand-built topology, no GPU. */
+/** The durable exchange round-trips a payload byte-for-byte: `publish_text` writes it
+ *  atomically (temp + rename, no leftover), `await_text` reads it whole, and a second publish
+ *  replaces the first — the primitive every wiring phase carries its coordinates over.
+ *  Hand-built topology, no GPU. */
 static void exchange_round_trips(test_suite_t &suite, fs::path const &base) {
     fs::path const directory = base / "exchange";
     std::error_code error;
@@ -316,9 +319,10 @@ static void barrier_traps_past_deadline(test_suite_t &suite, fs::path const &bas
 }
 
 /** The cluster tier, activated by `$UFORM_HOST_DOMAIN_INDEX` and driven by `mesh-4-8-16.sbatch`:
- *  every rank bootstraps the world for real, then proves the assembled world table is byte-identical
- *  across ranks (round-trip fidelity + phase ordering) and the closing barrier completes. The world
- *  size travels as `$UFORM_HOST_DOMAIN_COUNT` (Slurm's `$SLURM_NTASKS` as a fallback). */
+ *  every rank bootstraps the world for real, then proves the assembled world table is
+ *  byte-identical across ranks (round-trip fidelity + phase ordering) and the closing barrier
+ *  completes. The world size travels as `$UFORM_HOST_DOMAIN_COUNT` (Slurm's `$SLURM_NTASKS`
+ *  as a fallback). */
 static void run_cluster_exchange(test_suite_t &suite, u32_t local_devices) {
     if (local_devices == 0) return suite.skip(no_cuda_device_k);
     u32_t const index = host_domain_index_from_environment();

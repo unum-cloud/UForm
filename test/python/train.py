@@ -2,6 +2,10 @@
 
 Run with `uv run pytest test/python/train.py`. Training is GPU-only, so on a build without GPUs the
 constructors raise `DeviceError`, and these suites check everything the binding validates before that.
+
+File: test/python/train.py
+Author: Ash Vardanian
+Date: October 18, 2026
 """
 
 from array import array

@@ -16,16 +16,18 @@
  *
  *  The case matrix:
  *
- *      - @ref learning_rate_schedule — the warmup / cosine policy's properties, pure host math, no GPU.
- *      - @ref run_base_conformance for the tokens and omni mixtures at full width — @b A every replica
- *        bitwise-matches the lead, @b B every member's barrier round advanced and they all agree, @b C an
- *        eager trainer of the same seed lands on the captured run, @b D each head's loss fell between its first
- *        and last scored steps, @b E every live head's loss read nonzero at least once, @b F the captured
- *        window moved the weights off their seed.
- *      - @ref mixture_sweep — two width tiers: every media subset (2³) crossed with one-row and two-row
- *        budgets on the one-GPU mesh (plus the uneven five-row and 96-column omni corners), then every subset
- *        again at the bootstrapped world's full width. Each cell steps eagerly, then captures and replays over
- *        the same trainer, so both model-region modes run under every mixture.
+ *      - @ref learning_rate_schedule — the warmup / cosine policy's properties, pure host
+ *        math, no GPU.
+ *      - @ref run_base_conformance for the tokens and omni mixtures at full width — @b A every
+ *        replica bitwise-matches the lead, @b B every member's barrier round advanced and they all
+ *        agree, @b C an eager trainer of the same seed lands on the captured run, @b D each head's
+ *        loss fell between its first and last scored steps, @b E every live head's loss read
+ *        nonzero at least once, @b F the captured window moved the weights off their seed.
+ *      - @ref mixture_sweep — two width tiers: every media subset (2³) crossed with one-row and
+ *        two-row budgets on the one-GPU mesh (plus the uneven five-row and 96-column omni
+ *        corners), then every subset again at the bootstrapped world's full width. Each cell steps
+ *        eagerly, then captures and replays over the same trainer, so both model-region modes run
+ *        under every mixture.
  *      - @ref graph_capture — the capture contract holds and two replays agree, on the one-GPU mesh.
  *      - @ref choices_replay — choices alone replay through the items source: their term falls.
  *      - @ref spectrum_spike : the pooled-code regularizers ride a contrastive step, and a forced
@@ -60,15 +62,15 @@ using namespace unum::uform::train;
 using namespace unum::uform::test;
 
 /**
- *  @brief The tiny shared geometry — @c depth=2 , @c hidden=256 , @c 16 steps, and a two-step warmup so even
- *      the tiny run crosses both schedule phases.
+ *  @brief The tiny shared geometry — @c depth=2 , @c hidden=256 , @c 16 steps, and a two-step
+ *      warmup so even the tiny run crosses both schedule phases.
  *
- *  Tokens ride a @c 2×64 rectangle; the omni variant fills every media slice over a @c 4×64 one, so the keyed
- *  partition holds all four modalities live at every step and the composite loss measures the same mixture
- *  throughout — descent stays comparable. Sixteen steps, because descent is asserted on the @b world mean: at a
- *  16-GPU world the data spreads twice as wide as one box's, and the eight-step horizon left the token head's
- *  early-vs-late comparison genuinely marginal (a ~0.7% rise on the world mean) while every machinery invariant
- *  held.
+ *  Tokens ride a @c 2×64 rectangle; the omni variant fills every media slice over a @c 4×64 one, so
+ *  the keyed partition holds all four modalities live at every step and the composite loss measures
+ *  the same mixture throughout — descent stays comparable. Sixteen steps, because descent is
+ *  asserted on the @b world mean: at a 16-GPU world the data spreads twice as wide as one box's,
+ *  and the eight-step horizon left the token head's early-vs-late comparison genuinely marginal (a
+ *  ~0.7% rise on the world mean) while every machinery invariant held.
  */
 [[nodiscard]] static trainer_config_t test_geometry_(bool omni, u64_t seed) noexcept {
     trainer_config_t config;
@@ -92,9 +94,9 @@ using namespace unum::uform::test;
 }
 
 /** The test tier's rendezvous deadline — short enough that a dead peer never costs the surviving
- *  domain two minutes per case, but long enough for the real two-node cold start: the FIRST exchange
- *  rides NFS attribute-cache latency plus the peers' eager-module-loading skew, which can take tens
- *  of seconds (a warm local rendezvous completes in well under one). */
+ *  domain two minutes per case, but long enough for the real two-node cold start: the FIRST
+ *  exchange rides NFS attribute-cache latency plus the peers' eager-module-loading skew, which can
+ *  take tens of seconds (a warm local rendezvous completes in well under one). */
 inline constexpr f64_t test_rendezvous_timeout_seconds_k = 60.0;
 
 /** One width tier: the mesh every cell of the tier builds its trainer over, the devices it drives,
@@ -106,11 +108,12 @@ struct tier_t {
 };
 
 /**
- *  @brief Narrow the bootstrapped @p world into @p placed : this process alone drives its first @p gpus GPUs as an
- *      isolated one-host-domain mesh — the sweep's cheap tier and the capture case's world.
+ *  @brief Narrow the bootstrapped @p world into @p placed : this process alone drives its first
+ *      @p gpus GPUs as an isolated one-host-domain mesh — the sweep's cheap tier and the
+ *      capture case's world.
  *
- *  Safe because a single-host topology carries no rendezvous state; the one cross-field invariant is that
- *  @c host_domains sizes to @c shape.host_domain_count() .
+ *  Safe because a single-host topology carries no rendezvous state; the one cross-field invariant
+ *  is that @c host_domains sizes to @c shape.host_domain_count() .
  */
 [[nodiscard]] static expected_t narrow_mesh_(mesh_t &placed, mesh_topology_t const &world, u32_t gpus) noexcept {
     placed.topology.shape.gpus_per_host_domain = gpus;
@@ -131,8 +134,8 @@ struct tier_t {
 /** The world's health, owned by @c main beside the suite and threaded by reference into every case:
  *  a device-side fault poisons the local context (every later case fails with the same unrelated
  *  "unspecified launch failure"), and a dead peer domain makes every later rendezvous wait its full
- *  deadline — either way the first detection reports once and the remaining cases return immediately,
- *  so a faulted run finishes in seconds instead of minutes. */
+ *  deadline — either way the first detection reports once and the remaining cases return
+ *  immediately, so a faulted run finishes in seconds instead of minutes. */
 struct world_health_t {
 
     /** Cleared at the first poisoned-context or unresponsive-peer detection; later cases skip. */
@@ -147,8 +150,8 @@ struct world_health_t {
 inline constexpr char const *world_unhealthy_k = "an earlier case found the world unhealthy";
 
 /**
- *  @brief Probe @p health before a case: report the first poisoned-context or unresponsive-peer detection
- *      once, and tell every later case to return immediately.
+ *  @brief Probe @p health before a case: report the first poisoned-context or unresponsive-peer
+ *      detection once, and tell every later case to return immediately.
  *  @param[in,out] suite The suite the one abort line reports into.
  *  @param[in,out] health The world's health record, cleared at the first detection.
  */
@@ -184,8 +187,8 @@ inline constexpr char const *world_unhealthy_k = "an earlier case found the worl
     return {};
 }
 
-/** DtoH one replica's whole registration list into a byte-comparable host array — the snapshot behind
- *  assertions A, C, and the gradient-propagation check. */
+/** DtoH one replica's whole registration list into a byte-comparable host array — the snapshot
+ *  behind assertions A, C, and the gradient-propagation check. */
 [[nodiscard]] static expected<st::basic_vector<bf16_t>> snapshot_weights_(
     st::basic_vector<differentiable_weights_t> const &weights, gpu_stream_t &stream) noexcept {
     using result_t = expected<st::basic_vector<bf16_t>>;
@@ -219,7 +222,8 @@ inline constexpr char const *world_unhealthy_k = "an earlier case found the worl
     return result_t {std::move(host)};
 }
 
-/** DtoH the lead replica's shared @c d(normalized) - the score output whose two captured replays must agree. */
+/** DtoH the lead replica's shared @c d(normalized) - the score output whose two captured
+ *  replays must agree. */
 [[nodiscard]] static expected<st::basic_vector<bf16_t>> snapshot_grad_(base_replica_t &replica,
                                                                        gpu_stream_t &stream) noexcept {
     using result_t = expected<st::basic_vector<bf16_t>>;
@@ -246,7 +250,8 @@ inline constexpr char const *world_unhealthy_k = "an earlier case found the worl
     return left.size() == right.size() && std::memcmp(left.data(), right.data(), left.size() * sizeof(bf16_t)) == 0;
 }
 
-/** Two snapshots agree within 1% of the first's peak, for runs whose reductions may add in any order. */
+/** Two snapshots agree within 1% of the first's peak, for runs whose reductions may add
+ *  in any order. */
 [[nodiscard]] static bool snapshots_near_(st::basic_vector<bf16_t> const &left,
                                           st::basic_vector<bf16_t> const &right) noexcept {
     if (left.size() != right.size()) return false;
@@ -259,9 +264,9 @@ inline constexpr char const *world_unhealthy_k = "an earlier case found the worl
     return worst <= 1.0e-2f * largest;
 }
 
-/** The warmup / cosine policy's own properties, pure host math: a strictly monotone ramp topping out
- *  exactly at the peak, a never-rising decay bounded by @b [floor, peak] , and a tail settling onto the
- *  floor. */
+/** The warmup / cosine policy's own properties, pure host math: a strictly monotone ramp topping
+ *  out exactly at the peak, a never-rising decay bounded by @b [floor, peak] , and a tail settling
+ *  onto the floor. */
 static void learning_rate_schedule(test_suite_t &suite) {
     trainer_config_t config;
     config.seed = suite.settings.seed;
@@ -294,10 +299,11 @@ static void learning_rate_schedule(test_suite_t &suite) {
                 config.min_learning_rate * 1.1f);
 }
 
-/** The checkpoint naming contract over one built replica: the registration list carries the semantic
- *  per-weight names every SafeTensors parser keys by (under the driver's @c model. prefix), derived from
- *  @p config and asserted in full order — a @c fill reorder or rename fails loudly here before it silently
- *  re-keys a checkpoint. Piggybacks on an already-built trainer, so it costs no bring-up of its own. */
+/** The checkpoint naming contract over one built replica: the registration list carries the
+ *  semantic per-weight names every SafeTensors parser keys by (under the driver's @c model.
+ *  prefix), derived from @p config and asserted in full order — a @c fill reorder or rename fails
+ *  loudly here before it silently re-keys a checkpoint. Piggybacks on an already-built trainer, so
+ *  it costs no bring-up of its own. */
 static void check_weight_naming_(test_suite_t &suite, char const *label, trainer_config_t const &config,
                                  std::span<differentiable_weights_t const> weights) {
     std::size_t index = 0;
@@ -334,9 +340,10 @@ static void check_weight_naming_(test_suite_t &suite, char const *label, trainer
     suite.check(index == weights.size(), "[{}] registration count: got {} want {}", label, weights.size(), index);
 }
 
-/** Bring up a captured trainer for one mixture, run its loop reading telemetry every step, and fold the
- *  invariants A, B, D, E and F into @p suite ; then an eager trainer of the same seed checks C. D and E read the
- *  ledger's running loss statistics — every local member's sample mass, not a lead-only coin flip. */
+/** Bring up a captured trainer for one mixture, run its loop reading telemetry every step, and fold
+ *  the invariants A, B, D, E and F into @p suite ; then an eager trainer of the same seed checks C.
+ *  D and E read the ledger's running loss statistics — every local member's sample mass, not a
+ *  lead-only coin flip. */
 static void run_base_conformance(test_suite_t &suite, world_health_t &health, char const *label,
                                  trainer_config_t const &config, tier_t tier) {
     if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
@@ -349,14 +356,15 @@ static void run_base_conformance(test_suite_t &suite, world_health_t &health, ch
         u32_t const gpus = static_cast<u32_t>(trainer.replicas.size());
         check_weight_naming_(suite, label, config, trainer.replicas[0].weights);
 
-        // Assertion F's reference: the lead replica's freshly seeded weights, untouched by the capture.
+        // Assertion F's reference: the lead replica's freshly seeded weights, untouched
+        // by the capture.
         expected<st::basic_vector<bf16_t>> seed_lead = snapshot_weights_(trainer.replicas[0].weights,
                                                                          trainer.streams[0]);
         if (!seed_lead) return suite.check(false, "[{}] seed snapshot: {}", label, seed_lead.description_);
 
-        // The captured run, telemetry every step. A midpoint snapshot splits the run into two halves; assertion D
-        // compares their sample-weighted means, so a head scored on only some steps contributes its whole sample
-        // mass, not one noisy endpoint.
+        // The captured run, telemetry every step. A midpoint snapshot splits the run into two
+        // halves; assertion D compares their sample-weighted means, so a head scored on only some
+        // steps contributes its whole sample mass, not one noisy endpoint.
         telemetry_probe_t const head_probes[4] = {trainer.probes.token, trainer.probes.image, trainer.probes.video,
                                                   trainer.probes.audio};
         telemetry_loss_stats_t mid_stats[4] {};
@@ -372,10 +380,10 @@ static void run_base_conformance(test_suite_t &suite, world_health_t &health, ch
         telemetry_loss_stats_t end_stats[4] {};
         for (u32_t head = 0; head != 4u; ++head) end_stats[head] = trainer.ledger.losses(head_probes[head]);
 
-        // At multi-domain worlds a node's telemetry sees only its slice of the objective the optimizer
-        // minimizes — a local half can rise while the world mean falls, and that is descent, not a defect.
-        // Fold every host_domain's summands through the mesh exchange, so D judges the world mean and every
-        // node reaches the same verdict.
+        // At multi-domain worlds a node's telemetry sees only its slice of the objective the
+        // optimizer minimizes — a local half can rise while the world mean falls, and that is
+        // descent, not a defect. Fold every host_domain's summands through the mesh exchange, so D
+        // judges the world mean and every node reaches the same verdict.
         u32_t const host_domains = static_cast<u32_t>(topology.host_domains.size());
         if (host_domains > 1u) {
             sz::string_t mine;
@@ -423,7 +431,8 @@ static void run_base_conformance(test_suite_t &suite, world_health_t &health, ch
         if (!lead) return suite.check(false, "[{}] lead snapshot: {}", label, lead.description_);
         captured_lead = std::move(lead.value_);
 
-        // A — every replica byte-matches the lead. Vacuous at one GPU (the peer loop is empty), but the run stands.
+        // A — every replica byte-matches the lead. Vacuous at one GPU (the peer loop is empty), but
+        // the run stands.
         bool replicas_identical = true;
         for (u32_t member_index = 1; member_index < gpus; ++member_index) {
             expected<st::basic_vector<bf16_t>> peer = snapshot_weights_(trainer.replicas[member_index].weights,
@@ -450,7 +459,8 @@ static void run_base_conformance(test_suite_t &suite, world_health_t &health, ch
         suite.check(round_uniform, "[{}] barrier round reads identically through every member (B)", label);
         suite.check(round_monotone, "[{}] no member's barrier round ever moved backwards (B)", label);
 
-        // D — per live head, the sample-weighted mean of the run's late half fell below the early half's;
+        // D — per live head, the sample-weighted mean of the run's late half fell below
+        // the early half's;
         //     the late half is a subtraction of two monotone snapshots. A head both halves scored votes;
         //     the sums of voting heads decide. Loose by design — one deterministic descent, not convergence.
         f64_t early_mean_sum = 0.0, late_mean_sum = 0.0;
@@ -467,7 +477,8 @@ static void run_base_conformance(test_suite_t &suite, world_health_t &health, ch
                     "[{}] mean loss fell over {} steps: late-half {} want < early-half {} ({} heads voting) (D)", label,
                     config.steps, late_mean_sum, early_mean_sum, voting_heads);
 
-        // E — every live head scored at least once: the keyed partition fed every modality rows, and every
+        // E — every live head scored at least once: the keyed partition fed every modality
+        // rows, and every
         //     head actually trained.
         suite.check(end_stats[0].scored_steps > 0u, "[{}] the token head trained (E)", label);
         if (config.batch.contains(modality_t::image_k))
@@ -477,13 +488,15 @@ static void run_base_conformance(test_suite_t &suite, world_health_t &health, ch
         if (config.batch.contains(modality_t::audio_k))
             suite.check(end_stats[3].scored_steps > 0u, "[{}] the audio head trained (E)", label);
 
-        // F — the captured window moved the weights off their seed: gradients propagated through the whole
+        // F — the captured window moved the weights off their seed: gradients propagated
+        // through the whole
         //     backbone and the optimizer applied them.
         suite.check(!snapshots_match_(seed_lead.value_, captured_lead),
                     "[{}] the captured window moved the weights off their seed (F)", label);
     }
 
-    // C — capture == eager: a fresh trainer of the same seed starts from the same weights and fresh moments, runs
+    // C — capture == eager: a fresh trainer of the same seed starts from the same weights and
+    // fresh moments, runs
     //     the same steps eagerly, and lands on the captured run's weights. The strongest single check.
     trainer_config_t eager_config = config;
     eager_config.capture = eager_k;
@@ -499,9 +512,9 @@ static void run_base_conformance(test_suite_t &suite, world_health_t &health, ch
                 "[{}] captured replay lands on the eager run (C)", label);
 }
 
-/** One sweep cell: bring up an eager trainer, run two steps, then capture and replay two more over the same
- *  trainer — both model-region modes under one mixture — asserting finite losses and the final-norm extents every
- *  head reconstructs against. */
+/** One sweep cell: bring up an eager trainer, run two steps, then capture and replay two more over
+ *  the same trainer — both model-region modes under one mixture — asserting finite losses and the
+ *  final-norm extents every head reconstructs against. */
 static void run_sweep_cell_(test_suite_t &suite, world_health_t &health, tier_t tier, sz::string_view_t label,
                             trainer_config_t config) {
     if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
@@ -510,8 +523,8 @@ static void run_sweep_cell_(test_suite_t &suite, world_health_t &health, tier_t 
     if (expected_t built = make_trainer_(trainer, tier, config, health); !built)
         return suite.check(false, "[{}] trainer bring-up: {}", label, built.description_);
 
-    // The eager state first, then the captured one over the same trainer — capture must also hold after the
-    // optimizer has stepped (the capture-stable addresses survive weight updates).
+    // The eager state first, then the captured one over the same trainer — capture must also hold
+    // after the optimizer has stepped (the capture-stable addresses survive weight updates).
     if (expected_t ran = run_steps_(trainer, 0u, 2u); !ran)
         return suite.check(false, "[{}] eager steps: {}", label, ran.description_);
     f32_t const eager_loss = trainer.telemetry(optimizer_step_t {1u}).composite();
@@ -534,7 +547,8 @@ static void run_sweep_cell_(test_suite_t &suite, world_health_t &health, tier_t 
         suite.check(false, "[{}] end-of-case drain: {}", label, drained.description_);
 }
 
-/** One sweep cell's config: @p subset 's media bits over @p rows full-width rows of @p columns cells. */
+/** One sweep cell's config: @p subset 's media bits over @p rows full-width rows of
+ *  @p columns cells. */
 [[nodiscard]] static trainer_config_t sweep_config_(u32_t subset, u32_t rows, u32_t columns, u64_t seed) noexcept {
     trainer_config_t config = test_geometry_(false, seed);
     config.batch = multimodal_batch_shape_t {rows, rows, columns};
@@ -548,12 +562,13 @@ static void run_sweep_cell_(test_suite_t &suite, world_health_t &health, tier_t 
 /**
  *  @brief The two-tier sweep.
  *
- *  The cheap tier walks every media subset (2³) crossed with one-row and two-row budgets on the one-GPU mesh —
- *  every modality-presence combination, the zero-live-rows corner, and the 1-member peer-read domain — plus two
- *  corners the cross-product never reaches: an omni cell with five rows over four live modalities (the uneven
- *  partition, whose extra row rotates across epochs) and an omni cell at 96 columns (the non-square patch
- *  factorization). The wide tier reruns every subset at the bootstrapped world's full width, so shape handling
- *  composes with the real collectives — and widens to the multi-node world automatically under the sbatch launcher.
+ *  The cheap tier walks every media subset (2³) crossed with one-row and two-row budgets on the
+ *  one-GPU mesh — every modality-presence combination, the zero-live-rows corner, and the 1-member
+ *  peer-read domain — plus two corners the cross-product never reaches: an omni cell with five rows
+ *  over four live modalities (the uneven partition, whose extra row rotates across epochs) and an
+ *  omni cell at 96 columns (the non-square patch factorization). The wide tier reruns every subset
+ *  at the bootstrapped world's full width, so shape handling composes with the real collectives —
+ *  and widens to the multi-node world automatically under the sbatch launcher.
  */
 static void mixture_sweep(test_suite_t &suite, world_health_t &health, tier_t wide, tier_t cheap) {
     for (u32_t subset = 0; subset != 8u; ++subset)
@@ -633,8 +648,9 @@ static void packed_rows(test_suite_t &suite, world_health_t &health, tier_t tier
         suite.check(false, "packed end-of-case drain: {}", drained.description_);
 }
 
-/** The capture contract holds, one forward and one backward replay graph per replica build, and two forward replays
- *  over one fixed eager preamble produce the same shared @c d(normalized) up to reduction order. */
+/** The capture contract holds, one forward and one backward replay graph per replica build, and
+ *  two forward replays over one fixed eager preamble produce the same shared @c d(normalized) up
+ *  to reduction order. */
 static void graph_capture(test_suite_t &suite, world_health_t &health, tier_t tier) {
     if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
     trainer_config_t const config = test_geometry_(false, suite.settings.seed);
@@ -898,9 +914,10 @@ static void spectrum_world(test_suite_t &suite, world_health_t &health, tier_t w
 }
 
 int main(int, char **argv) {
-    // Lazy module loading deadlocks against the InfiniBand doorbell kernels' flag spins: the spinning
-    // wait blocks its context, the peer's next launch blocks on module loading behind it, and neither
-    // side progresses. Eager loading before `cuInit` front-loads every module — the mixer suite's fix.
+    // Lazy module loading deadlocks against the InfiniBand doorbell kernels' flag spins: the
+    // spinning wait blocks its context, the peer's next launch blocks on module loading behind it,
+    // and neither side progresses. Eager loading before `cuInit` front-loads every module — the
+    // mixer suite's fix.
     ::setenv("CUDA_MODULE_LOADING", "EAGER", 1);
 
     test_suite_t suite = test_suite_t::make(argv[0]);
@@ -927,8 +944,9 @@ int main(int, char **argv) {
             return suite.finish();
         }
 
-    // One process per host_domain; the sbatch launcher raises UFORM_HOST_DOMAIN_COUNT for the two-node tier and
-    // names the exchange, which this main maps onto the mesh options, as the library reads no environment.
+    // One process per host_domain; the sbatch launcher raises UFORM_HOST_DOMAIN_COUNT for the
+    // two-node tier and names the exchange, which this main maps onto the mesh options, as the
+    // library reads no environment.
     mesh_options_t options;
     options.host_domain_index = host_domain_index_from_environment();
     options.host_domain_count = host_domain_count_from_environment();

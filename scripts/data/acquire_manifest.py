@@ -1,7 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = []
-# ///
 """Balanced multi-modal staging manifest for the ~3 TB real corpus on `$UFORM_DATA_ROOT`.
 
 This module is the single declarative source the staging driver
@@ -50,7 +46,16 @@ injects the allocator's derived cap before the driver runs it.
 
 Every row whose `requires_new_knob` is True or whose `fraction_mechanism` is "no-downloader" is a BLOCKER
 surfaced by the driver's balance table.
+
+File: scripts/data/acquire_manifest.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
 
 import os
 import shutil
@@ -62,12 +67,14 @@ import mixtures
 #: Repo root a relative `glob_override` is anchored under (mirrors `mixtures._resolve_glob`).
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 
-#: Fraction of FREE disk the auto-detected budget targets when neither `--budget-gb` nor
-#: `$UFORM_DATA_BUDGET_GB` is set — half, leaving headroom for repack scratch and checkpoints.
+#: Fraction of FREE disk the auto-detected budget targets when
+#: neither `--budget-gb` nor `$UFORM_DATA_BUDGET_GB` is set —
+#: half, leaving headroom for repack scratch and checkpoints.
 SAFETY_MARGIN: float = 0.5
 
-#: How the disk budget is split across modalities. Cross-modal paired video / image lead; text is kept
-#: substantial (foundational, lots of high-value corpora) and audio is the thinnest slice. Sums to 1.0.
+#: How the disk budget is split across modalities. Cross-modal paired video / image lead; text is
+#: kept substantial (foundational, lots of high-value corpora) and audio is the thinnest slice.
+#: Sums to 1.0.
 MODALITY_WEIGHTS: dict[str, float] = {"video": 0.35, "image": 0.30, "text": 0.22, "audio": 0.13}
 
 #: Downloader-source markers that mean a script reads a Slurm (rank, world) split — the same test as
@@ -189,11 +196,11 @@ def _uv(*args: str) -> list[str]:
 #: The balanced manifest. Sizes are approximate (HuggingFace cards / downloader docstrings); the
 #: per-modality sums are tuned to ~750 GB each (printed by the driver's balance table).
 STAGING_ROWS: list[StagingRow] = [
-    # Text modality, ~750 GB target.
-    # Text is the dominant source and is already ~700 GB staged on $UFORM_DATA_ROOT, so its fractions are
-    # capped FAR below 0.35 for the web/code giants (fineweb-2, starcoderdata, compile_ir) — staging
-    # 35% of compile_ir alone (~950 GB) would blow the whole budget. The web/wiki/QA corpora already
-    # present are kept (the driver skips them as present); the only NEW text pulls are a code slice.
+    # Text modality, ~750 GB target. Text is the dominant source and is already ~700 GB staged on
+    # $UFORM_DATA_ROOT, so its fractions are capped FAR below 0.35 for the web/code giants
+    # (fineweb-2, starcoderdata, compile_ir) — staging 35% of compile_ir alone (~950 GB) would blow
+    # the whole budget. The web/wiki/QA corpora already present are kept (the driver skips them as
+    # present); the only NEW text pulls are a code slice.
     StagingRow(
         dataset="fineweb_2",
         modality="text",
@@ -286,7 +293,8 @@ STAGING_ROWS: list[StagingRow] = [
         estimated_full_gigabytes=783.0,  # full 86-language BigCode slice.
         estimated_download_gigabytes=40.0,  # --top10 high-volume languages only.
         fraction_mechanism="fraction",
-        # A --fraction slice across all 86 languages; pass --only <langs> or --shards N for per-language curation.
+        # A --fraction slice across all 86 languages; pass --only <langs> or --shards N
+        # for per-language curation.
         download_command=_uv("scripts/data/download_starcoderdata.py", "--data-root", DATA_ROOT, "--fraction", "0.05"),
         weight=2.0,
         cap_flag="--fraction",
@@ -321,7 +329,8 @@ STAGING_ROWS: list[StagingRow] = [
         estimated_full_gigabytes=40.0,  # full tier across 10 languages; the small tier is ~2 GB.
         estimated_download_gigabytes=2.0,
         fraction_mechanism="fraction",
-        # ~5% --fraction slice approximates the small tier; pass --only <langs> for per-language selection.
+        # ~5% --fraction slice approximates the small tier; pass --only <langs>
+        # for per-language selection.
         download_command=_uv("scripts/data/download_the_vault.py", "--data-root", DATA_ROOT, "--fraction", "0.05"),
         weight=0.5,
         cap_flag="--fraction",
@@ -363,9 +372,10 @@ STAGING_ROWS: list[StagingRow] = [
     StagingRow(
         dataset="text_pairs_present_rollup",
         modality="text",
-        # Rollup of the small contrastive-pair corpora already staged: msmarco, mmarco, natural_questions,
-        # eli5, arxiv, code_search_net, hackernews, commitpackft, stackexchange_*, all-nli, quora,
-        # gooaq, hotpotqa, mr-tydi. Each is < ~15 GB and already on $UFORM_DATA_ROOT; counted as one row.
+        # Rollup of the small contrastive-pair corpora already staged: msmarco, mmarco,
+        # natural_questions, eli5, arxiv, code_search_net, hackernews, commitpackft,
+        # stackexchange_*, all-nli, quora, gooaq, hotpotqa, mr-tydi. Each is < ~15 GB and already on
+        # $UFORM_DATA_ROOT; counted as one row.
         glob_override="data/msmarco/triplet/*.parquet",  # synthetic rollup; not a catalog row
         fraction=1.00,
         estimated_full_gigabytes=13.0,
@@ -382,8 +392,9 @@ STAGING_ROWS: list[StagingRow] = [
         estimated_full_gigabytes=16.0,  # skipped in bulk; ~16 GB partial already on disk.
         estimated_download_gigabytes=0.0,
         fraction_mechanism="fraction",
-        # Skipped in bulk staging: img2dataset URL-crawl hangs on dead links and blocks every worker; stage
-        # datacomp_small on its own with tuned img2dataset timeouts/retries, then restore the _uv(...) command.
+        # Skipped in bulk staging: img2dataset URL-crawl hangs on dead links and blocks every
+        # worker; stage datacomp_small on its own with tuned img2dataset timeouts/retries, then
+        # restore the _uv(...) command.
         download_command=None,
         flag="url_crawl via acquire (img2dataset); skipped in bulk run — stage separately (dead-link crawl too slow).",
     ),

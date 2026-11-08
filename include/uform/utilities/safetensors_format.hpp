@@ -47,16 +47,16 @@
 
 namespace unum::uform::utilities {
 
-/** The scalar types a checkpoint stores: BFloat16 weights, and the Float32 training state beside
- *  them. */
+/** The scalar types a checkpoint stores: BFloat16 weights, and the Float32 training
+ *  state beside them. */
 enum class checkpoint_dtype_t : u32_t {
     bf16_k = 0,
     f32_k = 1,
 };
 
-/** One indexed checkpoint entry: the owned name, its scalar type, the logical @b [rows,cols]
- *  extents (vectors are @b [1,cols] ), and where the tensor's bytes start inside the owner's
- *  payload. */
+/** One indexed checkpoint entry: the owned name, its scalar type, the logical
+ *  @b [rows,cols] extents (vectors are @b [1,cols] ), and where the tensor's bytes start
+ *  inside the owner's payload. */
 struct checkpoint_entry_t {
 
     /** The owned name text — short names ride StringZilla's inline buffer. */
@@ -82,8 +82,9 @@ struct checkpoint_metadata_t {
 };
 
 /**
- *  @brief The outbound checkpoint container: @ref insert snapshots one host tensor into the payload, so the
- *      source is free to change the moment it returns, and @ref metadata records the geometry beside it.
+ *  @brief The outbound checkpoint container: @ref insert snapshots one host tensor into the
+ *      payload, so the source is free to change the moment it returns, and @ref metadata records
+ *      the geometry beside it.
  *
  *  @ref save is pure host I/O. All buffers grow lazily and keep their backing across cadences;
  *  @ref reserve hoists the growth entirely. Lead-rank-only by the caller's discipline.
@@ -101,13 +102,13 @@ struct checkpoint_to_save_t {
      *  @p tensor_count , so no @ref insert ever reallocates. */
     [[nodiscard]] expected_t reserve(u64_t total_bytes, u64_t tensor_count) noexcept;
 
-    /** Append one entry, copying @p data into the payload @b now . @p name is copied into owned text;
-     *  duplicates are rejected loudly. */
+    /** Append one entry, copying @p data into the payload @b now . @p name is copied into owned
+     *  text; duplicates are rejected loudly. */
     [[nodiscard]] expected_t insert(sz::string_view_t name, nk::tensor_view<nk_bf16_t, 2> data) noexcept;
 
-    /** Append one Float32 entry like the BFloat16 one. The payload packs entries without gaps, so a
-     *  Float32 entry following an odd count of BFloat16 scalars is refused: insert the Float32
-     *  state first. */
+    /** Append one Float32 entry like the BFloat16 one. The payload packs entries without gaps,
+     *  so a Float32 entry following an odd count of BFloat16 scalars is refused: insert the
+     *  Float32 state first. */
     [[nodiscard]] expected_t insert(sz::string_view_t name, nk::tensor_view<f32_t, 2> data) noexcept;
 
     /** Record the metadata value of @p key , replacing an earlier one. */
@@ -145,12 +146,13 @@ struct checkpoint_to_save_t {
     /** The metadata pairs, in insertion order. */
     st::basic_vector<checkpoint_metadata_t> metadata_ {};
 
-    /** The yyjson pool @c save serializes the header in — grown lazily, settled after the
-     *  first save. */
+    /** The yyjson pool @c save serializes the header in — grown lazily, settled after
+     *  the first save. */
     st::basic_vector<char> scratch_ {};
 };
 
-/** A read-only file mapping, unmapped on destruction; empty for a checkpoint viewed in caller memory. */
+/** A read-only file mapping, unmapped on destruction; empty for a checkpoint viewed
+ *  in caller memory. */
 struct checkpoint_mapping_t {
     checkpoint_mapping_t() noexcept = default;
     checkpoint_mapping_t(checkpoint_mapping_t const &) = delete;
@@ -170,12 +172,13 @@ struct checkpoint_mapping_t {
 };
 
 /**
- *  @brief The inbound checkpoint container: @ref make maps a safetensors file once, or @ref view adopts one
- *      already in memory, and @ref operator[] hands out zero-copy read-only views by name.
+ *  @brief The inbound checkpoint container: @ref make maps a safetensors file once, or
+ *      @ref view adopts one already in memory, and @ref operator[] hands out zero-copy
+ *      read-only views by name.
  *
- *  The header is parsed and validated up front: its declared length is bounded by the image, and every entry's
- *  @c data_offsets by its shape and the payload. Views stay valid while the container lives; strictness is the
- *  caller's policy, not this container's.
+ *  The header is parsed and validated up front: its declared length is bounded by the image, and
+ *  every entry's @c data_offsets by its shape and the payload. Views stay valid while the container
+ *  lives; strictness is the caller's policy, not this container's.
  */
 struct checkpoint_to_load_t {
 
@@ -192,12 +195,13 @@ struct checkpoint_to_load_t {
     /** Index a checkpoint image the caller owns, which must outlive the container. */
     [[nodiscard]] static expected<checkpoint_to_load_t> view(bytes_view_t buffer) noexcept;
 
-    /** By-name lookup: a read-only rank-2 view into the image, or an @b empty view when the file misses
-     *  @p name (or holds it in a dtype other than BFloat16) — check @c .empty() and decide. */
+    /** By-name lookup: a read-only rank-2 view into the image, or an @b empty view when
+     *  the file misses @p name (or holds it in a dtype other than BFloat16) — check
+     *  @c .empty() and decide. */
     [[nodiscard]] nk::tensor_view<nk_bf16_t, 2> operator[](sz::string_view_t name) const noexcept;
 
-    /** The Float32 twin of @ref operator[] , empty when the file misses @p name or holds it in
-     *  another dtype. */
+    /** The Float32 twin of @ref operator[] , empty when the file misses @p name or holds it
+     *  in another dtype. */
     [[nodiscard]] nk::tensor_view<f32_t, 2> float32(sz::string_view_t name) const noexcept;
 
     /** The metadata value of @p key , or an empty view when the file carries none. */

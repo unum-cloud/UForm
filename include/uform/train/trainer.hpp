@@ -34,7 +34,8 @@ using encoder::multimodal_batch_mixer_t;
 using encoder::multimodal_batch_on_cpu_t;
 using encoder::multimodal_batch_on_gpu_t;
 
-/** Where this process sits among the processes of a run, and how they meet; every field explicit. */
+/** Where this process sits among the processes of a run, and how they meet;
+ *  every field explicit. */
 struct mesh_options_t {
 
     /** This process's index among @ref host_domain_count . */
@@ -59,9 +60,9 @@ struct mesh_options_t {
     nk_capability_t capabilities = 0;
 };
 
-/** One process's place among the processes of a run: the topology every process agreed on at bootstrap, and the
- *  InfiniBand domain joining its NVLink domains. Placed and never moved, since @ref colocated borrows
- *  @ref topology . */
+/** One process's place among the processes of a run: the topology every process agreed on at
+ *  bootstrap, and the InfiniBand domain joining its NVLink domains. Placed and never moved, since
+ *  @ref colocated borrows @ref topology . */
 struct mesh_t {
 
     /** The bootstrapped world. */
@@ -76,9 +77,9 @@ struct mesh_t {
     /**
      *  @brief Bootstrap @p placed from @p options over @p devices , this process's members.
      *
-     *  A process may drive any contiguous run of its NVLink domain's members — 4 of 72 on an NVL72 tray. @p devices
-     *  are those members in member order: every visible ordinal, ordinal @c d being member
-     *  @c index_in_multimem_domain(first_gpu_index()+d) .
+     *  A process may drive any contiguous run of its NVLink domain's members — 4 of 72 on an NVL72
+     *  tray. @p devices are those members in member order: every visible ordinal, ordinal @c d
+     *  being member @c index_in_multimem_domain(first_gpu_index()+d) .
      */
     [[nodiscard]] static expected_t make(mesh_t &placed, mesh_options_t const &options,
                                          std::span<i32_t const> devices) noexcept;
@@ -94,7 +95,7 @@ struct envelope_t {
     /** The fewest bytes any of this process's devices had free before the run allocated. */
     std::size_t free_bytes = 0;
 
-    /** The device footprint @c fixed_bytes+rows·row_bytes+rows²·pair_bytes fitted through the
+    /** The device footprint @c fixed_bytes+rows · row_bytes+rows² · pair_bytes fitted through the
      *  probe envelopes, its curvature read off the arena, whose high-water mark is exact. */
     std::size_t fixed_bytes = 0, row_bytes = 0, pair_bytes = 0;
 
@@ -128,15 +129,16 @@ struct telemetry_t {
     /** The token head's mean masked cross-entropy, weighted by its λ. */
     f32_t token_ce = 0.0f;
 
-    /** Each live media head's mean normalized reconstruction error, weighted by its λ (zero when absent). */
+    /** Each live media head's mean normalized reconstruction error, weighted by its λ
+     *  (zero when absent). */
     f32_t image_mse = 0.0f, video_mse = 0.0f, audio_mse = 0.0f;
 
     /** The world's contrastive per-vertex-mean potential, every process's summands added, or zero
      *  when the objective has none. */
     f32_t contrastive = 0.0f;
 
-    /** The world's weighted late-interaction loss over the live queries, or zero when the run has
-     *  none. */
+    /** The world's weighted late-interaction loss over the live queries, or zero when the
+     *  run has none. */
     f32_t late_interaction = 0.0f;
 
     /** The calibrated choices' mean soft cross-entropy plus Brier term over the live choice
@@ -146,8 +148,8 @@ struct telemetry_t {
     /** The domain's barrier round after this optimizer step. */
     concurrency_round_t concurrency_round {};
 
-    /** Segments dropped whole because the batch had no room for them, every member's since the
-     *  last read. */
+    /** Segments dropped whole because the batch had no room for them, every member's since
+     *  the last read. */
     std::size_t dropped = 0;
 
     /** The composite loss — every live term. */
@@ -159,8 +161,8 @@ struct telemetry_t {
     void report() const noexcept;
 };
 
-/** One held-out retrieval evaluation of the pooled embeddings, every member of this process
- *  summed. */
+/** One held-out retrieval evaluation of the pooled embeddings, every member of
+ *  this process summed. */
 struct retrieval_t {
 
     /** The optimizer steps completed before the evaluation. */
@@ -172,8 +174,8 @@ struct retrieval_t {
     /** Shares of ranked rows whose best positive scores first, and within the top five. */
     f64_t recall_at_1 = 0.0, recall_at_5 = 0.0;
 
-    /** The mean share of positives among a ranked row's scored cells, what a random order hits at
-     *  one. */
+    /** The mean share of positives among a ranked row's scored cells, what a random order
+     *  hits at one. */
     f64_t chance = 0.0;
 
     /** The mean cosine of attract cells minus that of ambient cells. */
@@ -197,7 +199,8 @@ struct trainer_t;
  *  replica's batch, and the relations when the objective contrasts, for one data epoch. */
 struct batch_source_t {
 
-    /** Fill every replica's batch of @p trainer for @p data_epoch , counting cut items into @p report . */
+    /** Fill every replica's batch of @p trainer for @p data_epoch , counting cut items into
+     *  @p report . */
     expected_t (*fill)(void *state, trainer_t &trainer, data_epoch_t data_epoch,
                        step_report_t &report) noexcept = nullptr;
 
@@ -215,7 +218,8 @@ template <typename source_type_>
             &source};
 }
 
-/** The keyed synthetic draw: every world GPU draws distinct data from the run seed, with self-edge relations. */
+/** The keyed synthetic draw: every world GPU draws distinct data from the run seed,
+ *  with self-edge relations. */
 struct synthetic_source_t {
     [[nodiscard]] expected_t fill(trainer_t &trainer, data_epoch_t data_epoch, step_report_t &report) noexcept;
 };
@@ -227,16 +231,16 @@ struct item_edges_t {
     std::span<f32_t const> weights {};
 };
 
-/** Each item's legal choice bytes and their targets, entries matching in length; empty tapes make
- *  no choice. */
+/** Each item's legal choice bytes and their targets, entries matching in length; empty tapes
+ *  make no choice. */
 struct item_choices_t {
     tape_view<u8_t const> bytes {};
     tape_view<f32_t const> targets {};
 };
 
-/** This process's share of one step: every item's modality and bytes, and its optional bag,
- *  temperature group, late-interaction side, choices and relations, all borrowed until the step
- *  returns. */
+/** This process's share of one step: every item's modality and bytes, and its optional
+ *  bag, temperature group, late-interaction side, choices and relations, all borrowed
+ *  until the step returns. */
 struct training_items_t {
     std::span<modality_t const> modalities {};
 
@@ -259,11 +263,12 @@ struct training_items_t {
 };
 
 /**
- *  @brief Caller items packed per device through the host decoders, routed across the mesh by the mixer, with
- *      the relations rebased onto the vertices the items landed on.
+ *  @brief Caller items packed per device through the host decoders, routed across the mesh by the
+ *      mixer, with the relations rebased onto the vertices the items landed on.
  *
- *  Owns everything the routing needs beside the trainer: the loaded batches the mixer reads, their pinned host
- *  twins, the mixer itself, and the host scratch the relations are rebuilt in — all allocated at @ref make .
+ *  Owns everything the routing needs beside the trainer: the loaded batches the mixer reads, their
+ *  pinned host twins, the mixer itself, and the host scratch the relations are rebuilt in — all
+ *  allocated at @ref make .
  */
 struct items_source_t {
 
@@ -275,10 +280,12 @@ struct items_source_t {
 
     [[nodiscard]] expected_t fill(trainer_t &trainer, data_epoch_t data_epoch, step_report_t &report) noexcept;
 
-    /** The mesh-wide vertex item @p item landed on in the last step, or @c ~0u when it carried no tokens. */
+    /** The mesh-wide vertex item @p item landed on in the last step, or @c ~0u when it
+     *  carried no tokens. */
     [[nodiscard]] u32_t destination(std::size_t item) const noexcept { return destinations_[item]; }
 
-    /** Download every replica's pooled vertices, @b [gpus·max_segments,hidden] by mesh-wide vertex. */
+    /** Download every replica's pooled vertices, @b [gpus·max_segments,hidden]
+     *  by mesh-wide vertex. */
     [[nodiscard]] expected<bf16r2_view_t> pooled(trainer_t &trainer) noexcept;
 
   private:
@@ -298,8 +305,8 @@ struct items_source_t {
     /** @b [gpus,segments] the item packed into each device segment of the mesh, or @c ~0u . */
     u32r2_tensor_pinned_t packed_items_ {};
 
-    /** One device's attract, repel and ignore sets rebuilt on host, and the live length of every
-     *  mesh vertex. */
+    /** One device's attract, repel and ignore sets rebuilt on host, and the live length of
+     *  every mesh vertex. */
     contrastive_edges_pinned_t edges_ {};
     st::basic_vector<u32_t> lengths_ {};
     st::basic_vector<temperature_group_t> groups_ {};
@@ -332,14 +339,15 @@ struct trainer_t {
     /** One owning stream per GPU — the ordered chain a replica's whole step enqueues onto. */
     per_gpu_array<gpu_stream_t> streams {};
 
-    /** One owning arena per GPU, visible to every local peer — the allocation budget its replica draws from. */
+    /** One owning arena per GPU, visible to every local peer — the allocation budget its
+     *  replica draws from. */
     per_gpu_array<gpu_arena_t> arenas {};
 
     /** The run's one telemetry ledger, its rows in the lead arena. */
     telemetry_ledger_t ledger {};
 
-    /** The ledger rows: one loss row per head, one round row per member — inert zero handles whenever their
-     *  channels are dark or their head is absent, so feeding them never branches. */
+    /** The ledger rows: one loss row per head, one round row per member — inert zero handles
+     *  whenever their channels are dark or their head is absent, so feeding them never branches. */
     struct probes_t {
         telemetry_probe_t token {}, image {}, video {}, audio {}, contrastive {}, late_interaction {}, choices {};
         per_gpu_array<telemetry_probe_t> rounds {};
@@ -349,11 +357,12 @@ struct trainer_t {
     /** One model replica per GPU, each holding its own @c weights registration list. */
     per_gpu_array<base_replica_t> replicas {};
 
-    /** The NVLink domain, sized by the optimizer's, the contrastive loss's and the mixer's windows. */
+    /** The NVLink domain, sized by the optimizer's, the contrastive loss's and
+     *  the mixer's windows. */
     multimem_domain_t domain {};
 
-    /** The cross-domain gradient all-reduce, wired on member 0 — the gateway — and unwired in every process not
-     *  holding it, which still mints its collective id. */
+    /** The cross-domain gradient all-reduce, wired on member 0 — the gateway — and unwired in every
+     *  process not holding it, which still mints its collective id. */
     infiniband_all_reduce<f32_t> world_reduce {};
 
     /** The gradient reduce and the Adafactor step of every replica. */
@@ -366,19 +375,20 @@ struct trainer_t {
      *  objective contrasts. */
     per_gpu_array<adafactor_temperatures_t> temperatures {};
 
-    /** The domain-wide late-interaction loss over the token head — wired only when the run
-     *  late-interacts. */
+    /** The domain-wide late-interaction loss over the token head — wired only when
+     *  the run late-interacts. */
     distributed_contrastive_tokens_t late_interaction {};
 
-    /** One temperature step per replica over the late-interaction β and bias groups, present when
-     *  it is. */
+    /** One temperature step per replica over the late-interaction β and bias groups, present
+     *  when it is. */
     per_gpu_array<adafactor_temperatures_t> token_temperatures {};
 
     /** The pooled-code regularizers and the gradient spike gate, wired only when the run weights a
      *  regularizer or sets a spike threshold. */
     distributed_pooled_spectrum_t spectrum {};
 
-    /** One captured forward and backward region per GPU under @c replayed_k ; empty runs the regions eagerly. */
+    /** One captured forward and backward region per GPU under @c replayed_k ; empty runs
+     *  the regions eagerly. */
     per_gpu_array<gpu_replay_graph_t> forward_graphs {}, backward_graphs {};
 
     /** Optimizer steps taken, counted across resumes — the step a checkpoint records. */
@@ -420,9 +430,9 @@ struct trainer_t {
      *  @c backward_graphs . */
     [[nodiscard]] expected_t capture() noexcept;
 
-    /** One optimizer step: @p source fills the batches, then per replica the preamble and the forward region, the
-     *  contrastive collective, the pooled-code regularizers, per replica the backward region, the
-     *  spike gate, and per replica the optimizer's slice. */
+    /** One optimizer step: @p source fills the batches, then per replica the preamble and the
+     *  forward region, the contrastive collective, the pooled-code regularizers, per replica the
+     *  backward region, the spike gate, and per replica the optimizer's slice. */
     [[nodiscard]] expected_t step(batch_source_t source, optimizer_step_t optimizer_step,
                                   step_report_t &report) noexcept;
 
@@ -433,8 +443,8 @@ struct trainer_t {
     /** Re-seed every replica's weights and temperatures to the identical deterministic init. */
     [[nodiscard]] expected_t reseed() noexcept;
 
-    /** Drain every replica and read one @ref telemetry_t , feeding the ledger's loss rows and one round probe per
-     *  member. */
+    /** Drain every replica and read one @ref telemetry_t , feeding the ledger's loss rows and one
+     *  round probe per member. */
     [[nodiscard]] telemetry_t telemetry(optimizer_step_t optimizer_step) noexcept;
 
     /** Write the lead replica to @p path with @ref completed_steps : the @c model. weights, the

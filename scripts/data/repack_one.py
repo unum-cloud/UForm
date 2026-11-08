@@ -1,12 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "cudf-cu12",
-#     "pandas",
-#     "pyarrow>=21.0.0",
-#     "zstandard",
-# ]
-# ///
 """Repack exactly one JSONL / JSONL.gz / JSONL.zst shard to a Parquet sibling.
 
 Modality: text. The unit of work for the GNU `parallel` repack model: one process per shard,
@@ -26,7 +17,21 @@ Run one process per shard under GNU `parallel`:
 
 Pass `--compression snappy|none` to change the Parquet codec (default `zstd`); pass `--overwrite`
 to re-repack a shard whose `.parquet` sibling already exists.
+
+File: scripts/data/repack_one.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "cudf-cu12",
+#     "pandas",
+#     "pyarrow>=21.0.0",
+#     "zstandard",
+# ]
+# ///
 
 import argparse
 import io

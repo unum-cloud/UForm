@@ -4,9 +4,9 @@
  *  @author Ash Vardanian
  *  @date July 4, 2026
  *
- *  The pack pair mirrors the mixer's ( @c multimodal_batch.cu ): a serial geometry walk writing offsets +
- *  lengths under the segments-never-cross-rows rule, then a CTA-per-segment gather. The row draw is a third
- *  kernel — a keyed permutation of the pooled files' rows, without replacement.
+ *  The pack pair mirrors the mixer's ( @c multimodal_batch.cu ): a serial geometry walk writing
+ *  offsets + lengths under the segments-never-cross-rows rule, then a CTA-per-segment gather. The
+ *  row draw is a third kernel — a keyed permutation of the pooled files' rows, without replacement.
  */
 #include <algorithm> // `std::min` (floor), `std::upper_bound` (weighted file pick), `std::find` (dedup)
 
@@ -24,11 +24,11 @@ inline constexpr u64_t row_draw_salt_k = 0xD1B54A32D192ED03ull;
 
 /**
  *  @brief Draw the whole fill's document rows: a keyed permutation of @c [0, pooled_rows) into
- *      @p record_indices , without replacement (a Feistel bijection, so distinct draw positions map to
- *      distinct rows).
+ *      @p record_indices , without replacement (a Feistel bijection, so distinct draw positions map
+ *      to distinct rows).
  *
- *  Because the pool is the picked files concatenated, a batch's slice of this permutation is a scatter of
- *  rows across those files.
+ *  Because the pool is the picked files concatenated, a batch's slice of this permutation is a
+ *  scatter of rows across those files.
  *
  *  __grid_size__ grid-stride over @c record_indices ; no dynamic shared memory.
  */
@@ -42,11 +42,11 @@ static __global__ void sample_rows_kernel_(u64r1_span_t record_indices, u64_t se
 }
 
 /**
- *  @brief Write one batch's geometry: thread 0 walks the destination segments serially — the repack cursor
- *      is a strict scan.
+ *  @brief Write one batch's geometry: thread 0 walks the destination segments serially — the repack
+ *      cursor is a strict scan.
  *
- *  It reads each drawn document's byte count through its reservoir row index, truncates to the row width,
- *  and jumps the cursor past any row boundary the segment would cross. A segment that would
+ *  It reads each drawn document's byte count through its reservoir row index, truncates to the row
+ *  width, and jumps the cursor past any row boundary the segment would cross. A segment that would
  *  overflow the rectangle is dropped (zero length) and counted into @p dropped . Segments past the
  *  drawn documents PAD: zero length, repeated offset.
  *
@@ -75,8 +75,9 @@ static __global__ void tokens_geometry_kernel_(u64r1_view_t reservoir_offsets, u
         if (cursor + columns > capacity) ++overflowed, columns = 0;
         segment_offsets[segment_index] = cursor;
         segment_lengths[segment_index] = columns;
-        // Every fill owns the whole segment table — a reused batch may hold another modality's tags, and
-        // a stale tag routes token bytes into a media head downstream (text_k doubles as PAD at length 0).
+        // Every fill owns the whole segment table — a reused batch may hold another modality's
+        // tags, and a stale tag routes token bytes into a media head downstream (text_k doubles as
+        // PAD at length 0).
         segment_modality[segment_index] = modality_t::text_k;
         cursor += columns;
     }
@@ -86,8 +87,8 @@ static __global__ void tokens_geometry_kernel_(u64r1_view_t reservoir_offsets, u
 
 /**
  *  @brief The gather-pack: each CTA copies its document's bytes as token ids — a byte @b is a token
- *      in the 256-entry vocabulary — from the reservoir column into the batch's token rectangle at the
- *      geometry's placement, threads striding the columns.
+ *      in the 256-entry vocabulary — from the reservoir column into the batch's token rectangle at
+ *      the geometry's placement, threads striding the columns.
  *
  *  __grid_size__ @c [documents,1,1] ; a PAD segment (zero length) exits immediately.
  */
@@ -133,8 +134,8 @@ expected_t ul::pack_tokens(column_view_t texts, u64r1_view_t elements, b8r1_view
     return packed;
 }
 
-/** The format-agnostic pack: draw the whole fill's rows over @p reservoir_column on the GPU
- *  (a keyed permutation of @p pool_rows , without replacement) and pack @b every batch from it. Both
+/** The format-agnostic pack: draw the whole fill's rows over @p reservoir_column on the GPU (a
+ *  keyed permutation of @p pool_rows , without replacement) and pack @b every batch from it. Both
  *  the Parquet and JSONL loaders share this once they hold a decoded reservoir — only how the
  *  reservoir is obtained differs (a footer-known Parquet read vs a JSONL decode + concat). A pure
  *  enqueue on @p gpu_stream . */
@@ -182,7 +183,8 @@ expected<tokens_loader_parquet_t> tokens_loader_parquet_t::make(gpu_direct_stora
                                                                 sz::string_view_t path_or_glob, u64_t seed) noexcept {
     using result_t = expected<tokens_loader_parquet_t>;
 
-    // Expand the glob (or a plain path) into the dataset's sorted absolute shard paths — POSIX glob(3).
+    // Expand the glob (or a plain path) into the dataset's sorted absolute shard paths
+    // — POSIX glob(3).
     auto paths = expand_glob(path_or_glob);
     if (!paths) return result_t::fail(std::move(paths));
 
@@ -267,7 +269,8 @@ expected<tokens_loader_jsonl_t> tokens_loader_jsonl_t::make(gpu_direct_storage_s
                                                             sz::string_view_t path_or_glob, u64_t seed) noexcept {
     using result_t = expected<tokens_loader_jsonl_t>;
 
-    // Expand the glob (or a plain path) into the dataset's sorted absolute shard paths — POSIX readdir.
+    // Expand the glob (or a plain path) into the dataset's sorted absolute shard paths
+    // — POSIX readdir.
     auto paths = expand_glob(path_or_glob);
     if (!paths) return result_t::fail(std::move(paths));
 
@@ -276,7 +279,8 @@ expected<tokens_loader_jsonl_t> tokens_loader_jsonl_t::make(gpu_direct_storage_s
     loader.absolute_paths_ = std::move(paths.value_);
     loader.seed_ = seed;
 
-    // No footer — weigh files by byte size (POSIX stat), a running prefix for the weighted file draw.
+    // No footer — weigh files by byte size (POSIX stat), a running prefix for the
+    // weighted file draw.
     if (expected_t weighed = weigh_by_bytes_(loader.absolute_paths_, loader.byte_prefix_, loader.reservoir_); !weighed)
         return result_t::fail(std::move(weighed));
     return result_t {std::move(loader)};
@@ -296,8 +300,8 @@ expected_t tokens_loader_jsonl_t::fill(gpu_stream_t &gpu_stream, tokens_base_loa
     std::size_t const total_bytes = byte_prefix_[shard_count];
     constexpr splitmix64_hash_t hash {};
 
-    // Pick distinct files weighted by BYTE size (JSONL has no footer), decoding each until the pooled
-    // rows cover the fill — never fewer than two, unless the whole dataset is one file.
+    // Pick distinct files weighted by BYTE size (JSONL has no footer), decoding each until the
+    // pooled rows cover the fill — never fewer than two, unless the whole dataset is one file.
     st::basic_vector<jsonl_file_t> parts;
     st::basic_vector<std::size_t> picked_shards;
     std::size_t pooled_rows = 0;
@@ -333,7 +337,8 @@ expected<tokens_loader_csv_t> tokens_loader_csv_t::make(gpu_direct_storage_sessi
                                                         sz::string_view_t path_or_glob, u64_t seed) noexcept {
     using result_t = expected<tokens_loader_csv_t>;
 
-    // Expand the glob (or a plain path) into the dataset's sorted absolute shard paths — POSIX readdir.
+    // Expand the glob (or a plain path) into the dataset's sorted absolute shard paths
+    // — POSIX readdir.
     auto paths = expand_glob(path_or_glob);
     if (!paths) return result_t::fail(std::move(paths));
 
@@ -342,7 +347,8 @@ expected<tokens_loader_csv_t> tokens_loader_csv_t::make(gpu_direct_storage_sessi
     loader.absolute_paths_ = std::move(paths.value_);
     loader.seed_ = seed;
 
-    // No footer — weigh files by byte size (POSIX stat), a running prefix for the weighted file draw.
+    // No footer — weigh files by byte size (POSIX stat), a running prefix for the
+    // weighted file draw.
     if (expected_t weighed = weigh_by_bytes_(loader.absolute_paths_, loader.byte_prefix_, loader.reservoir_); !weighed)
         return result_t::fail(std::move(weighed));
     return result_t {std::move(loader)};
@@ -361,8 +367,8 @@ expected_t tokens_loader_csv_t::fill(gpu_stream_t &gpu_stream, tokens_base_loade
     std::size_t const total_bytes = byte_prefix_[shard_count];
     constexpr splitmix64_hash_t hash {};
 
-    // Pick distinct files weighted by BYTE size (CSV has no footer), decoding each until the pooled rows
-    // cover the fill — never fewer than two, unless the whole dataset is one file.
+    // Pick distinct files weighted by BYTE size (CSV has no footer), decoding each until the pooled
+    // rows cover the fill — never fewer than two, unless the whole dataset is one file.
     st::basic_vector<csv_file_t> parts;
     st::basic_vector<std::size_t> picked_shards;
     std::size_t pooled_rows = 0;

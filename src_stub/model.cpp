@@ -2,12 +2,13 @@
  *  @file src_stub/model.cpp
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief A stand-in for the @c uform_model_* C ABI: any readable file or buffer loads as a model of 64
- *      dimensions and a context of 512 tokens.
+ *  @brief A stand-in for the @c uform_model_* C ABI: any readable file or buffer loads as a model
+ *      of 64 dimensions and a context of 512 tokens.
  *
- *  Nothing is parsed, so a binding can exercise loading, describing and freeing with any bytes it has at
- *  hand. The checkpoint is read in full and closed, as the engine reads it, and its length is what the
- *  model reports holding. Only the RAM verbs answer; the VRAM ones refuse as a build without GPUs does.
+ *  Nothing is parsed, so a binding can exercise loading, describing and freeing with any bytes it
+ *  has at hand. The checkpoint is read in full and closed, as the engine reads it, and its length
+ *  is what the model reports holding. Only the RAM verbs answer; the VRAM ones refuse as a build
+ *  without GPUs does.
  */
 #include <cstdio> // `std::fopen`, `std::fread`, `std::fclose`
 
@@ -23,7 +24,8 @@ static bool reject_quantization(uform_scalar_t quantization, uform_outcome_t *ou
                      uform_status_unsupported_k, "Blocks run in bf16 or e4m3 only", outcome);
 }
 
-/** Reads the whole file at @p path, answering its length, or zero once @p outcome records why not. */
+/** Reads the whole file at @p path, answering its length, or zero once @p outcome
+ *  records why not. */
 static std::size_t read_whole_file(uform_bytes_view_t path, uform_outcome_t *outcome) {
     std::string const terminated(as_text(path));
     std::FILE *const file = terminated.empty() ? nullptr : std::fopen(terminated.c_str(), "rb");
@@ -39,8 +41,8 @@ static std::size_t read_whole_file(uform_bytes_view_t path, uform_outcome_t *out
     return length;
 }
 
-/** Publishes a model of @p memory_usage bytes into @p output, once the handler, told of its one tensor, lets
- *  the load finish. */
+/** Publishes a model of @p memory_usage bytes into @p output, once the handler, told of its one
+ *  tensor, lets the load finish. */
 static void publish_model(uform_model_t *output, uform_scalar_t quantization, std::size_t memory_usage,
                           uform_progress_t progress, uform_outcome_t *outcome) {
     if (reject_if(!progress_ticks_t {progress, 1}.carry_on(1), uform_status_cancelled_k,

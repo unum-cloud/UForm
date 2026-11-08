@@ -10,16 +10,17 @@
  *  @b zero-copy @ref unum::uform::loaders::column_view_t borrows. No host bounce, no Apache Arrow,
  *  no bespoke tape — cuDF is a required dependency, and its owned columns are the tape.
  *
- *  A file's payload — the concatenated bytes of every row of a column — is borrowed in place from the
- *  owned cuDF table, never copied out. cuDF emits 32- or 64-bit @b signed offsets; the reader casts them
- *  once to unsigned @c u64_t and keeps that column alive alongside the table, so every @c column
- *  view carries 64-bit unsigned offsets and nothing downstream meets a 32-bit or a signedness
- *  boundary. @c string and @c list<uint8> columns both flatten to the same @c (bytes, offsets)
- *  shape, so text documents and media blobs come back through one interface.
+ *  A file's payload — the concatenated bytes of every row of a column — is borrowed in place from
+ *  the owned cuDF table, never copied out. cuDF emits 32- or 64-bit @b signed offsets; the reader
+ *  casts them once to unsigned @c u64_t and keeps that column alive alongside the table, so every
+ *  @c column view carries 64-bit unsigned offsets and nothing downstream meets a 32-bit or a
+ *  signedness boundary. @c string and @c list<uint8> columns both flatten to the same @c (bytes,
+ *  offsets) shape, so text documents and media blobs come back through one interface.
  *
- *  cuDF and RMM throw and allocate freely; that is confined to @c dataset_shards.cpp behind an exception
- *  firewall, and the cuDF types never cross this header — they live behind a @c std::unique_ptr pimpl,
- *  so ownership is RAII end to end with no hand-rolled @c new / @c delete .
+ *  cuDF and RMM throw and allocate freely; that is confined to @c dataset_shards.cpp behind an
+ *  exception firewall, and the cuDF types never cross this header — they live behind a
+ *  @c std::unique_ptr pimpl, so ownership is RAII end to end with no hand-rolled @c new /
+ *  @c delete .
  */
 #pragma once
 
@@ -38,9 +39,9 @@ namespace unum::uform::loaders {
 using namespace unum::uform::utilities;
 
 /** A column of byte strings: every element's bytes back to back with @c elements+1 terminator-free
- *  @c u64_t offsets — element @c i is the full @c [offsets[i],offsets[i+1]) span. Both text ( @c string )
- *  and media ( @c list<uint8> ) columns arrive as this, the payload device-resident; the loaders re-view
- *  it with host offsets to slice it on the host. */
+ *  @c u64_t offsets — element @c i is the full @c [offsets[i],offsets[i+1]) span. Both text (
+ *  @c string ) and media ( @c list<uint8> ) columns arrive as this, the payload device-resident;
+ *  the loaders re-view it with host offsets to slice it on the host. */
 struct column_view_t {
 
     /** Every element's bytes, back to back. */
@@ -73,7 +74,7 @@ struct parquet_length_metadata_t {
     st::basic_vector<std::size_t> group_complete_rows {};
 };
 
-/** The device bytes a fill's reservoir can take outside the arena, @c fixed_bytes+rows·row_bytes
+/** The device bytes a fill's reservoir can take outside the arena, @c fixed_bytes+rows · row_bytes
  *  for a fill of @c rows rows. A fill draws row groups while its rows fall short, then at most one
  *  more for a second shard, so it reads at most two groups past what its rows need. Every byte
  *  counts thrice, as cuDF holds the compressed chunks, the decompressed pages and the decoded
@@ -113,9 +114,9 @@ struct row_group_draw_t {
     /** Reserve every fill's pick storage for at most @p groups row groups, after the last shard. */
     [[nodiscard]] expected_t reserve(std::size_t groups) noexcept;
 
-    /** Draw distinct groups keyed by @p seed , @p step , @p rank and @p salt until they hold
-     *  @p rows complete rows from at least @p floor_shards shards, or every group is drawn;
-     *  allocates nothing. */
+    /** Draw distinct groups keyed by @p seed , @p step , @p rank and @p salt until they
+     *  hold @p rows complete rows from at least @p floor_shards shards, or every group is
+     *  drawn; allocates nothing. */
     [[nodiscard]] expected_t draw(u64_t seed, u64_t step, std::size_t rank, u64_t salt, std::size_t rows,
                                   std::size_t floor_shards) noexcept;
 
@@ -142,12 +143,12 @@ struct row_group_draw_t {
     /** Each shard's drawable row groups by their index within the shard, shard by shard. */
     st::basic_vector<u32_t> drawable_groups_ {};
 
-    /** @b [groups+1] cumulative complete rows over @c drawable_groups_ , the weighted search
-     *  table. */
+    /** @b [groups+1] cumulative complete rows over @c drawable_groups_ , the
+     *  weighted search table. */
     st::basic_vector<std::size_t> group_prefix_ {};
 
-    /** The last fill's drawn group IDs, then its picked shards, paths and their group tape, all
-     *  reserved once. */
+    /** The last fill's drawn group IDs, then its picked shards, paths and their group tape,
+     *  all reserved once. */
     st::basic_vector<u32_t> drawn_ {};
     st::basic_vector<u32_t> picked_shards_ {};
     st::basic_vector<sz::string_view_t> picked_paths_ {};
@@ -155,10 +156,10 @@ struct row_group_draw_t {
     st::basic_vector<u32_t> picked_groups_ {};
 };
 
-/** One Parquet shard's requested columns, decoded and owned on device. Move-only; the cuDF
- *  table (and any widened-offset columns) it owns free through RAII when the file is destroyed, so
- *  a file outlives the @ref make call that produced it for as long as its @c column views are
- *  read. A default-constructed / moved-from file is empty ( @c columns()==0 ). */
+/** One Parquet shard's requested columns, decoded and owned on device. Move-only; the cuDF table
+ *  (and any widened-offset columns) it owns free through RAII when the file is destroyed, so a file
+ *  outlives the @ref make call that produced it for as long as its @c column views are read. A
+ *  default-constructed / moved-from file is empty ( @c columns()==0 ). */
 struct parquet_file_t {
 
     parquet_file_t() noexcept;
@@ -169,9 +170,9 @@ struct parquet_file_t {
     ~parquet_file_t();
 
     /**
-     *  @brief Decode @p columns of the Parquet shard at @p path into device memory on @p stream — cuDF
-     *      reads only those columns' chunks over KvikIO / GDS and decodes on the GPU. @p storage is the
-     *      configured storage session, proof the GDS path is set up.
+     *  @brief Decode @p columns of the Parquet shard at @p path into device memory on @p stream —
+     *      cuDF reads only those columns' chunks over KvikIO / GDS and decodes on the GPU.
+     *      @p storage is the configured storage session, proof the GDS path is set up.
      *
      *  @param[in] storage The configured storage session.
      *  @param[in] path The Parquet shard to read.
@@ -210,8 +211,8 @@ struct parquet_file_t {
 
     /** Column @p index 's leaf bytes: element → bytes. A flat @c string / @c list<uint8> column
      *  has one element per row (element @c i is row @c i ); a nested @c list<string> column lays
-     *  every row's strings back to back, so it has more elements than rows — @ref groups maps rows
-     *  to them. */
+     *  every row's strings back to back, so it has more elements than rows — @ref groups maps
+     *  rows to them. */
     [[nodiscard]] column_view_t column(std::size_t index) const noexcept;
 
     /** Column @p index 's row → element grouping: row @c r owns the leaf elements in
@@ -242,8 +243,9 @@ struct jsonl_file_t {
     ~jsonl_file_t();
 
     /** Decode @p field of the JSONL shard at @p path — one JSON object per line — into device
-     *  memory on @p stream over KvikIO / GDS. JSONL carries no footer, so a shard is always decoded
-     *  to learn its rows; @ref file_size_bytes is the cheap size the loader draws files by instead. */
+     *  memory on @p stream over KvikIO / GDS. JSONL carries no footer, so a shard is always
+     *  decoded to learn its rows; @ref file_size_bytes is the cheap size the loader draws
+     *  files by instead. */
     [[nodiscard]] static expected<jsonl_file_t> make(gpu_direct_storage_session_t const &storage,
                                                      sz::string_view_t path, sz::string_view_t field,
                                                      gpu_stream_t &stream) noexcept;
@@ -257,8 +259,8 @@ struct jsonl_file_t {
     [[nodiscard]] std::size_t rows() const noexcept;
 
     /** The chosen field's leaf bytes and offsets — the same shape
-     *  @ref unum::uform::loaders::parquet_file_t::column hands out, so the pack kernels are
-     *  identical. */
+     *  @ref unum::uform::loaders::parquet_file_t::column hands out, so the pack
+     *  kernels are identical. */
     [[nodiscard]] column_view_t column() const noexcept;
 
     /** Row → element grouping when @p field is a JSON array of strings; empty for a scalar
@@ -271,7 +273,8 @@ struct jsonl_file_t {
     std::unique_ptr<state_t> state_;
 };
 
-/** Whether a CSV shard's row 0 names its columns, or every row is data and columns are positional. */
+/** Whether a CSV shard's row 0 names its columns, or every row is data and
+ *  columns are positional. */
 enum class csv_header_t : bool { positional_k, named_k };
 
 /** One CSV shard's chosen column, decoded and owned on device — the CSV sibling of
@@ -289,10 +292,10 @@ struct csv_file_t {
     csv_file_t &operator=(csv_file_t &&) noexcept;
     ~csv_file_t();
 
-    /** Decode @p column of the CSV shard at @p path into device memory on @p stream over KvikIO / GDS.
-     *  @p delimiter is the field separator; @p header says whether row 0 names the columns, and when
-     *  positional, @p column is a 0-based index string. CSV carries no footer, so a shard is always decoded
-     *  to learn its rows; @ref file_size_bytes is the loader's cheap weight. */
+    /** Decode @p column of the CSV shard at @p path into device memory on @p stream over KvikIO /
+     *  GDS. @p delimiter is the field separator; @p header says whether row 0 names the columns,
+     *  and when positional, @p column is a 0-based index string. CSV carries no footer, so a shard
+     *  is always decoded to learn its rows; @ref file_size_bytes is the loader's cheap weight. */
     [[nodiscard]] static expected<csv_file_t> make(gpu_direct_storage_session_t const &storage, sz::string_view_t path,
                                                    sz::string_view_t column, char delimiter, csv_header_t header,
                                                    gpu_stream_t &stream) noexcept;
@@ -305,8 +308,8 @@ struct csv_file_t {
     [[nodiscard]] std::size_t rows() const noexcept;
 
     /** The chosen column's leaf bytes and offsets — the same shape
-     *  @ref unum::uform::loaders::parquet_file_t::column hands out, so the pack kernels are
-     *  identical. */
+     *  @ref unum::uform::loaders::parquet_file_t::column hands out, so the pack
+     *  kernels are identical. */
     [[nodiscard]] column_view_t column() const noexcept;
 
     /** Empty — a CSV column is a flat string, so row @c r @b is element @c r . */

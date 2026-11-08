@@ -106,8 +106,8 @@ struct host_relations_t {
     }
 };
 
-/** One GPU's bags as a loader writes them: the bag, role, length, repel weight and key of every
- *  segment. */
+/** One GPU's bags as a loader writes them: the bag, role, length, repel weight and key
+ *  of every segment. */
 struct host_bags_t {
     std::vector<u32_t> bags, lengths;
     std::vector<segment_role_t> roles;
@@ -120,8 +120,8 @@ struct host_bags_t {
         keys.push_back(key);
     }
 
-    /** Relate @c [first,first+count) of these segments as one GPU's rows over all of them as the
-     *  world. */
+    /** Relate @c [first,first+count) of these segments as one GPU's rows over all of them
+     *  as the world. */
     [[nodiscard]] expected_t relate(host_edges_t &edges, u32_t first, u32_t count) const {
         auto const rows = nk::range(first, first + count);
         u32r1_view_t const bag_column = std::span {bags}, length_column = std::span {lengths};
@@ -189,8 +189,8 @@ static f64_t host_loss(f64r2_view_t vertices, f64r2_view_t neighbors, std::span<
 }
 
 /** The Float64 ranked oracle: per anchor row and prefix, every positive's scaled cosine against
- *  every negative's, @c Σ_p Σ_n w_p·w_n·softplus(β·(c_n−c_p))/(Σw_p·Σw_n) , where the bias
- *  cancels. */
+ *  every negative's, @c Σ_p Σ_n w_p · w_n · softplus(β · (c_n − c_p))/(Σw_p · Σw_n) , where
+ *  the bias cancels. */
 static f64_t host_ranked_loss(f64r2_view_t vertices, f64r2_view_t neighbors, std::span<u32_t const> prefixes,
                               host_relations_t const &relations, f64_t beta, std::size_t vertices_per_mesh) {
     std::size_t const num_vertices = vertices.extent(0), num_neighbors = neighbors.extent(0);
@@ -245,8 +245,8 @@ enum class oracle_graph_t : u32_t {
     roles_k = 2,
 };
 
-/** One single-GPU oracle case: run the loss, compare to the host oracle, finite-difference the force on a few
- *  sampled channels, and check captured replays land where the eager run did. */
+/** One single-GPU oracle case: run the loss, compare to the host oracle, finite-difference the
+ *  force on a few sampled channels, and check captured replays land where the eager run did. */
 static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::size_t hidden,
                             std::vector<u32_t> const &prefixes, oracle_graph_t graph, bool with_pad,
                             f32_t ambient_weight, contrastive_pair_loss_form_t form, f32_t inverse_temperature,
@@ -383,9 +383,8 @@ static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::
     // Each cell's softplus stays under 2 at unit β and zero bias, so repel-only rows stay bounded.
     suite.check(device_loss < 2.0f * 1.5f * f32_t(num_vertices), "loss {:.6f} stays bounded by its cells", device_loss);
 
-    // Finite-difference force check on a few sampled channels, as one vector against its own
-    // norm, so a small true force cannot hide under an absolute floor: (L(x+h) - L(x-h)) / 2h
-    // within 1%.
+    // Finite-difference force check on a few sampled channels, as one vector against its own norm,
+    // so a small true force cannot hide under an absolute floor: (L(x+h) - L(x-h)) / 2h within 1%.
     std::vector<f64_t> host_grad(scalars);
     cuMemcpyDtoH(staging.data(), device_address(grad), scalars * sizeof(nk_bf16_t));
     if (!widen_from_bf16(staging, host_grad)) return suite.check(false, "gradient widening failed");
@@ -400,7 +399,8 @@ static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::
         if (!narrow_to_bf16(plus, staging) || !narrow_to_bf16(minus, staging))
             return suite.check(false, "perturbation rounding failed");
         f64_t const numeric = (oracle_of(plus) - oracle_of(minus)) / (plus[index] - minus[index]);
-        // The full derivative sums the row-side (bf16 output) and column-side (f32 subgraph) forces.
+        // The full derivative sums the row-side (bf16 output) and column-side
+        // (f32 subgraph) forces.
         f64_t const analytic = host_grad[index] + host_column[index];
         error_squares += (numeric - analytic) * (numeric - analytic), numeric_squares += numeric * numeric;
     }
@@ -551,8 +551,8 @@ static void run_negative_cases(test_suite_t &suite) {
     cuCtxPopCurrent(nullptr);
 }
 
-/** One loss call's three outputs read back: the loss summand and the first group's log-β and bias
- *  gradients. */
+/** One loss call's three outputs read back: the loss summand and the first group's log-β
+ *  and bias gradients. */
 struct loss_readout_t {
     f64_t loss = 0.0, log_inverse_temperature_grad = 0.0, bias_grad = 0.0;
 };
@@ -858,8 +858,8 @@ static void run_distributed_case(test_suite_t &suite) {
                 analytic);
 }
 
-/** The cross-domain tier: one process per multimem_domain, GDAKI gather + all-reduce over the
- *  local HCAs, verified against the same global Float64 oracle each process computes independently.
+/** The cross-domain tier: one process per multimem_domain, GDAKI gather + all-reduce over the local
+ *  HCAs, verified against the same global Float64 oracle each process computes independently.
  *  Activated by UFORM_HOST_DOMAIN_INDEX in the environment. */
 static void run_cross_domain_case(test_suite_t &suite) {
 #if !defined(UFORM_WITH_INFINIBAND)
@@ -946,7 +946,8 @@ static void run_cross_domain_case(test_suite_t &suite) {
             return suite.check(false, "cross-domain sync on GPU {}: result {}", rank, static_cast<int>(synchronized));
     }
 
-    // Combine the two domains' loss sums over the mesh exchange; each process checks the global oracle.
+    // Combine the two domains' loss sums over the mesh exchange; each process checks
+    // the global oracle.
     f64_t domain_loss = 0.0;
     {
         cuCtxPushCurrent(streams[0].context());
@@ -999,11 +1000,12 @@ static void run_cross_domain_case(test_suite_t &suite) {
 }
 
 /** The FP64 attention-pool + head parity gate: seed a tiny text tower with keyed weights, run the
- *  contrastive forward over a fabricated ragged batch (one PAD segment included — the historical pool
- *  failure mode was PAD masking, never arithmetic), and compare the emitted vertices against a
- *  double-precision host replica of exactly the new math — the softmax pool over the tower's own
- *  final-norm states, then RMSNorm → fc1 → SiLU → fc2. The backward runs the same chain in reverse, and
- *  the pool's own state and query gradients must match the host softmax backward to the BFloat16 floor. */
+ *  contrastive forward over a fabricated ragged batch (one PAD segment included — the historical
+ *  pool failure mode was PAD masking, never arithmetic), and compare the emitted vertices against
+ *  a double-precision host replica of exactly the new math — the softmax pool over the tower's own
+ *  final-norm states, then RMSNorm → fc1 → SiLU → fc2. The backward runs the same chain in
+ *  reverse, and the pool's own state and query gradients must match the host softmax backward to
+ *  the BFloat16 floor. */
 static void run_pool_parity_case(test_suite_t &suite) {
     if (!cuda_devices_visible_(1)) return suite.skip(no_cuda_device_k);
     constexpr u32_t rows_k = 2, segments_k = 4, columns_k = 8, hidden_k = 256, tokens_k = rows_k * columns_k;
@@ -1062,9 +1064,9 @@ static void run_pool_parity_case(test_suite_t &suite) {
         cuMemcpyHtoD(device_address(weights[matrix].weights.data()), staging.data(), scalars * sizeof(nk_bf16_t));
     }
 
-    // A fabricated ragged batch: three live text segments of lengths {8, 5, 2}, a gap token closing the
-    // second row, and one PAD — the batch packer's contract (offsets repeat on PAD, lengths carry the live
-    // counts).
+    // A fabricated ragged batch: three live text segments of lengths {8, 5, 2}, a gap token closing
+    // the second row, and one PAD — the batch packer's contract (offsets repeat on PAD, lengths
+    // carry the live counts).
     auto batch = multimodal_batch_on_gpu_t::make(gpu_arena_alloc<b8_t> {arena.value_}, shape);
     if (!batch) {
         suite.check(false, "pool-parity batch make: {}", batch.description_);
@@ -1082,8 +1084,8 @@ static void run_pool_parity_case(test_suite_t &suite) {
     cuMemcpyHtoD(device_address(batch.value_.segment_modality.data()), host_modality, sizeof(host_modality));
     cuMemcpyHtoD(device_address(batch.value_.tokens.data()), host_tokens.data(), tokens_k * sizeof(token_id_t));
 
-    // Forward with vertices, then read back the tower's own final-norm states — the oracle's input, so
-    // the parity isolates exactly the new pool + head math.
+    // Forward with vertices, then read back the tower's own final-norm states — the oracle's input,
+    // so the parity isolates exactly the new pool + head math.
     bf16r2_tensor_arena_t vertices_tensor =
         bf16r2_tensor_arena_t::uninitialized({segments_k, hidden_k}, gpu_arena_alloc<bf16_t> {arena.value_}).value;
     bf16r2_tensor_arena_t vertices_grad_tensor =
@@ -1204,8 +1206,8 @@ static void run_pool_parity_case(test_suite_t &suite) {
     suite.check(worst < 3e-2,
                 "pool + head forward matches the FP64 oracle to the BFloat16 floor: worst relative {:.3e}", worst);
 
-    // Backward smoke over the same chain: the keyed vertices force, then every pool / head gradient finite
-    // and the query gradient nonzero (the pool actually differentiated).
+    // Backward smoke over the same chain: the keyed vertices force, then every pool / head gradient
+    // finite and the query gradient nonzero (the pool actually differentiated).
     cuMemcpyHtoD(device_address(vertices_grad_tensor.data()), host_force_staging.data(),
                  host_force_staging.size() * sizeof(nk_bf16_t));
     auto propagated = tower.value_.backward(vertices_grad_tensor.view(), bf16r2_view_t {}, batch.value_, stream.value_);
@@ -1228,8 +1230,9 @@ static void run_pool_parity_case(test_suite_t &suite) {
         suite.check(query_grad_energy > 0.0, "the pool query gradient is nonzero");
     }
 
-    // The tower's d(normalized) is overwritten by the block stack's backward before it returns, so a second
-    // pool replays forward + backward over the tower's states and query, into the spent vertices buffer.
+    // The tower's d(normalized) is overwritten by the block stack's backward before it returns,
+    // so a second pool replays forward + backward over the tower's states and query, into the
+    // spent vertices buffer.
     auto pool = tower_pool_t::make(arena.value_, config.block, numerics);
     f32r2_tensor_arena_t states_grad =
         f32r2_tensor_arena_t::uninitialized({tokens_k, hidden_k}, gpu_arena_alloc<f32_t> {arena.value_}).value;
@@ -1283,8 +1286,8 @@ static void run_pool_parity_case(test_suite_t &suite) {
         suite.check(query_widened, "the query gradient widens");
         states_worst /= states_peak;
         query_worst /= query_peak;
-        // NumKong rounds P and dS to BFloat16 for its tensor-core products, and the query gradient lands in
-        // BFloat16: a few 2⁻⁹ unit roundoffs over F32 sums.
+        // NumKong rounds P and dS to BFloat16 for its tensor-core products, and the query gradient
+        // lands in BFloat16: a few 2⁻⁹ unit roundoffs over F32 sums.
         suite.check(states_worst < 1e-2,
                     "pool d(states) matches the FP64 oracle on live rows to the BFloat16 floor: worst relative {:.3e}",
                     states_worst);
@@ -1294,8 +1297,9 @@ static void run_pool_parity_case(test_suite_t &suite) {
                     query_worst);
     }
 
-    // The quarter-precision twin: quantize the same tower and require every live vertex to stay on the
-    // BFloat16 tower's direction — the blocks carry the E4M3 error, the tail is a BFloat16 snapshot.
+    // The quarter-precision twin: quantize the same tower and require every live vertex to
+    // stay on the BFloat16 tower's direction — the blocks carry the E4M3 error, the tail is
+    // a BFloat16 snapshot.
     auto twin = tower.value_.quantize_weights(arena.value_, stream.value_);
     suite.check(static_cast<bool>(twin), "twin quantization: {}", twin.description_);
     if (twin) {
@@ -1324,8 +1328,9 @@ static void run_pool_parity_case(test_suite_t &suite) {
                                         dot(reference, quantized) /
                                             (std::sqrt(dot(reference, reference) * dot(quantized, quantized)) + 1e-30));
             }
-            // Keyed-random weights are the quantizer's worst case (trained weights are smoother), and
-            // this observed 0.979 at depth 1 already beats the R&D's FP8 embedding acceptance gates.
+            // Keyed-random weights are the quantizer's worst case (trained weights are
+            // smoother), and this observed 0.979 at depth 1 already beats the R&D's FP8
+            // embedding acceptance gates.
             suite.check(worst_cosine > 0.95,
                         "twin vertices stay on the BFloat16 tower's direction: worst cosine {:.4f}", worst_cosine);
         }
@@ -1361,10 +1366,10 @@ struct host_tokens_layout_t {
     }
 };
 
-/** The Float64 ranked MaxSim oracle over @p gpus copies of @ref host_tokens_layout_t , whose head
- *  rows sit back to back in @p vectors : @c S(q,d)=mean_t max_s⟨q_t,d_s⟩ , and per query row the
- *  weighted softplus of @c −β(s⁺−s⁻) over its positive and negative pairs, averaged over the live
- *  queries. */
+/** The Float64 ranked MaxSim oracle over @p gpus copies of @ref host_tokens_layout_t , whose
+ *  head rows sit back to back in @p vectors : @c S(q,d)=mean_t max_s⟨q_t,d_s⟩ , and per query
+ *  row the weighted softplus of @c −β(s⁺−s⁻) over its positive and negative pairs, averaged over
+ *  the live queries. */
 static f64_t host_tokens_loss(std::vector<f64_t> const &vectors, std::size_t gpus, host_relations_t const &relations,
                               f64_t beta) {
     using layout_t = host_tokens_layout_t;
@@ -1420,10 +1425,10 @@ static f64_t host_tokens_loss(std::vector<f64_t> const &vectors, std::size_t gpu
     return loss / f64_t(std::max<std::size_t>(live_queries, 1));
 }
 
-/** The per-GPU relation rows of @ref host_tokens_layout_t on GPU @p gpu of @p gpus : the triplet's
- *  attract and hard negative, the multi-positive bag's two positives, and the two-sided segment
- *  attracting the next GPU's first positive while ignoring itself. Appended to @p world as global
- *  rows. */
+/** The per-GPU relation rows of @ref host_tokens_layout_t on GPU @p gpu of @p gpus : the
+ *  triplet's attract and hard negative, the multi-positive bag's two positives, and the two-sided
+ *  segment attracting the next GPU's first positive while ignoring itself. Appended to @p world
+ *  as global rows. */
 static void append_tokens_relations(host_relations_t &world, std::size_t gpu, std::size_t gpus) {
     u32_t const base = u32_t(gpu * host_tokens_layout_t::segments_k);
     u32_t const next = u32_t(((gpu + 1u) % gpus) * host_tokens_layout_t::segments_k);
@@ -1524,8 +1529,8 @@ struct device_tokens_inputs_t {
     return result_t {std::move(inputs)};
 }
 
-/** The tokens loss geometry for @p copies back-to-back layouts on one GPU and @p subgraphs query
- *  tiles. */
+/** The tokens loss geometry for @p copies back-to-back layouts on one GPU and
+ *  @p subgraphs query tiles. */
 [[nodiscard]] static contrastive_tokens_config_t tokens_config_(std::size_t copies, std::size_t subgraphs) noexcept {
     using layout_t = host_tokens_layout_t;
     contrastive_tokens_config_t config;
@@ -1588,8 +1593,8 @@ static void run_tokens_oracle_case(test_suite_t &suite) {
     std::vector<f64_t> gradient(scalars);
     cuMemcpyDtoH(staging.data(), device_address(inputs->token_vectors_grad.data()), scalars * sizeof(nk_bf16_t));
     if (!widen_from_bf16(staging, gradient)) return suite.check(false, "gradient widening failed");
-    // Query tokens of the triplet and the multi-positive bag, tokens of three documents, and the
-    // two-sided segment.
+    // Query tokens of the triplet and the multi-positive bag, tokens of three documents, and
+    // the two-sided segment.
     std::size_t const rows[] = {0, 2, 32, 33, 4, 12, 30, 53, 65};
     for (std::size_t const row : rows)
         for (std::size_t const channel : {std::size_t {3}, std::size_t {17}}) {

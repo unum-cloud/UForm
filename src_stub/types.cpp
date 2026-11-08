@@ -2,12 +2,12 @@
  *  @file src_stub/types.cpp
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief The vocabulary verbs that belong to no modality: outcomes, the deferred queue, executors, arenas,
- *      names, version and capabilities.
+ *  @brief The vocabulary verbs that belong to no modality: outcomes, the deferred queue, executors,
+ *      arenas, names, version and capabilities.
  *
- *  A stand-in dispatches to no kernels, so it reports @c serial wherever a binding asks for capabilities.
- *  Only the RAM executor constructor succeeds: VRAM needs a GPU backend this library never carries, and a
- *  borrowed pool is not wired yet, as in the engine.
+ *  A stand-in dispatches to no kernels, so it reports @c serial wherever a binding asks for
+ *  capabilities. Only the RAM executor constructor succeeds: VRAM needs a GPU backend this library
+ *  never carries, and a borrowed pool is not wired yet, as in the engine.
  */
 #include <algorithm> // `std::find`, `std::count_if`, `std::any_of`, `std::find_if`, `std::stable_partition`
 #include <iterator>  // `std::make_move_iterator`
@@ -20,8 +20,8 @@
 namespace uf = unum::uform;
 using namespace unum::uform;
 
-/** Every call given to any executor that is not yet final, so a wait or a free finds the calls naming its
- *  handle without asking each executor. */
+/** Every call given to any executor that is not yet final, so a wait or a free finds the calls
+ *  naming its handle without asking each executor. */
 struct calls_t {
     std::mutex guard;
 
@@ -65,7 +65,8 @@ bool uf::submit_deferred(call_t call, uform_outcome_t *outcome) {
     return true;
 }
 
-/** Runs @p call, which the caller already listed as running, then delists it and wakes every waiter. */
+/** Runs @p call, which the caller already listed as running, then delists it and
+ *  wakes every waiter. */
 static void run_listed(call_t &call) {
     std::visit([&](auto &arguments) { call.verb(&arguments); }, call.arguments);
     std::lock_guard<std::mutex> lock(calls.guard);

@@ -2,12 +2,13 @@
  *  @file src/types.cpp
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief The verbs of @c types.h: outcomes, executors, arenas, the name tables and the library-wide probes, and the
- *      registry of deferred calls behind every verb.
+ *  @brief The verbs of @c types.h: outcomes, executors, arenas, the name tables and the
+ *      library-wide probes, and the registry of deferred calls behind every verb.
  *
- *  A deferred call waits in its executor's table until something needs its result: a wait on its outcome, a drain,
- *  a blocking call on the same executor, or a free of a handle it names. Whichever thread asks runs it, and every
- *  call held before it on that executor, in submission order.
+ *  A deferred call waits in its executor's table until something needs its result: a wait
+ *  on its outcome, a drain, a blocking call on the same executor, or a free of a handle it
+ *  names. Whichever thread asks runs it, and every call held before it on that executor,
+ *  in submission order.
  */
 #include <cstring> // `std::memcpy` - a listed device's name
 
@@ -24,8 +25,8 @@ thread_local void const *uf::resuming_call = nullptr;
 
 #pragma region Deferred Calls
 
-/** Whether the call in @p call reads or writes @p handle: its outcome, its executor, or a model, arena, mesh or
- *  trainer it names. An output for a handle the call creates holds nothing yet. */
+/** Whether the call in @p call reads or writes @p handle: its outcome, its executor, or a model,
+ *  arena, mesh or trainer it names. An output for a handle the call creates holds nothing yet. */
 static bool deferred_uses(deferred_call_t const &call, void const *handle) noexcept {
     return std::visit(
         [&](auto const &arguments) noexcept {
@@ -44,8 +45,8 @@ static bool deferred_uses(deferred_call_t const &call, void const *handle) noexc
         call.arguments);
 }
 
-/** Holds @p arena for the call whose published outcome is @p call, answering whether it was free or already that
- *  call's; a null arena holds nothing, left for the verb to refuse. */
+/** Holds @p arena for the call whose published outcome is @p call, answering whether it was free or
+ *  already that call's; a null arena holds nothing, left for the verb to refuse. */
 static bool hold_arena(uform_arena_t arena, uform_outcome_t const *call) noexcept {
     if (!arena) return true;
     uform_outcome_t const *holder = nullptr;
@@ -86,7 +87,8 @@ void uf::run_held(uform_executor_t executor, u64_t last) noexcept {
     }
 }
 
-/** Waits until no call @p executor took with a ticket up to @p last still runs on another thread. */
+/** Waits until no call @p executor took with a ticket up to @p last still runs
+ *  on another thread. */
 static void wait_running(uform_executor_handle_t &executor, u64_t last) noexcept {
     for (;;) {
         u64_t seen = 0;
@@ -171,7 +173,8 @@ uform_arena_t uf::claim_arena(uform_arena_t arena, uform_executor_t executor,
 
 #pragma region Executors
 
-/** Threads an executor spawns over @p cores when its caller names none: 7/8 of them, and at least one. */
+/** Threads an executor spawns over @p cores when its caller names none: 7/8 of them, and
+ *  at least one. */
 static std::size_t derived_threads(std::size_t cores) noexcept {
     std::size_t const threads = cores - cores / idle_cores_denominator_k;
     return threads ? threads : 1;
@@ -184,8 +187,8 @@ static bool has_memory_domain(topology_t const &topology, i32_t id) noexcept {
     return false;
 }
 
-/** Copies the NUMA nodes @p ram names into @p domains, every node of @p topology when it names none. False once
- *  @p outcome records why not. */
+/** Copies the NUMA nodes @p ram names into @p domains, every node of @p topology when it names
+ *  none. False once @p outcome records why not. */
 static bool adopt_memory_domains(st::basic_vector<i32_t> &domains, uform_ram_options_t const &ram,
                                  topology_t const &topology, uform_outcome_t *outcome) noexcept {
     if (ram.memory_domains_count && !ram.memory_domains)
@@ -251,9 +254,9 @@ static uform_gpu_vendor_t gpu_vendor_of(nk::device_kind_t kind) noexcept {
     return kind == nk::device_kind_t::cuda_k ? uform_gpu_vendor_nvidia_k : uform_gpu_vendor_amd_k;
 }
 
-/** Fills @p description of @p kind 's device @p vendor_ordinal from its driver and answers the
- *  class its architecture numbers name; unknown for a vendor this build lacks or a runtime that
- *  refuses. */
+/** Fills @p description of @p kind 's device @p vendor_ordinal from its driver and answers
+ *  the class its architecture numbers name; unknown for a vendor this build lacks or a
+ *  runtime that refuses. */
 static gpu_class_t describe_gpu(nk::device_kind_t kind, std::size_t vendor_ordinal,
                                 ue::device_description_t &description) noexcept {
     bool const described = kind == nk::device_kind_t::cuda_k
@@ -729,7 +732,8 @@ UFORM_EXPORT void uform_version(int *major, int *minor, int *patch) {
     *major = UFORM_VERSION_MAJOR, *minor = UFORM_VERSION_MINOR, *patch = UFORM_VERSION_PATCH;
 }
 
-/** The release tooling rewrites the literal in place, pre-release suffix included, as it does the macros. */
+/** The release tooling rewrites the literal in place, pre-release suffix included, as it
+ *  does the macros. */
 UFORM_EXPORT char const *uform_version_name(void) { return "4.0.0-rc.1"; }
 
 UFORM_EXPORT char const *uform_capabilities_compiled(void) {

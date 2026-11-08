@@ -27,7 +27,8 @@
 using namespace unum::uform::utilities;
 using namespace unum::uform::test;
 
-/** Reservation ceiling of the probe arena — roomy enough for the bump tail plus the heap-like range. */
+/** Reservation ceiling of the probe arena — roomy enough for the bump tail plus
+ *  the heap-like range. */
 inline constexpr std::size_t probe_reserve_bytes_k = 64ull * 1024 * 1024;
 
 /** The heap-like registrable range — sized like the optimizer's world-gradient heap, and ending
@@ -82,8 +83,8 @@ static void probe_gpudirect_(test_suite_t &suite, int) noexcept { suite.skip("bu
 #endif
 
 /**
- *  @brief When the mesh contract names an exchange directory, prove it is writable from this node by
- *      creating and removing a probe file.
+ *  @brief When the mesh contract names an exchange directory, prove it is writable from this node
+ *      by creating and removing a probe file.
  *  @param[in,out] suite The probe suite the check reports into.
  */
 static void probe_exchange_directory_(test_suite_t &suite) noexcept {

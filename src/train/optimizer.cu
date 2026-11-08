@@ -18,8 +18,8 @@ using namespace unum::uform::train;
 using namespace unum::uform::utilities;
 
 /** Read one gradient scalar at @p row , @p column : the reduced Float32 world sum when present —
- *  through a rank-2 view over this state's block of the packed world tape — the local BFloat16 buffer
- *  otherwise, read straight through its rank-2 handle. */
+ *  through a rank-2 view over this state's block of the packed world tape — the local BFloat16
+ *  buffer otherwise, read straight through its rank-2 handle. */
 [[nodiscard]] __device__ inline f32_t adafactor_gradient_(adafactor_state_t const &state, f32r1_view_t reduced,
                                                           u32_t row, u32_t column) noexcept {
     if (!reduced.empty()) {
@@ -102,10 +102,10 @@ static __global__ void adafactor_scale_kernel_(adafactor_state_t state, f32r1_vi
     f32_t const row_mean = adafactor_row_mean_(state, moments);
     f32_t thread_update_energy = 0.0f;
     for (u32_t column = threadIdx.x; column < cols; column += blockDim.x) {
-        // Divide before multiplying: a zero gradient leaves both moments at (1-beta2)*epsilon1 ~ 1e-33, and
-        // the raw r*c product underflows Float32 to zero - rsqrtf(0) is Inf and 0*Inf poisons the whole
-        // matrix with NaN. The paper's own normalization (r/mean(r))*c keeps every factor representable, so
-        // a zero-gradient step is a clean no-op.
+        // Divide before multiplying: a zero gradient leaves both moments at (1-beta2)*epsilon1 ~
+        // 1e-33, and the raw r*c product underflows Float32 to zero - rsqrtf(0) is Inf and 0*Inf
+        // poisons the whole matrix with NaN. The paper's own normalization (r/mean(r))*c keeps
+        // every factor representable, so a zero-gradient step is a clean no-op.
         f32_t const variance = moments[state.row_moment_offset + row] / row_mean *
                                moments[state.column_moment_offset + column];
         f32_t const gradient = adafactor_gradient_(state, reduced_gradients, row, column);
@@ -125,8 +125,8 @@ static __global__ void adafactor_scale_kernel_(adafactor_state_t state, f32r1_vi
 }
 
 /**
- *  @brief Apply the clipped update @c W -= @c lr·scale·G/√v , or its running mean under @p beta1
- *      divided by @p first_moment_correction when @p first_moments are kept.
+ *  @brief Apply the clipped update @c W -= @c lr · scale · G/√v , or its running mean under
+ *      @p beta1 divided by @p first_moment_correction when @p first_moments are kept.
  *
  *  The update lands through the Float32 master for vector weights (the norm scales) and straight
  *  into BFloat16 otherwise, rounded stochastically under @p rounding_key .
@@ -182,10 +182,10 @@ static __global__ void adafactor_apply_kernel_(adafactor_state_t state, f32r1_vi
  *      peer tier's fixed-order serial fold over this consumer's window at @p shard_begin ; the
  *      switch tier's fused loads live in @c multimem_switch.cu .
  *
- *  The result is scaled by @p world_scale , the @c 1/gpus_per_colocated_domain that turns the world @b sum
- *  into the world @b mean : the learning-rate semantics stay world-size-invariant, and the cross-domain
- *  all-reduce of domain terms each pre-scaled by @c 1/world sums to exactly the world mean (the scale is
- *  linear, so applying it before or after the sum is the same value).
+ *  The result is scaled by @p world_scale , the @c 1/gpus_per_colocated_domain that turns the world
+ *  @b sum into the world @b mean : the learning-rate semantics stay world-size-invariant, and the
+ *  cross-domain all-reduce of domain terms each pre-scaled by @c 1/world sums to exactly the world
+ *  mean (the scale is linear, so applying it before or after the sum is the same value).
  *  __grid_size__ grid-stride; no dynamic shared memory.
  */
 static __global__ void adafactor_reduce_gradient_peer_kernel_(multimem_member_t member, f32r1_span_t destination,
@@ -222,8 +222,8 @@ static __global__ void adafactor_reduce_gradient_peer_kernel_(multimem_member_t 
                             static_cast<u32_t>(domain.tier()));
 }
 
-/** Enqueue the seeding of @p state 's Float32 master inside @p masters from its live BFloat16
- *  weights. */
+/** Enqueue the seeding of @p state 's Float32 master inside @p masters from its
+ *  live BFloat16 weights. */
 [[nodiscard]] static expected_t seed_master_(adafactor_state_t const &state, f32r1_tensor_arena_t &masters,
                                              gpu_numerics_t const &numerics, gpu_stream_t &stream) noexcept {
     std::size_t const cols = state.weights.extent(1);
@@ -423,8 +423,8 @@ expected<distributed_adafactor_t> distributed_adafactor_t::make(
             if (!optimizer.ranks_[rank].reduced)
                 return result_t::fail(status_t::bad_alloc_k, "reduced-gradient allocation failed (rank={})", rank);
         }
-        // The rank's gradient-boundary probes — inert zero handles when the signals channel is dark. A
-        // zero gradient is a legal clean no-op, so every boundary registers as finite-only.
+        // The rank's gradient-boundary probes — inert zero handles when the signals channel is
+        // dark. A zero gradient is a legal clean no-op, so every boundary registers as finite-only.
         auto signal_probe = [&](sz::string_view_t stage, telemetry_probe_t &into) -> expected_t {
             sz::string_t name;
             if (!format_into(name, "adafactor/{}/{}", stage, domain.member_offset() + rank))
@@ -443,8 +443,8 @@ expected<distributed_adafactor_t> distributed_adafactor_t::make(
             return result_t::fail(std::move(probed));
     }
 
-    // The gateway's borrowed world buffer must fit this optimizer's gradient; the unread tail beyond it is
-    // harmless, since the reduce is elementwise.
+    // The gateway's borrowed world buffer must fit this optimizer's gradient; the unread tail
+    // beyond it is harmless, since the reduce is elementwise.
     if (!single_domain && domain.member_offset() == 0) {
         std::size_t const gradient_scalars = optimizer.ranks_[0].state.gradient_scalars();
         if (world_reduce.payload().extent(0) < gradient_scalars)
@@ -534,8 +534,8 @@ expected_t distributed_adafactor_t::world_gradient_step_(std::size_t rank, f32_t
     f32r1_span_t const world_mean {domain_->payload(0).data() + window_.offset, scalars};
     expected_t staged {};
     if (member == 0) {
-        // Each domain stages its sum pre-scaled by 1/world; the elementwise cross-domain sum of those
-        // terms lands exactly on the world mean (the scale is linear either side of the sum).
+        // Each domain stages its sum pre-scaled by 1/world; the elementwise cross-domain sum of
+        // those terms lands exactly on the world mean (the scale is linear either side of the sum).
         f32_t *const world_gradient = world_reduce_->payload().data();
         f32_t const world_scale = 1.0f /
                                   static_cast<f32_t>(domain_->member_count() * world_reduce_->multimem_domain_count());
@@ -555,9 +555,9 @@ expected_t distributed_adafactor_t::world_gradient_step_(std::size_t rank, f32_t
 }
 
 /**
- *  @brief One Adafactor step of the temperature scalars: the full second moment, the RMS clip
- *      over all @b [2·groups] updates, then β in log space and the bias additively — one CTA,
- *      fixed order.
+ *  @brief One Adafactor step of the temperature scalars: the full second moment, the RMS
+ *      clip over all @b [2·groups] updates, then β in log space and the bias additively —
+ *      one CTA, fixed order.
  *
  *  __grid_size__ @c [1,1,1] ; threads stripe the scalars; no dynamic shared memory.
  */

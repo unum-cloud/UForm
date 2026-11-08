@@ -5,11 +5,12 @@
  *  @brief CPython forward passes: text, images, video and audio in, pooled embeddings, per-token
  *      states and token vectors out, one verb per input form, plus calibrated choices over texts.
  *
- *  Every verb runs the same tower and keeps whichever surfaces its `outputs` flags name, from one forward. The
- *  flags decide which of the C output pointers the binding passes, so a surface left out costs nothing past the
- *  final norm. Every verb is written once and reached through three receivers: the model runs it on the calling
- *  thread, an @c On blocks on its executor, and a @c DeferredOn submits it and answers a @c Deferred. The call
- *  owns the tape its inputs were gathered into, or holds the buffers they were lent from, until it is final.
+ *  Every verb runs the same tower and keeps whichever surfaces its `outputs` flags name, from one
+ *  forward. The flags decide which of the C output pointers the binding passes, so a surface left
+ *  out costs nothing past the final norm. Every verb is written once and reached through three
+ *  receivers: the model runs it on the calling thread, an @c On blocks on its executor, and a
+ *  @c DeferredOn submits it and answers a @c Deferred. The call owns the tape its inputs were
+ *  gathered into, or holds the buffers they were lent from, until it is final.
  */
 #include "lib.h"
 
@@ -38,7 +39,8 @@ uform_py_enum_t uform_py_outputs = {.name = "Outputs",
                                     .last = outputs_token_vectors_k,
                                     .spell = spell_outputs};
 
-/** Reads an `Outputs` flag set, defaulting to embeddings alone; returns 0 or -1 with an exception set. */
+/** Reads an `Outputs` flag set, defaulting to embeddings alone; returns 0 or -1 with
+ *  an exception set. */
 static int outputs_from_object(PyObject *object, int *outputs) {
     *outputs = outputs_embeddings_k;
     if (!object) return 0;
@@ -276,7 +278,8 @@ static int encode_traverse(void *erased, visitproc visit, void *arg) {
     return 0;
 }
 
-/** What tells one encode verb from another: how its inputs gather, the report it fills, and how it runs. */
+/** What tells one encode verb from another: how its inputs gather, the report it fills, and
+ *  how it runs. */
 typedef struct encode_verb_t {
     char const *input_name;
     uform_py_element_t element;
@@ -301,7 +304,8 @@ typedef struct encode_common_t {
     uform_progress_t progress;
 } encode_common_t;
 
-/** Binds `(inputs, arena, /, *, outputs, outputs_scalar, progress, progress_steps, stats)`; returns 0 or -1. */
+/** Binds `(inputs, arena, /, *, outputs, outputs_scalar, progress, progress_steps, stats)`; returns
+ *  0 or -1. */
 static int encode_parse(char const *verb, encode_verb_t const *descriptor, PyObject *const *args,
                         Py_ssize_t positional_args_count, PyObject *args_names_tuple, encode_arguments_t *parsed) {
     uform_py_argument_t const arguments[] = {
@@ -319,8 +323,8 @@ static int encode_parse(char const *verb, encode_verb_t const *descriptor, PyObj
 }
 
 /**
- *  @brief Opens the call of @p descriptor on @p self, gathering its inputs, claiming its arena and reading
- *      every field the six C structures share into @p common.
+ *  @brief Opens the call of @p descriptor on @p self, gathering its inputs, claiming its arena and
+ *      reading every field the six C structures share into @p common.
  *  @return The call to fill, or NULL with an exception set.
  */
 static encode_call_t *encode_open(PyObject *self, encode_verb_t const *descriptor, encode_arguments_t const *parsed,

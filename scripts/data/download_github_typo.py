@@ -1,3 +1,10 @@
+"""Download GitHub Typo Corpus: human typo edits (`text` anchor / `correction` positive).
+
+File: scripts/data/download_github_typo.py
+Author: Ash Vardanian
+Date: July 5, 2026
+"""
+
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -5,7 +12,6 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download GitHub Typo Corpus: human typo edits (`text` anchor / `correction` positive)."""
 from acquire import acquire
 
 if __name__ == "__main__":

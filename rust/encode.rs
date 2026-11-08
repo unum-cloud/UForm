@@ -174,8 +174,8 @@ extern "C" {
 /// The surfaces an encode verb keeps from its one forward, named after the C fields they fill;
 /// [`Outputs::default`] keeps the embeddings alone.
 ///
-/// Rust-only; decides which of the C `embeddings`, `states` and `token_vectors` pointers a verb
-/// passes.
+/// Rust-only; decides which of the C `embeddings`, `states` and `token_vectors` pointers
+/// a verb passes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Outputs(u32);
 
@@ -382,7 +382,8 @@ impl From<Scalar> for TextEncodeConfig<'_> {
     }
 }
 
-/// The scalar and the knobs of [`EncodeVerbs::image_encode`]; a bare [`Scalar`] is the whole config.
+/// The scalar and the knobs of [`EncodeVerbs::image_encode`]; a bare [`Scalar`] is
+/// the whole config.
 ///
 /// Mirrors `uform_image_encode_t`.
 pub struct ImageEncodeConfig<'config> {
@@ -407,8 +408,8 @@ impl From<Scalar> for ImageEncodeConfig<'_> {
     }
 }
 
-/// The scalar and the knobs of [`EncodeVerbs::image_encode_pixels`]; a bare [`Scalar`] is the
-/// whole config.
+/// The scalar and the knobs of [`EncodeVerbs::image_encode_pixels`]; a bare [`Scalar`] is
+/// the whole config.
 ///
 /// Mirrors `uform_image_encode_pixels_t`.
 pub struct ImageEncodePixelsConfig<'config> {
@@ -433,7 +434,8 @@ impl From<Scalar> for ImageEncodePixelsConfig<'_> {
     }
 }
 
-/// The scalar and the knobs of [`EncodeVerbs::video_encode`]; a bare [`Scalar`] is the whole config.
+/// The scalar and the knobs of [`EncodeVerbs::video_encode`]; a bare [`Scalar`] is
+/// the whole config.
 ///
 /// Mirrors `uform_video_encode_t`.
 pub struct VideoEncodeConfig<'config> {
@@ -458,7 +460,8 @@ impl From<Scalar> for VideoEncodeConfig<'_> {
     }
 }
 
-/// The scalar and the knobs of [`EncodeVerbs::audio_encode`]; a bare [`Scalar`] is the whole config.
+/// The scalar and the knobs of [`EncodeVerbs::audio_encode`]; a bare [`Scalar`] is
+/// the whole config.
 ///
 /// Mirrors `uform_audio_encode_t`.
 pub struct AudioEncodeConfig<'config> {
@@ -483,8 +486,8 @@ impl From<Scalar> for AudioEncodeConfig<'_> {
     }
 }
 
-/// The scalar and the knobs of [`EncodeVerbs::audio_encode_samples`]; a bare [`Scalar`] is the
-/// whole config.
+/// The scalar and the knobs of [`EncodeVerbs::audio_encode_samples`]; a bare [`Scalar`] is
+/// the whole config.
 ///
 /// Mirrors `uform_audio_encode_samples_t`.
 pub struct AudioEncodeSamplesConfig<'config> {
@@ -543,9 +546,10 @@ impl Accepts<AudioEncodeSamplesConfig<'static>> for Deferring {}
 /// the [`On`](crate::On) that [`Model::on`](crate::Model::on) or
 /// [`Model::deferred`](crate::Model::deferred) makes runs on an executor.
 ///
-/// Every verb takes its inputs, the [`Outputs`] to keep, a config every bare [`Scalar`] converts
-/// into, and last the [`Arena`] its [`Encoded`] result borrows. A blocking receiver answers what
-/// the call produced; a deferring one answers a [`Deferred`](crate::Deferred) and takes owned inputs.
+/// Every verb takes its inputs, the [`Outputs`] to keep, a config every bare [`Scalar`]
+/// converts into, and last the [`Arena`] its [`Encoded`] result borrows. A blocking receiver
+/// answers what the call produced; a deferring one answers a [`Deferred`](crate::Deferred) and
+/// takes owned inputs.
 ///
 /// Rust-only; implemented for every receiver of [`ModelVerbs`].
 pub trait EncodeVerbs<'model>: ModelVerbs<'model> {

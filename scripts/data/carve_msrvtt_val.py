@@ -6,10 +6,9 @@
 # ///
 r"""Carve the standard MSR-VTT 1K test split out of the train_9k parquet.
 
-MSR-VTT ships a canonical held-out test set of 1,000 video clips defined in
-`msrvtt_test_1k.json` (video IDs video7010..video9999, the last 3K of the 10K
-corpus, consistent with the JSFusion / HGR / Frozen-in-Time evaluation
-protocol).  The `train_9k.parquet` repacked shard covers the 9K training
+MSR-VTT ships a canonical held-out test set of 1,000 video clips defined in `msrvtt_test_1k.json`
+(video IDs video7010..video9999, the last 3K of the 10K corpus, consistent with the JSFusion / HGR /
+Frozen-in-Time evaluation protocol). The `train_9k.parquet` repacked shard covers the 9K training
 split; the 1K test set is a *different* (non-overlapping) partition.
 
 This script:
@@ -18,10 +17,9 @@ This script:
 3. Filters to the rows whose ``video_id`` appears in the 1K list.
 4. Writes the result to ``data/msrvtt-captions/test_1k.parquet`` (default).
 
-NOTE: ``train_9k.parquet`` covers video0..video6999 + (parts of 7K split).
-The canonical 1K test clips (video7010..video9999) are NOT in that shard —
-they were repacked separately and the standard protocol evaluates on video IDs
-listed in ``msrvtt_test_1k.json``.  To repack the test videos, call
+NOTE: ``train_9k.parquet`` covers video0..video6999 + (parts of 7K split). The canonical 1K test
+clips (video7010..video9999) are NOT in that shard — they were repacked separately and the standard
+protocol evaluates on video IDs listed in ``msrvtt_test_1k.json``. To repack the test videos, call
 ``repack_msrvtt_to_parquet`` with ``--json msrvtt_test_1k.json``:
 
     uv run scripts/data/repack_msrvtt_to_parquet.py \

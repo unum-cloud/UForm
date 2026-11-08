@@ -2,8 +2,8 @@
  *  @file tools/eval.cpp
  *  @author Ash Vardanian
  *  @date October 21, 2026
- *  @brief The retrieval evaluation binary: text-to-media Recall@K of a checkpoint through the C
- *      interface.
+ *  @brief The retrieval evaluation binary: text-to-media Recall@K of a checkpoint through
+ *      the C interface.
  *
  *  It loads a checkpoint `uform_base --checkpoint` wrote onto the host, encodes each split's
  *  captions and media in batches into pooled embeddings, L2-normalizes them, and prints Recall@1,
@@ -80,8 +80,8 @@ template <typename value_type_>
     return true;
 }
 
-/** Strings end to end with one more offset than strings, as a @c uform_tape_view_t lays them
- *  out. */
+/** Strings end to end with one more offset than strings, as a @c uform_tape_view_t
+ *  lays them out. */
 struct strings_t {
     st::basic_vector<char> bytes {};
     st::basic_vector<std::size_t> offsets {};
@@ -566,8 +566,8 @@ struct choices_t {
     return items ? total / double(items) : 0;
 }
 
-/** The share of items whose highest logit is the target's most likely choice, the same under
- *  every temperature. */
+/** The share of items whose highest logit is the target's most likely choice, the same
+ *  under every temperature. */
 [[nodiscard]] static double top_choice_accuracy_(choices_t const &held_out, std::span<double const> logits) noexcept {
     std::size_t const items = held_out.states.count();
     std::size_t correct = 0;
@@ -751,8 +751,8 @@ int main(int argc, char **argv) {
                                                       .outcome = &outcome,
                                                       .vram = {&device, 1}};
         uform_executor_for_vram(&executor_arguments);
-        // Every call pushes and pops its own context, so copying outputs out needs the device's
-        // made current.
+        // Every call pushes and pops its own context, so copying outputs out needs the
+        // device's made current.
         if (outcome.status == uform_status_success_k &&
             (cuDeviceGet(&handle, device) != CUDA_SUCCESS ||
              cuDevicePrimaryCtxRetain(&encoder.context, handle) != CUDA_SUCCESS ||

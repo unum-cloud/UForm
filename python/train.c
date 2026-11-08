@@ -2,13 +2,13 @@
  *  @file python/train.c
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief CPython training: the mesh a run's processes meet in, the trainer, its keyword-built configuration
- *      structures, and the step and save verbs.
+ *  @brief CPython training: the mesh a run's processes meet in, the trainer, its keyword-built
+ *      configuration structures, and the step and save verbs.
  *
- *  Training is GPU-only, so a trainer runs its verbs blocking on the executor it was created on, and its
- *  receivers name another completion or another executor of the same devices. The configuration arrives as
- *  keyword-built structures mirroring the C ones field by field, so a field left out is zero, which the library
- *  derives as its header documents.
+ *  Training is GPU-only, so a trainer runs its verbs blocking on the executor it was created on,
+ *  and its receivers name another completion or another executor of the same devices. The
+ *  configuration arrives as keyword-built structures mirroring the C ones field by field, so a
+ *  field left out is zero, which the library derives as its header documents.
  */
 #include "lib.h"
 
@@ -186,7 +186,8 @@ uform_py_fields_t MaskingType = {
     sizeof(Masking_fields) / sizeof(*Masking_fields),
 };
 
-/** The index of `matryoshka_dimensions` among the fields of `Contrastive`, which the trainer converts itself. */
+/** The index of `matryoshka_dimensions` among the fields of `Contrastive`, which the
+ *  trainer converts itself. */
 enum { contrastive_matryoshka_k = 0 };
 
 static uform_py_field_t const Contrastive_fields[] = {
@@ -287,7 +288,8 @@ uform_py_fields_t ScheduleType = {
     sizeof(Schedule_fields) / sizeof(*Schedule_fields),
 };
 
-/** The indices of the two paths among the fields of `MeshOptions`, which the bootstrap converts itself. */
+/** The indices of the two paths among the fields of `MeshOptions`, which the
+ *  bootstrap converts itself. */
 enum { mesh_options_directory_k = 3, mesh_options_job_k = 4 };
 
 static uform_py_field_t const MeshOptions_fields[] = {
@@ -384,7 +386,8 @@ static void Mesh_dealloc(Mesh *self) {
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
-/** Reads an optional path field into @p view, keeping its encoding in @p decoded; returns 0 or -1. */
+/** Reads an optional path field into @p view, keeping its encoding in @p decoded; returns
+ *  0 or -1. */
 static int optional_path(PyObject *object, char const *field, uform_bytes_view_t *view, PyObject **decoded) {
     *decoded = NULL;
     if (!object || object == Py_None) return 0;
@@ -534,7 +537,8 @@ typedef struct Trainer {
     /** The @c Executor the trainer was created on, held, which its own verbs block on. */
     PyObject *executor;
 
-    /** The @c Mesh the trainer borrows until it is freed, held, or NULL for a run of one process. */
+    /** The @c Mesh the trainer borrows until it is freed, held, or NULL for a run
+     *  of one process. */
     PyObject *mesh;
 } Trainer;
 
@@ -563,7 +567,8 @@ static void Trainer_dealloc(Trainer *self) {
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
-/** Reads a sequence of positive widths into a @c PyMem array; NULL and zero for None. Returns 0 or -1. */
+/** Reads a sequence of positive widths into a @c PyMem array; NULL and zero for None. Returns
+ *  0 or -1. */
 static int widths_from_object(PyObject *object, char const *field, size_t **widths, size_t *count) {
     *widths = NULL;
     *count = 0;
@@ -704,7 +709,8 @@ release:
     return result;
 }
 
-/** Reads the receiver of a trainer verb: the trainer itself blocks on the executor it was created on. */
+/** Reads the receiver of a trainer verb: the trainer itself blocks on the executor it
+ *  was created on. */
 static int trainer_receiver(PyObject *self, uform_py_receiver_t *receiver) {
     if (uform_py_receiver_from_object(self, &TrainerType, receiver) != 0) return -1;
     if (receiver->target != self) return 0;
@@ -821,7 +827,8 @@ static void edges_release(edges_t *edges) {
     if (edges->weights.obj) PyBuffer_Release(&edges->weights);
 }
 
-/** Acquires @p object as a C-contiguous buffer of @p item_bytes items of format @p format; returns 0 or -1. */
+/** Acquires @p object as a C-contiguous buffer of @p item_bytes items of format @p format; returns
+ *  0 or -1. */
 static int edges_buffer(PyObject *object, char const *field, Py_ssize_t item_bytes, char const *formats,
                         Py_buffer *buffer) {
     if (PyObject_GetBuffer(object, buffer, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT) != 0) return -1;
@@ -832,8 +839,8 @@ static int edges_buffer(PyObject *object, char const *field, Py_ssize_t item_byt
 }
 
 /**
- *  @brief Lends the edge set @p object - an @c Edges or None - over @p count items into @p view, checking every
- *      offset stays inside its ids and every weight pairs with one.
+ *  @brief Lends the edge set @p object - an @c Edges or None - over @p count items into @p view,
+ *      checking every offset stays inside its ids and every weight pairs with one.
  *  @return 0 on success, -1 with an exception set otherwise.
  */
 static int edges_from_object(PyObject *object, char const *field, size_t count, edges_t *edges,
@@ -879,7 +886,8 @@ static int choices_from_objects(PyObject *choices_object, PyObject *targets_obje
     return 0;
 }
 
-/** A @c uform_trainer_step call, the inputs it owns or borrows until it is final, and what it lands. */
+/** A @c uform_trainer_step call, the inputs it owns or borrows until it is final, and
+ *  what it lands. */
 typedef struct step_call_t {
     uform_py_call_t call;
     uform_trainer_step_t arguments;
@@ -937,7 +945,8 @@ static int step_traverse(void *erased, visitproc visit, void *arg) {
 
 static uform_py_verb_t const step_verb = {sizeof(step_call_t), step_submit, step_answer, step_release, step_traverse};
 
-/** Gathers one modality per item into a @c PyMem array of @p count; returns 0 or -1 with an exception set. */
+/** Gathers one modality per item into a @c PyMem array of @p count; returns 0 or -1 with
+ *  an exception set. */
 static int modalities_from_object(PyObject *object, size_t count, uform_modality_t **modalities) {
     PyObject *const sequence = PySequence_Fast(object, "expected a sequence of uform.Modality");
     if (!sequence) return -1;

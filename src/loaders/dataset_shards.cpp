@@ -41,9 +41,10 @@ namespace ul = unum::uform::loaders;
 using namespace unum::uform::utilities;
 using namespace ul;
 
-/** One decoded column's device-resident spans and the cuDF columns that back them — everything
- *  RAII, nothing hand-freed. A shared @b representation (not a shared type) behind both the Parquet
- *  and JSONL readers: the payload and offsets are @c std::span borrows into an owned cuDF buffer. */
+/** One decoded column's device-resident spans and the cuDF columns that back them —
+ *  everything RAII, nothing hand-freed. A shared @b representation (not a shared type) behind
+ *  both the Parquet and JSONL readers: the payload and offsets are @c std::span borrows into
+ *  an owned cuDF buffer. */
 struct column_span_t {
 
     /** cuDF's widened leaf-offset column, owned; the leaf offsets are always cast to @c u64 . */
@@ -108,7 +109,8 @@ struct flat_column_t {
     cudf::column_view groups;
 };
 
-/** The character bytes of the cuDF strings column @p strings — where cuDF's @c char tape becomes bytes. */
+/** The character bytes of the cuDF strings column @p strings — where cuDF's @c char
+ *  tape becomes bytes. */
 [[nodiscard]] static bytes_view_t chars_of_(cudf::strings_column_view const &strings,
                                             rmm::cuda_stream_view stream) noexcept {
     return std::as_bytes(
@@ -128,7 +130,8 @@ struct flat_column_t {
     if (decoded.type().id() == cudf::type_id::LIST) {
         cudf::lists_column_view const list {decoded};
         cudf::column_view const child = list.child();
-        // list<uint8> — a flat media blob: the child bytes are the payload, the list offsets the leaf.
+        // list<uint8> — a flat media blob: the child bytes are the payload, the list
+        // offsets the leaf.
         if (child.type().id() == cudf::type_id::UINT8 || child.type().id() == cudf::type_id::INT8) {
             auto const *payload = static_cast<b8_t const *>(child.head());
             return result_t {flat_column_t {{payload, static_cast<std::size_t>(child.size())}, list.offsets(), {}}};
@@ -140,9 +143,9 @@ struct flat_column_t {
             return result_t {
                 flat_column_t {{payload, static_cast<std::size_t>(child.size()) * sizeof(i32_t)}, list.offsets(), {}}};
         }
-        // list<string> — a nested column (K captions / negatives per row): the string child's chars are
-        // the leaf payload, its offsets the element → bytes level, and the list offsets the row → element
-        // groups.
+        // list<string> — a nested column (K captions / negatives per row): the string child's chars
+        // are the leaf payload, its offsets the element → bytes level, and the list offsets the row
+        // → element groups.
         if (child.type().id() == cudf::type_id::STRING) {
             cudf::strings_column_view const strings {child};
             return result_t {flat_column_t {chars_of_(strings, stream), strings.offsets(), list.offsets()}};
@@ -182,8 +185,8 @@ static void widen_offsets_(cudf::column_view const &offsets, rmm::cuda_stream_vi
 inline constexpr char tar_offset_column_k[] = "tar_byte_offset";
 inline constexpr char tar_length_column_k[] = "tar_byte_length";
 
-/** Decode a footer statistic's little-endian 64-bit integer into @p value ; false when the writer
- *  kept none. */
+/** Decode a footer statistic's little-endian 64-bit integer into @p value ; false when the
+ *  writer kept none. */
 [[nodiscard]] static bool statistic_(auto const &bytes, i64_t &value) noexcept {
     if (!bytes || bytes->size() != sizeof(i64_t)) return false;
     std::memcpy(&value, bytes->data(), sizeof(i64_t));
@@ -197,10 +200,10 @@ inline constexpr char tar_length_column_k[] = "tar_byte_length";
     return format_into(tar, "{}.tar", path);
 }
 
-/** Gather every row's @p extension member into @p payload back to back, one shard at a time: its
- *  sibling tar is read to the device whole, and one batch copies out the members its rows index.
- *  Rows follow the shards in @p paths order, @p rows_per_shard of each, as cuDF concatenates
- *  them. */
+/** Gather every row's @p extension member into @p payload back to back, one shard at a
+ *  time: its sibling tar is read to the device whole, and one batch copies out the members
+ *  its rows index. Rows follow the shards in @p paths order, @p rows_per_shard of each, as
+ *  cuDF concatenates them. */
 [[nodiscard]] static expected<column_span_t> read_tar_members_(
     cudf::column_view byte_offsets, cudf::column_view byte_lengths, sz::string_view_t extension,
     sz::strings_view_t paths, std::span<std::size_t const> rows_per_shard, rmm::cuda_stream_view stream,
@@ -350,8 +353,8 @@ expected_t row_group_draw_t::draw(u64_t seed, u64_t step, std::size_t rank, u64_
     };
     drawn_.clear(), picked_shards_.clear(), picked_paths_.clear(), picked_offsets_.clear(), picked_groups_.clear();
 
-    // Distinct groups accumulate until they hold the rows, then only a fresh shard's group meets
-    // the floor.
+    // Distinct groups accumulate until they hold the rows, then only a fresh shard's group
+    // meets the floor.
     constexpr splitmix64_hash_t hash {};
     std::size_t const floor = std::min(floor_shards, paths_.size());
     std::size_t pooled = 0, shards = 0;
@@ -373,8 +376,8 @@ expected_t row_group_draw_t::draw(u64_t seed, u64_t step, std::size_t rank, u64_
         shards += fresh;
     }
 
-    // Drawable groups number shard-major, so sorted IDs list the shards and each shard's groups
-    // ascending.
+    // Drawable groups number shard-major, so sorted IDs list the shards and each
+    // shard's groups ascending.
     std::sort(drawn_.begin(), drawn_.end());
     for (u32_t const group : drawn_) {
         std::size_t const shard = shard_of(group);
@@ -488,8 +491,8 @@ expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const
             if (!column) return result_t::fail(std::move(column));
             state->columns[index] = std::move(column.value_);
         }
-        // Adopt the table: the borrowed payload / native-offset spans stay valid, now owned by the file,
-        // and free stream-ordered on destruction.
+        // Adopt the table: the borrowed payload / native-offset spans stay valid, now owned by the
+        // file, and free stream-ordered on destruction.
         state->table = std::move(whole);
         return result_t {parquet_file_t {std::move(state)}};
     }
@@ -586,7 +589,8 @@ expected<parquet_length_metadata_t> parquet_file_t::column_metadata(gpu_direct_s
                                                                     sz::string_view_t column) noexcept {
     using result_t = expected<parquet_length_metadata_t>;
     try {
-        // Footer only — no row-group decode: the row count and the column's total uncompressed byte size.
+        // Footer only — no row-group decode: the row count and the column's total
+        // uncompressed byte size.
         cudf::io::parquet_metadata const meta = cudf::io::read_parquet_metadata(
             cudf::io::source_info {std::string {path}}); // vendor-boundary
         std::string const name {column};                 // vendor-boundary
@@ -734,8 +738,8 @@ expected<csv_file_t> csv_file_t::make(gpu_direct_storage_session_t const &, sz::
             return result_t::fail(status_t::device_error_k, "stream drain before the read failed");
         rmm::cuda_stream_view const cudf_stream {stream.get()};
         std::string const name {column}; // vendor-boundary
-        // Read only the wanted column, forced to string so type inference cannot surprise us; KvikIO /
-        // GDS streams the bytes, cuDF decodes on the GPU.
+        // Read only the wanted column, forced to string so type inference cannot surprise us;
+        // KvikIO / GDS streams the bytes, cuDF decodes on the GPU.
         auto options =
             cudf::io::csv_reader_options::builder(cudf::io::source_info {std::string {path}}) // vendor-boundary
                 .delimiter(delimiter)
@@ -809,9 +813,10 @@ expected<st::basic_vector<sz::string_t>> ul::expand_glob(sz::string_view_t path_
     using result_t = expected<st::basic_vector<sz::string_t>>;
 
     // Wildcards may sit in ANY component — the mixture manifests spell mid-path patterns like
-    // `data/*/train/*.parquet` — so the expansion walks the path left to right, forking the running
-    // directory prefixes at every patterned component and matching files at the last one. A forked
-    // branch that lacks a later component simply contributes nothing; only a wholly empty match fails.
+    // `data/*/train/*.parquet` — so the expansion walks the path left to right, forking the
+    // running directory prefixes at every patterned component and matching files at the last one.
+    // A forked branch that lacks a later component simply contributes nothing; only a wholly
+    // empty match fails.
     st::basic_vector<sz::string_view_t> components;
     for (sz::string_view_t component : path_or_glob.split(sz::byteset_t {"/", 1}))
         if (!component.empty() && st::failed(components.push_back(std::move(component))))
@@ -882,7 +887,8 @@ expected<st::basic_vector<sz::string_t>> ul::expand_glob(sz::string_view_t path_
     }
     if (paths.empty()) return result_t::fail(status_t::invalid_argument_k, "no files match {}", path_or_glob);
 
-    // readdir order is filesystem-dependent; sort so the shard order is deterministic across every rank.
+    // readdir order is filesystem-dependent; sort so the shard order is deterministic
+    // across every rank.
     std::sort(paths.begin(), paths.end());
     return result_t {std::move(paths)};
 }

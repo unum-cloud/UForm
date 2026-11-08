@@ -7,12 +7,13 @@
  *
  *  @section trainer_impl_items How caller items reach the mixer
  *
- *  An items step plans every item on the host through the same decoders the encode verbs use, groups items by bag,
- *  and deals the bags round-robin over the devices, each bag whole on one device and each item one row-aligned
- *  segment. The pinned host batches upload to the loaded batches, and the mixer routes them into the replicas'
- *  batches. Under a contrastive objective the mixer's routes are read back, every item's mesh-wide vertex is
- *  resolved, and each device's relations are rebuilt over the vertices it holds, their ids rebased onto the
- *  vertices the referenced items landed on.
+ *  An items step plans every item on the host through the same decoders the encode verbs use,
+ *  groups items by bag, and deals the bags round-robin over the devices, each bag whole on one
+ *  device and each item one row-aligned segment. The pinned host batches upload to the loaded
+ *  batches, and the mixer routes them into the replicas' batches. Under a contrastive objective the
+ *  mixer's routes are read back, every item's mesh-wide vertex is resolved, and each device's
+ *  relations are rebuilt over the vertices it holds, their ids rebased onto the vertices the
+ *  referenced items landed on.
  */
 #include <cmath> // `std::sqrt` — the rows a curved footprint fits
 #include <ctime> // `nanosleep` — the pause between two polls of the exchange directory
@@ -55,8 +56,8 @@ namespace ut = unum::uform::train;
 
 #pragma region Numerics
 
-/** The kernels GPU class @p gpu_class_ trains with, each its products, attention or element-wise
- *  kit's own. */
+/** The kernels GPU class @p gpu_class_ trains with, each its products, attention or
+ *  element-wise kit's own. */
 template <uf::gpu_class_t gpu_class_>
 static gpu_numerics_t gpu_numerics_of() noexcept {
     constexpr nk_capability_t capabilities_k = gpu_class_ == uf::gpu_class_t::unknown_k
@@ -91,8 +92,8 @@ static gpu_numerics_t gpu_numerics_of() noexcept {
     return numerics;
 }
 
-/** The newest NVIDIA class whose kits @p capabilities hold, as a run's processes agree on them
- *  by mask. */
+/** The newest NVIDIA class whose kits @p capabilities hold, as a run's processes agree on
+ *  them by mask. */
 static uf::gpu_class_t nvidia_class_held_(nk_capability_t capabilities) noexcept {
     for (uf::gpu_class_t const gpu_class :
          {uf::gpu_class_t::nvidia_blackwellrtx_k, uf::gpu_class_t::nvidia_blackwell_k, uf::gpu_class_t::nvidia_hopper_k,
@@ -127,13 +128,13 @@ static constexpr u32_t absent_k = std::numeric_limits<u32_t>::max();
     return kept > room ? cursor + room : cursor;
 }
 
-/** One head's @c {λ·Σ, count} summand pair — the currency the ledger's loss rows accumulate. */
+/** One head's @c {λ · Σ, count} summand pair — the currency the ledger's loss rows accumulate. */
 struct summand_pair_t {
     f64_t sum = 0.0;
     f64_t count = 0.0;
 };
 
-/** Read one head's @b [2] @c {λ·Σ, count} summands back to host. Best-effort: a slipped readback
+/** Read one head's @b [2] @c {λ · Σ, count} summands back to host. Best-effort: a slipped readback
  *  reports zeros, never fails the run. Caller holds the stream's context. */
 [[nodiscard]] static summand_pair_t read_summands_(f32r1_tensor_arena_t &summands, gpu_stream_t &stream) noexcept {
     f32r1_tensor_pinned_t staging = f32r1_tensor_pinned_t::uninitialized({2}, pinned_alloc<f32_t> {}).value;
@@ -193,7 +194,7 @@ expected_t mesh_t::make(mesh_t &placed, mesh_options_t const &options, std::span
  *  granularity can't flatten the slope, while the middle one exposes the growth by rows². */
 static constexpr u32_t smaller_probe_rows_k = 1u, middle_probe_rows_k = 4u, larger_probe_rows_k = 16u;
 
-/** A footprint @c fixed+rows·row+rows²·pair in bytes. */
+/** A footprint @c fixed+rows · row+rows² · pair in bytes. */
 struct footprint_fit_t {
     f64_t fixed = 0.0, row = 0.0, pair = 0.0;
 
@@ -238,8 +239,8 @@ struct device_budget_t {
     unsigned int const process = static_cast<unsigned int>(getpid());
     std::size_t held = 0, entries = 0;
     st::basic_vector<nvmlProcessInfo_t> processes;
-    // An MPS client appears in both lists with the same bytes, so the first list naming this
-    // process counts.
+    // An MPS client appears in both lists with the same bytes, so the first list naming
+    // this process counts.
     for (auto const query : {&nvmlDeviceGetComputeRunningProcesses_v3, &nvmlDeviceGetMPSComputeRunningProcesses_v3}) {
         if (entries != 0) break;
         unsigned int count = static_cast<unsigned int>(processes.size());
@@ -257,8 +258,8 @@ struct device_budget_t {
     if (status != NVML_SUCCESS)
         return result_t::fail(status_t::device_error_k, "NVML process query failed (device={}): {}", device,
                               nvmlErrorString(status));
-    // A PID namespace or a driver withholding per-process bytes would read as zero growth and an
-    // unbounded fit.
+    // A PID namespace or a driver withholding per-process bytes would read as zero growth and
+    // an unbounded fit.
     if (entries == 0)
         return result_t::fail(status_t::device_error_k, "NVML lists no bytes for process {} on device {}", process,
                               device);
@@ -420,12 +421,12 @@ struct device_budget_t {
  *  @brief The rows per GPU at @p config 's columns — the configured ones, or the most every device
  *      of every process holds — and the arena reservation they need.
  *
- *  The arena's high-water mark is exact, so it is fitted as @c fixed+rows·row+rows²·pair through
- *  the three probes, each of which also allocates a data source's loaded batch and mixer. Each
- *  device's footprint takes the arena's curvature and is fitted through the smaller and the larger
- *  probe, and the margin is the footprint outside the arena at the larger probe — the decoders'
- *  workspaces, graphs, the symmetric heap — held free once more. The reservation is the arena's
- *  curve one row past the envelope.
+ *  The arena's high-water mark is exact, so it is fitted as @c fixed+rows · row+rows² · pair
+ *  through the three probes, each of which also allocates a data source's loaded batch and mixer.
+ *  Each device's footprint takes the arena's curvature and is fitted through the smaller and the
+ *  larger probe, and the margin is the footprint outside the arena at the larger probe — the
+ *  decoders' workspaces, graphs, the symmetric heap — held free once more. The reservation is the
+ *  arena's curve one row past the envelope.
  *
  *  @par Statuses:
  *  - @c status_t::bad_alloc_k The configured rows do not fit, with the measured numbers.
@@ -979,8 +980,9 @@ telemetry_t trainer_t::telemetry(optimizer_step_t optimizer_step) noexcept {
     telemetry.optimizer_step = optimizer_step;
     std::size_t const gpus = replicas.size();
     if (gpus == 0) return telemetry;
-    // Accumulate every member's summands before the fold — at wide worlds a lead-only reading is a coin flip,
-    // not a statistic. The all-member pairs are also what the ledger's loss rows accumulate.
+    // Accumulate every member's summands before the fold — at wide worlds a lead-only
+    // reading is a coin flip, not a statistic. The all-member pairs are also what the
+    // ledger's loss rows accumulate.
     summand_pair_t token {}, image {}, video {}, audio {}, choices {};
     auto accumulate = [](summand_pair_t &into, f32r1_tensor_arena_t &summands, gpu_stream_t &stream) noexcept {
         if (summands.empty()) return;
@@ -1455,8 +1457,9 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
     return {};
 }
 
-/** Sort one row's edges ascending by id, carrying the weights along, and drop repeated ids — the order the
- *  relation columns' binary search reads. Rows are short, so an insertion sort without scratch. */
+/** Sort one row's edges ascending by id, carrying the weights along, and drop repeated ids
+ *  — the order the relation columns' binary search reads. Rows are short, so an insertion
+ *  sort without scratch. */
 [[nodiscard]] static u32_t sort_row_(u32r1_span_t ids, f32r1_span_t weights) noexcept {
     std::size_t const count = ids.extent(0);
     for (std::size_t index = 1; index < count; ++index)

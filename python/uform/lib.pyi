@@ -40,8 +40,9 @@ def gpu_devices() -> tuple[GPUDevice, ...]:
 
 # region: Shared Vocabulary
 
-# Every input arrives through PEP 3118, so NumPy is never required - at runtime or here. Frameworks whose
-# stubs predate PEP 688, PyTorch among them, support the protocol at runtime but need a `cast` here.
+# Every input arrives through PEP 3118, so NumPy is never required - at runtime or here.
+# Frameworks whose stubs predate PEP 688, PyTorch among them, support the protocol at runtime but
+# need a `cast` here.
 type _PathLike = str | bytes | os.PathLike[str] | os.PathLike[bytes]
 type _Progress = Callable[[int, int], bool | None]
 type _Tape = tuple[Buffer, Buffer]

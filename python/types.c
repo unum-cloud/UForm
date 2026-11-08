@@ -2,11 +2,11 @@
  *  @file python/types.c
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief The CPython vocabulary every header shares: failures, enums, keyword-built structures, calls,
- *      receivers, executors, arenas and the tapes inputs gather into.
+ *  @brief The CPython vocabulary every header shares: failures, enums, keyword-built structures,
+ *      calls, receivers, executors, arenas and the tapes inputs gather into.
  *
- *  Nothing here belongs to one header of the C interface: an @c Arena an encoding writes into is the very object
- *  a training step accepts, because there is one definition and one address.
+ *  Nothing here belongs to one header of the C interface: an @c Arena an encoding writes into is
+ *  the very object a training step accepts, because there is one definition and one address.
  */
 #include "lib.h"
 
@@ -17,7 +17,8 @@ PyObject *ErrorType = NULL;
 /** The class each failing status raises, indexed by status; success and deferred never raise. */
 static PyObject *status_error_types[uform_status_invalid_argument_k + 1];
 
-/** One failing status, the dotted name of the class it raises, the built-in it also subclasses, and its doc. */
+/** One failing status, the dotted name of the class it raises, the built-in it also subclasses,
+ *  and its doc. */
 static struct {
     uform_status_t status;
     char const *name;
@@ -184,7 +185,8 @@ static char const *enum_spelling(uform_py_enum_t const *mirrored, long value) {
     return spelled;
 }
 
-/** Builds the class of @p mirrored by calling its base from @p enum_module with @p keywords, in value order. */
+/** Builds the class of @p mirrored by calling its base from @p enum_module with @p keywords,
+ *  in value order. */
 static int enum_register(PyObject *module, PyObject *enum_module, PyObject *keywords, uform_py_enum_t *mirrored) {
     PyObject *members = PyDict_New();
     for (long value = mirrored->first; members && value <= mirrored->last; ++value) {
@@ -378,8 +380,8 @@ PyObject *uform_py_struct_sequence_steal(PyTypeObject *type, PyObject **fields, 
 #pragma region Keyword Structures
 
 /**
- *  @brief Checks and stores @p value as field @p field of a new structure, a tuple building a nested structure
- *      from its items in order.
+ *  @brief Checks and stores @p value as field @p field of a new structure, a tuple building a
+ *      nested structure from its items in order.
  *  @return A new reference to what the structure keeps, or NULL with an exception set.
  */
 static PyObject *field_accept(uform_py_field_t const *field, PyObject *value) {
@@ -429,7 +431,8 @@ static PyObject *field_accept(uform_py_field_t const *field, PyObject *value) {
     return NULL;
 }
 
-/** The value a field the caller left out holds: zero for a number, the zero member of an enum, None otherwise. */
+/** The value a field the caller left out holds: zero for a number, the zero member of an
+ *  enum, None otherwise. */
 static PyObject *field_default(uform_py_field_t const *field) {
     switch (field->kind) {
     case uform_py_field_size_k: return PyLong_FromLong(0);
@@ -569,7 +572,8 @@ void *uform_py_call_open(uform_py_receiver_t const *receiver, uform_py_verb_t co
     return call;
 }
 
-/** Answers a final @p call: a callback's first exception, else the outcome's failure, else the verb's answer. */
+/** Answers a final @p call: a callback's first exception, else the outcome's failure, else
+ *  the verb's answer. */
 static PyObject *call_answer(uform_py_verb_t const *verb, void *call) {
     uform_py_call_t *const header = (uform_py_call_t *)call;
     if (header->raised) {
@@ -630,8 +634,8 @@ int uform_py_callback_from_object(PyObject *object, char const *field, uform_py_
     return 0;
 }
 
-/** Moves the exception the calling thread holds into @p call unless an earlier one is there, a store that is the
- *  fence a later report reads; the GIL is held. */
+/** Moves the exception the calling thread holds into @p call unless an earlier one is there, a
+ *  store that is the fence a later report reads; the GIL is held. */
 static void callback_latch(uform_py_call_t *call) {
     PyObject *const raised = PyErr_GetRaisedException();
     PyObject *expected = NULL;
@@ -647,9 +651,10 @@ static int callback_raised(uform_py_call_t *call) {
 /**
  *  @brief Re-enters Python for one progress report, from whichever thread advances the call.
  *
- *  Reports are serialized, but nothing guarantees they land on the calling thread - a deferred call runs on
- *  whichever thread waits on it - so the GIL is taken here rather than assumed. A handler answering @c None
- *  carries on, and one that raises also stops the call, so it unwinds at the next slice instead of running on.
+ *  Reports are serialized, but nothing guarantees they land on the calling thread - a deferred call
+ *  runs on whichever thread waits on it - so the GIL is taken here rather than assumed. A handler
+ *  answering @c None carries on, and one that raises also stops the call, so it unwinds at the next
+ *  slice instead of running on.
  */
 static uform_continuation_t progress_trampoline(size_t completed, size_t total, void *state) {
     uform_py_callback_t const *const callback = (uform_py_callback_t const *)state;
@@ -682,7 +687,8 @@ uform_progress_t uform_py_progress_registered(uform_py_callback_t *callback, siz
 
 #pragma region Receivers and Deferred Calls
 
-/** A model or trainer bound to the executor its verbs run on; its type alone chooses how they complete. */
+/** A model or trainer bound to the executor its verbs run on; its type alone chooses
+ *  how they complete. */
 typedef struct On {
     PyObject ob_base;
 
@@ -822,11 +828,11 @@ static void deferred_block(Deferred *deferred) {
 }
 
 /**
- *  @brief Finishes a final @p self exactly once: the thread taking its verb answers, publishes, then lets go of
- *      its inputs.
+ *  @brief Finishes a final @p self exactly once: the thread taking its verb answers, publishes,
+ *      then lets go of its inputs.
  *
- *  Answering may run Python, which lets another thread in even under the GIL, so the verb is taken before
- *  answering and the answer published after it, never one check spanning both.
+ *  Answering may run Python, which lets another thread in even under the GIL, so the verb is taken
+ *  before answering and the answer published after it, never one check spanning both.
  */
 static void deferred_finish(Deferred *self) {
     uform_py_verb_t const *finishing = NULL;
@@ -910,7 +916,8 @@ static PyObject *method_call(PyObject *self, char const *name, PyObject *first, 
     return result;
 }
 
-/** Answers the iterator of an `asyncio.Future` that `wait()` resolves on the running loop's default executor. */
+/** Answers the iterator of an `asyncio.Future` that `wait()` resolves on the running
+ *  loop's default executor. */
 static PyObject *Deferred_await(PyObject *self) {
     PyObject *const asyncio = PyImport_ImportModule("asyncio");
     PyObject *const loop = asyncio ? method_call(asyncio, "get_running_loop", NULL, NULL) : NULL;
@@ -936,8 +943,9 @@ static void Deferred_dealloc(Deferred *self) {
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
-/** Visits what @p self holds; an unfinished call's own objects stay unvisited, so every cycle through them waits
- *  for a later collection rather than being cleared while the library still reads them. */
+/** Visits what @p self holds; an unfinished call's own objects stay unvisited, so every cycle
+ *  through them waits for a later collection rather than being cleared while the library
+ *  still reads them. */
 static int Deferred_traverse(Deferred *self, visitproc visit, void *arg) {
     Py_VISIT(self->origin);
     Py_VISIT(self->answer);
@@ -949,8 +957,8 @@ static int Deferred_traverse(Deferred *self, visitproc visit, void *arg) {
     return self->verb->traverse ? self->verb->traverse(self->call, visit, arg) : 0;
 }
 
-/** Breaks a garbage cycle through a final @p self; an unfinished one is left whole, as its traversal hid the
- *  cycle. */
+/** Breaks a garbage cycle through a final @p self; an unfinished one is left whole, as its
+ *  traversal hid the cycle. */
 static int Deferred_clear(Deferred *self) {
     if (deferred_status(self) == uform_status_deferred_k) return 0;
     uform_py_verb_t const *const releasing = self->verb;
@@ -1021,7 +1029,8 @@ static char const doc_Executor[] =                                              
     "  >>> with uform.Executor.for_ram() as executor:\n"                                       //
     "  ...     executor.drain(uform.Mood.PARKED)";
 
-/** Wraps a fresh handle, or frees it when the wrapper cannot be allocated; a new reference, or NULL. */
+/** Wraps a fresh handle, or frees it when the wrapper cannot be allocated; a new
+ *  reference, or NULL. */
 static PyObject *executor_adopt(PyTypeObject *type, uform_executor_t handle) {
     Executor *const executor = (Executor *)type->tp_alloc(type, 0);
     if (!executor) {
@@ -1045,8 +1054,8 @@ static void executor_free(uform_executor_t handle) {
     Py_END_ALLOW_THREADS;
 }
 
-/** Closes @p executor once, fenced against a concurrent close; while a GPU arena it made is alive, the handle is
- *  left for the last of them to free. */
+/** Closes @p executor once, fenced against a concurrent close; while a GPU arena it made is alive,
+ *  the handle is left for the last of them to free. */
 static void executor_close(Executor *executor) {
     uform_executor_t handle = NULL;
 #if PY_VERSION_HEX >= 0x030D0000
@@ -1456,8 +1465,8 @@ static struct {
     {"f", {kDLFloat, 32, 1}}, {"d", {kDLFloat, 64, 1}}, {"N", {kDLUInt, sizeof(size_t) * 8, 1}},
 };
 
-/** Hands the tensor a consumed capsule holds back to its producer, and frees the extents its view
- *  borrowed. */
+/** Hands the tensor a consumed capsule holds back to its producer, and frees the extents
+ *  its view borrowed. */
 static void dlpack_capsule_release(PyObject *capsule) {
     PyMem_Free(PyCapsule_GetContext(capsule));
     if (PyCapsule_IsValid(capsule, "used_dltensor_versioned")) {
@@ -1690,14 +1699,16 @@ void uform_py_arena_unclaim(PyObject *arena) {
 /** The rank of every output in an arena: rows by columns. */
 enum { arena_buffer_max_rank_k = 2 };
 
-/** One output a call left in an arena, exported zero-copy, and the base of every result that is one. */
+/** One output a call left in an arena, exported zero-copy, and the base of every result
+ *  that is one. */
 typedef struct ArenaBuffer {
     PyObject ob_base;
 
     /** The arena the output lives in, kept alive so the memory outlives every other name for it. */
     PyObject *arena;
 
-    /** The arena's generation when the call wrote the output; any later one means a call rewound it. */
+    /** The arena's generation when the call wrote the output; any later one means a
+     *  call rewound it. */
     size_t generation;
 
     void const *data;
@@ -1716,8 +1727,8 @@ typedef struct RowsTape {
     PyObject *offsets;
 } RowsTape;
 
-/** Where the outputs of @p buffer live, as the engine reports its arena; 0, or -1 with an error
- *  set. */
+/** Where the outputs of @p buffer live, as the engine reports its arena; 0, or -1 with
+ *  an error set. */
 static int arena_buffer_describe(ArenaBuffer const *buffer, uform_arena_description_t *description) {
     uform_outcome_t outcome = {0};
     uform_arena_describe(&(uform_arena_describe_t) {.arena = ((Arena *)buffer->arena)->handle,
@@ -1726,8 +1737,8 @@ static int arena_buffer_describe(ArenaBuffer const *buffer, uform_arena_descript
     return uform_py_raise_on_outcome(&outcome);
 }
 
-/** Raises @c InvalidArgumentError unless the call that wrote @p buffer is still the last to claim its arena;
- *  returns 0 or -1. */
+/** Raises @c InvalidArgumentError unless the call that wrote @p buffer is still the last to claim
+ *  its arena; returns 0 or -1. */
 static int arena_buffer_fresh(ArenaBuffer const *buffer, size_t generation) {
     if (generation == buffer->generation) return 0;
     return uform_py_raise(uform_status_invalid_argument_k, "a later call rewound the arena this output lived in");
@@ -2094,7 +2105,8 @@ static struct {
     {uform_scalar_i32_k, "i", 4}, {uform_scalar_i8_k, "b", 1},  {uform_scalar_u8_k, "B", 1},
 };
 
-/** A new @c ArenaBuffer of @p type over @p data inside the claimed @p arena, C-contiguous; NULL on failure. */
+/** A new @c ArenaBuffer of @p type over @p data inside the claimed @p arena, C-contiguous;
+ *  NULL on failure. */
 static ArenaBuffer *arena_buffer_new(PyTypeObject *type, PyObject *arena, void const *data, char const *format,
                                      Py_ssize_t item_bytes, Py_ssize_t const *shape, int rank) {
     static char const empty_output = 0; // stands in for a null output, which no exporter may hand out
@@ -2166,12 +2178,14 @@ static size_t element_bytes(uform_py_element_t element) {
     return element == uform_py_element_samples_k ? sizeof(float) : 1;
 }
 
-/** The format character a buffer of @p element must report, its byte-order prefix stripped; NULL takes any. */
+/** The format character a buffer of @p element must report, its byte-order prefix stripped;
+ *  NULL takes any. */
 static char const *element_format(uform_py_element_t element) {
     return element == uform_py_element_samples_k ? "f" : element == uform_py_element_pixels_k ? "B" : NULL;
 }
 
-/** The format character of @p buffer, its byte-order prefix skipped; "B" when the exporter named none. */
+/** The format character of @p buffer, its byte-order prefix skipped; "B" when the
+ *  exporter named none. */
 static char buffer_format(Py_buffer const *buffer) {
     char const *format = buffer->format ? buffer->format : "B";
     while (*format == '@' || *format == '=' || *format == '<' || *format == '>' || *format == '!') ++format;
@@ -2179,8 +2193,8 @@ static char buffer_format(Py_buffer const *buffer) {
 }
 
 /**
- *  @brief Acquires the offsets of a @c (data, offsets) pair into @p tape when @p candidate exports a C-contiguous
- *      run of unsigned words as wide as a @c size_t.
+ *  @brief Acquires the offsets of a @c (data, offsets) pair into @p tape when @p candidate exports
+ *      a C-contiguous run of unsigned words as wide as a @c size_t.
  *  @return 1 when it does, 0 when it is no offsets buffer at all, with no exception set.
  */
 static int tape_offsets_acquire(PyObject *candidate, uform_py_tape_t *tape) {
@@ -2197,7 +2211,8 @@ static int tape_offsets_acquire(PyObject *candidate, uform_py_tape_t *tape) {
     return 0;
 }
 
-/** Lends the data of a pair whose offsets @p tape already holds; returns 0 or -1 with an exception set. */
+/** Lends the data of a pair whose offsets @p tape already holds; returns 0 or -1 with
+ *  an exception set. */
 static int tape_lend(PyObject *data, char const *field, uform_py_element_t element, uform_py_tape_t *tape) {
     if (buffer_acquire(data, 1, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT, &tape->data) != 0) return -1;
     char const *const expected = element_format(element);
@@ -2215,7 +2230,8 @@ static int tape_lend(PyObject *data, char const *field, uform_py_element_t eleme
     return 0;
 }
 
-/** Acquires one entry of a gathered batch into @p view, checking it holds @p element; returns 0 or -1. */
+/** Acquires one entry of a gathered batch into @p view, checking it holds @p element; returns
+ *  0 or -1. */
 static int tape_entry_acquire(PyObject *entry, char const *field, Py_ssize_t position, uform_py_element_t element,
                               Py_buffer *view) {
     if (element == uform_py_element_text_k && PyUnicode_Check(entry)) {
@@ -2247,7 +2263,8 @@ static int tape_entry_acquire(PyObject *entry, char const *field, Py_ssize_t pos
                                                                   : "a run of bytes");
 }
 
-/** Gathers the entries of @p sequence into one block @p tape owns; returns 0 or -1 with an exception set. */
+/** Gathers the entries of @p sequence into one block @p tape owns; returns 0 or -1 with
+ *  an exception set. */
 static int tape_gather(PyObject *sequence, char const *field, uform_py_element_t element, uform_py_tape_t *tape) {
     Py_ssize_t const count = PySequence_Fast_GET_SIZE(sequence);
     Py_buffer *const views = (Py_buffer *)PyMem_Calloc(count ? (size_t)count : 1, sizeof(Py_buffer));

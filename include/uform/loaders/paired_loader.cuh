@@ -7,15 +7,15 @@
  *      halves and the relation between them, and optionally a hard negative per pair.
  *
  *  Tied to a @b dataset like the single-modality loaders:
- *  @ref unum::uform::loaders::paired_loader_parquet_t::make reads only the shard footers, and every
- *  @ref unum::uform::loaders::paired_loader_parquet_t::fill takes the caller's stream, rank and
- *  step. A fill opens at least two shards unless the dataset is one file, decodes the anchor,
- *  positive and negative columns of the same rows into one reservoir, and draws rows by a keyed
- *  bijection over the pool. A row whose anchor or text positive is a list contributes one of its
- *  elements, drawn by a key of its own, so every element of a row recurs across steps. A row's
- *  negatives are a list too: strings for a text positive, and shard-local row indices into the
- *  positive column for media, whose row passes over when the fill drew no row group holding its
- *  negative.
+ *  @ref unum::uform::loaders::paired_loader_parquet_t::make reads only the shard footers, and
+ *  every @ref unum::uform::loaders::paired_loader_parquet_t::fill takes the caller's stream,
+ *  rank and step. A fill opens at least two shards unless the dataset is one file, decodes the
+ *  anchor, positive and negative columns of the same rows into one reservoir, and draws rows by
+ *  a keyed bijection over the pool. A row whose anchor or text positive is a list contributes
+ *  one of its elements, drawn by a key of its own, so every element of a row recurs across
+ *  steps. A row's negatives are a list too: strings for a text positive, and shard-local row
+ *  indices into the positive column for media, whose row passes over when the fill drew no row
+ *  group holding its negative.
  *
  *  @section paired_layout One bag per pair or triplet
  *
@@ -135,8 +135,8 @@ struct paired_loader_parquet_t {
      *  @param[in,out] gpu_stream The stream the decode, the packing and the pairing run on.
      *  @param[in] gpu_rank Ensures different GPUs draw different rows from the same dataset.
      *  @param[in] training_step Ensures subsequent steps sample different data.
-     *  @param[out] batches The batches whose segment table, bags, tokens and audio samples get
-     *      populated.
+     *  @param[out] batches The batches whose segment table, bags, tokens and audio
+     *      samples get populated.
      *
      *  @par Statuses:
      *  - @c status_t::invalid_argument_k The loader's positives are images or videos.

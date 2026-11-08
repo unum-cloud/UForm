@@ -2,14 +2,14 @@
  *  @file include/uform/train/contrastive_relations.cuh
  *  @author Ash Vardanian
  *  @date July 2, 2026
- *  @brief The contrastive relation graph: per-pair attract / repel / ignore semantics over the
- *      global vertex axis, as compressed sparse rows — the edge sets of the force layout the losses
- *      relax.
+ *  @brief The contrastive relation graph: per-pair attract / repel / ignore semantics over
+ *      the global vertex axis, as compressed sparse rows — the edge sets of the force layout
+ *      the losses relax.
  *
- *  Both contrastive losses (segments and tokens) score a @b [from_vertices_per_gpu,to_vertices_per_mesh] cell grid
- *  and need one answer per cell: the target sign and the weight. This file is that answer's single source
- *  of truth — a device-readable view, the per-cell resolver, and the host owner that stages it
- *  capture-safely.
+ *  Both contrastive losses (segments and tokens) score a
+ *  @b [from_vertices_per_gpu,to_vertices_per_mesh] cell grid and need one answer per cell: the
+ *  target sign and the weight. This file is that answer's single source of truth — a
+ *  device-readable view, the per-cell resolver, and the host owner that stages it capture-safely.
  *
  *  @section relations_semantics Per-cell contract
  *
@@ -25,23 +25,23 @@
  *      7. Every other cell — target −1, weight @c ambient_repulsion_weight .
  *
  *  The explicit-vs-ambient balance is @b weights-only — there is no policy flag, and
- *  @c ambient_repulsion_weight==0 removes the background repulsion through the same code path. When no
- *  explicit attract edges exist the graph degenerates to the @b self-edge default: vertex @c i attracts
- *  its own global copy at @c self_edge_base+i with unit weight, and every other pair repels with
- *  @c ambient_repulsion_weight — the classic in-batch contract, bit-for-bit.
+ *  @c ambient_repulsion_weight==0 removes the background repulsion through the same code path. When
+ *  no explicit attract edges exist the graph degenerates to the @b self-edge default: vertex @c i
+ *  attracts its own global copy at @c self_edge_base+i with unit weight, and every other pair
+ *  repels with @c ambient_repulsion_weight — the classic in-batch contract, bit-for-bit.
  *
- *  Padding is @b state of the graph, not a parameter threaded through kernels: the view carries optional
- *  effective-length columns for the local vertices and the global axis, and the resolver reads them
- *  itself. Empty columns mean everything is live.
+ *  Padding is @b state of the graph, not a parameter threaded through kernels: the view carries
+ *  optional effective-length columns for the local vertices and the global axis, and the resolver
+ *  reads them itself. Empty columns mean everything is live.
  *
  *  @section relations_staging Staging and capture
  *
- *  Ids index the @b global (post-all-gather) vertex axis and are staged global — no rank-local rebasing
- *  scratch downstream. Within each vertex's run the ids are @b sorted ascending: the in-kernel
- *  membership test is a per-row binary search, so an unsorted run silently mis-scores — which is exactly
- *  why @ref unum::uform::train::contrastive_relations_t::upload validates every invariant
- *  host-side, where the data still is, and fails @b loudly (capacity overflow included: an
- *  overflowing graph is an error, never a silent fallback to the self-edge default).
+ *  Ids index the @b global (post-all-gather) vertex axis and are staged global — no rank-local
+ *  rebasing scratch downstream. Within each vertex's run the ids are @b sorted ascending: the
+ *  in-kernel membership test is a per-row binary search, so an unsorted run silently mis-scores —
+ *  which is exactly why @ref unum::uform::train::contrastive_relations_t::upload validates every
+ *  invariant host-side, where the data still is, and fails @b loudly (capacity overflow included:
+ *  an overflowing graph is an error, never a silent fallback to the self-edge default).
  *
  *  The device columns are NumKong rank-1 tensors owning memory through
  *  @ref unum::uform::utilities::gpu_arena_alloc — allocated @b once at fixed capacity, so device
@@ -82,15 +82,17 @@ namespace nk = ashvardanian::numkong;
 enum class temperature_group_t : u32_t {};
 
 /**
- *  @brief Scaling and labeling knobs of a contrastive loss — host fallbacks plus optional device views of
- *      the learnable scalars, so a captured step reads per-step-updated values without a host readback.
+ *  @brief Scaling and labeling knobs of a contrastive loss — host fallbacks plus optional device
+ *      views of the learnable scalars, so a captured step reads per-step-updated values without
+ *      a host readback.
  *
- *  When @c inverse_temperature_device / @c bias_device are non-empty they override the host scalars;
- *  @c from_vertex_temperature_group (when non-empty, @b [from_vertices_per_gpu] ) selects each vertex's
- *  entry — e.g. a per-modality or per-dataset temperature group, one learnable (β, bias) per group,
- *  selected per anchor vertex. An empty selector means every vertex uses entry 0, bit-identical to the
- *  single-entry path. Views instead of raw pointers: every device column carries its own extent, so the
- *  entry count is never a separately-carried integer that can disagree.
+ *  When @c inverse_temperature_device / @c bias_device are non-empty they override the host
+ *  scalars; @c from_vertex_temperature_group (when non-empty, @b [from_vertices_per_gpu] )
+ *  selects each vertex's entry — e.g. a per-modality or per-dataset temperature group, one
+ *  learnable (β, bias) per group, selected per anchor vertex. An empty selector means every
+ *  vertex uses entry 0, bit-identical to the single-entry path. Views instead of raw pointers:
+ *  every device column carries its own extent, so the entry count is never a separately-carried
+ *  integer that can disagree.
  */
 struct contrastive_recipe_t {
 
@@ -101,8 +103,8 @@ struct contrastive_recipe_t {
     f32_t bias = 0.0f;
 
     /** Weight of every pair the graph names no edge for — the ambient all-pairs repulsion. The
-     *  kernels read the copy on @ref contrastive_relations_view_t (staged through @c upload ); this one
-     *  is inert after upload. */
+     *  kernels read the copy on @ref contrastive_relations_view_t (staged through @c upload ); this
+     *  one is inert after upload. */
     f32_t ambient_repulsion_weight = 1.0f;
 
     /** Optional @b [temperature_group_count] Float32 device entries of the learnable β; empty falls
@@ -127,7 +129,7 @@ struct contrastive_recipe_t {
  *  skipped and the multiplier carries no meaning. */
 struct contrastive_pair_relation_t {
 
-    /** Loss-sign multiplier (+1 attract / −1 repel) — multiplies the logit as @c target·logit . */
+    /** Loss-sign multiplier (+1 attract / −1 repel) — multiplies the logit as @c target · logit . */
     f32_t target;
 
     /** Per-cell weight; 0 skips the cell entirely. */
@@ -135,8 +137,8 @@ struct contrastive_pair_relation_t {
 };
 
 /** One CSR edge set over a GPU's vertex rows, borrowed: @b [rows+1] offsets, the global vertex IDs
- *  ascending per row, and per-edge weights, which an ignore set carries none of. Empty offsets name
- *  no set. */
+ *  ascending per row, and per-edge weights, which an ignore set carries none of. Empty offsets
+ *  name no set. */
 struct contrastive_edges_view_t {
     u32r1_view_t offsets {};
     u32r1_view_t ids {};
@@ -144,13 +146,13 @@ struct contrastive_edges_view_t {
 };
 
 /**
- *  @brief The device-readable relation graph — NumKong views borrowing the staged columns, passed to
- *      kernels @b by value.
+ *  @brief The device-readable relation graph — NumKong views borrowing the staged columns, passed
+ *      to kernels @b by value.
  *
  *  Three CSR edge sets over the local vertex rows: attract and repel with per-edge scores, ignore
- *  without. Every extent is carried by its view: @ref from_vertices_per_gpu derives from the offsets
- *  row, and empty @ref ignore_offsets means no ignores. All ids are @b global vertex ids, sorted
- *  ascending within each row's run.
+ *  without. Every extent is carried by its view: @ref from_vertices_per_gpu derives from the
+ *  offsets row, and empty @ref ignore_offsets means no ignores. All ids are @b global vertex ids,
+ *  sorted ascending within each row's run.
  */
 struct contrastive_relations_view_t {
 
@@ -180,13 +182,13 @@ struct contrastive_relations_view_t {
     /** Ignore global ids, sorted ascending per run. */
     u32r1_view_t ignore_ids {};
 
-    /** Optional @b [from_vertices_per_gpu] UInt32 device column of from-vertex token counts; 0 == PAD
-     *  (magnitude unused), a row no pair resolves against. Empty means every vertex is live. */
+    /** Optional @b [from_vertices_per_gpu] UInt32 device column of from-vertex token counts; 0 ==
+     *  PAD (magnitude unused), a row no pair resolves against. Empty means every vertex is live. */
     u32r1_view_t from_vertex_effective_length {};
 
     /** Optional @b [to_vertices_per_mesh] UInt32 device column of to-vertex token counts over the
-     *  whole global vertex axis, indexed by @b global id; 0 == PAD (magnitude unused). Empty means all
-     *  live. */
+     *  whole global vertex axis, indexed by @b global id; 0 == PAD (magnitude unused). Empty
+     *  means all live. */
     u32r1_view_t to_vertex_effective_length {};
 
     /** Optional @b [from_vertices_per_gpu] keys of the from-vertices; empty attracts no key. */
@@ -229,8 +231,8 @@ struct contrastive_relations_view_t {
  *      target and weight, in the file-header precedence: PAD > ignore > self > key > attract >
  *      repel > implicit negative.
  *
- *  Padding is read from the view's own effective-length columns — the label grid carries its whole
- *  state.
+ *  Padding is read from the view's own effective-length columns — the label grid carries
+ *  its whole state.
  *
  *  @param[in] relations The graph views, taken by value at kernel launch.
  *  @param[in] vertex_index Row in @c [0,from_vertices_per_gpu) .
@@ -285,8 +287,8 @@ enum class contrastive_edge_set_t : u32_t {
 };
 
 /** The live edges of @p set over @b [3,rows+1] offsets, @b [3,capacity] IDs and @b [2,capacity]
- *  weights. A plain function, as nvcc's front end miscompiles a multidimensional subscript inside a
- *  class template. */
+ *  weights. A plain function, as nvcc's front end miscompiles a multidimensional subscript inside
+ *  a class template. */
 [[nodiscard]] inline contrastive_edges_view_t contrastive_edges_live_(u32r2_view_t offsets, u32r2_view_t ids,
                                                                       f32r2_view_t weights,
                                                                       contrastive_edge_set_t set) noexcept {
@@ -304,8 +306,8 @@ enum class contrastive_edge_set_t : u32_t {
  *  @brief The host owner of one GPU's attract, repel and ignore sets, sized once at @ref make and
  *      refilled every step by @ref relate_roles or by an explicit edge list.
  *
- *  Each set's live edge count is the last entry of its offsets row, so nothing beside the columns
- *  counts it.
+ *  Each set's live edge count is the last entry of its offsets row, so nothing beside the
+ *  columns counts it.
  *
  *  @tparam alloc_type_ A byte-typed host allocator handle, @c pinned_alloc_t for staging and
  *      @c nk::aligned_allocator for host-only use, rebound per element type inside.
@@ -317,8 +319,8 @@ struct contrastive_edges {
     template <typename value_type_>
     using rebound = typename std::allocator_traits<alloc_type_>::template rebind_alloc<value_type_>;
 
-    /** Allocate @b [3,rows+1] offsets, @b [3,max_edges] IDs and @b [2,max_edges] weights, every set
-     *  empty. */
+    /** Allocate @b [3,rows+1] offsets, @b [3,max_edges] IDs and @b [2,max_edges] weights,
+     *  every set empty. */
     [[nodiscard]] static expected<contrastive_edges> make(u32_t rows, u32_t max_edges,
                                                           alloc_type_ allocator = {}) noexcept {
         using result_t = expected<contrastive_edges>;
@@ -371,8 +373,8 @@ struct contrastive_edges {
         return contrastive_edges_live_(offsets_.view(), ids_.view(), weights_.view(), set);
     }
 
-    /** @b [3,rows+1] , @b [3,capacity] and @b [2,capacity] columns in @ref contrastive_edge_set_t
-     *  order. */
+    /** @b [3,rows+1] , @b [3,capacity] and @b [2,capacity] columns in
+     *  @ref contrastive_edge_set_t order. */
     nk::tensor<u32_t, rebound<u32_t>, 2> offsets_ {}, ids_ {};
     nk::tensor<f32_t, rebound<f32_t>, 2> weights_ {};
 };
@@ -403,10 +405,10 @@ using contrastive_edges_pinned_t = contrastive_edges<pinned_alloc_t>;
  *  @param[in] bags The GPU's @b [segments] mixed bag column.
  *  @param[in] roles The GPU's @b [segments] mixed role column.
  *  @param[in] lengths The GPU's @b [segments] mixed length column; a zero length is PAD.
- *  @param[in] weights The GPU's @b [segments] repel weight of every negative; empty means unit
- *      weights.
- *  @param[in] vertex_base The global vertex of the GPU's segment 0, its world coordinate times the
- *      segments.
+ *  @param[in] weights The GPU's @b [segments] repel weight of every negative; empty
+ *      means unit weights.
+ *  @param[in] vertex_base The global vertex of the GPU's segment 0, its world coordinate
+ *      times the segments.
  *  @param[out] edges The three sets, refilled over the @b [segments] rows.
  *
  *  @par Statuses:
@@ -491,20 +493,20 @@ template <typename alloc_type_>
 }
 
 /**
- *  @brief The host owner of the relation graph — one memory-owning NumKong tensor per column, allocated
- *      through @ref unum::uform::utilities::gpu_arena_alloc at fixed capacity, re-uploaded per
- *      step, and viewed by kernels through @ref contrastive_relations_view_t windows over the live
- *      extents.
+ *  @brief The host owner of the relation graph — one memory-owning NumKong tensor per column,
+ *      allocated through @ref unum::uform::utilities::gpu_arena_alloc at fixed capacity,
+ *      re-uploaded per step, and viewed by kernels through @ref contrastive_relations_view_t
+ *      windows over the live extents.
  *
- *  Eight columns: three offset rows @b [max_vertices+1] , three id runs @b [max_edges] , two score runs
- *  @b [max_edges] . Addresses never change after @ref make — the capture-stability contract — so a
- *  replayed graph reads whatever @ref upload staged last. Uploads run @b outside any capture.
+ *  Eight columns: three offset rows @b [max_vertices+1] , three id runs @b [max_edges] , two score
+ *  runs @b [max_edges] . Addresses never change after @ref make — the capture-stability contract —
+ *  so a replayed graph reads whatever @ref upload staged last. Uploads run @b outside any capture.
  *
- *  Ownership is deliberately split: the CSR columns are @b owned (they are staged copies of host data
- *  with no other home), while the effective-length columns are @b borrowed device views — the batch
- *  pipeline owns those lengths and re-fills them per step at capture-stable addresses; copying them here
- *  would duplicate per-step state. Both arrive through @ref upload / @ref upload_self_edges , the single
- *  staging entry points.
+ *  Ownership is deliberately split: the CSR columns are @b owned (they are staged copies of host
+ *  data with no other home), while the effective-length columns are @b borrowed device views — the
+ *  batch pipeline owns those lengths and re-fills them per step at capture-stable addresses;
+ *  copying them here would duplicate per-step state. Both arrive through @ref upload /
+ *  @ref upload_self_edges , the single staging entry points.
  */
 struct contrastive_relations_t {
 
@@ -547,21 +549,22 @@ struct contrastive_relations_t {
     }
 
     /**
-     *  @brief Validate a host CSR and stage it into the device columns on @p stream — @b outside capture.
+     *  @brief Validate a host CSR and stage it into the device columns on @p stream —
+     *      @b outside capture.
      *
-     *  Every invariant is checked here, where the data is still host-resident, and every violation is a
-     *  named failure: capacity overflow, offset rows of the wrong length, non-monotone or non-zero-based
-     *  offsets, id/score length mismatches, unsorted or duplicate ids within a run, ids outside
-     *  @c [0,to_vertices_per_mesh) , negative scores. There is no silent fallback.
+     *  Every invariant is checked here, where the data is still host-resident, and every violation
+     *  is a named failure: capacity overflow, offset rows of the wrong length, non-monotone or
+     *  non-zero-based offsets, id/score length mismatches, unsorted or duplicate ids within a run,
+     *  ids outside @c [0,to_vertices_per_mesh) , negative scores. There is no silent fallback.
      *
      *  @param[in] attract The attract set; its offsets span @c from_vertices_per_gpu+1 .
      *  @param[in] repel The repel set over the same rows.
-     *  @param[in] ignore The ignore set over the same rows, its weights unread; empty offsets mean
-     *      no ignores.
-     *  @param[in] from_vertex_effective_length / @p to_vertex_effective_length The per-step PAD columns the
-     *      resolver reads: @b [from_vertices_per_gpu] and @b [to_vertices_per_mesh] (by global id) device
-     *      views, 0 marking PAD, empty meaning all-live. @b Borrowed, never copied — the batch pipeline owns
-     *      them and keeps the addresses capture-stable.
+     *  @param[in] ignore The ignore set over the same rows, its weights unread; empty offsets
+     *      mean no ignores.
+     *  @param[in] from_vertex_effective_length / @p to_vertex_effective_length The per-step PAD
+     *      columns the resolver reads: @b [from_vertices_per_gpu] and @b [to_vertices_per_mesh] (by
+     *      global id) device views, 0 marking PAD, empty meaning all-live. @b Borrowed, never
+     *      copied — the batch pipeline owns them and keeps the addresses capture-stable.
      *  @param[in] to_vertex_effective_length The to-side PAD column over global vertex IDs,
      *      borrowed like @p from_vertex_effective_length .
      *  @param[in] from_vertex_key / @p to_vertex_key The per-step key columns,
@@ -570,10 +573,10 @@ struct contrastive_relations_t {
      *  @param[in] to_vertex_key The to-side key column over global vertex IDs, borrowed like
      *      @p from_vertex_key .
      *  @param[in] to_vertices_per_mesh How many global vertices the to-side columns span.
-     *  @param[in] self_edge_base Global ID of local vertex 0's own copy, the base of the implicit
-     *      self-edges.
-     *  @param[in] ambient_repulsion_weight Weight of every unnamed cell; 0 removes in-batch
-     *      negatives.
+     *  @param[in] self_edge_base Global ID of local vertex 0's own copy, the base of
+     *      the implicit self-edges.
+     *  @param[in] ambient_repulsion_weight Weight of every unnamed cell; 0
+     *      removes in-batch negatives.
      *  @param[in] stream The stream the host CSR is staged on.
      */
     [[nodiscard]] expected_t upload(contrastive_edges_view_t attract, contrastive_edges_view_t repel,
@@ -677,8 +680,8 @@ struct contrastive_relations_t {
     }
 
     /** Views over the owned columns' live extents — the shapes the last successful upload resized
-     *  them to; kernels take this by value. An ignore set staged with zero edges is indistinguishable
-     *  from no ignores, so its views collapse to empty. */
+     *  them to; kernels take this by value. An ignore set staged with zero edges is
+     *  indistinguishable from no ignores, so its views collapse to empty. */
     [[nodiscard]] contrastive_relations_view_t view() const noexcept {
         contrastive_relations_view_t view;
         view.attract_offsets = attract_offsets_.view();
@@ -754,7 +757,8 @@ struct contrastive_relations_t {
     u64r1_view_t from_vertex_key_ {};
     u64r1_view_t to_vertex_key_ {};
 
-    /** The self-edge default's anchor base and the ambient repulsion — plain label scalars, not extents. */
+    /** The self-edge default's anchor base and the ambient repulsion — plain label
+     *  scalars, not extents. */
     std::size_t self_edge_base_ = 0;
     f32_t ambient_repulsion_weight_ = 1.0f;
 };

@@ -1,11 +1,3 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "huggingface_hub",
-#     "pyarrow>=21.0.0",
-#     "xxhash",
-# ]
-# ///
 """Pull DiDeMo (dense video moment descriptions) and repack it to the registry video schema.
 
 DiDeMo is ~10K Flickr clips, each annotated with a handful of ORDERED moment descriptions ("camera
@@ -42,7 +34,20 @@ Usage:
     uv run scripts/data/download_didemo.py                       # both splits (~48 GB), then repack
     uv run scripts/data/download_didemo.py --max-shards 1        # test split only
     uv run scripts/data/download_didemo.py --data-root $UFORM_DATA_ROOT --no-repack
+
+File: scripts/data/download_didemo.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "huggingface_hub",
+#     "pyarrow>=21.0.0",
+#     "xxhash",
+# ]
+# ///
 
 import argparse
 import json
@@ -67,7 +72,8 @@ CAPTIONS_JSON = {
     "test": "wo_concat/didemo_test_wo_concat.json",
     "train": "wo_concat/didemo_train_wo_concat.json",
 }
-#: Per-split video tar(s): the test split is one complete archive, the train split is byte-split parts.
+#: Per-split video tar(s): the test split is one complete archive, the train split
+#: is byte-split parts.
 SPLIT_TAR_PATTERNS = {
     "test": ["DiDeMo_Videos_mp4_test.tar"],
     "train": ["DiDeMo_Videos_mp4_train.tar.part-*"],

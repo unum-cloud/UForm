@@ -1,3 +1,10 @@
+"""Download S2ORC: scientific abstract<->citation pairs (`abstract` / `citation`) for text_contrastive.
+
+File: scripts/data/download_s2orc.py
+Author: Ash Vardanian
+Date: July 5, 2026
+"""
+
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -5,14 +12,14 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download S2ORC: scientific abstract<->citation pairs (`abstract` / `citation`) for text_contrastive."""
 from acquire import acquire
 
 if __name__ == "__main__":
-    # `abstract-citation-pair/train-*.parquet` already carries `abstract` + `citation` — pure passthrough,
-    # and that config sorts first among the repo's parquet. Cap with `--max-shards 185` (or `--fraction`)
-    # to stay inside it: the later `title-abstract-pair` / `title-citation-pair` configs lack the
-    # `citation` column, so acquire's column-assert (correctly) rejects them past the abstract shards.
+    # `abstract-citation-pair/train-*.parquet` already carries `abstract` + `citation` — pure
+    # passthrough, and that config sorts first among the repo's parquet. Cap with `--max-shards 185`
+    # (or `--fraction`) to stay inside it: the later `title-abstract-pair` / `title-citation-pair`
+    # configs lack the `citation` column, so acquire's column-assert (correctly) rejects them past
+    # the abstract shards.
     raise SystemExit(
         acquire(
             "s2orc",

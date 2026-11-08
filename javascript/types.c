@@ -4,8 +4,9 @@
  *  @date October 17, 2026
  *  @brief The Node-API vocabulary every verb shares.
  *
- *  Closed-set naming, argument parsing, tapes, the @c Executor whose threads or streams every verb runs on, the
- *  @c Arena every scaling output lands in, and the @c CompiledDeferred a deferred call answers.
+ *  Closed-set naming, argument parsing, tapes, the @c Executor whose threads or streams every
+ *  verb runs on, the @c Arena every scaling output lands in, and the @c CompiledDeferred a
+ *  deferred call answers.
  */
 #include <stdio.h>  // `snprintf`
 #include <stdlib.h> // `malloc`, `calloc`, `realloc`, `free`
@@ -327,7 +328,8 @@ bool uform_js_array_from_value(napi_env env, napi_value value, char const *field
     return true;
 }
 
-/** Hands @p call a heap block of @p bytes it frees once final; @c NULL with an exception pending. */
+/** Hands @p call a heap block of @p bytes it frees once final; @c NULL with
+ *  an exception pending. */
 static void *uform_js_call_own(napi_env env, uform_js_call_t *call, size_t bytes) {
     for (size_t block = 0; block != uform_js_owned_k; ++block) {
         if (call->owned[block]) continue;
@@ -397,8 +399,8 @@ bool uform_js_per_item_from_value(napi_env env, napi_value value, char const *fi
     return true;
 }
 
-/** Calls the JavaScript progress handler in place: @c false from it cancels, and so does a throw, which the call
- *  rethrows once it returns. */
+/** Calls the JavaScript progress handler in place: @c false from it cancels, and so does a throw,
+ *  which the call rethrows once it returns. */
 static uform_continuation_t uform_js_progress_relay(size_t completed, size_t total, void *state) {
     uform_js_call_t *const call = (uform_js_call_t *)state;
     napi_env const env = call->env;
@@ -514,7 +516,8 @@ static napi_value uform_js_sealed_construct(napi_env env, napi_callback_info inf
     return self;
 }
 
-/** Gives the instances of @p constructor a @c [Symbol.dispose] calling their @c free, as @c using expects. */
+/** Gives the instances of @p constructor a @c [Symbol.dispose] calling their @c free, as
+ *  @c using expects. */
 static bool uform_js_class_disposable(napi_env env, napi_value constructor) {
     napi_value global = NULL, symbols = NULL, dispose = NULL, prototype = NULL, function = NULL;
     if (napi_get_global(env, &global) != napi_ok ||
@@ -628,8 +631,8 @@ static napi_value uform_js_executor_for_ram(napi_env env, napi_callback_info inf
     return uform_js_executor_adopt(env, &outcome, handle);
 }
 
-/** @c onPool(pool, {memoryDomains, cpuClass, deferredLimit}) → an executor borrowing a ForkUnion
- *  pool. */
+/** @c onPool(pool, {memoryDomains, cpuClass, deferredLimit}) → an executor borrowing
+ *  a ForkUnion pool. */
 static napi_value uform_js_executor_on_pool(napi_env env, napi_callback_info info) {
     napi_value arguments[2];
     uform_outcome_t outcome = {uform_status_success_k, NULL};
@@ -820,7 +823,8 @@ static uform_residency_t uform_js_arena_described(napi_env env, uform_js_arena_t
     return uform_js_succeeded(env, &outcome) ? description.residency : uform_residency_unknown_k;
 }
 
-/** @c Arena(executor) - empty memory where @p executor computes; host pages for the calling thread when absent. */
+/** @c Arena(executor) - empty memory where @p executor computes; host pages for the calling
+ *  thread when absent. */
 static napi_value uform_js_arena_construct(napi_env env, napi_callback_info info) {
     napi_value self = NULL, argument = NULL;
     if (!uform_js_arguments(env, info, 1, &argument, &self)) return NULL;
@@ -866,8 +870,8 @@ static napi_value uform_js_arena_construct(napi_env env, napi_callback_info info
     return self;
 }
 
-/** @c free() - releases the memory now, once every deferred call writing it is final, detaching every view still
- *  held into it; a second call is a no-op. */
+/** @c free() - releases the memory now, once every deferred call writing it is final, detaching
+ *  every view still held into it; a second call is a no-op. */
 static napi_value uform_js_arena_release(napi_env env, napi_callback_info info) {
     uform_js_arena_t *const arena = (uform_js_arena_t *)uform_js_self(env, info, 0, NULL, NULL);
     if (!arena) return NULL;
@@ -892,8 +896,8 @@ bool uform_js_arena_from_value(napi_env env, napi_value value, uform_js_call_t *
     return true;
 }
 
-/** Views @p buffer as @p elements of @p type; half-precision rows read as their bits on a runtime without
- *  @c Float16Array, which a build against newer headers can still be loaded into. */
+/** Views @p buffer as @p elements of @p type; half-precision rows read as their bits on a runtime
+ *  without @c Float16Array, which a build against newer headers can still be loaded into. */
 static napi_status uform_js_typedarray(napi_env env, napi_typedarray_type type, size_t elements, napi_value buffer,
                                        napi_value *array) {
     napi_status const created = napi_create_typedarray(env, type, elements, buffer, 0, array);
@@ -1022,9 +1026,9 @@ static void uform_js_call_release(napi_env env, uform_js_call_t *call) {
 /**
  *  @brief Frees a deferred call once its wrapper is collected.
  *
- *  The wrapper stays reachable until its call is final - the TypeScript @c Deferred re-registers it with the
- *  collector until then - so an unfinished call here is a contract breach, and it is left to leak rather than be
- *  freed under the library's feet.
+ *  The wrapper stays reachable until its call is final - the TypeScript @c Deferred re-registers it
+ *  with the collector until then - so an unfinished call here is a contract breach, and it is left
+ *  to leak rather than be freed under the library's feet.
  */
 static void uform_js_deferred_finalize(napi_env env, void *data, void *hint) {
     uform_js_call_t *const call = (uform_js_call_t *)data;

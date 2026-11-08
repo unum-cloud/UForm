@@ -16,12 +16,13 @@
  *      it is folded
  *  @verify fail sc gather=true: two all-gathers back to back let the faster domain overwrite a
  *      block before it is copied out
- *  @verify pass sc gather=true consumer_sync=true: an exchange after the copy-out, like the
- *      trainer's force and gradient all-reduces, keeps a partner from posting the next all-gather
- *      early
+ *  @verify pass sc gather=true consumer_sync=true: an exchange after the copy-out, like
+ *      the trainer's force and gradient all-reduces, keeps a partner from posting the
+ *      next all-gather early
  */
 
-// The knobs: the all-reduce's parity landings, the all-gather's single payload, and a later exchange.
+// The knobs: the all-reduce's parity landings, the all-gather's single payload, and
+// a later exchange.
 #ifndef parity
 #define parity true
 #endif
@@ -35,8 +36,8 @@
 #define steps 3
 #define landing_of(step) ((parity && !gather) -> ((step) % 2) : 0)
 
-byte landing[4];  // domain·2+landing, the step whose block landed there, plus one
-byte arrival[4];  // domain·2+parity, the newest step whose flag arrived, plus one
+byte landing[4];  // domain · 2+landing, the step whose block landed there, plus one
+byte arrival[4];  // domain · 2+parity, the newest step whose flag arrived, plus one
 byte exchange[2]; // the later exchange's arrival per domain
 
 proctype domain(byte index) {

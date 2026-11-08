@@ -2,12 +2,13 @@
  *  @file test/vram.c
  *  @author Ash Vardanian
  *  @date October 18, 2026
- *  @brief The C interface on one NVIDIA GPU against the same checkpoint on the host: text, pixels and samples,
- *      blocking, deferred and split into slices, each landing within the BFloat16 floor of the RAM outputs.
+ *  @brief The C interface on one NVIDIA GPU against the same checkpoint on the host: text, pixels
+ *      and samples, blocking, deferred and split into slices, each landing within the BFloat16
+ *      floor of the RAM outputs.
  *
  *  The token head's vectors and the byte decoder's choices over the same texts land within it too.
- *  A one-process mesh over every visible GPU must report the class they dispatch as.
- *  The outputs of a VRAM call stay on the device, so only this test copies them back, with the CUDA driver API.
+ *  A one-process mesh over every visible GPU must report the class they dispatch as. The outputs of
+ *  a VRAM call stay on the device, so only this test copies them back, with the CUDA driver API.
  *  The checkpoint comes from @c argv[1], as written by @c test/tiny_checkpoint.cpp.
  */
 #include <math.h>    // `fabsf`
@@ -21,7 +22,8 @@
 
 #include "uform/uform.h"
 
-/** The largest relative difference a GPU output may show against the host's, from BFloat16 rounding alone. */
+/** The largest relative difference a GPU output may show against the host's, from
+ *  BFloat16 rounding alone. */
 static float const tolerance = 0.05f;
 
 static void expect(bool must_be_true, char const *message) {
@@ -183,7 +185,8 @@ static fetched_t fetch(landed_t const *landed, size_t dimensions, bool on_device
     return fetched;
 }
 
-/** The largest over rows of the row's largest absolute difference relative to the reference row's largest value. */
+/** The largest over rows of the row's largest absolute difference relative to the reference
+ *  row's largest value. */
 static float relative_error(float const *rows, float const *reference, size_t count, size_t dimensions) {
     float worst = 0.0f;
     for (size_t row = 0; row != count; ++row) {

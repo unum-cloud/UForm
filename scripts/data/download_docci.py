@@ -1,3 +1,10 @@
+"""Download DOCCI: ~15K images, one long dense description each, into the image registry schema.
+
+File: scripts/data/download_docci.py
+Author: Ash Vardanian
+Date: July 5, 2026
+"""
+
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -5,7 +12,6 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download DOCCI: ~15K images, one long dense description each, into the image registry schema."""
 import pyarrow as pa
 from acquire import acquire
 

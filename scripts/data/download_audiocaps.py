@@ -1,3 +1,10 @@
+"""Download AudioCaps: 50k (caption, audio) clips already carrying `caption` + `audio` parquet columns.
+
+File: scripts/data/download_audiocaps.py
+Author: Ash Vardanian
+Date: July 5, 2026
+"""
+
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -5,7 +12,6 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download AudioCaps: 50k (caption, audio) clips already carrying `caption` + `audio` parquet columns."""
 
 from acquire import acquire
 

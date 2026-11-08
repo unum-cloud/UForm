@@ -1,3 +1,10 @@
+"""Download Panda-70M testing split: ~70k short (video, caption) WebDataset tar shards -> parquet.
+
+File: scripts/data/download_panda70m_wds.py
+Author: Ash Vardanian
+Date: July 5, 2026
+"""
+
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -7,7 +14,6 @@
 #     "xxhash",
 # ]
 # ///
-"""Download Panda-70M testing split: ~70k short (video, caption) WebDataset tar shards -> parquet."""
 
 import pyarrow as pa
 from acquire import acquire

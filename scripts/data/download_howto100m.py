@@ -1,16 +1,9 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "pyarrow>=21.0.0",
-#     "yt-dlp",
-# ]
-# ///
 """Build a bounded slice of the HowTo100M instructional video corpus by fetching clips from YouTube.
 
-Modality: video + text.  HowTo100M is ~136M instructional video clips — each a `(video_id, [start, end]
-window, ASR narration)` — mined from ~1.2M YouTube videos.  The clip BYTES live only on YouTube (no
-snapshot mirror redistributes them), so a builder needs a clip-level caption index carrying the per-clip
-`(video_id, start, end, text)` and then fetches each window itself.
+Modality: video + text. HowTo100M is ~136M instructional video clips — each a `(video_id, [start,
+end] window, ASR narration)` — mined from ~1.2M YouTube videos. The clip BYTES live only on YouTube
+(no snapshot mirror redistributes them), so a builder needs a clip-level caption index carrying the
+per-clip `(video_id, start, end, text)` and then fetches each window itself.
 
 Caption source.
 This builder reads `bpiyush/howto100m_captions_with_verb_nouns` — a HuggingFace PARQUET mirror of
@@ -25,13 +18,13 @@ We take `text` (the clip's ASR narration) as the caption.  Parquet was chosen ov
 are typed and null-safe, and pyarrow reads them row group by row group over HTTP range requests — so a
 leading slice is read WITHOUT downloading or parsing a whole shard, at bounded memory.
 
-Bounded index (the 100M-clip trap).
-HowTo100M is far too large to materialise; `_clip_records` therefore streams the parquet shards in order
-with `pyarrow.parquet.ParquetFile.iter_batches` and stops after `_INDEX_CAP` distinct `(vid, start, end)`
-windows (default 200k, set by `--index-cap` / `$UFORM_INDEX_CAP`), pulling only the footer and the
-leading row groups of the remote files.  Records that share a window are folded into one clip whose
-captions are joined, so no window is fetched twice.  The tiny built index (a few hundred-k small dicts) is
-cached under `<out-dir>/.captions/` keyed by the cap so re-runs and `--print-plan` are instant.
+Bounded index (the 100M-clip trap). HowTo100M is far too large to materialise; `_clip_records`
+therefore streams the parquet shards in order with `pyarrow.parquet.ParquetFile.iter_batches` and
+stops after `_INDEX_CAP` distinct `(vid, start, end)` windows (default 200k, set by `--index-cap` /
+`$UFORM_INDEX_CAP`), pulling only the footer and the leading row groups of the remote files. Records
+that share a window are folded into one clip whose captions are joined, so no window is fetched
+twice. The tiny built index (a few hundred-k small dicts) is cached under `<out-dir>/.captions/`
+keyed by the cap so re-runs and `--print-plan` are instant.
 
 The rest is the shared `acquire_clips.acquire_clips` orchestrator: a Slurm `(rank, world)` split so each
 worker fetches a disjoint `clips[rank::world]` stride, intra-host GNU-`parallel` fan-out, per-shard yt-dlp
@@ -40,11 +33,10 @@ fetch (an H.264 `bestvideo+bestaudio` mux trimmed to the clip's window), and the
     caption: string                                (the clip's ASR narration, joined per window)
     mp4:     struct<bytes: binary, path: string>   (the trimmed clip bytes + a `<id>.mp4` path tag)
 
-Sizing.
-A bare run fetches the whole capped index (~200k clips); `--fraction` / `--max-clips` cap the fetch BELOW
-that ceiling (they cannot raise it — raise `--index-cap` to index more).  Per-shard yields
-merge into `<out-dir>/fetch_manifest.json`; dead / private / geo-blocked ids are dropped (never silently
-truncated), so expect a real-world video yield around 60-80%.
+Sizing. A bare run fetches the whole capped index (~200k clips); `--fraction` / `--max-clips` cap
+the fetch BELOW that ceiling (they cannot raise it — raise `--index-cap` to index more). Per-shard
+yields merge into `<out-dir>/fetch_manifest.json`; dead / private / geo-blocked ids are dropped
+(never silently truncated), so expect a real-world video yield around 60-80%.
 
 This corpus is research-only: fetching is subject to YouTube's Terms of Service and the per-video rights,
 and the clips are not redistributable.
@@ -55,7 +47,19 @@ CLI usage:
     uv run scripts/data/download_howto100m.py --fraction 0.05 --fanout 8     # ~5% of the capped index
     uv run scripts/data/download_howto100m.py --rank 0 --world 16            # this worker's disjoint stride
     uv run scripts/data/download_howto100m.py --index-cap 1000000                # index a larger slice
+
+File: scripts/data/download_howto100m.py
+Author: Ash Vardanian
+Date: July 5, 2026
 """
+
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "pyarrow>=21.0.0",
+#     "yt-dlp",
+# ]
+# ///
 
 import json
 import urllib.request
@@ -64,7 +68,8 @@ from pathlib import Path
 import pyarrow.parquet as pq
 from acquire_clips import MediaClip, MediaKind, acquire_clips
 
-#: HuggingFace `resolve` URLs of the per-clip caption parquet shards (read by row group, never fully fetched).
+#: HuggingFace `resolve` URLs of the per-clip caption parquet shards (read by row group,
+#: never fully fetched).
 _CAPTION_PARQUET_URLS: tuple[str, ...] = tuple(
     "https://huggingface.co/datasets/bpiyush/howto100m_captions_with_verb_nouns/"
     f"resolve/main/data/train-{shard:05d}-of-00006.parquet"
@@ -72,10 +77,11 @@ _CAPTION_PARQUET_URLS: tuple[str, ...] = tuple(
 )
 #: Row-group batch size for the streaming scan (rows held in memory at once while grouping windows).
 _ROW_BATCH: int = 20_000
-#: Default ceiling on distinct `(vid, start, end)` windows the streamed index materialises — HowTo100M has
-#: ~136M clips, so this hard bound (the `--index-cap` default; raise it via `--index-cap` / `$UFORM_INDEX_CAP`)
-#: keeps the list small and a bare run's fetch conservative. `--fraction` / `--max-clips` cap the fetch BELOW
-#: this, never above it.
+#: Default ceiling on distinct `(vid, start, end)` windows the streamed index materialises
+#: — HowTo100M has ~136M clips, so this hard bound (the `--index-cap` default;
+#: raise it via `--index-cap` / `$UFORM_INDEX_CAP`) keeps the list small and a bare run's
+#: fetch conservative.
+#: `--fraction` / `--max-clips` cap the fetch BELOW this, never above it.
 _DEFAULT_INDEX_CAP = 200_000
 
 
