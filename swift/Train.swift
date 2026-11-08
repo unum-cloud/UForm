@@ -153,6 +153,7 @@ public struct MeshOptions: Sendable {
     /// Seconds any wait for a peer lasts before the call fails; zero derives 120.
     public var timeoutSeconds: Double
 
+    /// Takes every field by name; zeros and empty strings derive as their fields document.
     public init(
         hostDomainIndex: Int = 0,
         hostDomainCount: Int = 0,
@@ -255,6 +256,7 @@ public struct ImageShape: Sendable {
     /// Channels every pixel carries; zero derives four.
     public var channels: Int
 
+    /// Takes every field by name; a zero derives as its field documents.
     public init(patchSide: Int = 0, channels: Int = 0) {
         self.patchSide = patchSide
         self.channels = channels
@@ -272,6 +274,7 @@ public struct VideoShape: Sendable {
     /// Channels every pixel carries; zero derives three.
     public var channels: Int
 
+    /// Takes every field by name; a zero derives as its field documents.
     public init(patchSide: Int = 0, tubeFrames: Int = 0, frameStride: Int = 0, channels: Int = 0) {
         self.patchSide = patchSide
         self.tubeFrames = tubeFrames
@@ -287,6 +290,7 @@ public struct AudioShape: Sendable {
     /// The mono rate every recording is resampled to; zero derives 16000.
     public var sampleRate: Int
 
+    /// Takes every field by name; a zero derives as its field documents.
     public init(chunkSamples: Int = 0, sampleRate: Int = 0) {
         self.chunkSamples = chunkSamples
         self.sampleRate = sampleRate
@@ -312,6 +316,7 @@ public struct BatchShape: Sendable {
     /// The audio geometry.
     public var audio: AudioShape
 
+    /// Takes every field by name; a zero derives as its field documents.
     public init(
         maxRowsPerDevice: Int = 0,
         maxSegmentsPerDevice: Int = 0,
@@ -354,18 +359,30 @@ public struct BatchShape: Sendable {
 /// How the masked objective corrupts a batch and weighs its heads. Mirrors `uform_masking_t`, every zero deriving
 /// the default the C field names.
 public struct Masking: Sendable {
+    /// Fraction of text positions covered by spans; zero derives 0.15.
     public var tokenMaskProbability: Float = 0
+    /// Mean geometric span length in bytes; zero derives 16.
     public var tokenMeanSpan: Float = 0
+    /// Of covered positions, the share shown as MASK; zero derives 0.8.
     public var replaceFraction: Float = 0
+    /// The share of covered positions given a random byte, the rest kept clean; zero derives 0.1.
     public var randomFraction: Float = 0
+    /// Fraction of image patches masked; zero derives 0.75.
     public var imageMaskRatio: Float = 0
+    /// Fraction of video tubes masked, tubed across time; zero derives 0.75.
     public var videoMaskRatio: Float = 0
+    /// Fraction of audio frames masked; zero derives 0.75.
     public var audioMaskRatio: Float = 0
+    /// The weight λ of the text head; zero derives 1.
     public var textWeight: Float = 0
+    /// The weight λ of the image head; zero derives 1.
     public var imageWeight: Float = 0
+    /// The weight λ of the video head; zero derives 1.
     public var videoWeight: Float = 0
+    /// The weight λ of the audio head; zero derives 1.
     public var audioWeight: Float = 0
 
+    /// Starts every field at zero, so each derives its default.
     public init() {}
 
     var raw: uform_masking_t {
@@ -390,14 +407,26 @@ public struct Masking: Sendable {
 public struct Contrastive: Sendable {
     /// Matryoshka prefix widths, strictly ascending, each a multiple of 8, at most 8; empty scores the full width.
     public var matryoshkaDimensions: [Int] = []
+    /// Learnable inverse temperature and bias pairs, one per group of a step's items; zero derives
+    /// one.
     public var temperatureGroups: Int = 0
+    /// The starting inverse temperature of every group; zero derives 10 under the sigmoid form,
+    /// SigLIP's, else 1.
     public var inverseTemperature: Float = 0
+    /// The starting logit bias of every group; zero derives −10 under the sigmoid form, SigLIP's,
+    /// else zero.
     public var bias: Float = 0
+    /// Which pairs repel.
     public var negatives: Negatives = .ambient
+    /// The weight of every pair no edge names under `.ambient` negatives; zero derives 1.
     public var ambientRepulsionWeight: Float = 0
+    /// Edges one device's step names per edge set at most; zero derives it from the segments and
+    /// the largest bag.
     public var maxEdgesPerDevice: Int = 0
+    /// The pair loss over each anchor's row; `.derived` takes sigmoid.
     public var pairLoss: PairLossForm = .derived
 
+    /// Starts every field at zero or empty, so each derives its default.
     public init() {}
 }
 
@@ -405,16 +434,28 @@ public struct Contrastive: Sendable {
 /// `uform_late_interaction_t`, every zero deriving the default the C field names; a zero `weight` trains no token
 /// head.
 public struct LateInteraction: Sendable {
+    /// The loss weight; zero trains no token head.
     public var weight: Float = 0
+    /// The token vectors' width, a multiple of 8; zero derives 128.
     public var width: Int = 0
+    /// The starting inverse temperature of every contrastive group; zero derives 1.
     public var inverseTemperature: Float = 0
+    /// The starting logit bias of every contrastive group.
     public var bias: Float = 0
+    /// Tokens one query segment contributes at most, its first past the prefix; zero derives 64.
     public var maxQuerySpan: Int = 0
+    /// Query token rows one device's step holds at most; zero derives `maxQuerySpan` for every
+    /// segment.
     public var maxQueryTokensPerDevice: Int = 0
+    /// Document segments one device's step holds at most; zero derives `maxSegmentsPerDevice`.
     public var maxDocumentsPerDevice: Int = 0
+    /// Document token rows one device's step holds at most; zero derives the batch's tokens per
+    /// device.
     public var maxDocumentTokensPerDevice: Int = 0
+    /// The pair loss over each query's row of hard MaxSim scores; `.derived` takes ranked.
     public var pairLoss: PairLossForm = .derived
 
+    /// Starts every field at zero, so each derives its default and no token head trains.
     public init() {}
 
     var raw: uform_late_interaction_t {
@@ -440,6 +481,7 @@ public struct Choices: Sendable {
     /// The Brier term's weight beside the soft cross-entropy; zero derives 0.5.
     public var brierWeight: Float
 
+    /// Takes every field by name; a zero derives as its field documents.
     public init(weight: Float = 0, brierWeight: Float = 0) {
         self.weight = weight
         self.brierWeight = brierWeight
@@ -458,6 +500,7 @@ public struct Schedule: Sendable {
     /// Steps the run takes across resumes, which the cosine spans; zero is refused.
     public var steps: Int
 
+    /// Takes every field by name; a zero derives as its field documents.
     public init(learningRate: Float = 0, minLearningRate: Float = 0, warmupSteps: Int = 0, steps: Int = 0) {
         self.learningRate = learningRate
         self.minLearningRate = minLearningRate
@@ -478,6 +521,7 @@ public struct Edges: Sendable {
     /// The weight of each edge, paired with `ids`; nil weighs every edge one.
     public var weights: [Float]?
 
+    /// Takes the compressed rows by name; nil `weights` weighs every edge one.
     public init(offsets: [Int], ids: [UInt32], weights: [Float]? = nil) {
         self.offsets = offsets
         self.ids = ids
@@ -488,10 +532,14 @@ public struct Edges: Sendable {
 /// The contrastive targets of one step; a pair `ignore` names is skipped, one `attract` names pulls together, one
 /// `repel` names pushes apart, and every other pair follows the run's negatives. Mirrors `uform_relations_view_t`.
 public struct Relations: Sendable {
+    /// Pairs pulled together.
     public var attract: Edges?
+    /// Pairs pushed apart.
     public var repel: Edges?
+    /// Pairs skipped, like known false negatives; its `weights` are not read.
     public var ignore: Edges?
 
+    /// Takes the edge sets by name; a nil set names no pairs.
     public init(attract: Edges? = nil, repel: Edges? = nil, ignore: Edges? = nil) {
         self.attract = attract
         self.repel = repel
@@ -507,12 +555,19 @@ public struct TrainerStepStats: Sendable {
     public var learningRate: Float
     /// The total loss the step minimized.
     public var loss: Float
+    /// The contrastive term; zero when the objective is masked alone.
     public var contrastiveLoss: Float
+    /// The text reconstruction term, before its weight; zero when absent.
     public var maskedTextLoss: Float
+    /// The image reconstruction term, before its weight; zero when absent.
     public var maskedImageLoss: Float
+    /// The video reconstruction term, before its weight; zero when absent.
     public var maskedVideoLoss: Float
+    /// The audio reconstruction term, before its weight; zero when absent.
     public var maskedAudioLoss: Float
+    /// The late-interaction term, weighted; zero when absent.
     public var lateInteractionLoss: Float
+    /// The choices term over the items that made a choice, before its weight; zero when absent.
     public var choicesLoss: Float
     /// Items cut at a row's width.
     public var truncated: Int
@@ -538,6 +593,7 @@ public struct TrainerStepStats: Sendable {
 
 /// What one step wrote: its report, and the pooled embeddings it scored when given an arena.
 public struct TrainerStep {
+    /// What the step reports.
     public let stats: TrainerStepStats
     /// One row per item, as the contrastive loss scored it before the update, or nil without an arena.
     public let embeddings: Rows?

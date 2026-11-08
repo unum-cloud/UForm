@@ -1,4 +1,4 @@
-"""Pocket-Sized Multimodal AI: CPU + GPU inference and GPU training for content understanding.
+"""Distributed training and inference pipeline for multi-modal perception.
 
 File: python/uform/__init__.py
 Author: Ash Vardanian

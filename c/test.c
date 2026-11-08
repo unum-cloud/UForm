@@ -878,7 +878,8 @@ static void test_deferred_limit(void) {
 }
 
 /** An arena keeps its high-water mark, so a repeated call lands where the last did; inputs inside it are
- *  refused; and a deferred call holds it, refusing another call meanwhile, until final. */
+ *  refused; a deferred call holds it, refusing another call meanwhile, until final; and it
+ *  describes the host pages a RAM executor gave it. */
 static void test_arenas(void) {
     printf("Test: Arenas\n");
     uform_executor_t const executor = create_executor(0);
@@ -932,6 +933,15 @@ static void test_arenas(void) {
     uform_text_encode(&other);
     expect(!outcome.message, outcome.message);
     expect(embeddings.data != NULL, "A final call lets go of its arena");
+
+    uform_arena_description_t placement = {uform_residency_unknown_k, 0};
+    uform_arena_describe(
+        &(uform_arena_describe_t) {.arena = outputs.arena, .outcome = &outcome, .description = &placement});
+    expect(outcome.status == uform_status_success_k && placement.residency == uform_residency_ram_k &&
+               placement.device == -1,
+           "A RAM executor's arena lives in host pages");
+    uform_arena_describe(&(uform_arena_describe_t) {.arena = NULL, .outcome = &outcome, .description = &placement});
+    expect(outcome.status == uform_status_invalid_argument_k, "A NULL arena is refused");
 
     uform_arena_free(outputs.arena);
     uform_model_free(model);

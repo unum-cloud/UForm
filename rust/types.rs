@@ -241,6 +241,22 @@ pub struct uform_arena_init_t {
     pub outcome: *mut uform_outcome_t,
 }
 
+pub type uform_residency_t = c_int;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct uform_arena_description_t {
+    pub residency: uform_residency_t,
+    pub device: i32,
+}
+
+#[repr(C)]
+pub struct uform_arena_describe_t {
+    pub arena: uform_arena_t,
+    pub outcome: *mut uform_outcome_t,
+    pub description: *mut uform_arena_description_t,
+}
+
 extern "C" {
     pub fn uform_outcome_wait(outcome: *mut uform_outcome_t) -> uform_status_t;
     pub fn uform_outcome_status(outcome: *mut uform_outcome_t) -> uform_status_t;
@@ -253,6 +269,7 @@ extern "C" {
 
     pub fn uform_arena_init(arguments: *mut uform_arena_init_t);
     pub fn uform_arena_free(arena: uform_arena_t);
+    pub fn uform_arena_describe(arguments: *mut uform_arena_describe_t);
 
     pub fn uform_status_name(status: uform_status_t) -> *const c_char;
     pub fn uform_status_from_name(name: uform_bytes_view_t) -> uform_status_t;
@@ -1334,10 +1351,26 @@ impl FromStr for Mood {
 }
 
 /// Where an executor computes, and with it where the arenas it makes keep their memory.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Residency {
-    Ram,
-    Vram,
+///
+/// Mirrors `uform_residency_t`.
+#[repr(i32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[non_exhaustive]
+pub enum Residency {
+    /// Host pages, which the host reads directly.
+    Ram = 1,
+    /// One GPU's memory, which only device code reads.
+    Vram = 2,
+}
+
+impl Residency {
+    fn from_raw(value: uform_residency_t) -> Option<Self> {
+        match value {
+            1 => Some(Residency::Ram),
+            2 => Some(Residency::Vram),
+            _ => None,
+        }
+    }
 }
 
 /// The host threads or device streams an [`On`] runs its calls on, with the activation scratch and
@@ -1360,8 +1393,6 @@ enum Residency {
 #[derive(Debug)]
 pub struct Executor {
     pub(crate) handle: uform_executor_t,
-    /// The residency of the constructor that produced it, which places the arenas it makes.
-    residency: Residency,
     /// Frees `handle` once neither this nor a GPU arena it made holds it.
     share: Arc<ExecutorShare>,
 }
@@ -1371,15 +1402,14 @@ pub struct Executor {
 unsafe impl Send for Executor {}
 
 impl Default for Executor {
-    fn default() -> Self { Executor::adopt(ptr::null_mut(), Residency::Ram) }
+    fn default() -> Self { Executor::adopt(ptr::null_mut()) }
 }
 
 impl Executor {
     /// Owns the handle a constructor filled, which is null for the executor that owns nothing.
-    fn adopt(handle: uform_executor_t, residency: Residency) -> Self {
+    fn adopt(handle: uform_executor_t) -> Self {
         Executor {
             handle,
-            residency,
             share: Arc::new(ExecutorShare(handle)),
         }
     }
@@ -1408,7 +1438,7 @@ impl Executor {
                 deferred_limit,
             })
         };
-        let executor = Executor::adopt(handle, Residency::Ram);
+        let executor = Executor::adopt(handle);
         check(outcome).map(|()| executor)
     }
 
@@ -1434,7 +1464,7 @@ impl Executor {
             pool,
             deferred_limit,
         });
-        let executor = Executor::adopt(handle, Residency::Ram);
+        let executor = Executor::adopt(handle);
         check(outcome).map(|()| executor)
     }
 
@@ -1478,7 +1508,7 @@ impl Executor {
             scratch_limit,
             deferred_limit,
         });
-        let executor = Executor::adopt(handle, Residency::Vram);
+        let executor = Executor::adopt(handle);
         check(outcome).map(|()| executor)
     }
 
@@ -1531,14 +1561,12 @@ impl Drop for ExecutorShare {
 #[derive(Debug)]
 pub struct Arena {
     pub(crate) handle: uform_arena_t,
-    /// The residency of the executor that made it.
-    residency: Residency,
     /// The executor a GPU arena frees on, dropped after the arena; `None` for host pages.
     _executor: Option<Arc<ExecutorShare>>,
 }
 
 // Safety: an arena serves one call at a time, which the `&mut` every verb takes already enforces,
-// and a shared borrow reads only its residency.
+// and a shared borrow only asks the library where it lives.
 unsafe impl Send for Arena {}
 unsafe impl Sync for Arena {}
 
@@ -1555,11 +1583,7 @@ impl Arena {
     pub fn new_in(executor: &Executor) -> Result<Self> {
         let mut arena = Arena {
             handle: ptr::null_mut(),
-            residency: executor.residency,
-            _executor: match executor.residency {
-                Residency::Vram => Some(Arc::clone(&executor.share)),
-                Residency::Ram => None,
-            },
+            _executor: None,
         };
         let mut outcome = uform_outcome_t::default();
         unsafe {
@@ -1569,16 +1593,51 @@ impl Arena {
                 outcome: &mut outcome,
             })
         };
-        check(outcome).map(|()| arena)
+        check(outcome)?;
+        if arena.describe()?.residency == Residency::Vram {
+            arena._executor = Some(Arc::clone(&executor.share));
+        }
+        Ok(arena)
+    }
+
+    /// Where the outputs live, as the executor that made the arena decided.
+    ///
+    /// Calls `uform_arena_describe`.
+    pub fn describe(&self) -> Result<ArenaDescription> {
+        let mut description = uform_arena_description_t::default();
+        let mut outcome = uform_outcome_t::default();
+        unsafe {
+            uform_arena_describe(&mut uform_arena_describe_t {
+                arena: self.handle,
+                outcome: &mut outcome,
+                description: &mut description,
+            })
+        };
+        check(outcome)?;
+        Ok(ArenaDescription {
+            residency: Residency::from_raw(description.residency)
+                .ok_or_else(|| fail(Status::UnknownKind, "the arena names no known residency"))?,
+            device: u32::try_from(description.device).ok(),
+        })
     }
 
     /// Refuses device memory, which no host accessor may read.
     pub(crate) fn host(&self) -> Result<()> {
-        match self.residency {
+        match self.describe()?.residency {
             Residency::Vram => Err(fail(Status::Device, "the outputs are device memory")),
-            Residency::Ram => Ok(()),
+            _ => Ok(()),
         }
     }
+}
+
+/// Where an [`Arena`]'s outputs live.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[non_exhaustive]
+pub struct ArenaDescription {
+    /// [`Residency::Ram`] for host pages, [`Residency::Vram`] for one device's memory.
+    pub residency: Residency,
+    /// The device ordinal, as [`Executor::for_vram`] takes it; `None` for host pages.
+    pub device: Option<u32>,
 }
 
 impl Drop for Arena {
@@ -1924,19 +1983,34 @@ mod tests {
         }
     }
 
-    /// An arena keeps the residency of the executor that made it, and the host reads only host pages.
+    /// An arena lives where the executor that made it computes, and the host reads only host pages.
     #[test]
     fn arenas_live_where_their_executor_computes() -> Result<()> {
-        assert!(Arena::new()?.host().is_ok());
+        let local = Arena::new()?;
+        let host = ArenaDescription {
+            residency: Residency::Ram,
+            device: None,
+        };
+        assert_eq!(local.describe()?, host);
+        assert!(local.host().is_ok());
 
         let executor = Executor::for_ram(&[], None, 1, 0)?;
         let placed = Arena::new_in(&executor)?;
         drop(executor);
-        assert!(placed.host().is_ok(), "an arena outlives its executor");
+        assert_eq!(placed.describe()?, host, "an arena outlives its executor");
 
         // A GPU arena frees on its executor's first stream, so it keeps the executor past its drop.
-        let gpu = Executor::adopt(ptr::null_mut(), Residency::Vram);
+        let Ok(gpu) = (unsafe { Executor::for_vram(&[0], None, &[], None, &[], 0, 0) }) else {
+            return Ok(());
+        };
         let device = Arena::new_in(&gpu)?;
+        assert_eq!(
+            device.describe()?,
+            ArenaDescription {
+                residency: Residency::Vram,
+                device: Some(0)
+            }
+        );
         let share = Arc::downgrade(&gpu.share);
         drop(gpu);
         assert!(share.upgrade().is_some(), "a GPU arena holds its executor");
@@ -1946,10 +2020,11 @@ mod tests {
         Ok(())
     }
 
+    /// A pool that lends no threads and streams that do not pair with the devices are refused.
     #[test]
-    fn executors_report_what_this_build_lacks() {
+    fn executors_refuse_malformed_placements() {
         let pooled = unsafe { Executor::on_pool(&[], None, ptr::null_mut(), 0) };
-        assert_eq!(pooled.unwrap_err().status, Status::Unsupported);
+        assert_eq!(pooled.unwrap_err().status, Status::InvalidArgument);
         let mismatched = unsafe { Executor::for_vram(&[0, 1], None, &[], None, &[ptr::null_mut()], 0, 0) };
         assert_eq!(mismatched.unwrap_err().status, Status::ShapeMismatch);
     }

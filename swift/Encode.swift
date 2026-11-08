@@ -12,7 +12,9 @@ import UFormC
 /// The surfaces an encode call keeps from its one forward, each deciding whether the binding passes the C
 /// output pointer of the same name; `.embeddings` alone by default.
 public struct Outputs: OptionSet, Sendable {
+    /// The bits, one per C output pointer the set passes.
     public let rawValue: UInt8
+    /// Wraps bits, one per C output pointer.
     public init(rawValue: UInt8) { self.rawValue = rawValue }
 
     /// One pooled embedding per item, read past the attention pool and the projection head.
@@ -41,6 +43,7 @@ public struct EncodeConfig {
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     public var progressSteps: Int
 
+    /// Takes every knob by name; a zero `progressSteps` derives ten.
     public init(outputsScalar: Scalar = .f32, progress: Progress? = nil, progressSteps: Int = 0) {
         self.outputsScalar = outputsScalar
         self.progress = progress

@@ -63,16 +63,6 @@ typedef enum uform_js_outputs_t {
     uform_js_outputs_token_vectors_k = 4,
 } uform_js_outputs_t;
 
-/** Where an executor computes, which every arena it makes inherits; device memory is never viewed. */
-typedef enum uform_js_residency_t {
-
-    /** Host threads over host pages. */
-    uform_js_residency_ram_k = 0,
-
-    /** Device streams over device memory. */
-    uform_js_residency_vram_k = 1,
-} uform_js_residency_t;
-
 /** Everything the addon owns per environment: the constructors its verbs type-check against, reached through
  *  @c napi_get_instance_data rather than a namespace-scope global. */
 typedef struct uform_js_addon_t {
@@ -107,9 +97,6 @@ typedef struct uform_js_executor_t {
     /** The library handle, freed by @c free or when the JavaScript wrapper is collected. */
     uform_executor_t handle;
 
-    /** Where it computes, which every arena it makes inherits. */
-    uform_js_residency_t residency;
-
     /** Live GPU arenas it made, each of which must be freed before it is. */
     size_t arenas;
 } uform_js_executor_t;
@@ -119,9 +106,6 @@ typedef struct uform_js_arena_t {
 
     /** The library handle, made with the wrapper and @c NULL once freed. */
     uform_arena_t handle;
-
-    /** The residency of the executor that made it. */
-    uform_js_residency_t residency;
 
     /** The executor a GPU arena grows, fills and frees on, held until the arena is freed; @c NULL for host
      *  pages, which may outlive theirs. */

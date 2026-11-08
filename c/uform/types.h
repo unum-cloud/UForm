@@ -233,7 +233,11 @@ typedef enum uform_status_t {
  *  status cannot. Messages are static and @b don't need to be deallocated, and are @c NULL exactly when the
  *  status is @c uform_status_success_k. */
 typedef struct uform_outcome_t {
+
+    /** The status bindings branch on; @c uform_status_deferred_k until a deferred call settles. */
     uform_status_t status;
+
+    /** The static detail, @c NULL exactly when @c status is @c uform_status_success_k. */
     char const* message;
 } uform_outcome_t;
 
@@ -816,6 +820,51 @@ UFORM_EXPORT void uform_arena_init(uform_arena_init_t* arguments);
  *  Waits until every deferred call naming the handle is final.
  */
 UFORM_EXPORT void uform_arena_free(uform_arena_t arena);
+
+/** Where an arena's outputs live, as the executor that made it decided. */
+typedef enum uform_residency_t {
+
+    /** No residency named. */
+    uform_residency_unknown_k = 0,
+
+    /** Host pages, which the host reads directly. */
+    uform_residency_ram_k = 1,
+
+    /** One GPU's memory, which only device code reads. */
+    uform_residency_vram_k = 2,
+} uform_residency_t;
+
+/** Where an arena's outputs live. */
+typedef struct uform_arena_description_t {
+
+    /** RAM for host pages, VRAM for one device's memory. */
+    uform_residency_t residency;
+
+    /** The UForm ordinal of the device, as @c uform_gpu_devices lists it, or -1 for host pages. */
+    int32_t device;
+} uform_arena_description_t;
+
+/** The arguments of @c uform_arena_describe. */
+typedef struct uform_arena_describe_t {
+
+    /** The arena to describe. */
+    uform_arena_t arena;
+
+    /** Output for the outcome, final once its status leaves @c uform_status_deferred_k. */
+    uform_outcome_t *outcome;
+
+    /** Output for where the arena's outputs live. */
+    uform_arena_description_t *description;
+} uform_arena_describe_t;
+
+/**
+ *  @brief Reports where an arena's outputs live, as the executor that made it decided, so a caller
+ *      reads them as host memory or hands them to device code without remembering that executor.
+ *
+ *  @par Statuses:
+ *  - @c uform_status_invalid_argument_k A @c NULL arena or description.
+ */
+UFORM_EXPORT void uform_arena_describe(uform_arena_describe_t *arguments);
 
 /**
  *  @brief The canonical lowercase, dash-separated spelling of each closed set's enumerators, and the inverse

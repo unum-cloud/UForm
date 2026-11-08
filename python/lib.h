@@ -141,9 +141,6 @@ typedef struct Executor {
     /** The library's executor, NULL once a `with` block closed it. */
     uform_executor_t handle;
 
-    /** Devices its streams run on, at least one for a GPU executor; zero for host threads. */
-    size_t devices_count;
-
     /** The GPU arenas it made that are still alive, each holding it, since they free on its first stream. */
     Py_ssize_t arenas;
 

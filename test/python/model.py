@@ -2,6 +2,10 @@
 
 Run with `uv run pytest test/python/model.py` once the extension is built against the stub library or the
 engine; every check reads its expectations from the C contract, never from the stub's choices.
+
+File: test/python/model.py
+Author: Ash Vardanian
+Date: October 18, 2026
 """
 
 import asyncio
@@ -57,7 +61,7 @@ def test_classes_are_spelled_by_the_library():
     """Class members take the library's own spellings and ordinals, and the unknown class is no member."""
     assert uform.CPUClass.INTEL_HASWELL == 2 and uform.CPUClass.WASM64_EXTENDED == 17
     assert uform.GPUClass.NVIDIA_HOPPER == 3 and uform.GPUClass.APPLE_METAL10 == 12
-    assert len(uform.CPUClass) == 17 and len(uform.GPUClass) == 12
+    assert len(uform.CPUClass) == 18 and len(uform.GPUClass) == 12
     assert "UNKNOWN" not in uform.CPUClass.__members__ and "UNKNOWN" not in uform.GPUClass.__members__
 
 

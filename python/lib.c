@@ -9,11 +9,11 @@
  */
 #include "lib.h"
 
-static char const doc_module[] =                                                                    //
-    "Pocket-Sized Multimodal AI: CPU + GPU inference and GPU training for content understanding.\n" //
-    "\n"                                                                                            //
-    "Models, executors and trainers sitting directly on the stable C ABI. Every verb is a\n"        //
-    "batch over buffer-protocol inputs, every output lands in an arena the caller reuses,\n"        //
+static char const doc_module[] =                                                             //
+    "Distributed training and inference pipeline for multi-modal perception.\n"              //
+    "\n"                                                                                     //
+    "Models, executors and trainers sitting directly on the stable C ABI. Every verb is a\n" //
+    "batch over buffer-protocol inputs, every output lands in an arena the caller reuses,\n" //
     "and NumPy is never required.";
 
 /** One type the module readies, the name it exports it under, and the layout of a struct sequence. */

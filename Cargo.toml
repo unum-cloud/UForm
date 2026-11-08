@@ -1,6 +1,6 @@
 [package]
 authors = ["Ash Vardanian <info@unum.cloud>"]
-description = "Pocket-sized multimodal encoders and their training steps over the UForm C interface"
+description = "Distributed training and inference pipeline for multi-modal perception"
 edition = "2021"
 rust-version = "1.100"
 include = [
@@ -16,6 +16,7 @@ include = [
 ]
 license = "Apache-2.0"
 name = "uform"
+links = "uform"
 publish = false
 repository = "https://github.com/unum-cloud/UForm"
 documentation = "https://docs.rs/uform"
@@ -27,10 +28,10 @@ path = "rust/lib.rs"
 
 [dependencies]
 # CMake builds each crate's tree in place of downloading the revision the submodule pins.
-forkunion = { version = "4.0.0-rc.1", default-features = false }
-numkong = "8.0.0-rc.1"
-smashtable = "1.0.0-rc.1"
-stringzilla = { version = "6.0.0-rc.1", default-features = false }
+forkunion = { version = "4.0.0-rc.1", git = "https://github.com/ashvardanian/ForkUnion", default-features = false }
+numkong = { version = "8.0.0-rc.1", git = "https://github.com/ashvardanian/NumKong" }
+smashtable = { version = "1.0.0-rc.1", git = "https://github.com/ashvardanian/SmashTable" }
+stringzilla = { version = "6.0.0-rc.1", git = "https://github.com/ashvardanian/StringZilla", default-features = false }
 
 # Which implementation of the C interface gets linked. Naming none links the engine for the host
 # alone; the GPU features add residencies to it, and `build.rs` refuses the stub beside either.

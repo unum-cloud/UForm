@@ -1,4 +1,4 @@
-//! UForm - Pocket-sized multimodal encoders and their training steps over the UForm C interface.
+//! UForm - Distributed training and inference pipeline for multi-modal perception.
 //!
 //! The crate links the precompiled library, so building it compiles no tower.
 //!
@@ -46,7 +46,7 @@ pub use train::{
     TrainerStepConfig, TrainerStepStats, VideoShape,
 };
 pub use types::{
-    capabilities_available, capabilities_compiled, gpu_devices, version, Arena, Blocking, CPUClass, Deferred,
-    Deferring, Element, Error, Executor, GPUClass, GPUDevice, GPUVendor, Mood, On, ProgressCallback, Result, Rows,
-    RowsTape, Scalar, Status, Tape, Wait,
+    capabilities_available, capabilities_compiled, gpu_devices, version, Arena, ArenaDescription, Blocking, CPUClass,
+    Deferred, Deferring, Element, Error, Executor, GPUClass, GPUDevice, GPUVendor, Mood, On, ProgressCallback,
+    Residency, Result, Rows, RowsTape, Scalar, Status, Tape, Wait,
 };

@@ -7,7 +7,7 @@ version=$(cat VERSION)
 name=uform_docs_$version out=build/uform_docs_$version
 # Rustdoc's JSON is unstable, and `rust-version` needs 1.100, which reaches stable on 2026-11-12.
 toolchain=${UFORM_RUST_TOOLCHAIN:-beta-2026-10-18}
-rm -rf "$out" && mkdir -p "$out"/{doxygen,headers,python,rust,swift,javascript} build/docs-scratch/library
+rm -rf "$out" && mkdir -p "$out"/{doxygen,headers,python,rust,swift,javascript,mojo} build/docs-scratch/library
 
 rm -rf build/xml && (cd docs && doxygen conf.dox) && cp -r build/xml/. "$out/doxygen"
 git ls-files ':(glob)c/uform/*.h' | xargs cp --parents -t "$out/headers"
@@ -22,7 +22,13 @@ swiftc -emit-module -emit-module-path build/docs-scratch/UForm.swiftmodule -modu
     -package-name UForm -parse-as-library -I build/docs-scratch -I c \
     -emit-symbol-graph -emit-symbol-graph-dir "$out/swift" swift/{Types,Model,Encode,Train}.swift
 cp javascript/*.ts "$out/javascript/"
-# griffe, rustdoc and Doxygen's body locations hold absolute paths, which would leak the build machine's directories.
-sed -i "s|$PWD/||g; s|$PWD|.|g; s|$HOME|~|g" "$out/python/uform.json" "$out/rust/uform.json" "$out"/doxygen/*.xml
+# `mojo doc` needs only the compiler, not the environment `pixi.toml` builds the library into.
+pixi exec -c conda-forge -c https://conda.modular.com/max --spec 'mojo>=1.2.0,<1.3' \
+    mojo doc -o "$out/mojo/uform.json" mojo/uform
+cp mojo/uform/__init__.mojo "$out/mojo/"
+# griffe, rustdoc, Mojo and Doxygen's body locations hold absolute paths, which would leak the build machine's
+# directories.
+sed -i "s|$PWD/||g; s|$PWD|.|g; s|$HOME|~|g" "$out/python/uform.json" "$out/rust/uform.json" "$out/mojo/uform.json" \
+    "$out"/doxygen/*.xml
 printf '{"project":"uform","version":"%s","commit":"%s"}\n' "$version" "$(git rev-parse HEAD)" > "$out/manifest.json"
 tar -czf "build/$name.tar.gz" -C build "$name"

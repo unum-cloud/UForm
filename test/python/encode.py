@@ -2,6 +2,10 @@
 
 Run with `uv run pytest test/python/encode.py`. Texts are tokenizer-free, a byte per token, so their shapes
 follow from the inputs and the model's own description; media shapes are only checked for consistency.
+
+File: test/python/encode.py
+Author: Ash Vardanian
+Date: October 18, 2026
 """
 
 import asyncio
@@ -149,6 +153,21 @@ def test_a_tape_pair_is_lent_as_is(model: uform.Model, arena: uform.Arena):
     lent = bytes(memoryview(model.text_encode((data, offsets), arena).embeddings))
     gathered = bytes(memoryview(model.text_encode([text.encode() for text in TEXTS], arena).embeddings))
     assert lent == gathered
+
+
+def test_outputs_cross_as_dlpack(model: uform.Model, arena: uform.Arena):
+    """Host outputs export DLPack, lend a tape pair as a buffer would, and free their arena once dropped."""
+    encoded = model.text_encode(TEXTS, arena, outputs=uform.Outputs.STATES)
+    assert encoded.states.offsets.__dlpack_device__() == (1, 0)
+    data = "".join(TEXTS).encode()
+    lent = bytes(memoryview(model.text_encode((data, encoded.states.offsets), uform.Arena()).embeddings))
+    gathered = bytes(memoryview(model.text_encode([text.encode() for text in TEXTS], uform.Arena()).embeddings))
+    assert lent == gathered
+    capsule = encoded.states.__dlpack__()
+    with pytest.raises(uform.ContendedError):
+        model.text_encode(TEXTS, arena)
+    del capsule
+    model.text_encode(TEXTS, arena)
 
 
 def test_a_tape_pair_past_its_data_is_refused(model: uform.Model, arena: uform.Arena):

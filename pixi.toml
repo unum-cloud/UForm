@@ -1,0 +1,63 @@
+# The workspace, and the `uform` package the Mojo binding `dlopen`s. Built by the tree's own CMake, so the ISA
+# probes, the encoder variants and the submodule pins are the ones every other SDK gets.
+
+[workspace]
+authors = ["Ash Vardanian <info@unum.cloud>"]
+channels = ["conda-forge", "https://conda.modular.com/max"]
+description = "Distributed training and inference pipeline for multi-modal perception"
+license = "Apache-2.0"
+license-file = "LICENSE"
+name = "uform"
+# Ubuntu 26.04's glibc is the floor for a toolchain that moves as fast as Mojo's, as in USearch.
+platforms = [
+  { name = "linux-64-glibc239", platform = "linux-64", glibc = "2.39" },
+  { name = "linux-aarch64-glibc239", platform = "linux-aarch64", glibc = "2.39" },
+  "osx-arm64",
+]
+preview = ["pixi-build"]
+readme = "README.md"
+version = "4.0.0-rc.1"
+
+[workspace.target.linux-64.build-variants]
+c_stdlib_version = ["2.39"]
+
+[workspace.target.linux-aarch64.build-variants]
+c_stdlib_version = ["2.39"]
+
+# A dependency of the environment too, so `pixi run` puts the library in the prefix `mojo build` bakes as runpath.
+[dependencies]
+mojo = ">=1.2.0,<1.3" # ? Mojo minors still change the language, as 1.1 and 1.2 did, so each is adopted by hand
+uform = { path = "." }
+
+# `mojo build` links against a MAX runtime that needs a newer glibc than conda-forge's default
+# sysroot, which otherwise fails with a wall of GLIBC_2.34 undefined references.
+[target.linux-64.dependencies]
+sysroot_linux-64 = ">=2.34"
+
+[target.linux-aarch64.dependencies]
+sysroot_linux-aarch64 = ">=2.34"
+
+[package]
+name = "uform"
+version = "4.0.0-rc.1"
+
+[package.build]
+backend = { name = "pixi-build-cmake", version = "0.*" }
+
+# The backend defaults to a C++-only toolchain, and the C interface's own units compile as C.
+[package.build.config]
+compilers = ["c", "cxx"]
+# Static dependencies, so the shared engine carries yyjson and the rest rather than naming libraries nothing ships.
+extra-args = ["-DUFORM_BUILD_SHARED=1", "-DBUILD_SHARED_LIBS=OFF"]
+
+# The host decoders the verbs over files call, whose run exports follow the library into the environment.
+[package.host-dependencies]
+ffmpeg = "*"
+libjpeg-turbo = "*"
+libpng = "*"
+libwebp-base = "*"
+zlib = "*"
+
+[tasks]
+build = { cmd = "mkdir -p build_mojo && mojo build -I mojo mojo/test.mojo -o build_mojo/mojo_test" }
+test = { cmd = "mojo run -I mojo mojo/test.mojo" }

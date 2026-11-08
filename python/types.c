@@ -1022,14 +1022,13 @@ static char const doc_Executor[] =                                              
     "  ...     executor.drain(uform.Mood.PARKED)";
 
 /** Wraps a fresh handle, or frees it when the wrapper cannot be allocated; a new reference, or NULL. */
-static PyObject *executor_adopt(PyTypeObject *type, uform_executor_t handle, size_t devices_count) {
+static PyObject *executor_adopt(PyTypeObject *type, uform_executor_t handle) {
     Executor *const executor = (Executor *)type->tp_alloc(type, 0);
     if (!executor) {
         uform_executor_free(handle);
         return NULL;
     }
     executor->handle = handle;
-    executor->devices_count = devices_count;
     return (PyObject *)executor;
 }
 
@@ -1183,7 +1182,7 @@ static PyObject *Executor_for_ram(PyTypeObject *type, PyObject *const *args, Py_
     PyMem_Free(memory_domains);
 
     if (uform_py_raise_on_outcome(&outcome) != 0) return NULL;
-    return executor_adopt(type, handle, 0);
+    return executor_adopt(type, handle);
 }
 
 static char const doc_Executor_on_pool[] =                                                     //
@@ -1246,31 +1245,31 @@ static PyObject *Executor_on_pool(PyTypeObject *type, PyObject *const *args, Py_
     PyMem_Free(memory_domains);
 
     if (uform_py_raise_on_outcome(&outcome) != 0) return NULL;
-    return executor_adopt(type, handle, 0);
+    return executor_adopt(type, handle);
 }
 
-static char const doc_Executor_for_vram[] =                                                         //
-    "for_vram(devices=None, *, scratch_limit=0, deferred_limit=0, gpu_class=None,\n"                //
-    "         memory_domains=None, cpu_class=None) -> Executor\n"                                   //
-    "\n"                                                                                         //
-    "Opens one submission stream on every named device, all of them driven by whichever\n"       //
-    "thread submits, and spawns the host threads that decode what the devices cannot.\n"         //
-    "Calls `uform_executor_for_vram`.\n"                                                         //
-    "\n"                                                                                         //
-    "Args:\n"                                                                                    //
-    "  devices (Sequence[int], optional): Positions in `gpu_devices()` to drive; None\n"         //
-    "    derives one free device.\n"                                                             //
-    "  scratch_limit (int, optional): The ceiling on scratch bytes per device; 0 lets\n"         //
-    "    scratch grow as batches ask, and a batch larger than the ceiling runs in passes.\n"     //
-    "  deferred_limit (int, optional): Deferred calls tracked at once; 0 takes a default.\n"     //
-    "  gpu_class (GPUClass, optional): The class every device dispatches as; None derives\n"     //
-    "    the devices' own, which must agree.\n"                                                  //
+static char const doc_Executor_for_vram[] =                                                     //
+    "for_vram(devices=None, *, scratch_limit=0, deferred_limit=0, gpu_class=None, "             //
+    "memory_domains=None, cpu_class=None) -> Executor\n"                                        //
+    "\n"                                                                                        //
+    "Opens one submission stream on every named device, all of them driven by whichever\n"      //
+    "thread submits, and spawns the host threads that decode what the devices cannot.\n"        //
+    "Calls `uform_executor_for_vram`.\n"                                                        //
+    "\n"                                                                                        //
+    "Args:\n"                                                                                   //
+    "  devices (Sequence[int], optional): Positions in `gpu_devices()` to drive; None\n"        //
+    "    derives one free device.\n"                                                            //
+    "  scratch_limit (int, optional): The ceiling on scratch bytes per device; 0 lets\n"        //
+    "    scratch grow as batches ask, and a batch larger than the ceiling runs in passes.\n"    //
+    "  deferred_limit (int, optional): Deferred calls tracked at once; 0 takes a default.\n"    //
+    "  gpu_class (GPUClass, optional): The class every device dispatches as; None derives\n"    //
+    "    the devices' own, which must agree.\n"                                                 //
     "  memory_domains (Sequence[int], optional): NUMA node IDs whose cores the host\n"          //
     "    decoders take; None derives every node the process may allocate on.\n"                 //
     "  cpu_class (CPUClass, optional): The class the host decoders dispatch as; None derives\n" //
-    "    the CPU's own.\n"                                                                       //
-    "\n"                                                                                         //
-    "Example:\n"                                                                                 //
+    "    the CPU's own.\n"                                                                      //
+    "\n"                                                                                        //
+    "Example:\n"                                                                                //
     "  >>> executor = uform.Executor.for_vram([0, 1])   # doctest: +SKIP";
 
 static PyObject *Executor_for_vram(PyTypeObject *type, PyObject *const *args, Py_ssize_t positional_args_count,
@@ -1319,7 +1318,7 @@ static PyObject *Executor_for_vram(PyTypeObject *type, PyObject *const *args, Py
     PyMem_Free(memory_domains);
 
     if (uform_py_raise_on_outcome(&outcome) != 0) return NULL;
-    return executor_adopt(type, handle, devices_count ? devices_count : 1); // a GPU executor drives one at least
+    return executor_adopt(type, handle);
 }
 
 static char const doc_Executor_drain[] =                                                    //
@@ -1388,6 +1387,188 @@ PyTypeObject ExecutorType = {
 
 #pragma endregion Executors
 
+#pragma region DLPack
+
+/** The parts of the DLPack 1.x ABI this binding exchanges, spelled as @c dlpack.h spells them. */
+typedef enum DLDeviceType {
+    kDLCPU = 1,
+    kDLCUDA = 2,
+    kDLCUDAHost = 3,
+    kDLMetal = 8,
+    kDLROCM = 10,
+    kDLROCMHost = 11,
+    kDLCUDAManaged = 13,
+} DLDeviceType;
+
+typedef enum DLDataTypeCode {
+    kDLInt = 0,
+    kDLUInt = 1,
+    kDLFloat = 2,
+} DLDataTypeCode;
+
+typedef struct DLPackVersion {
+    uint32_t major;
+    uint32_t minor;
+} DLPackVersion;
+
+typedef struct DLDevice {
+    DLDeviceType device_type;
+    int32_t device_id;
+} DLDevice;
+
+typedef struct DLDataType {
+    uint8_t code;
+    uint8_t bits;
+    uint16_t lanes;
+} DLDataType;
+
+typedef struct DLTensor {
+    void *data;
+    DLDevice device;
+    int32_t ndim;
+    DLDataType dtype;
+    int64_t *shape;
+    int64_t *strides;
+    uint64_t byte_offset;
+} DLTensor;
+
+typedef struct DLManagedTensor {
+    DLTensor dl_tensor;
+    void *manager_ctx;
+    void (*deleter)(struct DLManagedTensor *self);
+} DLManagedTensor;
+
+typedef struct DLManagedTensorVersioned {
+    DLPackVersion version;
+    void *manager_ctx;
+    void (*deleter)(struct DLManagedTensorVersioned *self);
+    uint64_t flags;
+    DLTensor dl_tensor;
+} DLManagedTensorVersioned;
+
+/** The buffer formats a DLPack tensor crosses as, and the element type each stands for. */
+static struct {
+    char const *format;
+    DLDataType dtype;
+} const dlpack_formats[] = {
+    {"B", {kDLUInt, 8, 1}},   {"b", {kDLInt, 8, 1}},    {"I", {kDLUInt, 32, 1}},
+    {"i", {kDLInt, 32, 1}},   {"Q", {kDLUInt, 64, 1}},  {"e", {kDLFloat, 16, 1}},
+    {"f", {kDLFloat, 32, 1}}, {"d", {kDLFloat, 64, 1}}, {"N", {kDLUInt, sizeof(size_t) * 8, 1}},
+};
+
+/** Hands the tensor a consumed capsule holds back to its producer, and frees the extents its view
+ *  borrowed. */
+static void dlpack_capsule_release(PyObject *capsule) {
+    PyMem_Free(PyCapsule_GetContext(capsule));
+    if (PyCapsule_IsValid(capsule, "used_dltensor_versioned")) {
+        DLManagedTensorVersioned *const managed = PyCapsule_GetPointer(capsule, "used_dltensor_versioned");
+        if (managed->deleter) managed->deleter(managed);
+    }
+    else if (PyCapsule_IsValid(capsule, "used_dltensor")) {
+        DLManagedTensor *const managed = PyCapsule_GetPointer(capsule, "used_dltensor");
+        if (managed->deleter) managed->deleter(managed);
+    }
+}
+
+/**
+ *  @brief Consumes the DLPack export of @p object into @p view, whose @c obj becomes the capsule,
+ *      so releasing the view hands the tensor back to its producer.
+ *  @return 1 when it does, 0 when @p object exports no DLPack, or -1 with an exception set.
+ *
+ *  Only C-contiguous tensors cross. Host-readable memory always does, and CUDA and ROCm memory only
+ *  where @p device_allowed, since the binding reads the other inputs itself.
+ */
+static int dlpack_acquire(PyObject *object, int device_allowed, Py_buffer *view) {
+    PyObject *const exporter = PyObject_GetAttrString(object, "__dlpack__");
+    if (!exporter) {
+        PyErr_Clear();
+        return 0;
+    }
+    PyObject *const arguments = PyTuple_New(0);
+    PyObject *const keywords = PyDict_New();
+    PyObject *const version = PyTuple_New(2);
+    if (version) {
+        PyTuple_SET_ITEM(version, 0, PyLong_FromLong(1));
+        PyTuple_SET_ITEM(version, 1, PyLong_FromLong(0));
+    }
+    int const packed = arguments && keywords && version && PyTuple_GET_ITEM(version, 0) &&
+                       PyTuple_GET_ITEM(version, 1) && PyDict_SetItemString(keywords, "stream", Py_None) == 0 &&
+                       PyDict_SetItemString(keywords, "max_version", version) == 0;
+    PyObject *const capsule = packed ? PyObject_Call(exporter, arguments, keywords) : NULL;
+    Py_XDECREF(version);
+    Py_XDECREF(keywords);
+    Py_XDECREF(arguments);
+    Py_DECREF(exporter);
+    if (!capsule) { // a producer refusing this export may still lend the buffer protocol
+        PyErr_Clear();
+        return 0;
+    }
+    int const versioned = PyCapsule_IsValid(capsule, "dltensor_versioned");
+    void *const managed = PyCapsule_GetPointer(capsule, versioned ? "dltensor_versioned" : "dltensor");
+    if (!managed) {
+        Py_DECREF(capsule);
+        return -1;
+    }
+    DLTensor const *const tensor = versioned ? &((DLManagedTensorVersioned *)managed)->dl_tensor
+                                             : &((DLManagedTensor *)managed)->dl_tensor;
+    DLDeviceType const device = tensor->device.device_type;
+    int const host_readable = device == kDLCPU || device == kDLCUDAHost || device == kDLROCMHost ||
+                              device == kDLCUDAManaged;
+    char const *format = NULL;
+    for (size_t row = 0; row != sizeof(dlpack_formats) / sizeof(*dlpack_formats) && !format; ++row)
+        if (dlpack_formats[row].dtype.code == tensor->dtype.code &&
+            dlpack_formats[row].dtype.bits == tensor->dtype.bits && tensor->dtype.lanes == 1)
+            format = dlpack_formats[row].format;
+    Py_ssize_t items = 1;
+    int contiguous = tensor->ndim >= 0;
+    for (int axis = tensor->ndim - 1; axis >= 0; --axis) {
+        contiguous = contiguous && tensor->shape[axis] >= 0 &&
+                     (!tensor->strides || tensor->shape[axis] < 2 || tensor->strides[axis] == items);
+        items *= (Py_ssize_t)tensor->shape[axis];
+    }
+    int failed = 0;
+    if (!host_readable && !(device_allowed && (device == kDLCUDA || device == kDLROCM)))
+        failed = uform_py_raise(uform_status_device_k, "this input cannot take memory of DLPack device type %d",
+                                (int)device);
+    else if (!format)
+        failed = uform_py_raise(uform_status_unsupported_layout_k, "the DLPack tensor holds items no format names");
+    else if (!contiguous)
+        failed = uform_py_raise(uform_status_unsupported_layout_k, "the DLPack tensor must be C-contiguous");
+    Py_ssize_t *const extents = failed ? NULL
+                                       : (Py_ssize_t *)PyMem_Malloc((size_t)(tensor->ndim + 1) * sizeof(Py_ssize_t));
+    if (!failed && !extents) failed = (PyErr_NoMemory(), -1);
+    if (!failed && (PyCapsule_SetContext(capsule, extents) != 0 ||
+                    PyCapsule_SetName(capsule, versioned ? "used_dltensor_versioned" : "used_dltensor") != 0 ||
+                    PyCapsule_SetDestructor(capsule, dlpack_capsule_release) != 0)) {
+        PyMem_Free(extents);
+        failed = -1;
+    }
+    if (failed) {
+        Py_DECREF(capsule);
+        return -1;
+    }
+    for (int axis = 0; axis != tensor->ndim; ++axis) extents[axis] = (Py_ssize_t)tensor->shape[axis];
+    Py_ssize_t const item_bytes = tensor->dtype.bits / 8;
+    *view = (Py_buffer) {.buf = (char *)tensor->data + tensor->byte_offset,
+                         .obj = capsule,
+                         .len = items * item_bytes,
+                         .itemsize = item_bytes,
+                         .readonly = 1,
+                         .ndim = tensor->ndim,
+                         .format = (char *)format,
+                         .shape = extents};
+    return 1;
+}
+
+/** Acquires @p object into @p view through DLPack first, then the buffer protocol under @p flags;
+ *  0, or -1 with an exception set. */
+static int buffer_acquire(PyObject *object, int device_allowed, int flags, Py_buffer *view) {
+    int const consumed = dlpack_acquire(object, device_allowed, view);
+    return consumed ? (consumed > 0 ? 0 : -1) : PyObject_GetBuffer(object, view, flags);
+}
+
+#pragma endregion DLPack
+
 #pragma region Arenas
 
 static char const doc_Arena[] =                                                                //
@@ -1402,10 +1583,10 @@ static char const doc_Arena[] =                                                 
     "over it. Like a `bytearray`, it refuses to rewind with `ContendedError` while a buffer\n" //
     "over its outputs is exported, and a result read after a later call rewound it raises\n"   //
     "`InvalidArgumentError`. A deferred call holds it as a blocking one does, until it is\n"   //
-    "waited on or dropped. Results over device memory export `__cuda_array_interface__`,\n"    //
-    "and host reads of them raise `DeviceError`. A GPU arena serves only calls on the\n"       //
-    "executor that made it and holds that executor until it is freed, so an executor\n"        //
-    "closed first keeps its streams until then.\n"                                             //
+    "waited on or dropped. Results over device memory export `__dlpack__`, and host reads\n"   //
+    "of them raise `DeviceError`. A GPU arena serves only calls on the executor that made\n"   //
+    "it and holds that executor until it is freed, so an executor closed first keeps its\n"    //
+    "streams until then.\n"                                                                    //
     "Calls `uform_arena_init`.\n"                                                              //
     "\n"                                                                                       //
     "Args:\n"                                                                                  //
@@ -1441,7 +1622,13 @@ static PyObject *Arena_tp_new(PyTypeObject *type, PyObject *args, PyObject *keyw
         return NULL;
     }
     arena->handle = handle;
-    if (executor && ((Executor *)executor_object)->devices_count) // a GPU arena frees on its executor's first stream
+    uform_arena_description_t description = {0};
+    uform_arena_describe(&(uform_arena_describe_t) {.arena = handle, .outcome = &outcome, .description = &description});
+    if (uform_py_raise_on_outcome(&outcome) != 0) {
+        Py_DECREF(arena);
+        return NULL;
+    }
+    if (description.residency == uform_residency_vram_k) // a GPU arena frees on its executor's first stream
         arena->executor = executor_hold(executor_object);
     return (PyObject *)arena;
 }
@@ -1529,8 +1716,15 @@ typedef struct RowsTape {
     PyObject *offsets;
 } RowsTape;
 
-/** Whether @p buffer lives in device memory, which the host may not dereference. */
-static int arena_buffer_on_device(ArenaBuffer const *buffer) { return ((Arena *)buffer->arena)->executor != NULL; }
+/** Where the outputs of @p buffer live, as the engine reports its arena; 0, or -1 with an error
+ *  set. */
+static int arena_buffer_describe(ArenaBuffer const *buffer, uform_arena_description_t *description) {
+    uform_outcome_t outcome = {0};
+    uform_arena_describe(&(uform_arena_describe_t) {.arena = ((Arena *)buffer->arena)->handle,
+                                                    .outcome = &outcome,
+                                                    .description = description});
+    return uform_py_raise_on_outcome(&outcome);
+}
 
 /** Raises @c InvalidArgumentError unless the call that wrote @p buffer is still the last to claim its arena;
  *  returns 0 or -1. */
@@ -1539,15 +1733,9 @@ static int arena_buffer_fresh(ArenaBuffer const *buffer, size_t generation) {
     return uform_py_raise(uform_status_invalid_argument_k, "a later call rewound the arena this output lived in");
 }
 
-/**
- *  @brief Holds the arena of @p buffer against a rewind while its host memory is read, as one more export.
- *  @return 0 on success, -1 with a @c DeviceError set when the output is on a device, or an
- *      @c InvalidArgumentError when a later call rewound it.
- */
-static int arena_buffer_pin(ArenaBuffer const *buffer) {
-    if (arena_buffer_on_device(buffer))
-        return uform_py_raise(uform_status_device_k,
-                              "the output lives in device memory; read `__cuda_array_interface__`");
+/** Holds the arena of @p buffer against a rewind as one more export; 0, or -1 with an
+ *  @c InvalidArgumentError set when a later call rewound it. */
+static int arena_buffer_hold(ArenaBuffer const *buffer) {
     Arena *const arena = (Arena *)buffer->arena;
     size_t generation = 0;
 #if PY_VERSION_HEX >= 0x030D0000
@@ -1559,6 +1747,30 @@ static int arena_buffer_pin(ArenaBuffer const *buffer) {
     Py_END_CRITICAL_SECTION();
 #endif
     return arena_buffer_fresh(buffer, generation);
+}
+
+/** Lets go of one export @c arena_buffer_hold took on the arena of @p buffer. */
+static void arena_buffer_unhold(ArenaBuffer const *buffer) {
+#if PY_VERSION_HEX >= 0x030D0000
+    Py_BEGIN_CRITICAL_SECTION(buffer->arena);
+#endif
+    --((Arena *)buffer->arena)->exports;
+#if PY_VERSION_HEX >= 0x030D0000
+    Py_END_CRITICAL_SECTION();
+#endif
+}
+
+/**
+ *  @brief Holds the arena of @p buffer against a rewind while the host reads it, as one export.
+ *  @return 0 on success, -1 with a @c DeviceError set when the output is on a device, or an
+ *      @c InvalidArgumentError when a later call rewound it.
+ */
+static int arena_buffer_pin(ArenaBuffer const *buffer) {
+    uform_arena_description_t description = {0};
+    if (arena_buffer_describe(buffer, &description) != 0) return -1;
+    if (description.residency == uform_residency_vram_k)
+        return uform_py_raise(uform_status_device_k, "the output lives in device memory; read `__dlpack__`");
+    return arena_buffer_hold(buffer);
 }
 
 static int ArenaBuffer_getbuffer(ArenaBuffer *self, Py_buffer *view, int flags) {
@@ -1580,15 +1792,7 @@ static int ArenaBuffer_getbuffer(ArenaBuffer *self, Py_buffer *view, int flags) 
     return 0;
 }
 
-static void ArenaBuffer_releasebuffer(ArenaBuffer *self, Py_buffer *view) {
-#if PY_VERSION_HEX >= 0x030D0000
-    Py_BEGIN_CRITICAL_SECTION(self->arena);
-#endif
-    --((Arena *)self->arena)->exports;
-#if PY_VERSION_HEX >= 0x030D0000
-    Py_END_CRITICAL_SECTION();
-#endif
-}
+static void ArenaBuffer_releasebuffer(ArenaBuffer *self, Py_buffer *view) { arena_buffer_unhold(self); }
 
 /** A tuple of the first @p rank of @p extents; a new reference, or NULL. */
 static PyObject *extents_to_tuple(Py_ssize_t const *extents, int rank) {
@@ -1605,7 +1809,9 @@ static PyObject *extents_to_tuple(Py_ssize_t const *extents, int rank) {
 }
 
 static PyObject *ArenaBuffer_get_cuda_array_interface(ArenaBuffer *self, void *closure) {
-    if (!arena_buffer_on_device(self)) {
+    uform_arena_description_t description = {0};
+    if (arena_buffer_describe(self, &description) != 0) return NULL;
+    if (description.residency != uform_residency_vram_k) {
         PyErr_SetString(PyExc_AttributeError, "the output lives in host memory; read it through the buffer protocol");
         return NULL;
     }
@@ -1639,6 +1845,171 @@ static PyObject *ArenaBuffer_get_cuda_array_interface(ArenaBuffer *self, void *c
     return interface;
 }
 
+/** The DLPack device the outputs of @p buffer live on, from the engine's description of its arena;
+ *  0, or -1 with an exception set. */
+static int arena_buffer_device(ArenaBuffer const *buffer, DLDevice *device) {
+    uform_arena_description_t description = {0};
+    if (arena_buffer_describe(buffer, &description) != 0) return -1;
+    *device = (DLDevice) {kDLCPU, 0};
+    if (description.residency != uform_residency_vram_k) return 0;
+    size_t const capacity = (size_t)description.device + 1;
+    size_t count = 0;
+    uform_gpu_device_t *const listed = (uform_gpu_device_t *)PyMem_Calloc(capacity, sizeof(uform_gpu_device_t));
+    if (!listed) return PyErr_NoMemory(), -1;
+    uform_outcome_t outcome = {0};
+    uform_gpu_devices(&(uform_gpu_devices_t) {.outcome = &outcome,
+                                              .devices = listed,
+                                              .devices_capacity = capacity,
+                                              .devices_count = &count});
+    int failed = uform_py_raise_on_outcome(&outcome);
+    if (!failed && count < capacity) failed = uform_py_raise(uform_status_device_k, "the arena's GPU is not listed");
+    uform_gpu_device_t const *const gpu = &listed[description.device];
+    if (!failed)
+        *device = (DLDevice) {gpu->vendor == uform_gpu_vendor_amd_k     ? kDLROCM
+                              : gpu->vendor == uform_gpu_vendor_apple_k ? kDLMetal
+                                                                        : kDLCUDA,
+                              (int32_t)gpu->vendor_ordinal};
+    PyMem_Free(listed);
+    return failed ? -1 : 0;
+}
+
+/** What a DLPack capsule over an @c ArenaBuffer owns: the managed tensor, its extents and strides,
+ *  and the export it holds on the buffer's arena until the consumer lets go. */
+typedef struct dlpack_export_t {
+    union {
+        DLManagedTensor legacy;
+        DLManagedTensorVersioned versioned;
+    } managed;
+    ArenaBuffer *buffer;
+    int64_t shape[arena_buffer_max_rank_k];
+    int64_t strides[arena_buffer_max_rank_k];
+} dlpack_export_t;
+
+/** Releases an export from whichever thread its consumer drops it on, taking the GIL itself. */
+static void dlpack_export_release(dlpack_export_t *exported) {
+    PyGILState_STATE const state = PyGILState_Ensure();
+    arena_buffer_unhold(exported->buffer);
+    Py_DECREF(exported->buffer);
+    PyMem_Free(exported);
+    PyGILState_Release(state);
+}
+
+static void dlpack_legacy_deleter(DLManagedTensor *self) { dlpack_export_release(self->manager_ctx); }
+
+static void dlpack_versioned_deleter(DLManagedTensorVersioned *self) { dlpack_export_release(self->manager_ctx); }
+
+/** Releases an export no consumer took; a consumer renames the capsule and owns it. */
+static void dlpack_export_capsule_release(PyObject *capsule) {
+    if (PyCapsule_IsValid(capsule, "dltensor")) {
+        DLManagedTensor *const managed = PyCapsule_GetPointer(capsule, "dltensor");
+        managed->deleter(managed);
+    }
+    else if (PyCapsule_IsValid(capsule, "dltensor_versioned")) {
+        DLManagedTensorVersioned *const managed = PyCapsule_GetPointer(capsule, "dltensor_versioned");
+        managed->deleter(managed);
+    }
+}
+
+static PyObject *ArenaBuffer_dlpack(ArenaBuffer *self, PyObject *const *args, Py_ssize_t positional, PyObject *names) {
+    // The call that wrote the output is final, so `stream` names no work left to order after.
+    PyObject *stream = Py_None, *max_version = Py_None, *dl_device = Py_None, *copy = Py_None;
+    if (positional) return PyErr_Format(PyExc_TypeError, "__dlpack__() takes keyword arguments only");
+    for (Py_ssize_t keyword = 0; names && keyword != PyTuple_GET_SIZE(names); ++keyword) {
+        PyObject *const name = PyTuple_GET_ITEM(names, keyword);
+        PyObject **const slot = PyUnicode_CompareWithASCIIString(name, "stream") == 0        ? &stream
+                                : PyUnicode_CompareWithASCIIString(name, "max_version") == 0 ? &max_version
+                                : PyUnicode_CompareWithASCIIString(name, "dl_device") == 0   ? &dl_device
+                                : PyUnicode_CompareWithASCIIString(name, "copy") == 0        ? &copy
+                                                                                             : NULL;
+        if (!slot) return PyErr_Format(PyExc_TypeError, "__dlpack__() got an unexpected keyword argument '%S'", name);
+        *slot = args[keyword];
+    }
+    int const copied = copy == Py_None ? 0 : PyObject_IsTrue(copy);
+    if (copied < 0) return NULL;
+    if (copied) return PyErr_Format(PyExc_BufferError, "an arena output exports only in place, never a copy");
+    DLDevice device;
+    if (arena_buffer_device(self, &device) != 0) return NULL;
+    if (dl_device != Py_None) {
+        if (!PyTuple_Check(dl_device) || PyTuple_GET_SIZE(dl_device) != 2)
+            return PyErr_Format(PyExc_TypeError, "dl_device must be a (device_type, device_id) tuple");
+        long const requested_type = PyLong_AsLong(PyTuple_GET_ITEM(dl_device, 0));
+        long const requested_id = PyLong_AsLong(PyTuple_GET_ITEM(dl_device, 1));
+        if (PyErr_Occurred()) return NULL;
+        if (requested_type != (long)device.device_type || requested_id != (long)device.device_id)
+            return PyErr_Format(PyExc_BufferError, "the output lives on DLPack device (%d, %d)",
+                                (int)device.device_type, (int)device.device_id);
+    }
+    long major = 0;
+    if (max_version != Py_None) {
+        if (!PyTuple_Check(max_version) || PyTuple_GET_SIZE(max_version) != 2)
+            return PyErr_Format(PyExc_TypeError, "max_version must be a (major, minor) tuple");
+        major = PyLong_AsLong(PyTuple_GET_ITEM(max_version, 0));
+        if (PyErr_Occurred()) return NULL;
+    }
+    DLDataType dtype = {0, 0, 0};
+    for (size_t row = 0; row != sizeof(dlpack_formats) / sizeof(*dlpack_formats); ++row)
+        if (*dlpack_formats[row].format == *self->format) dtype = dlpack_formats[row].dtype;
+    if (!dtype.bits) return PyErr_Format(PyExc_BufferError, "format '%s' has no DLPack type", self->format);
+
+    dlpack_export_t *const exported = (dlpack_export_t *)PyMem_Calloc(1, sizeof(dlpack_export_t));
+    if (!exported) return PyErr_NoMemory();
+    if (arena_buffer_hold(self) != 0) {
+        PyMem_Free(exported);
+        return NULL;
+    }
+    exported->buffer = (ArenaBuffer *)Py_NewRef((PyObject *)self);
+    for (int axis = 0; axis != self->rank; ++axis) {
+        exported->shape[axis] = self->shape[axis];
+        exported->strides[axis] = self->strides[axis] / self->item_bytes;
+    }
+    DLTensor const tensor = {(void *)self->data, device, self->rank, dtype, exported->shape, exported->strides, 0};
+    void *managed = NULL;
+    if (major >= 1) {
+        exported->managed.versioned =
+            (DLManagedTensorVersioned) {{1, 0}, exported, dlpack_versioned_deleter, 0, tensor};
+        managed = &exported->managed.versioned;
+    }
+    else {
+        exported->managed.legacy = (DLManagedTensor) {tensor, exported, dlpack_legacy_deleter};
+        managed = &exported->managed.legacy;
+    }
+    PyObject *const capsule = PyCapsule_New(managed, major >= 1 ? "dltensor_versioned" : "dltensor",
+                                            dlpack_export_capsule_release);
+    if (!capsule) dlpack_export_release(exported);
+    return capsule;
+}
+
+static PyObject *ArenaBuffer_dlpack_device(ArenaBuffer *self, PyObject *unused) {
+    DLDevice device;
+    if (arena_buffer_device(self, &device) != 0) return NULL;
+    PyObject *const pair = PyTuple_New(2);
+    if (!pair) return NULL;
+    PyTuple_SET_ITEM(pair, 0, PyLong_FromLong((long)device.device_type));
+    PyTuple_SET_ITEM(pair, 1, PyLong_FromLong((long)device.device_id));
+    if (PyTuple_GET_ITEM(pair, 0) && PyTuple_GET_ITEM(pair, 1)) return pair;
+    Py_DECREF(pair);
+    return NULL;
+}
+
+static char const doc_ArenaBuffer_dlpack[] =                                                 //
+    "__dlpack__(*, stream=None, max_version=None, dl_device=None, copy=None) -> PyCapsule\n" //
+    "\n"                                                                                     //
+    "Exports the output in place as a DLPack capsule, on host pages or the GPU its arena\n"  //
+    "lives on; the arena refuses to rewind until the consumer lets go. A `max_version` of\n" //
+    "1 or more asks for a versioned capsule.";
+
+static char const doc_ArenaBuffer_dlpack_device[] = //
+    "__dlpack_device__() -> tuple[int, int]\n"      //
+    "\n"                                            //
+    "The DLPack device type and ID the output lives on.";
+
+static PyMethodDef ArenaBuffer_methods[] = {
+    {"__dlpack__", (PyCFunction)(void (*)(void))ArenaBuffer_dlpack, METH_FASTCALL | METH_KEYWORDS,
+     doc_ArenaBuffer_dlpack},
+    {"__dlpack_device__", (PyCFunction)ArenaBuffer_dlpack_device, METH_NOARGS, doc_ArenaBuffer_dlpack_device},
+    {NULL, NULL, 0, NULL},
+};
+
 static void ArenaBuffer_dealloc(ArenaBuffer *self) {
     Py_DECREF(self->arena);
     Py_TYPE(self)->tp_free((PyObject *)self);
@@ -1664,8 +2035,8 @@ static char const doc_ArenaBuffer[] =                                           
     "\n"                                                                                     //
     "One output a call left in an `Arena`, viewing it until it rewinds: a (rows, columns)\n" //
     "matrix for the scalars a buffer can format, and a (rows, stride) run of 'B' for the\n"  //
-    "rest, `bf16` among them. Host outputs export the writable buffer protocol; device\n"    //
-    "outputs export `__cuda_array_interface__` instead.";
+    "rest, `bf16` among them. Every output exports `__dlpack__`; host outputs also export\n" //
+    "the writable buffer protocol, and device ones `__cuda_array_interface__`.";
 
 PyTypeObject ArenaBufferType = {
     PyVarObject_HEAD_INIT(NULL, 0) //
@@ -1678,6 +2049,7 @@ PyTypeObject ArenaBufferType = {
     .tp_as_sequence = &ArenaBuffer_as_sequence,
     .tp_as_buffer = &ArenaBuffer_as_buffer,
     .tp_getset = ArenaBuffer_getset,
+    .tp_methods = ArenaBuffer_methods,
 };
 
 static void RowsTape_dealloc(RowsTape *self) {
@@ -1812,7 +2184,7 @@ static char buffer_format(Py_buffer const *buffer) {
  *  @return 1 when it does, 0 when it is no offsets buffer at all, with no exception set.
  */
 static int tape_offsets_acquire(PyObject *candidate, uform_py_tape_t *tape) {
-    if (PyObject_GetBuffer(candidate, &tape->offsets, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT) != 0) {
+    if (buffer_acquire(candidate, 0, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT, &tape->offsets) != 0) {
         PyErr_Clear();
         return 0;
     }
@@ -1827,7 +2199,7 @@ static int tape_offsets_acquire(PyObject *candidate, uform_py_tape_t *tape) {
 
 /** Lends the data of a pair whose offsets @p tape already holds; returns 0 or -1 with an exception set. */
 static int tape_lend(PyObject *data, char const *field, uform_py_element_t element, uform_py_tape_t *tape) {
-    if (PyObject_GetBuffer(data, &tape->data, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT) != 0) return -1;
+    if (buffer_acquire(data, 1, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT, &tape->data) != 0) return -1;
     char const *const expected = element_format(element);
     if ((size_t)tape->data.itemsize != element_bytes(element) || (expected && buffer_format(&tape->data) != *expected))
         return uform_py_raise(uform_status_unsupported_layout_k, "the '%s' data holds items the verb cannot read",
@@ -1854,7 +2226,7 @@ static int tape_entry_acquire(PyObject *entry, char const *field, Py_ssize_t pos
     int const flags = element == uform_py_element_pixels_k || element == uform_py_element_samples_k
                           ? PyBUF_C_CONTIGUOUS | PyBUF_FORMAT
                           : PyBUF_C_CONTIGUOUS;
-    if (PyObject_GetBuffer(entry, view, flags) != 0) {
+    if (buffer_acquire(entry, 0, flags, view) != 0) {
         PyErr_Clear();
         PyErr_Format(PyExc_TypeError, "entry %zd of '%s' must be a %s, got %S", position, field,
                      element == uform_py_element_text_k ? "str or a bytes-like object" : "contiguous buffer",
@@ -1951,7 +2323,7 @@ void uform_py_words_release(uform_py_words_t *words) {
 
 int uform_py_words_from_object(PyObject *object, char const *field, size_t count, uform_py_words_t *words) {
     if (!object || object == Py_None) return 0;
-    if (PyObject_GetBuffer(object, &words->buffer, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT) == 0) {
+    if (buffer_acquire(object, 0, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT, &words->buffer) == 0) {
         if (words->buffer.itemsize != sizeof(uint32_t) || buffer_format(&words->buffer) != 'I')
             return uform_py_raise(uform_status_unsupported_layout_k, "the '%s' buffer must hold uint32 words", field);
         if ((size_t)words->buffer.len != count * sizeof(uint32_t))

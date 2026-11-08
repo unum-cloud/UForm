@@ -507,6 +507,19 @@ UFORM_EXPORT void uform_arena_free(uform_arena_t arena) {
     delete arena;
 }
 
+UFORM_EXPORT void uform_arena_describe(uform_arena_describe_t *arguments) {
+    call_outcome_t outcome(arguments->outcome);
+    if (!arguments->arena || !arguments->description)
+        return propagate_error(uform_status_invalid_argument_k, outcome,
+                               "The arena and its description must not be null"),
+               void();
+    *arguments->description = {uform_residency_ram_k, -1};
+    if (std::holds_alternative<device_arena_t>(arguments->arena->memory))
+        *arguments->description = {uform_residency_vram_k,
+                                   std::get<vram_executor_t>(arguments->arena->executor->executor).devices[0].ordinal};
+    propagate_error(uform_status_success_k, outcome, nullptr);
+}
+
 #pragma endregion Outcomes Executors and Arenas
 
 #pragma region Names

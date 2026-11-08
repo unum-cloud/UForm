@@ -69,6 +69,7 @@ public struct UFormError: Swift.Error, CustomStringConvertible, Equatable, Senda
     /// The library's static detail, or this binding's own when it refused the call.
     public let message: String
 
+    /// The status and message, as `uform: <status>: <message>`.
     public var description: String { "uform: \(status): \(message)" }
 
     init(status: Status, message: String) {
@@ -612,20 +613,11 @@ extension Deferred {
 /// One executor serves any number of models of its residency, so several models share one machine's cores or
 /// devices; a mismatch reports `device`. Calls on one executor run in submission order.
 public final class Executor: @unchecked Sendable {
-    /// Where an executor computes, which the factory that spawned it named.
-    enum Placement {
-        case host
-        case devices
-    }
-
     /// The native handle, released by `deinit`.
     let raw: uform_executor_t
-    /// Where it computes, and with it where its arenas keep their memory.
-    let placement: Placement
 
-    private init(raw: uform_executor_t, placement: Placement) {
+    private init(raw: uform_executor_t) {
         self.raw = raw
-        self.placement = placement
     }
 
     /// Spawns host threads for RAM-resident models, interleaved across the compute domains local to
@@ -648,7 +640,7 @@ public final class Executor: @unchecked Sendable {
             deferred_limit: deferredLimit
         )
         uform_executor_for_ram(&arguments)
-        return try landing.read { () throws(UFormError) in Executor(raw: try created(executor), placement: .host) }
+        return try landing.read { () throws(UFormError) in Executor(raw: try created(executor)) }
     }
 
     /// Creates a RAM executor over a borrowed ForkUnion `fu_pool_t`, which must outlive it. Reports `unsupported`
@@ -669,7 +661,7 @@ public final class Executor: @unchecked Sendable {
             deferred_limit: deferredLimit
         )
         uform_executor_on_pool(&arguments)
-        return try landing.read { () throws(UFormError) in Executor(raw: try created(executor), placement: .host) }
+        return try landing.read { () throws(UFormError) in Executor(raw: try created(executor)) }
     }
 
     /// Opens one submission stream on every named device, or borrows the caller's `streams`, one per device in
@@ -703,7 +695,7 @@ public final class Executor: @unchecked Sendable {
             deferred_limit: deferredLimit
         )
         uform_executor_for_vram(&arguments)
-        return try landing.read { () throws(UFormError) in Executor(raw: try created(executor), placement: .devices) }
+        return try landing.read { () throws(UFormError) in Executor(raw: try created(executor)) }
     }
 
     /// Calls `uform_executor_free`.
@@ -744,7 +736,12 @@ public final class Arena {
         var arguments = uform_arena_init_t(arena: arena, executor: executor?.raw, outcome: landing.outcome)
         uform_arena_init(&arguments)
         raw = try landing.read { () throws(UFormError) in try created(arena) }
-        device = executor?.placement == .devices ? executor : nil
+        let asked = Landing()
+        let description = asked.slots(uform_arena_description_t())
+        var describe = uform_arena_describe_t(arena: raw, outcome: asked.outcome, description: description)
+        uform_arena_describe(&describe)
+        device = description.pointee.residency == uform_residency_vram_k ? executor : nil
+        try asked.read { () throws(UFormError) in }
     }
 
     /// Calls `uform_arena_free`.

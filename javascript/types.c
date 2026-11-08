@@ -579,8 +579,7 @@ static void uform_js_executor_finalize(napi_env env, void *data, void *hint) {
 }
 
 /** Wraps the handle a factory just made, or throws its outcome; frees the handle on failure. */
-static napi_value uform_js_executor_adopt(napi_env env, uform_outcome_t const *outcome, uform_executor_t handle,
-                                          uform_js_residency_t residency) {
+static napi_value uform_js_executor_adopt(napi_env env, uform_outcome_t const *outcome, uform_executor_t handle) {
     if (!uform_js_succeeded(env, outcome)) return NULL;
     uform_js_addon_t *const addon = uform_js_addon(env);
     napi_value const instance = addon ? uform_js_instantiate(env, addon->executor_class) : NULL;
@@ -593,7 +592,6 @@ static napi_value uform_js_executor_adopt(napi_env env, uform_outcome_t const *o
         return NULL;
     }
     executor->handle = handle;
-    executor->residency = residency;
     return instance;
 }
 
@@ -627,7 +625,7 @@ static napi_value uform_js_executor_for_ram(napi_env env, napi_callback_info inf
     for_ram.ram.memory_domains = ordinals;
     uform_executor_for_ram(&for_ram);
     free(ordinals);
-    return uform_js_executor_adopt(env, &outcome, handle, uform_js_residency_ram_k);
+    return uform_js_executor_adopt(env, &outcome, handle);
 }
 
 /** @c onPool(pool, {memoryDomains, cpuClass, deferredLimit}) → an executor borrowing a ForkUnion
@@ -649,7 +647,7 @@ static napi_value uform_js_executor_on_pool(napi_env env, napi_callback_info inf
     on_pool.ram.memory_domains = ordinals;
     uform_executor_on_pool(&on_pool);
     free(ordinals);
-    return uform_js_executor_adopt(env, &outcome, handle, uform_js_residency_ram_k);
+    return uform_js_executor_adopt(env, &outcome, handle);
 }
 
 /** @c forVram({devices, gpuClass, memoryDomains, cpuClass, streams, scratchLimit, deferredLimit})
@@ -711,7 +709,7 @@ static napi_value uform_js_executor_for_vram(napi_env env, napi_callback_info in
     free(streams);
     free(memory_domains);
     free(ordinals);
-    return uform_js_executor_adopt(env, &outcome, handle, uform_js_residency_vram_k);
+    return uform_js_executor_adopt(env, &outcome, handle);
 }
 
 /** @c drain(mood) - waits for every call submitted so far, then idles in @p mood; absent parks. */
@@ -812,6 +810,16 @@ static void uform_js_arena_finalize(napi_env env, void *data, void *hint) {
     free(arena);
 }
 
+/** Where the outputs of @p arena live, as the library reports it; @c uform_residency_unknown_k
+ *  with an exception pending when it refuses. */
+static uform_residency_t uform_js_arena_described(napi_env env, uform_js_arena_t const *arena) {
+    uform_outcome_t outcome = {uform_status_success_k, NULL};
+    uform_arena_description_t description = {uform_residency_unknown_k, -1};
+    uform_arena_describe_t describe = {.arena = arena->handle, .outcome = &outcome, .description = &description};
+    uform_arena_describe(&describe);
+    return uform_js_succeeded(env, &outcome) ? description.residency : uform_residency_unknown_k;
+}
+
 /** @c Arena(executor) - empty memory where @p executor computes; host pages for the calling thread when absent. */
 static napi_value uform_js_arena_construct(napi_env env, napi_callback_info info) {
     napi_value self = NULL, argument = NULL;
@@ -828,12 +836,17 @@ static napi_value uform_js_arena_construct(napi_env env, napi_callback_info info
                                .executor = executor ? executor->handle : NULL,
                                .outcome = &outcome};
     uform_arena_init(&init);
-    arena->residency = executor ? executor->residency : uform_js_residency_ram_k;
     if (!uform_js_succeeded(env, &outcome)) {
         free(arena);
         return NULL;
     }
-    if (arena->residency == uform_js_residency_vram_k) { // a GPU arena frees on its executor's first stream
+    uform_residency_t const residency = uform_js_arena_described(env, arena);
+    if (residency == uform_residency_unknown_k) {
+        uform_arena_free(arena->handle);
+        free(arena);
+        return NULL;
+    }
+    if (residency == uform_residency_vram_k) { // a GPU arena frees on its executor's first stream
         if (napi_create_reference(env, argument, 1, &arena->executor_reference) != napi_ok) {
             uform_arena_free(arena->handle);
             free(arena);
@@ -899,7 +912,9 @@ napi_value uform_js_arena_view(napi_env env, napi_value arena_value, napi_typeda
         uform_js_throw(env, uform_status_internal_k, "The Arena is not attached");
         return NULL;
     }
-    if (arena->residency == uform_js_residency_vram_k) {
+    uform_residency_t const residency = uform_js_arena_described(env, arena);
+    if (residency == uform_residency_unknown_k) return NULL;
+    if (residency == uform_residency_vram_k) {
         napi_get_null(env, &array);
         return array;
     }
@@ -966,7 +981,9 @@ napi_value uform_js_offsets_view(napi_env env, napi_value arena, size_t const *o
 static napi_value uform_js_arena_residency(napi_env env, napi_callback_info info) {
     uform_js_arena_t const *const arena = (uform_js_arena_t const *)uform_js_self(env, info, 0, NULL, NULL);
     if (!arena) return NULL;
-    return uform_js_static_string(env, arena->residency == uform_js_residency_vram_k ? "vram" : "ram");
+    uform_residency_t const residency = uform_js_arena_described(env, arena);
+    if (residency == uform_residency_unknown_k) return NULL;
+    return uform_js_static_string(env, residency == uform_residency_vram_k ? "vram" : "ram");
 }
 
 napi_value uform_js_arena_define(napi_env env) {

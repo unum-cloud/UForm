@@ -2,6 +2,10 @@
 
 Stub files are never executed, so PEP 695 `type` statements and PEP 688's `Buffer` are read by any checker
 regardless of the interpreter running the tests. The package floor is 3.12.
+
+File: python/uform/lib.pyi
+Author: Ash Vardanian
+Date: October 18, 2026
 """
 
 import os
@@ -140,17 +144,34 @@ class GPUDevice(structseq[Any], tuple[GPUVendor, int, GPUClass | None, int, int,
     __match_args__: Final = ("vendor", "vendor_ordinal", "gpu_class", "compute_units", "memory_bytes", "name")
 
     @property
-    def vendor(self) -> GPUVendor: ...
+    def vendor(self) -> GPUVendor:
+        """The vendor whose runtime drives the device."""
+        ...
+
     @property
-    def vendor_ordinal(self) -> int: ...
+    def vendor_ordinal(self) -> int:
+        """The device's ordinal in its vendor's runtime, as nvidia-smi or rocm-smi list it."""
+        ...
+
     @property
-    def gpu_class(self) -> GPUClass | None: ...
+    def gpu_class(self) -> GPUClass | None:
+        """The class whose kernels run on it, or None."""
+        ...
+
     @property
-    def compute_units(self) -> int: ...
+    def compute_units(self) -> int:
+        """Streaming multiprocessors or compute units."""
+        ...
+
     @property
-    def memory_bytes(self) -> int: ...
+    def memory_bytes(self) -> int:
+        """Device memory in bytes."""
+        ...
+
     @property
-    def name(self) -> str: ...
+    def name(self) -> str:
+        """The vendor's own name for the device."""
+        ...
 
 class Outputs(IntFlag):
     """Which surfaces an encoding keeps, deciding which of the C output pointers the binding passes."""
@@ -321,6 +342,21 @@ class ArenaBuffer:
 
     def __len__(self) -> int:
         """Rows. Python-only."""
+        ...
+
+    def __dlpack__(
+        self,
+        *,
+        stream: Any = None,
+        max_version: tuple[int, int] | None = None,
+        dl_device: tuple[int, int] | None = None,
+        copy: bool | None = None,
+    ) -> Any:
+        """A DLPack capsule over the output in place; the arena refuses to rewind until the consumer lets go."""
+        ...
+
+    def __dlpack_device__(self) -> tuple[int, int]:
+        """The DLPack device type and ID the output lives on."""
         ...
 
     @property
@@ -881,19 +917,39 @@ class MeshDescription(structseq[Any], tuple[int, int, int, int, int, MultimemTie
     )
 
     @property
-    def gpus_per_host_domain(self) -> int: ...
+    def gpus_per_host_domain(self) -> int:
+        """GPUs one process drives."""
+        ...
+
     @property
-    def gpus_per_multimem_domain(self) -> int: ...
+    def gpus_per_multimem_domain(self) -> int:
+        """GPUs one NVLink domain spans."""
+        ...
+
     @property
-    def gpus_per_colocated_domain(self) -> int: ...
+    def gpus_per_colocated_domain(self) -> int:
+        """GPUs in the whole run."""
+        ...
+
     @property
-    def host_domain_index(self) -> int: ...
+    def host_domain_index(self) -> int:
+        """This process's index among the run's processes."""
+        ...
+
     @property
-    def first_gpu_index(self) -> int: ...
+    def first_gpu_index(self) -> int:
+        """The run-wide index of this process's first GPU."""
+        ...
+
     @property
-    def multimem_tier(self) -> MultimemTier: ...
+    def multimem_tier(self) -> MultimemTier:
+        """How its NVLink domains reduce."""
+        ...
+
     @property
-    def gpu_class(self) -> GPUClass | None: ...
+    def gpu_class(self) -> GPUClass | None:
+        """The class every GPU of the run dispatches as, or None."""
+        ...
 
 @final
 class Mesh:

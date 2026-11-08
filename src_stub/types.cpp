@@ -205,6 +205,14 @@ void uform_arena_free(uform_arena_t arena) {
     delete arena;
 }
 
+void uform_arena_describe(uform_arena_describe_t *arguments) {
+    deferred_outcome_t outcome(arguments->outcome);
+    if (reject_if(!arguments->arena || !arguments->description, uform_status_invalid_argument_k,
+                  "The arena and its description must not be null", outcome))
+        return;
+    *arguments->description = {uform_residency_ram_k, -1};
+}
+
 char const *uform_status_name(uform_status_t status) {
     switch (status) {
     case uform_status_success_k: return "success";

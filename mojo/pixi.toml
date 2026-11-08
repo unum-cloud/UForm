@@ -1,0 +1,20 @@
+# The Mojo binding, which `dlopen`s the engine rather than linking it, so `uform` is a run dependency and a
+# consumer naming this package by `git` or `path` needs no linker flags of its own.
+
+[package]
+authors = ["Ash Vardanian <info@unum.cloud>"]
+description = "Distributed training and inference pipeline for multi-modal perception"
+license = "Apache-2.0"
+name = "uform_mojo"
+version = "4.0.0-rc.1"
+
+[package.build]
+backend = { name = "pixi-build-mojo", version = "0.*" }
+
+# The backend only auto-discovers a package under `<name>/` or `src/`, and this one lives under
+# `uform/`, so it is named here.
+[package.build.config]
+pkg = { name = "uform", path = "uform" }
+
+[package.run-dependencies]
+uform = { path = ".." }

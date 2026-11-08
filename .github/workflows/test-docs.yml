@@ -36,6 +36,11 @@ jobs:
         uses: compnerd/gha-setup-swift@v0.5.0
         with:
           swift-version: swift-6.4.0-release
+      - name: Set Up Pixi
+        uses: prefix-dev/setup-pixi@v0
+        with:
+          pixi-version: v0.84.1
+          run-install: false
       - name: Build Docs
         run: .github/scripts/build-docs.sh
       - name: Upload Docs
