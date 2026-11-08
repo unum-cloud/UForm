@@ -3,7 +3,29 @@
 The C ABI is the one versioned interface of UForm, and every binding is a layer over it.
 It compiles as plain C11, holds no C++ type, and never logs.
 
-## Headers
+## Installation
+
+### Building
+
+CMake builds `uform_static` and `uform_shared` from the objects `src/` compiles, and the archive carries the NumKong, StringZilla and yyjson objects it needs, naming only the system codecs to its consumers:
+
+```sh
+cmake --preset library
+cmake --build --preset library
+```
+
+The presets choose the residencies a build carries:
+
+- `library` builds the engine for the host alone.
+- `cuda_rocm_library` adds the NVIDIA and AMD residencies, the trainer and the mesh, with Clang hosting both vendors' compilers.
+- `linux_cuda_rocm` adds both residencies without the trainer, and launches UForm's own kernels through drivers opened at first use.
+- `wasm32_emscripten` and `wasm32_wasi` build for WebAssembly, which takes decoded media only.
+- `stub_library` builds `src_stub/`, a stand-in answering the same verbs over the C++ standard library and ForkUnion.
+
+The stand-in's archives carry the engine's file names in a `stub/` directory of their own, so a consumer swaps implementations with one `-L`.
+`c/test.c` runs against both, with the tiny checkpoint `test/tiny_checkpoint.cpp` writes when the suites are built.
+
+### Headers
 
 - `uform/uform.h`: the umbrella over the four headers below.
 - `uform/types.h`: statuses and outcomes, scalars, rows, tapes, progress, CPU and GPU classes, devices, executors, arenas, the name tables and the version probes.
@@ -15,6 +37,8 @@ A caller only encoding may include `encode.h` alone, since each header pulls in 
 Statuses, scalars, rows, tapes, progress, arenas and the executor contract mirror USearch's `types.h` value for value, so embeddings and failures cross between the two libraries unchanged.
 `find_package(uform)` reads an install as `uform::static`, `uform::shared` and `uform::header`.
 An install or the SDK archive also answers `pkg-config --libs uform` with the shared library, which exports the `uform_*` functions alone.
+
+`uform_version`, `uform_capabilities_compiled` and `uform_capabilities_available` report the library this process linked and the hardware it found.
 
 ## Quickstart
 
@@ -57,28 +81,7 @@ int main(int argc, char** argv) {
 }
 ```
 
-## Argument Structures
-
-Every verb that takes options, outputs or callbacks takes one structure named after it, as `uform_text_encode` takes a `uform_text_encode_t`.
-Fields open in the same order everywhere: the handle, `executor`, `outcome` and `completion`, then inputs, then outputs and the `arena` they land in, then knobs, and last `progress` and `stats`.
-Structures carry no size or version field, so initialize them by designator, which zeroes every field left out, and expect the major version to change whenever one grows.
-Name lookups and the `_free` family stay positional, and a `_free` of `NULL` is safe.
-
-## Executors
-
-An executor owns what a call runs on but a model does not: host threads or device streams, activation scratch, and the pinned buffer staging passes through.
-
-- `uform_executor_for_ram` spawns host threads across the compute domains local to the memory domains of its `uform_ram_options_t`, 7/8 of their cores when `threads` is zero.
-- `uform_executor_on_pool` lends UForm a ForkUnion `fu_pool_t` another library spawned, so UForm, USearch and UStore in one process share one set of threads; the pool must outlive the executor.
-- `uform_executor_for_vram` opens one stream on every device of its `uform_vram_options_t`, named by their position in `uform_gpu_devices`, beside host threads for the decoding the devices cannot do.
-- `uform_executor_drain` waits for every call submitted before it and sets the `uform_mood_t` the executor adopts when idle, parked or spinning.
-- `uform_executor_free` drains, releases what the executor owns and returns what it borrowed.
-
-One executor serves any number of models of its residency, and a call pairing a model with an executor of another residency reports `uform_status_device_k`.
-A `NULL` executor runs the call on the calling thread, final when it returns.
-`cpu_class` and `gpu_class` in the options pin the class a call dispatches as, and `uform_status_unsupported_k` answers a class the machine cannot run.
-
-## Outcomes and Completions
+## Receivers & Deferred Calls
 
 Every call stores its result in the `uform_outcome_t` it names: a status, and a static message that is `NULL` exactly on success.
 `uform_completion_blocking_k`, the default, returns with the status final and every output readable.
@@ -98,6 +101,33 @@ for (size_t shard = 0; shard != 4; ++shard) {
 }
 for (size_t shard = 0; shard != 4; ++shard) uform_outcome_wait(&outcomes[shard]);
 ```
+
+## Executors
+
+An executor owns what a call runs on but a model does not: host threads or device streams, activation scratch, and the pinned buffer staging passes through.
+
+- `uform_executor_for_ram` spawns host threads across the compute domains local to the memory domains of its `uform_ram_options_t`, 7/8 of their cores when `threads` is zero.
+- `uform_executor_on_pool` lends UForm a ForkUnion `fu_pool_t` another library spawned, so UForm, USearch and UStore in one process share one set of threads; the pool must outlive the executor.
+- `uform_executor_for_vram` opens one stream on every device of its `uform_vram_options_t`, named by their position in `uform_gpu_devices`, beside host threads for the decoding the devices cannot do.
+- `uform_executor_drain` waits for every call submitted before it and sets the `uform_mood_t` the executor adopts when idle, parked or spinning.
+- `uform_executor_free` drains, releases what the executor owns and returns what it borrowed.
+
+One executor serves any number of models of its residency, and a call pairing a model with an executor of another residency reports `uform_status_device_k`.
+A `NULL` executor runs the call on the calling thread, final when it returns.
+`cpu_class` and `gpu_class` in the options pin the class a call dispatches as, and `uform_status_unsupported_k` answers a class the machine cannot run.
+
+### Classes and Devices
+
+Dispatch picks one tuned variant per CPU or GPU family, named by `uform_cpu_class_t` and `uform_gpu_class_t`, whose enumerators and ordinals are USearch's.
+`uform_ram_options_t::cpu_class` and `uform_vram_options_t::gpu_class` pin one, and the `unknown` zero derives the hardware's own:
+
+- A CPU pin dispatches as if the CPU were of that class, taking every rung whose features it holds, and a class the CPU cannot run reports `uform_status_unsupported_k`.
+- A GPU pin dispatches every named device as that class, and a device that cannot run it reports `uform_status_unsupported_k`.
+- Unpinned devices of one VRAM executor must share a class, or the call reports `uform_status_config_mismatch_k`.
+
+`uform_gpu_devices` lists every GPU the process can drive, NVIDIA devices first, then AMD, each as a `uform_gpu_device_t` of its vendor, vendor ordinal, class, compute units, memory and name.
+A device's position in that listing is the ordinal `uform_vram_options_t::devices` names it by, and a machine without GPUs lists none and succeeds.
+`uform_cpu_class_name` and `uform_gpu_class_name` spell a class, like `intel-haswell` or `nvidia-hopper`, and the `_from_name` verbs read one back.
 
 ## Arenas
 
@@ -128,54 +158,17 @@ for (size_t batch = 0; batch != batches_count; ++batch) {
 uform_arena_free(arena);
 ```
 
-## Building
+### Rows and Tapes
 
-CMake builds `uform_static` and `uform_shared` from the objects `src/` compiles, and the archive carries the NumKong, StringZilla and yyjson objects it needs, naming only the system codecs to its consumers:
-
-```sh
-cmake --preset library
-cmake --build --preset library
-```
-
-The presets choose the residencies a build carries:
-
-- `library` builds the engine for the host alone.
-- `cuda_rocm_library` adds the NVIDIA and AMD residencies, the trainer and the mesh, with Clang hosting both vendors' compilers.
-- `linux_cuda_rocm` adds both residencies without the trainer, and launches UForm's own kernels through drivers opened at first use.
-- `wasm32_emscripten` and `wasm32_wasi` build for WebAssembly, which takes decoded media only.
-- `stub_library` builds `src_stub/`, a stand-in answering the same verbs over the C++ standard library and ForkUnion.
-
-The stand-in's archives carry the engine's file names in a `stub/` directory of their own, so a consumer swaps implementations with one `-L`.
-`c/test.c` runs against both, with the tiny checkpoint `test/tiny_checkpoint.cpp` writes when the suites are built.
-
-## Classes and Devices
-
-Dispatch picks one tuned variant per CPU or GPU family, named by `uform_cpu_class_t` and `uform_gpu_class_t`, whose enumerators and ordinals are USearch's.
-`uform_ram_options_t::cpu_class` and `uform_vram_options_t::gpu_class` pin one, and the `unknown` zero derives the hardware's own:
-
-- A CPU pin dispatches as if the CPU were of that class, taking every rung whose features it holds, and a class the CPU cannot run reports `uform_status_unsupported_k`.
-- A GPU pin dispatches every named device as that class, and a device that cannot run it reports `uform_status_unsupported_k`.
-- Unpinned devices of one VRAM executor must share a class, or the call reports `uform_status_config_mismatch_k`.
-
-`uform_gpu_devices` lists every GPU the process can drive, NVIDIA devices first, then AMD, each as a `uform_gpu_device_t` of its vendor, vendor ordinal, class, compute units, memory and name.
-A device's position in that listing is the ordinal `uform_vram_options_t::devices` names it by, and a machine without GPUs lists none and succeeds.
-`uform_cpu_class_name` and `uform_gpu_class_name` spell a class, like `intel-haswell` or `nvidia-hopper`, and the `_from_name` verbs read one back.
-
-## Residencies
-
-Residency is in the verb name, as in USearch and UStore, so a residency a build lacks has no verb to call:
-
-- __RAM__: `uform_model_load_ram` and `uform_model_load_ram_buffer` place the weights in host memory, on the NUMA nodes `uform_ram_options_t` names, and every build carries them.
-- __NVIDIA__: `uform_model_load_vram` and `uform_model_load_vram_buffer` place them on the CUDA devices `uform_vram_options_t` names, in builds with `UFORM_CUDA_ARCH`.
-- __AMD__: the same VRAM verbs place them on ROCm devices, in builds with `UFORM_ROCM_ARCH`.
-
-On NVIDIA, text and JPEG images never leave the device; container demux, PNG and WebP, audio, and every modality on AMD decode on host threads the executor spawns beside its streams.
-`uform_capabilities_compiled` and `uform_capabilities_available` report what the binary was built with and what the machine offers.
+A verb's `count` is its batch axis and nothing else.
+Outputs are views the call writes packed into its arena, so none carries a capacity for the caller to pick.
+`uform_rows_view_t` holds one row per item as `data`, `stride`, `columns` and `scalar`, field for field USearch's rows, so pooled embeddings feed an index as they are.
+Ragged inputs are `uform_tape_view_t` tapes laid out as Apache Arrow lays them: elements end to end in `data`, and `count + 1` offsets in host memory around them.
+Ragged outputs, such as per-token states, are `uform_rows_tape_view_t`: packed rows and one more offset than items.
+On a VRAM executor every output is device memory, which the caller copies out itself or hands to a USearch VRAM index as it is.
 
 ## Encoding
 
-`uform_model_describe` reports the model's `dimensions`, `context`, `quantization`, memory usage and the CPU or GPU class it dispatched to.
-It also reports the `cpu_class` a RAM model was packed for or the `gpu_class` a VRAM model runs as, the `token_width` of its token head, and the `choice_temperature_groups` of its byte decoder, each zero when the checkpoint carries no such part.
 Every encode verb runs the same tower, the modality's entry, the transformer blocks and the final norm, and keeps whichever surfaces the caller names from one forward:
 
 - `embeddings` land one pooled row per item, past the attention pool and the projection head.
@@ -200,7 +193,7 @@ uform_text_encode(&(uform_text_encode_t){
     .arena = arena, .outputs_scalar = uform_scalar_bf16_k});
 ```
 
-## Calibrated Choices
+## Choices
 
 `uform_text_choose` scores each text's legal choices, one byte each, through one forward of the byte decoder.
 The call appends the mask byte to every text, and a text longer than the model's `context` loses its head, never its end.
@@ -218,7 +211,21 @@ uform_text_choose(&(uform_text_choose_t){
 A checkpoint stores one inverse temperature per question type as `choices.inverse_temperatures`, and one without them chooses at an inverse temperature of one.
 `uform_eval <checkpoint> --calibrate <choices.jsonl> --output <calibrated.safetensors>` fits them on held-out choices, prints each group's negative log-likelihood and the top-choice calibration error before and after, and writes the calibrated copy.
 
-## Mesh and Trainer
+## Models
+
+Residency is in the verb name, as in USearch and UStore, so a residency a build lacks has no verb to call:
+
+- __RAM__: `uform_model_load_ram` and `uform_model_load_ram_buffer` place the weights in host memory, on the NUMA nodes `uform_ram_options_t` names, and every build carries them.
+- __NVIDIA__: `uform_model_load_vram` and `uform_model_load_vram_buffer` place them on the CUDA devices `uform_vram_options_t` names, in builds with `UFORM_CUDA_ARCH`.
+- __AMD__: the same VRAM verbs place them on ROCm devices, in builds with `UFORM_ROCM_ARCH`.
+
+On NVIDIA, text and JPEG images never leave the device; container demux, PNG and WebP, audio, and every modality on AMD decode on host threads the executor spawns beside its streams.
+`uform_capabilities_compiled` and `uform_capabilities_available` report what the binary was built with and what the machine offers.
+
+`uform_model_describe` reports the model's `dimensions`, `context`, `quantization`, memory usage and the CPU or GPU class it dispatched to.
+It also reports the `cpu_class` a RAM model was packed for or the `gpu_class` a VRAM model runs as, the `token_width` of its token head, and the `choice_temperature_groups` of its byte decoder, each zero when the checkpoint carries no such part.
+
+## Training
 
 Training is GPU-only.
 `uform_mesh_bootstrap` joins this process to a run once, through files in a directory every host sees, and after it processes talk only over NVLink and InfiniBand.
@@ -252,16 +259,7 @@ uform_trainer_init_vram(&(uform_trainer_init_vram_t){
     .objective = uform_objective_joint_k, .schedule = {.steps = 100000}, .seed = 42});
 ```
 
-## Rows and Tapes
-
-A verb's `count` is its batch axis and nothing else.
-Outputs are views the call writes packed into its arena, so none carries a capacity for the caller to pick.
-`uform_rows_view_t` holds one row per item as `data`, `stride`, `columns` and `scalar`, field for field USearch's rows, so pooled embeddings feed an index as they are.
-Ragged inputs are `uform_tape_view_t` tapes laid out as Apache Arrow lays them: elements end to end in `data`, and `count + 1` offsets in host memory around them.
-Ragged outputs, such as per-token states, are `uform_rows_tape_view_t`: packed rows and one more offset than items.
-On a VRAM executor every output is device memory, which the caller copies out itself or hands to a USearch VRAM index as it is.
-
-## Statuses
+## Errors
 
 Statuses are numbered as USearch numbers them, so a failure keeps its identity across the two libraries:
 
@@ -276,4 +274,10 @@ Statuses are numbered as USearch numbers them, so a failure keeps its identity a
 - `uform_status_internal_k`: a defect, reported rather than hung on.
 
 `uform_status_name` spells a status as lowercase words joined by dashes and `uform_status_from_name` reads it back, as the other closed sets' `_name` and `_from_name` pairs do.
-`uform_version`, `uform_capabilities_compiled` and `uform_capabilities_available` report the library this process linked and the hardware it found.
+
+## Design
+
+Every verb that takes options, outputs or callbacks takes one structure named after it, as `uform_text_encode` takes a `uform_text_encode_t`.
+Fields open in the same order everywhere: the handle, `executor`, `outcome` and `completion`, then inputs, then outputs and the `arena` they land in, then knobs, and last `progress` and `stats`.
+Structures carry no size or version field, so initialize them by designator, which zeroes every field left out, and expect the major version to change whenever one grows.
+Name lookups and the `_free` family stay positional, and a `_free` of `NULL` is safe.

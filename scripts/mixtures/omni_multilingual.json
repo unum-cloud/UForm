@@ -1595,6 +1595,14 @@
       "anchor": "caption",
       "positive": "audio",
       "media": "audio"
+    },
+    {
+      "name": "clotho_train",
+      "weight": 0.1,
+      "glob": "data/clotho/clotho-data-train-*.parquet",
+      "anchor": "captions",
+      "positive": "audio",
+      "media": "audio"
     }
   ]
 }

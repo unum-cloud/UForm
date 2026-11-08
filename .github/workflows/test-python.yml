@@ -17,9 +17,13 @@ env:
 
 jobs:
   test_python_ubuntu:
-    name: Test Python on Ubuntu with the CPU Library
+    name: Test Python ${{ matrix.python-version }} on Ubuntu with the CPU Library
     runs-on: ubuntu-26.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.15t"]
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7
@@ -36,7 +40,7 @@ jobs:
       - name: Set Up Python
         uses: actions/setup-python@v7
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: ${{ matrix.python-version }}
       - name: Build Python
         env:
           CC: clang
@@ -44,6 +48,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install --group test .
+      - name: Assert the GIL Stays Disabled
+        if: ${{ endsWith(matrix.python-version, 't') }}
+        run: python -c "import sys, uform; assert not sys._is_gil_enabled(), 'importing uform re-enabled the GIL'"
       - name: Test Python
         env:
           UFORM_TEST_CHECKPOINT: ${{ github.workspace }}/build_library/tiny.safetensors

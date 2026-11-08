@@ -1,11 +1,12 @@
 <h1 align="center">UForm</h1>
 <h3 align="center">
-Pocket-Sized Multimodal Perception AI<br/>
+Distributed Training &amp; Inference Pipeline<br/>
+for Multi-Modal Perception<br/>
 </h3>
 <br/>
 
 <p align="center">
-<a href="https://discord.gg/jsMURnSFM2"><img height="25" src="https://github.com/unum-cloud/.github/raw/main/assets/discord.svg" alt="Discord"></a>
+<a href="https://discord.gg/4mxGrenbNt"><img height="25" src="https://github.com/unum-cloud/.github/raw/main/assets/discord.svg" alt="Discord"></a>
 &nbsp; &nbsp; &nbsp;
 <a href="https://www.linkedin.com/company/unum-cloud/"><img height="25" src="https://github.com/unum-cloud/.github/raw/main/assets/linkedin.svg" alt="LinkedIn"></a>
 &nbsp; &nbsp; &nbsp;
@@ -36,6 +37,8 @@ CUDA Training • CPU, NVIDIA and AMD Inference • WebAssembly
 
 ---
 
+![UForm banner](https://github.com/ashvardanian/ashvardanian/blob/master/repositories/UForm-v4.png?raw=true)
+
 UForm 4 is a family of neural networks trained from scratch to learn __shared multi-modal representations__ across text, images, audio, video, and code on a GPU, a single DGX node, or an entire cluster, designed bottom-up from scratch, to fully leverage modern hardware.
 A few convictions shape the whole stack:
 
@@ -61,7 +64,7 @@ The subsections below trace it end to end.
 - [Coding-Rate & Lipschitz Regularization](#coding-rate--lipschitz-regularization) shows how the pooled embedding is shaped into a high-rank, well-spread code;
 - [Encoders Strike Back](#encoders-strike-back) argues why one forward pass beats autoregression on bounded tasks;
 - [Tokenization-Free](#tokenization-free) covers the byte-level inputs that need no tokenizer; and
-- [Matryoshka-like Multi-scale Embedders](#matryoshka-like-multi-scale-embedders) with [ColBERT-style Late-interaction Rerankers](#colbert-style-late-interaction-rerankers) are the two heads that read the encoder output.
+- [Matryoshka-Like Multi-Scale Embedders](#matryoshka-like-multi-scale-embedders) with [ColBERT-Style Late-Interaction Rerankers](#colbert-style-late-interaction-rerankers) are the two heads that read the encoder output.
 - Every tier is trained as one weight-shared family; the scales, recipes, and warm-start lineage live under [Pretrained Models & Recipes](#pretrained-models--recipes).
 
 ### Coding-Rate & Lipschitz Regularization
@@ -132,7 +135,7 @@ The byte-level thread runs from [CANINE](https://arxiv.org/abs/2103.06874) and [
 Where those patch by a fixed or entropy-driven rule, UForm's learned byte embedding and uniform encoder _are_ the tokenizer — attention clusters bytes into effective subwords with no fixed pooling rule, the same instinct as [Charformer](https://arxiv.org/abs/2106.12672)'s gradient-based subword blocks.
 And because the pooled embedding is a small modality-agnostic latent — the design [Perceiver IO](https://arxiv.org/abs/2107.14795) validated on raw bytes, pixels, and audio — a single backbone ingests every modality with no per-modality codec.
 
-### Matryoshka-like Multi-scale Embedders
+### Matryoshka-Like Multi-Scale Embedders
 
 Dense vector embeddings are the workhorse of modern retrieval.
 Since __[Matryoshka](https://arxiv.org/abs/2205.13147)__ Representation Learning paper it has been standard practice to train _truncatable_ embeddings, where the leading dimensions already form a usable vector and each later block only sharpens it.
@@ -166,7 +169,7 @@ Two loader-side properties keep the step cheap.
 The text towers pack many short documents into a single 4096-byte row and pool one embedding per packed segment, so a large contrastive batch of short inputs never balloons the step's sequence budget — the GPU stays saturated whether the corpus is sentences or full passages.
 And each entry can carry _several positives and explicit hard negatives_, which the sharded loss gathers as extra band columns, converging faster than a pipeline restricted to one positive and in-batch negatives alone.
 
-### ColBERT-style Late-interaction Rerankers
+### ColBERT-Style Late-Interaction Rerankers
 
 A reranker shares almost everything with the embedder above — still a sigmoid cross-entropy objective, still one loss sharded across the whole NVLink domain — but it scores documents differently.
 Instead of pooling a passage into a single attention-pooled embedding, it reads the _full encoder output_ — one embedding per byte, refined through a per-byte projection head — and scores a query against a candidate with a [ColBERT](https://arxiv.org/abs/2004.12832)-style late-interaction MaxSim.
@@ -192,12 +195,12 @@ A production late-interaction index therefore quantizes the per-byte vectors int
 UForm not only publicly lists all of the data mixtures and code used for training, which is rare by itself, but also provides a PyTorch- and JAX-free training codebase, GPU-accelerated end-to-end, with orders of magnitude less complexity and overhead than traditional frameworks.
 The pipeline follows the convictions up top:
 
-- [Mixed Precision by Design](#) — BF16 training, E4M3 inference, one master copy per weight.
-- [GPU-Accelerated Data-loaders & IO](#) — bytes to batch on the GPU, decoding there wherever the codec allows.
-- [NVLink-based Cross-GPU Collaboration](#) — cross-rank collectives inside the captured graph, no NCCL.
-- [Optimizing via Adafactor](#) — magnitude-aware updates at byte-level scale.
+- [Mixed Precision by Design](#precision-by-design) — BF16 training, E4M3 inference, one master copy per weight.
+- [GPU-Accelerated Data-Loaders & IO](#gpu-accelerated-data-loaders--io) — bytes to batch on the GPU, decoding there wherever the codec allows.
+- [NVLink-Based Cross-GPU Collaboration](#nvlink-based-cross-gpu-collaboration) — cross-rank collectives inside the captured graph, no NCCL.
+- [Optimizing via Adafactor](#adafactor-optimizer) — magnitude-aware updates at byte-level scale.
 
-### GPU-Accelerated Data-loaders & IO
+### GPU-Accelerated Data-Loaders & IO
 
 The defining property of the UForm training stack is that __nothing should leave the GPU between fetch and forward__.
 Parquet corpora are read into device memory by cuDF over GPUDirect Storage as Apache Arrow-compatible columns, then byte-tokenized, gathered and packed on-device by the C++ loaders, so text takes no host-device copy in the loop.
@@ -228,7 +231,7 @@ And the host-side C++ libraries that carry bytes up to the device line:
 - __[SmashTable](https://github.com/ashvardanian/SmashTable)__ — the vectors and hash tables every host-side table grows in.
 - __[yyjson](https://github.com/ibireme/yyjson)__ — the exception-free JSON parser behind JSONL dataset records and SafeTensors headers.
 
-### NVLink-based Cross-GPU Collaboration
+### NVLink-Based Cross-GPU Collaboration
 
 Every training step is a single captured CUDA Graph, replayed each iteration and driven from one host thread across every GPU in one process.
 No variable-size dynamic allocations on the hot path, no shared pointers, no `std::async` or `std::thread` to control GPUs: the calling thread owns every `cudaGraph` and `cudaStream_t`, host-side callbacks are avoided, and everything else is shifted into fused on-GPU operations.
@@ -243,7 +246,7 @@ Where multicast is absent, every member reads its peers in a fixed order instead
 Across NVLink domains, device-initiated InfiniBand writes on a recursive-doubling schedule all-gather the contrastive embeddings and all-reduce the gradients from inside the same captured graph.
 The [FAQ](#why-hand-roll-ptx-instead-of-nccl-and-nvshmem) covers why this is hand-rolled rather than delegated to NCCL or NVSHMEM.
 
-### Mixed Precision by Design
+### Precision by Design
 
 __Training is BF16.__
 Weights and activations are BFloat16 throughout — the forward and backward GEMMs (FP32-accumulated on the tensor cores), RMSNorm, attention, SwiGLU, embedding lookups, and the loss kernels.
@@ -262,9 +265,9 @@ The compute mode is the one `quantization` scalar a load names — `bf16` as the
 Each load packs its weights for one CPU or GPU class, the hardware's own or one the caller pins, so a single binary carries tuned variants from Haswell to Diamond Rapids on x86, from Graviton2 to Vera on Arm, and from Ampere to Blackwell and CDNA3 to CDNA5 on GPUs.
 [NumKong](https://github.com/ashvardanian/NumKong) runs every matrix product and every attention, forward and backward — BF16 and E4M3 alike, against weights packed once per step — and [CUB](https://github.com/NVIDIA/cccl) supplies the device-wide scans and reductions inside the custom kernels.
 
-### Optimizing via Adafactor (the Sole Optimizer)
+### Adafactor Optimizer
 
-UForm trains exclusively with a custom CUDA [Adafactor](https://arxiv.org/abs/1804.04235) implementation in [`optimizer.hpp`](include/uform/train/optimizer.hpp).
+UForm trains exclusively with a custom CUDA [Adafactor](https://arxiv.org/abs/1804.04235) implementation in [`optimizer.hpp`](https://github.com/unum-cloud/UForm/blob/main/include/uform/train/optimizer.hpp).
 Neither [Lion](https://arxiv.org/abs/2302.06675) nor [AdamW](https://arxiv.org/abs/1711.05101) ships in the stack; both appear below only as ablation baselines.
 Lion is hyperparameter-economical — two betas, no second-moment state — but its sign-only update $\mathrm{sign}(\mathrm{EMA}(g))$ discards gradient _magnitude_ and steps every parameter by the same amount.
 On a unit-RMSNorm encoder that is fatal: the variance-destroying low-rank direction costs the optimizer no more than an informative one, so the pooled embedding slides into rank collapse.
@@ -342,7 +345,7 @@ This is how a run with media achieves cross-modal retrieval: image↔text, video
 
 Cross-modal retrieval and the structured-output tasks — de-identification, segmentation, log normalization, document extraction — all run over the same backbone and the same GPU-accelerated scaffolding, at encoder throughput.
 
-### Evaluation and Calibration
+### Evaluation & Calibration
 
 `uform_eval <checkpoint>` scores a checkpoint through the C interface as Recall@1, @5 and @10 in both directions between captions and media.
 `--coco` takes COCO 2017 val, `--msrvtt` the MSR-VTT 1K-A test, `--clotho` the Clotho evaluation set, and `--coco-sm` the COCO-SM captions in 21 languages.
@@ -385,7 +388,7 @@ uform/
 
 Every binding is a thin layer over the C ABI in `c/uform/`: one module per header, one method per verb, and the same receivers, executors and arenas in each language.
 Each links either the engine or the stand-in of `src_stub/`, which answers every verb with deterministic rows in seconds of build time, so the binding suites run without a checkpoint.
-Conventions, hooks and the commit format are described in [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Conventions, hooks and the commit format are described in [`CONTRIBUTING.md`](https://github.com/unum-cloud/UForm/blob/main/CONTRIBUTING.md).
 
 ## FAQ
 
@@ -423,4 +426,23 @@ cudaGraphLaunch(exec, stream);   // replays — but grad is never reduced
 
 — and the standard workaround, splitting the step so the reduce runs on the host between sub-graphs, puts a host sync back into every step, which gave intermittent NaNs and stalled the multi-collective sharded-loss path.
 NVSHMEM replays correctly but bootstraps one PE per process (`nvshmem_n_pes()` returns 1 from our single-process trainer), so adopting it means re-architecting under MPI or `torchrun`.
-`multimem.*` is the NVLink-fabric primitive both libraries dispatch internally anyway — capture-safe and single-process — so UForm calls it directly; the design is in [NVLink-based Cross-GPU Collaboration](#nvlink-based-cross-gpu-collaboration).
+`multimem.*` is the NVLink-fabric primitive both libraries dispatch internally anyway — capture-safe and single-process — so UForm calls it directly; the design is in [NVLink-Based Cross-GPU Collaboration](#nvlink-based-cross-gpu-collaboration).
+
+## Citation
+
+If UForm helps your research or product, please cite it:
+
+```bibtex
+@software{Kim_UForm,
+  author = {Kim, Mikhail and Orshulevich, Vladimir and Vardanian, Ash},
+  title = {{UForm: Hardware-Accelerated Distributed Training of Multi-Modal Perception Models across NVLink Domains}},
+  doi = {10.5281/zenodo.8204323},
+  url = {https://github.com/unum-cloud/UForm},
+  license = {Apache-2.0}
+}
+```
+
+## License
+
+Licensed under the Apache License, Version 2.0.
+See `LICENSE` for details.

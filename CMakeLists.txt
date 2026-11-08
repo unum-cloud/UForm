@@ -56,7 +56,7 @@ project(
     uform
     VERSION 4.0.0
     LANGUAGES C CXX
-    DESCRIPTION "Pocket-sized multimodal AI for content understanding and generation"
+    DESCRIPTION "Distributed training and inference pipeline for multi-modal perception"
     HOMEPAGE_URL "https://github.com/unum-cloud/UForm"
 )
 

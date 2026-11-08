@@ -12,7 +12,9 @@ npm install @unum-cloud/uform
 
 The package carries prebuilt addons under `prebuilds/`, and the `uform.mjs` and `uform.wasm` pair for browsers under `javascript/dist/wasm/`.
 
-## Node
+## Quickstart
+
+### Node
 
 Models are tokenizer-free: text arrives as UTF-8 and every byte is a token.
 An executor owns the threads, a model owns the weights, and an arena owns the outputs, so one executor serves many models and one arena serves a steady loop without allocating.
@@ -28,73 +30,7 @@ const encoded = await model.deferred(executor).textEncode(["a small red panda"],
 const embedding = encoded.embeddings.row(0); // a Float32Array of the model's dimensions
 ```
 
-The same verbs run on the calling thread with no receiver, and block on an executor through `on`:
-
-```js
-const here = model.textEncode(["a small red panda"], arena);
-const there = model.on(executor).textEncode(["a small red panda"], arena);
-```
-
-Every verb keeps the pooled embeddings by default.
-Ask for the final-norm states too, one row per token kept, with the `outputs` flags:
-
-```js
-const { embeddings, states, stats } = model.textEncode(texts, arena, {
-  outputs: Outputs.Embeddings | Outputs.States,
-  outputsScalar: Scalar.BF16,
-});
-const tokensOfFirst = states.item(0); // rows from states.offsets[0] up to states.offsets[1]
-console.log(stats.truncated, stats.tokens);
-```
-
-A checkpoint with a token head also lands unit token vectors for late-interaction reranking, `tokenWidth` wide and sharing the states' offsets:
-
-```js
-const { tokenWidth } = model.describe(); // zero without a token head, which answers `unsupported`
-const { tokenVectors } = model.textEncode(documents, arena, { outputs: Outputs.TokenVectors });
-```
-
-A checkpoint with the byte decoder scores closed sets of single-byte choices in one forward, each item's probabilities summing to one:
-
-```js
-const { probabilities } = model.textChoose(["keep this candidate?", "expand which neighbour?"], ["yn", "ABCD"], arena);
-const [keep, drop] = probabilities.item(0);
-```
-
-Images, clips and recordings arrive encoded, as JPEG, PNG, WebP, MP4, WebM, WAV, FLAC, MP3 or Opus files:
-
-```js
-import fs from "node:fs/promises";
-
-const images = model.imageEncode([await fs.readFile("panda.jpg")], arena);
-const clips = model.videoEncode([await fs.readFile("panda.mp4")], arena);
-const recordings = model.audioEncode([await fs.readFile("panda.wav")], arena);
-```
-
-Or decoded, as RGB or RGBA pixels with their shape, and as mono samples with their rate:
-
-```js
-const pixels = model.imageEncodePixels([{ data: rgb, width: 640, height: 480 }], arena);
-const samples = model.audioEncodeSamples([new Float32Array(16000)], 16000, arena);
-```
-
-A model on GPUs takes a VRAM executor and lands its outputs in device memory, which no host view reads:
-
-```js
-const gpus = Executor.forVram({ devices: [0, 1] });
-const resident = Model.loadVram("model.safetensors", { executor: gpus, devices: [0, 1] });
-```
-
-Device ordinals are positions in `gpuDevices()`, NVIDIA devices first, then AMD.
-Dispatch picks a CPU or GPU class on its own, and `cpuClass` or `gpuClass` pins one by its name:
-
-```js
-for (const { name, gpuClass, memoryBytes } of gpuDevices()) console.log(name, gpuClass, memoryBytes);
-const portable = Model.loadRam("model.safetensors", { cpuClass: "intel-haswell" });
-console.log(portable.describe().cpuClass); // "intel-haswell"
-```
-
-## Browser
+### Browser
 
 The browser build computes on the calling thread, so every call blocks and a deferred receiver answers a call that is already final.
 Decode media with the platform, through a canvas or the Web Audio API, then hand the pixels and samples to UForm.
@@ -115,7 +51,27 @@ const texts = model.textEncode(["a small red panda"], arena);
 A bundler that relocates the module passes its factory or URL to `initialize`.
 Encoded media, VRAM, the mesh and the trainer report `unsupported` in the browser build.
 
-## Arenas and Views
+## Receivers & Deferred Calls
+
+The same verbs run on the calling thread with no receiver, and block on an executor through `on`:
+
+```js
+const here = model.textEncode(["a small red panda"], arena);
+const there = model.on(executor).textEncode(["a small red panda"], arena);
+```
+
+## Executors
+
+A model on GPUs takes a VRAM executor and lands its outputs in device memory, which no host view reads:
+
+```js
+const gpus = Executor.forVram({ devices: [0, 1] });
+const resident = Model.loadVram("model.safetensors", { executor: gpus, devices: [0, 1] });
+```
+
+Device ordinals are positions in `gpuDevices()`, NVIDIA devices first, then AMD.
+
+## Arenas
 
 Every output whose length scales with the call lands in an arena, and the verb answers views into it rather than copies.
 Each call rewinds the arena it is given, detaching the buffers under the previous call's views, so a stale view refuses its reads with `invalid-argument` instead of reading another call's memory.
@@ -126,6 +82,63 @@ A deferred call holds its arena until final, and a second call naming it finishe
 const first = model.textEncode(["first"], arena);
 const second = model.textEncode(["second"], arena);
 first.embeddings.data; // throws: the arena was rewound
+```
+
+## Encoding
+
+Every verb keeps the pooled embeddings by default.
+Ask for the final-norm states too, one row per token kept, with the `outputs` flags:
+
+```js
+const { embeddings, states, stats } = model.textEncode(texts, arena, {
+  outputs: Outputs.Embeddings | Outputs.States,
+  outputsScalar: Scalar.BF16,
+});
+const tokensOfFirst = states.item(0); // rows from states.offsets[0] up to states.offsets[1]
+console.log(stats.truncated, stats.tokens);
+```
+
+A checkpoint with a token head also lands unit token vectors for late-interaction reranking, `tokenWidth` wide and sharing the states' offsets:
+
+```js
+const { tokenWidth } = model.describe(); // zero without a token head, which answers `unsupported`
+const { tokenVectors } = model.textEncode(documents, arena, { outputs: Outputs.TokenVectors });
+```
+
+Images, clips and recordings arrive encoded, as JPEG, PNG, WebP, MP4, WebM, WAV, FLAC, MP3 or Opus files:
+
+```js
+import fs from "node:fs/promises";
+
+const images = model.imageEncode([await fs.readFile("panda.jpg")], arena);
+const clips = model.videoEncode([await fs.readFile("panda.mp4")], arena);
+const recordings = model.audioEncode([await fs.readFile("panda.wav")], arena);
+```
+
+Or decoded, as RGB or RGBA pixels with their shape, and as mono samples with their rate:
+
+```js
+const pixels = model.imageEncodePixels([{ data: rgb, width: 640, height: 480 }], arena);
+const samples = model.audioEncodeSamples([new Float32Array(16000)], 16000, arena);
+```
+
+## Choices
+
+A checkpoint with the byte decoder scores closed sets of single-byte choices in one forward, each item's probabilities summing to one:
+
+```js
+const { probabilities } = model.textChoose(["keep this candidate?", "expand which neighbour?"], ["yn", "ABCD"], arena);
+const [keep, drop] = probabilities.item(0);
+```
+
+## Models
+
+Dispatch picks a CPU or GPU class on its own, and `cpuClass` or `gpuClass` pins one by its name:
+
+```js
+for (const { name, gpuClass, memoryBytes } of gpuDevices()) console.log(name, gpuClass, memoryBytes);
+const portable = Model.loadRam("model.safetensors", { cpuClass: "intel-haswell" });
+console.log(portable.describe().cpuClass); // "intel-haswell"
 ```
 
 ## Training

@@ -22,7 +22,6 @@ IFS=. read -r major minor patch <<< "$core"
 export version core major minor patch
 echo "$version" > VERSION
 perl -pi -e 's/^(  "version": ")[^"]+/$1$ENV{version}/' package.json
-perl -pi -e 's/^version: .+$/version: $ENV{version}/' CITATION.cff
 perl -pi -e 's/^(version = ")[^"]+/$1$ENV{version}/' Cargo.toml
 perl -pi -e 's/(uform_version_name\(void\) \{ return ")[^"]+/$1$ENV{version}/' src/types.cpp src_stub/types.cpp
 perl -pi -e 's/^(    VERSION )[0-9.]+$/$1$ENV{core}/' CMakeLists.txt

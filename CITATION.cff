@@ -1,14 +1,13 @@
 cff-version: 1.2.0
-title: "UForm: Pocket-Sized Multimodal Perception AI"
+title: "UForm: Hardware-Accelerated Distributed Training of Multi-Modal Perception Models across NVLink Domains"
 message: "If you use this software, please cite it as below."
 type: software
 license: Apache-2.0
-version: 4.0.0-rc.1
-doi: 10.5281/zenodo.8204323
 repository-code: https://github.com/unum-cloud/UForm
 url: https://github.com/unum-cloud/UForm
+doi: 10.5281/zenodo.8204323
 abstract: >-
-  UForm 4 is a family of pocket-sized perception models trained from scratch to share one
+  UForm is a family of perception models trained from scratch to share one
   representation across text, images, audio, video, and code, from a single GPU to a DGX node or a
   whole cluster. It builds its training stack bottom-up: distributed primitives that scale
   contrastive learning across nodes, custom NVLink multicast collectives in place of generic
@@ -16,11 +15,14 @@ abstract: >-
   stalls the math. Encoders produce embeddings from 64 to 1024 dimensions and serve on CPUs, NVIDIA
   and AMD GPUs, and WebAssembly, behind one C ABI with C++, Python, Rust, JavaScript, and Swift
   bindings.
-
 keywords:
-  - text-to-image retrieval
-  - multimodal
-  - visual-language pre-training
+  - distributed training
+  - multimodal learning
+  - contrastive learning
+  - representation learning
+  - nvlink
+  - gpu
+  - quantization
 
 authors:
   - family-names: Kim

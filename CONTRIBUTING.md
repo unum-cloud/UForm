@@ -69,7 +69,7 @@ Configuring CMake also arms the hooks in `.githooks/`; to arm them without a bui
 | `rust/`                    | the Rust crate over the C ABI                                | none                     |
 | `javascript/`              | the Node-API addon and the WebAssembly module over the C ABI | none                     |
 | `swift/`                   | the Swift package over the C ABI                             | none                     |
-| `docs/`                    | the Sphinx site                                              | none                     |
+| `docs/`                    | the Doxygen configuration of the C reference                 | none                     |
 
 Namespaces mirror directories and nothing else: a directory adds a namespace component, and no namespace groups symbols by theme.
 `c/`, `include/` and `src/` are include roots that add no component, so `src/train/` and `include/uform/train/` both open `unum::uform::train`.

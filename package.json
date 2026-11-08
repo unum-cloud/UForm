@@ -1,7 +1,7 @@
 {
   "name": "@unum-cloud/uform",
   "version": "4.0.0-rc.1",
-  "description": "Pocket-Sized Multimodal Perception AI",
+  "description": "Distributed training and inference pipeline for multi-modal perception",
   "keywords": [
     "AI",
     "multimodal",

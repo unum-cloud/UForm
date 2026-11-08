@@ -149,7 +149,7 @@ narrow.embeddings!.withUnsafeBytes { bytes in index.add(bytes) }
 
 A handler never runs on two threads at once, but may run on whichever thread advanced the work, hence `@Sendable`; returning `.cancel` stops the call with `cancelled`.
 
-## Calibrated Choices
+## Choices
 
 `textChoose` scores each text's legal choices, one byte each, through one forward of the byte decoder, a softmax over that item's choices alone at its question type's calibrated inverse temperature.
 The call appends the mask byte, and a text longer than the context loses its head, never its end.
@@ -228,11 +228,6 @@ do {
 
 `Scalar`, `Mood` and every other closed set read a spelling back with `init?(name:)`, and nil for one the library does not spell.
 
-## What This Binding Does Not Expose
-
-- The constructors address no model or trainer yet, so no receiver offers them; each blocks, the model loads on an optional `executor` and the trainer and mesh on a required one.
-- A trainer is bound to the executor it was made on, so its verbs block there and take no receiver.
-
 ## Design
 
 - __A thin layer over the C ABI.__
@@ -249,3 +244,6 @@ do {
   `Status`, `Scalar`, `Mood`, `CPUClass`, `GPUClass`, `Modality`, `Objective`, `Negatives` and `MultimemTier` carry their C enumerators and spell themselves through the C name functions, never strings.
 - __Nothing costs anything until it is used.__
   Blocking calls take no deferred-table entry, a surface `outputs` leaves out is never computed, and an arena allocates only when a call writes into it.
+- __What this binding does not expose.__
+  The constructors address no model or trainer yet, so no receiver offers them; each blocks, the model loads on an optional `executor` and the trainer and mesh on a required one.
+  A trainer is bound to the executor it was made on, so its verbs block there and take no receiver.

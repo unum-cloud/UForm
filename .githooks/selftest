@@ -3498,7 +3498,6 @@ stage_release_fixture() { # stage_release_fixture <version> [<relative-path> <se
         printf '%s\n' "$version" > VERSION
         printf '{\n  "name": "@unum-cloud/uform",\n  "version": "%s",\n}\n' "$version" > package.json
         printf '[package]\nname = "uform"\nversion = "%s"\n' "$version" > Cargo.toml
-        printf 'cff-version: 1.2.0\nversion: %s\n' "$version" > CITATION.cff
         for library in src/types.cpp src_stub/types.cpp; do
             printf 'char const *uform_version_name(void) { return "%s"; }\n' "$version" > "$library"
         done
