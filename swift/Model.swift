@@ -179,7 +179,7 @@ public final class Model: @unchecked Sendable {
         try landing.read { () throws(UFormError) in Model(raw: try created(model)) }
     }
 
-    /// The same verbs, blocking on `executor` after every call submitted there before them.
+    /// The same verbs, blocking on `executor`, throwing `contended` while another call holds it.
     /// Binding-only: names the executor every call passes.
     public func on(_ executor: Executor) -> ModelOn { ModelOn(model: self, executor: executor) }
 
@@ -196,8 +196,8 @@ public final class Model: @unchecked Sendable {
 
 // MARK: - Receivers
 
-/// A model's verbs on an executor, each blocking until final after every call submitted there
-/// before it; see `Model.on(_:)` and the model's own verbs for what each one does.
+/// A model's verbs on an executor, each blocking until final and throwing `contended` while another
+/// call holds the executor; see `Model.on(_:)` and the model's own verbs for what each one does.
 public struct ModelOn: Sendable {
     /// The model every verb addresses.
     let model: Model

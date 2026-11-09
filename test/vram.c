@@ -11,6 +11,7 @@
  *  a VRAM call stay on the device, so only this test copies them back, with the CUDA driver API.
  *  The checkpoint comes from @c argv[1], as written by @c test/tiny_checkpoint.cpp.
  */
+#define _GNU_SOURCE // `sched_getaffinity` and `CPU_COUNT`
 #include <math.h>    // `fabsf`
 #include <stdbool.h> // `bool`
 #include <stdint.h>  // `uint8_t`, `uint32_t`
@@ -22,9 +23,23 @@
 
 #include "uform/uform.h"
 
+#if UFORM_OS_LINUX_
+#include <sched.h> // `sched_getaffinity`, `CPU_COUNT`
+#endif
+
 /** The largest relative difference a GPU output may show against the host's, from
  *  BFloat16 rounding alone. */
 static float const tolerance = 0.05f;
+
+/** The cores the calling thread may run on, or zero where the OS keeps no per-thread mask. */
+static int caller_cores(void) {
+#if UFORM_OS_LINUX_
+    cpu_set_t cores;
+    return sched_getaffinity(0, sizeof(cores), &cores) == 0 ? CPU_COUNT(&cores) : 0;
+#else
+    return 0;
+#endif
+}
 
 static void expect(bool must_be_true, char const *message) {
     if (must_be_true) return;
@@ -94,7 +109,7 @@ typedef struct landed_t {
     size_t tokens;
 } landed_t;
 
-/** Runs @p verb over @p inputs into @p landed, waiting for a deferred call before returning. */
+/** Runs @p verb over @p inputs into @p landed, final on return even when deferred. */
 static void encode(verb_t verb, inputs_t const *inputs, uform_model_t model, uform_executor_t executor,
                    uform_arena_t arena, uform_completion_t completion, uform_progress_t progress, landed_t *landed) {
     memset(landed, 0, sizeof(*landed));
@@ -150,7 +165,7 @@ static void encode(verb_t verb, inputs_t const *inputs, uform_model_t model, ufo
                                              .stats = &audio_stats});
         break;
     }
-    if (completion == uform_completion_deferred_k) uform_outcome_wait(&landed->outcome);
+    expect(landed->outcome.status != uform_status_deferred_k, "A call is final on return");
     landed->tokens = text_stats.tokens + image_stats.tokens + audio_stats.tokens;
 }
 
@@ -267,9 +282,10 @@ int main(int argc, char *argv[]) {
     uform_executor_t host = NULL, gpu = NULL;
     uform_executor_for_ram(&(uform_executor_for_ram_t) {.executor = &host, .outcome = &outcome, .threads = 2});
     expect_success(&outcome, "RAM executor");
-    uform_executor_for_vram(&(
-        uform_executor_for_vram_t) {.executor = &gpu, .outcome = &outcome, .vram = {&device, 1}, .deferred_limit = 4});
+    int const cores = caller_cores();
+    uform_executor_for_vram(&(uform_executor_for_vram_t) {.executor = &gpu, .outcome = &outcome, .vram = {&device, 1}});
     expect_success(&outcome, "VRAM executor");
+    expect(caller_cores() == cores, "A VRAM executor leaves its creator on its own cores");
 
     uform_model_t host_model = NULL, gpu_model = NULL;
     uform_model_load_ram(&(uform_model_load_ram_t) {.model = &host_model,

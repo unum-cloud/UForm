@@ -1239,7 +1239,7 @@ struct TrainerOn[origin: ImmOrigin](ImplicitlyCopyable, TrainVerbs):
         self.executor = executor
 
     def _route[C: Call](self, var call: C) raises Error -> C.Result:
-        """Runs `call` on the bound executor, after every call submitted there before it."""
+        """Runs `call` on the bound executor, raising `CONTENDED` while another call holds it."""
         return _block(self.library, call^, self.trainer, self.executor)
 
 

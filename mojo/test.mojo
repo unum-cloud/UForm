@@ -128,6 +128,12 @@ def test_names_round_trip_through_the_engine_tables() raises:
     assert_true(library.negatives_from_name("ambient") == Negatives.AMBIENT)
     assert_equal(library.multimem_tier_name(MultimemTier.PEER_READ), "peer-read")
     assert_true(library.multimem_tier_from_name("peer-read") == MultimemTier.PEER_READ)
+    var refused = Status.SUCCESS
+    try:
+        _ = library.mood_from_name("sleepy")
+    except error:
+        refused = error.status
+    assert_true(refused == Status.INVALID_ARGUMENT, "an unrecognized spelling must be refused, not read as a default")
 
 
 def test_gpu_devices_count_what_the_process_drives() raises:
@@ -359,6 +365,55 @@ def test_deferred_encoding_matches_the_blocking_one() raises:
         assert_equal(waited[position], expected[position])
 
 
+@fieldwise_init
+struct _Reentry(Movable):
+    """The model and executor a handler calls again on, and how its calls ended."""
+
+    var model: Pointer[Model, MutUntrackedOrigin]
+    var executor: Pointer[Executor, MutUntrackedOrigin]
+    var calls: Int
+    var refusals: Int
+
+
+def _call_again(completed: Int, total: Int, reentry: Pointer[_Reentry, MutAnyOrigin]) -> Continuation:
+    """A progress handler calling `describe` on the executor its own call holds."""
+    reentry[].calls += 1
+    try:
+        _ = reentry[].model[].on(reentry[].executor[]).describe()
+    except error:
+        if error.status == Status.CONTENDED:
+            reentry[].refusals += 1
+    return Continuation.CONTINUE
+
+
+def test_a_held_executor_refuses_other_calls() raises:
+    """A call made from the handler of a call holding the executor raises `CONTENDED` without running."""
+    var path = _checkpoint()
+    if not _engine_is_present() or path.byte_length() == 0:
+        print("skipped: UFORM_TEST_CHECKPOINT names no checkpoint")
+        return
+    var library = Library()
+    var executor = Executor.for_ram(library, threads=2)
+    var model = Model.load_ram(executor, path)
+    var texts = "onetwo".as_bytes()
+    var offsets: List[UInt] = [0, 3, 6]
+    var arena = Arena(executor)
+    var reentry = _Reentry(
+        Pointer(to=model).unsafe_origin_cast[MutUntrackedOrigin](),
+        Pointer(to=executor).unsafe_origin_cast[MutUntrackedOrigin](),
+        0,
+        0,
+    )
+    var progress = Progress.of[_call_again](Pointer(to=reentry))
+    var encoded = model.on(executor).text_encode(
+        TapeView.of(texts, offsets), Outputs.EMBEDDINGS, arena, EncodeConfig(progress=progress)
+    )
+    assert_equal(len(encoded.embeddings().value()), 2)
+    assert_true(reentry.calls > 0, "the handler must hear a report")
+    assert_equal(reentry.refusals, reentry.calls)
+    _ = model.on(executor).describe()
+
+
 def _stop_at_first_report(completed: Int, total: Int, reports: Pointer[Int, MutAnyOrigin]) -> Continuation:
     """A progress handler counting its reports and cancelling at the first."""
     reports[] += 1
@@ -478,6 +533,7 @@ def main() raises:
     suite.test[test_a_later_call_retires_earlier_rows]()
     suite.test[test_deferred_encoding_matches_the_blocking_one]()
     suite.test[test_progress_cancels_an_encoding]()
+    suite.test[test_a_held_executor_refuses_other_calls]()
     suite.test[test_text_choose_answers_a_probability_per_choice]()
     suite.test[test_pixels_and_samples_encode_without_codecs]()
     suite.test[test_mismatched_pixel_shapes_are_refused_before_the_call]()

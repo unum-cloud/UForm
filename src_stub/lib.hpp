@@ -2,15 +2,14 @@
  *  @file src_stub/lib.hpp
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief Machinery every stand-in verb shares: outcomes, the deferred queue, arenas, scalars,
- *      progress, and the deterministic numbers the encoders write.
+ *  @brief Machinery every stand-in verb shares: outcomes, the calls holding executors, arenas,
+ *      scalars, progress, and the deterministic numbers the encoders write.
  *
  *  Nothing here is part of the C ABI. The stand-in answers every verb of the @c c/uform headers
  *  with the C++ standard library alone, so a binding suite links and runs in seconds against the
- *  interface instead of waiting on a build of the engine. Its executors start no threads: a
- *  deferred call is copied at submission into one stub-wide queue and runs on the thread of
- *  whichever caller next drains its executor, submits a blocking call to it, waits on the call's
- *  outcome, or frees a handle the call names.
+ *  interface instead of waiting on a build of the engine. Its executors start no threads, so they
+ *  behave as the engine's caller-inclusive ones: every call, deferred too, runs on its caller and
+ *  is final when it returns, and a call finding another one holding its executor is refused.
  */
 #ifndef UNUM_UFORM_STUB_LIB_HPP
 #define UNUM_UFORM_STUB_LIB_HPP
@@ -29,18 +28,12 @@
 #include <variant>          // `std::variant`
 #include <vector>           // `std::vector`
 
-#include <forkunion.hpp> // `fu::standard_atomic_ref`, `fu::standard_yield_t` - the outcome's status word
+#include <forkunion.hpp> // `fu::standard_atomic_ref`, `fu::standard_yield_t` - the serial class's verbs
 
 #include "uform/uform.h" // every argument structure a call copies
 
-/** What @c uform_executor_t owns: only the size of its share of the deferred queue, since it runs
- *  nothing on threads of its own. */
-struct uform_executor_handle_t {
-
-    /** Deferred calls not yet final beyond which a submission
-     *  finishes @c uform_status_contended_k. */
-    std::size_t deferred_limit = 64;
-};
+/** What @c uform_executor_t owns: nothing, since every call runs on its caller. */
+struct uform_executor_handle_t {};
 
 /** What @c uform_arena_t owns: one host buffer, rewound by every call and grown to
  *  a high-water mark. */
@@ -49,7 +42,7 @@ struct uform_arena_handle_t {
     std::size_t capacity = 0;
 
     /** The outcome of the call holding the arena, null while free; read and written under
-     *  the queue's lock. */
+     *  the running calls' lock. */
     uform_outcome_t const *holder = nullptr;
 };
 
@@ -69,6 +62,11 @@ struct uform_trainer_handle_t {};
 namespace unum::uform {
 
 namespace fu = ashvardanian::forkunion;
+
+/** The serial class's verbs, as the engine maps @c cpu_class_t::serial_k, the stub's only class. */
+template <typename value_type_>
+using serial_atomic_ref = fu::standard_atomic_ref<value_type_>;
+using serial_waiter_t = fu::standard_yield_t;
 
 /** Scalars per embedding row every stand-in model reports. */
 inline constexpr std::size_t dimensions_k = 64;
@@ -93,11 +91,21 @@ inline std::string_view as_text(uform_bytes_view_t bytes) {
 /** Whether @p name spells @p spelling exactly, with no terminator assumed on either side. */
 inline bool named(uform_bytes_view_t name, std::string_view spelling) { return as_text(name) == spelling; }
 
+/** Writes to @p output the one of @p values that @p spell spells as @p name, or fails with
+ *  @c uform_status_invalid_argument_k and writes nothing. */
+template <typename value_type_>
+uform_status_t read_name(uform_bytes_view_t name, std::initializer_list<value_type_> values,
+                         char const *(*spell)(value_type_), value_type_ *output) {
+    if (!output) return uform_status_invalid_argument_k;
+    for (value_type_ const value : values)
+        if (named(name, spell(value))) return *output = value, uform_status_success_k;
+    return uform_status_invalid_argument_k;
+}
+
 /** Marks @p outcome deferred, every verb's first act, so a waiter never reads a stale status. */
 inline void propagate_deferred(uform_outcome_t *outcome) {
     if (outcome)
-        fu::standard_atomic_ref<uform_status_t> {outcome->status}.store(uform_status_deferred_k,
-                                                                        std::memory_order_relaxed);
+        serial_atomic_ref<uform_status_t> {outcome->status}.store(uform_status_deferred_k, std::memory_order_relaxed);
 }
 
 /** The one final write to @p outcome: the message, then the status with release ordering, which
@@ -105,7 +113,7 @@ inline void propagate_deferred(uform_outcome_t *outcome) {
 inline void propagate_error(uform_status_t status, uform_outcome_t *outcome, char const *message) {
     if (!outcome) return;
     outcome->message = status == uform_status_success_k ? nullptr : message;
-    fu::standard_atomic_ref<uform_status_t> {outcome->status}.store(status, std::memory_order_release);
+    serial_atomic_ref<uform_status_t> {outcome->status}.store(status, std::memory_order_release);
 }
 
 /** Lets go of @p arena if the call whose outcome is @p call holds it. */
@@ -156,12 +164,11 @@ using call_arguments_t = std::variant<                                          
     uform_audio_encode_t, uform_audio_encode_samples_t, uform_text_choose_t,                      //
     uform_mesh_bootstrap_t, uform_trainer_init_vram_t, uform_trainer_step_t, uform_trainer_save_t>;
 
-/** A call given to an executor, waiting in the queue or running on some caller's thread. */
+/** A call running on its caller's thread, holding its executor. */
 struct call_t {
 
-    /** The executor whose share of the queue the call takes; null for a blocking call,
-     *  which takes none. */
-    uform_executor_handle_t const *deferred_on;
+    /** The executor the call holds while it runs. */
+    uform_executor_handle_t const *held_executor;
 
     /** A copy of the arguments with a null executor, so running them goes straight to
      *  the verb's body. */
@@ -173,18 +180,11 @@ struct call_t {
     std::vector<void const *> handles;
 };
 
-/** Queues a deferred @p call, or finishes it contended once its executor has @c deferred_limit
- *  calls that are not final, answering whether it was queued. */
-bool submit_deferred(call_t call, uform_outcome_t *outcome);
+/** Runs @p call on the calling thread, listed while it runs so a free of a handle it names waits,
+ *  or finishes @p outcome contended while another call holds its executor. */
+void run_holding(call_t call, uform_outcome_t *outcome);
 
-/** Runs a blocking @p call on the calling thread, listed while it runs so a free of a handle
- *  it names waits. */
-void run_blocking(call_t call);
-
-/** Runs every call queued for @p executor, oldest first, on the calling thread. */
-void drain(uform_executor_handle_t const *executor);
-
-/** Returns once no call names @p handle, draining the executors whose queue still holds one. */
+/** Returns once no running call names @p handle. */
 void wait_for_calls_using(void const *handle);
 
 /** Holds @p arena for the call whose outcome is @p call, answering whether that call holds it now.
@@ -210,9 +210,8 @@ std::vector<void const *> handles_used_by(arguments_ const &arguments) {
  *  @brief Every verb's first act. A call without an executor answers false and runs the verb's
  *      body in place.
  *
- *  A call with one is copied without it and answers true: a blocking copy runs right after the
- *  calls queued before it, and a deferred one holds its arena and waits in the queue until a drain,
- *  a blocking call, a wait or a free runs it.
+ *  A call with one is copied without it and answers true once it ran on the calling thread, holding
+ *  its executor, whatever its completion, as a caller-inclusive executor of the engine runs it.
  */
 template <auto verb_, typename arguments_>
 bool through_executor(arguments_ *arguments) {
@@ -220,17 +219,9 @@ bool through_executor(arguments_ *arguments) {
     if (!executor) return false;
     arguments_ copy = *arguments;
     copy.executor = nullptr;
-    call_t call {nullptr, copy, [](void *erased) { verb_(static_cast<arguments_ *>(erased)); },
+    call_t call {executor, copy, [](void *erased) { verb_(static_cast<arguments_ *>(erased)); },
                  handles_used_by(*arguments)};
-    if (arguments->completion != uform_completion_deferred_k)
-        return drain(executor), run_blocking(std::move(call)), true;
-    call.deferred_on = executor;
-    uform_arena_t arena = nullptr;
-    if constexpr (requires { arguments->arena; }) arena = arguments->arena;
-    if (!hold_arena(arena, arguments->outcome))
-        return propagate_error(uform_status_contended_k, arguments->outcome, "The arena serves another call"), true;
-    if (!submit_deferred(std::move(call), arguments->outcome)) // a refused call never runs to let go of its arena
-        release_arena(arena, arguments->outcome);
+    run_holding(std::move(call), arguments->outcome);
     return true;
 }
 

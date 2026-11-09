@@ -410,81 +410,89 @@ struct Library(ImplicitlyCopyable):
         """The engine's spelling of a status, "unrecognized" for a code it does not name. Calls `uform_status_name`."""
         return text_at(self.symbols().status_name(c_int(status.code)))
 
-    def status_from_name(self, name: StringSlice) -> Status:
-        """Reads a spelling back; `INVALID_ARGUMENT` when unrecognized. Calls `uform_status_from_name`."""
-        return Status.of(self.symbols().status_from_name(BytesView.of(name).arguments()))
+    def status_from_name(self, name: StringSlice) raises Error -> Status:
+        """Reads a spelling back, raising `INVALID_ARGUMENT` when unrecognized. Calls `uform_status_from_name`."""
+        return Status.of(self._from_name(self.symbols().status_from_name, name, "uform_status_from_name"))
 
     def scalar_name(self, scalar: ScalarKind) -> String:
         """The engine's spelling of a scalar kind, as `F32` spells "f32". Calls `uform_scalar_name`."""
         return text_at(self.symbols().scalar_name(scalar.code))
 
-    def scalar_from_name(self, name: StringSlice) -> ScalarKind:
-        """Reads a spelling back; `UNKNOWN` when unrecognized. Calls `uform_scalar_from_name`."""
-        return ScalarKind(self.symbols().scalar_from_name(BytesView.of(name).arguments()))
+    def scalar_from_name(self, name: StringSlice) raises Error -> ScalarKind:
+        """Reads a spelling back, raising `INVALID_ARGUMENT` when unrecognized. Calls `uform_scalar_from_name`."""
+        return ScalarKind(self._from_name(self.symbols().scalar_from_name, name, "uform_scalar_from_name"))
 
     def mood_name(self, mood: Mood) -> String:
         """The engine's spelling of a mood, as `PARKED` spells "parked". Calls `uform_mood_name`."""
         return text_at(self.symbols().mood_name(mood.code))
 
-    def mood_from_name(self, name: StringSlice) -> Mood:
-        """Reads a spelling back; `PARKED` when unrecognized. Calls `uform_mood_from_name`."""
-        return Mood(self.symbols().mood_from_name(BytesView.of(name).arguments()))
+    def mood_from_name(self, name: StringSlice) raises Error -> Mood:
+        """Reads a spelling back, raising `INVALID_ARGUMENT` when unrecognized. Calls `uform_mood_from_name`."""
+        return Mood(self._from_name(self.symbols().mood_from_name, name, "uform_mood_from_name"))
 
     def cpu_class_name(self, cpu_class: CPUClass) -> String:
         """The engine's spelling of a CPU class, as `INTEL_HASWELL` spells "intel-haswell". Calls `uform_cpu_class_name`.
         """
         return text_at(self.symbols().cpu_class_name(cpu_class.code))
 
-    def cpu_class_from_name(self, name: StringSlice) -> CPUClass:
-        """Reads a spelling back; `UNKNOWN` when unrecognized. Calls `uform_cpu_class_from_name`."""
-        return CPUClass(self.symbols().cpu_class_from_name(BytesView.of(name).arguments()))
+    def cpu_class_from_name(self, name: StringSlice) raises Error -> CPUClass:
+        """Reads a spelling back, raising `INVALID_ARGUMENT` when unrecognized. Calls `uform_cpu_class_from_name`."""
+        return CPUClass(self._from_name(self.symbols().cpu_class_from_name, name, "uform_cpu_class_from_name"))
 
     def gpu_class_name(self, gpu_class: GPUClass) -> String:
         """The engine's spelling of a GPU class, as `NVIDIA_HOPPER` spells "nvidia-hopper". Calls `uform_gpu_class_name`.
         """
         return text_at(self.symbols().gpu_class_name(gpu_class.code))
 
-    def gpu_class_from_name(self, name: StringSlice) -> GPUClass:
-        """Reads a spelling back; `UNKNOWN` when unrecognized. Calls `uform_gpu_class_from_name`."""
-        return GPUClass(self.symbols().gpu_class_from_name(BytesView.of(name).arguments()))
+    def gpu_class_from_name(self, name: StringSlice) raises Error -> GPUClass:
+        """Reads a spelling back, raising `INVALID_ARGUMENT` when unrecognized. Calls `uform_gpu_class_from_name`."""
+        return GPUClass(self._from_name(self.symbols().gpu_class_from_name, name, "uform_gpu_class_from_name"))
 
     def modality_name(self, modality: Modality) -> String:
         """The engine's spelling of a modality, as `TEXT` spells "text". Calls `uform_modality_name`."""
         return text_at(self.symbols().modality_name(modality.code))
 
-    def modality_from_name(self, name: StringSlice) -> Modality:
-        """Reads a spelling back; `TEXT` when unrecognized. Calls `uform_modality_from_name`."""
-        return Modality(self.symbols().modality_from_name(BytesView.of(name).arguments()))
+    def modality_from_name(self, name: StringSlice) raises Error -> Modality:
+        """Reads a spelling back, raising `INVALID_ARGUMENT` when unrecognized. Calls `uform_modality_from_name`."""
+        return Modality(self._from_name(self.symbols().modality_from_name, name, "uform_modality_from_name"))
 
     def objective_name(self, objective: Objective) -> String:
         """The engine's spelling of an objective, as `JOINT` spells "joint". Calls `uform_objective_name`."""
         return text_at(self.symbols().objective_name(objective.code))
 
-    def objective_from_name(self, name: StringSlice) -> Objective:
-        """Reads a spelling back; `MASKED` when unrecognized. Calls `uform_objective_from_name`."""
-        return Objective(self.symbols().objective_from_name(BytesView.of(name).arguments()))
+    def objective_from_name(self, name: StringSlice) raises Error -> Objective:
+        """Reads a spelling back, raising `INVALID_ARGUMENT` when unrecognized. Calls `uform_objective_from_name`."""
+        return Objective(self._from_name(self.symbols().objective_from_name, name, "uform_objective_from_name"))
 
     def negatives_name(self, negatives: Negatives) -> String:
         """The engine's spelling of a negatives policy, as `NAMED` spells "named". Calls `uform_negatives_name`."""
         return text_at(self.symbols().negatives_name(negatives.code))
 
-    def negatives_from_name(self, name: StringSlice) -> Negatives:
-        """Reads a spelling back; `AMBIENT` when unrecognized. Calls `uform_negatives_from_name`."""
-        return Negatives(self.symbols().negatives_from_name(BytesView.of(name).arguments()))
+    def negatives_from_name(self, name: StringSlice) raises Error -> Negatives:
+        """Reads a spelling back, raising `INVALID_ARGUMENT` when unrecognized. Calls `uform_negatives_from_name`."""
+        return Negatives(self._from_name(self.symbols().negatives_from_name, name, "uform_negatives_from_name"))
 
     def multimem_tier_name(self, tier: MultimemTier) -> String:
         """The engine's spelling of a multimem tier, as `PEER_READ` spells "peer-read". Calls `uform_multimem_tier_name`.
         """
         return text_at(self.symbols().multimem_tier_name(tier.code))
 
-    def multimem_tier_from_name(self, name: StringSlice) -> MultimemTier:
-        """Reads a spelling back; `SWITCH_REDUCED` when unrecognized. Calls `uform_multimem_tier_from_name`."""
-        return MultimemTier(self.symbols().multimem_tier_from_name(BytesView.of(name).arguments()))
+    def multimem_tier_from_name(self, name: StringSlice) raises Error -> MultimemTier:
+        """Reads a spelling back, raising `INVALID_ARGUMENT` when unrecognized. Calls `uform_multimem_tier_from_name`."""
+        return MultimemTier(self._from_name(self.symbols().multimem_tier_from_name, name, "uform_multimem_tier_from_name"))
 
     def _error(self, outcome: Outcome, symbol: StaticString) -> Error:
         """The failure a final outcome reports, its status spelled by the engine's own table."""
         var status = Status.of(outcome.status)
         return Error(status, symbol, outcome.message, self.symbols().status_name(c_int(status.code)), self)
+
+    def _from_name(self, verb: FromName, name: StringSlice, symbol: StaticString) raises Error -> c_int:
+        """Reads `name` through a `_from_name` verb, raising the status it fails with."""
+        var value = c_int(0)
+        var status = verb(BytesView.of(name).arguments(), Pointer(to=value).unsafe_origin_cast[MutAnyOrigin]())
+        if status != c_int(0):
+            raise Error(Status.of(status), symbol)
+        return value
 
     def _check(self, outcome: Outcome, symbol: StaticString) raises Error:
         """Raises the failure a final outcome reports, and returns on success."""

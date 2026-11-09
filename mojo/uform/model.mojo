@@ -382,7 +382,7 @@ struct Model(ModelVerbs, Movable):
         _ = self.library^
 
     def on(ref self, ref executor: Executor) -> ModelOn[ImmOrigin(origin_of(self, executor))]:
-        """The same verbs, blocking on `executor` after every call submitted there before them. Binding-only.
+        """The same verbs, blocking on `executor`, `CONTENDED` while another call holds it. Binding-only.
 
         Returns:
             A receiver borrowing both, which neither may outlive.
@@ -604,7 +604,7 @@ struct ModelOn[origin: ImmOrigin](ImplicitlyCopyable, ModelVerbs):
         self.executor = executor
 
     def _route[C: Call](self, var call: C) raises Error -> C.Result:
-        """Runs `call` on the bound executor, after every call submitted there before it."""
+        """Runs `call` on the bound executor, raising `CONTENDED` while another call holds it."""
         return _block(self.model[].library, call^, self.model[].address, self.executor)
 
 

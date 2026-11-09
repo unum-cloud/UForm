@@ -42,9 +42,9 @@ static bool uform_js_mood_from_value(napi_env env, napi_value value, uform_mood_
     *result = uform_mood_parked_k;
     if (uform_js_value_absent(env, value)) return true;
     if (!uform_js_name_from_value(env, value, "mood", name)) return false;
-    *result = uform_mood_from_name(uform_js_name_view(name));
-    if (strcmp(uform_mood_name(*result), name) == 0) return true;
-    return uform_js_throw_field(env, "mood", "must name a mood");
+    uform_status_t const status = uform_mood_from_name(uform_js_name_view(name), result);
+    if (status == uform_status_success_k) return true;
+    return uform_js_throw(env, status, "The 'mood' argument names no mood");
 }
 
 bool uform_js_cpu_class_from_value(napi_env env, napi_value value, uform_cpu_class_t *result) {
@@ -52,9 +52,9 @@ bool uform_js_cpu_class_from_value(napi_env env, napi_value value, uform_cpu_cla
     *result = uform_cpu_class_unknown_k;
     if (uform_js_value_absent(env, value)) return true;
     if (!uform_js_name_from_value(env, value, "cpuClass", name)) return false;
-    *result = uform_cpu_class_from_name(uform_js_name_view(name));
-    if (*result != uform_cpu_class_unknown_k && strcmp(uform_cpu_class_name(*result), name) == 0) return true;
-    return uform_js_throw(env, uform_status_unknown_kind_k, "The 'cpuClass' argument names no CPU class");
+    uform_status_t const status = uform_cpu_class_from_name(uform_js_name_view(name), result);
+    if (status == uform_status_success_k) return true;
+    return uform_js_throw(env, status, "The 'cpuClass' argument names no CPU class");
 }
 
 bool uform_js_gpu_class_from_value(napi_env env, napi_value value, uform_gpu_class_t *result) {
@@ -62,9 +62,9 @@ bool uform_js_gpu_class_from_value(napi_env env, napi_value value, uform_gpu_cla
     *result = uform_gpu_class_unknown_k;
     if (uform_js_value_absent(env, value)) return true;
     if (!uform_js_name_from_value(env, value, "gpuClass", name)) return false;
-    *result = uform_gpu_class_from_name(uform_js_name_view(name));
-    if (*result != uform_gpu_class_unknown_k && strcmp(uform_gpu_class_name(*result), name) == 0) return true;
-    return uform_js_throw(env, uform_status_unknown_kind_k, "The 'gpuClass' argument names no GPU class");
+    uform_status_t const status = uform_gpu_class_from_name(uform_js_name_view(name), result);
+    if (status == uform_status_success_k) return true;
+    return uform_js_throw(env, status, "The 'gpuClass' argument names no GPU class");
 }
 
 napi_value uform_js_class_name(napi_env env, char const *name) {
@@ -610,7 +610,7 @@ static bool uform_js_pointer_from_value(napi_env env, napi_value value, char con
     return true;
 }
 
-/** @c forRam({memoryDomains, cpuClass, threads, deferredLimit}) → host threads over NUMA nodes. */
+/** <tt>forRam({memoryDomains, cpuClass, threads})</tt> → host threads over NUMA nodes. */
 static napi_value uform_js_executor_for_ram(napi_env env, napi_callback_info info) {
     napi_value config = NULL;
     uform_outcome_t outcome = {uform_status_success_k, NULL};
@@ -620,8 +620,6 @@ static napi_value uform_js_executor_for_ram(napi_env env, napi_callback_info inf
     if (!uform_js_arguments(env, info, 1, &config, NULL) ||
         !uform_js_cpu_class_from_value(env, uform_js_property(env, config, "cpuClass"), &for_ram.ram.cpu_class) ||
         !uform_js_size_from_value(env, uform_js_property(env, config, "threads"), "threads", &for_ram.threads) ||
-        !uform_js_size_from_value(env, uform_js_property(env, config, "deferredLimit"), "deferredLimit",
-                                  &for_ram.deferred_limit) ||
         !uform_js_ordinals_from_value(env, uform_js_property(env, config, "memoryDomains"), "memoryDomains", &ordinals,
                                       &for_ram.ram.memory_domains_count))
         return NULL;
@@ -631,7 +629,7 @@ static napi_value uform_js_executor_for_ram(napi_env env, napi_callback_info inf
     return uform_js_executor_adopt(env, &outcome, handle);
 }
 
-/** @c onPool(pool, {memoryDomains, cpuClass, deferredLimit}) → an executor borrowing
+/** <tt>onPool(pool, {memoryDomains, cpuClass})</tt> → an executor borrowing
  *  a ForkUnion pool. */
 static napi_value uform_js_executor_on_pool(napi_env env, napi_callback_info info) {
     napi_value arguments[2];
@@ -642,8 +640,6 @@ static napi_value uform_js_executor_on_pool(napi_env env, napi_callback_info inf
     if (!uform_js_arguments(env, info, 2, arguments, NULL) ||
         !uform_js_pointer_from_value(env, arguments[0], "pool", &on_pool.pool) ||
         !uform_js_cpu_class_from_value(env, uform_js_property(env, arguments[1], "cpuClass"), &on_pool.ram.cpu_class) ||
-        !uform_js_size_from_value(env, uform_js_property(env, arguments[1], "deferredLimit"), "deferredLimit",
-                                  &on_pool.deferred_limit) ||
         !uform_js_ordinals_from_value(env, uform_js_property(env, arguments[1], "memoryDomains"), "memoryDomains",
                                       &ordinals, &on_pool.ram.memory_domains_count))
         return NULL;
@@ -653,7 +649,7 @@ static napi_value uform_js_executor_on_pool(napi_env env, napi_callback_info inf
     return uform_js_executor_adopt(env, &outcome, handle);
 }
 
-/** @c forVram({devices, gpuClass, memoryDomains, cpuClass, streams, scratchLimit, deferredLimit})
+/** <tt>forVram({devices, gpuClass, memoryDomains, cpuClass, streams, scratchLimit})</tt>
  *  → a stream per device and host decoders over NUMA nodes. */
 static napi_value uform_js_executor_for_vram(napi_env env, napi_callback_info info) {
     napi_value config = NULL;
@@ -666,8 +662,6 @@ static napi_value uform_js_executor_for_vram(napi_env env, napi_callback_info in
         !uform_js_cpu_class_from_value(env, uform_js_property(env, config, "cpuClass"), &for_vram.ram.cpu_class) ||
         !uform_js_size_from_value(env, uform_js_property(env, config, "scratchLimit"), "scratchLimit",
                                   &for_vram.scratch_limit) ||
-        !uform_js_size_from_value(env, uform_js_property(env, config, "deferredLimit"), "deferredLimit",
-                                  &for_vram.deferred_limit) ||
         !uform_js_ordinals_from_value(env, uform_js_property(env, config, "devices"), "devices", &ordinals,
                                       &for_vram.vram.devices_count))
         return NULL;
@@ -715,7 +709,8 @@ static napi_value uform_js_executor_for_vram(napi_env env, napi_callback_info in
     return uform_js_executor_adopt(env, &outcome, handle);
 }
 
-/** @c drain(mood) - waits for every call submitted so far, then idles in @p mood; absent parks. */
+/** @c drain(mood) - waits until no call holds the executor and its devices are idle, then applies
+ *  @p mood; absent parks. */
 static napi_value uform_js_executor_drain(napi_env env, napi_callback_info info) {
     napi_value argument = NULL;
     uform_js_executor_t *const executor = (uform_js_executor_t *)uform_js_self(env, info, 1, &argument, NULL);

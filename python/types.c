@@ -45,8 +45,7 @@ static struct {
      "The library reported neither success nor a failure - a defect."},
     {uform_status_config_mismatch_k, "uform.ConfigMismatchError", &PyExc_ValueError,
      "The request contradicts a frozen configuration, like resuming a checkpoint of another geometry."},
-    {uform_status_contended_k, "uform.ContendedError", NULL,
-     "An executor's deferred table or an arena is already serving another call."},
+    {uform_status_contended_k, "uform.ContendedError", NULL, "Another call already holds the executor or the arena."},
     {uform_status_cancelled_k, "uform.CancelledError", NULL,
      "A progress handler stopped the call, which published nothing."},
     {uform_status_unsupported_k, "uform.UnsupportedError", &PyExc_NotImplementedError,
@@ -649,12 +648,11 @@ static int callback_raised(uform_py_call_t *call) {
 }
 
 /**
- *  @brief Re-enters Python for one progress report, from whichever thread advances the call.
+ *  @brief Re-enters Python for one progress report, from the thread running the call.
  *
- *  Reports are serialized, but nothing guarantees they land on the calling thread - a deferred call
- *  runs on whichever thread waits on it - so the GIL is taken here rather than assumed. A handler
- *  answering @c None carries on, and one that raises also stops the call, so it unwinds at the next
- *  slice instead of running on.
+ *  Reports are serialized, but a deferred call runs on the executor's thread 0, not on its caller,
+ *  so the GIL is taken here rather than assumed. A handler answering @c None carries on, and one
+ *  that raises also stops the call, so it unwinds at the next slice instead of running on.
  */
 static uform_continuation_t progress_trampoline(size_t completed, size_t total, void *state) {
     uform_py_callback_t const *const callback = (uform_py_callback_t const *)state;
@@ -706,8 +704,8 @@ static char const doc_On[] =                                                    
     "answers it.\n"                                                                           //
     "\n"                                                                                      //
     "Offers the verbs of its target with the same arguments and answers; each call runs on\n" //
-    "the executor after every call submitted to it before. It holds the target and the\n"     //
-    "executor, so it may outlive the names they were bound to.\n"                             //
+    "the executor, and one that finds another call holding it raises `ContendedError`.\n"     //
+    "It holds the target and the executor, so it may outlive the names they were bound to.\n" //
     "\n"                                                                                      //
     "Example:\n"                                                                              //
     "  >>> executor = uform.Executor.for_ram()\n"                                             //
@@ -723,7 +721,7 @@ static char const doc_DeferredOn[] =                                            
     "\n"                                                                                            //
     "Offers the verbs of its target with the same arguments, each answering a `Deferred` at\n"      //
     "once. Arguments the binding refuses raise at the call, while the library's refusals,\n"        //
-    "`ContendedError` from a full deferred table included, raise at `await` or `wait()`.";
+    "`ContendedError` from an executor another call holds included, raise at `await` or `wait()`.";
 
 int uform_py_receiver_from_object(PyObject *self, PyTypeObject *type, uform_py_receiver_t *receiver) {
     int const deferred = Py_IS_TYPE(self, &DeferredOnType);
@@ -898,7 +896,7 @@ static char const doc_Deferred_wait[] =                                         
     "\n"                                                                                     //
     "Raises:\n"                                                                              //
     "  Error: What the blocking verb would have raised, `ContendedError` included when\n"    //
-    "    the executor's deferred table was full.";
+    "    another call held the executor.";
 
 static PyObject *Deferred_wait(Deferred *self, PyObject *unused) {
     deferred_block(self);
@@ -1008,25 +1006,25 @@ PyTypeObject DeferredType = {
 
 #pragma region Executors
 
-static char const doc_Executor[] =                                                             //
-    "Executor\n"                                                                               //
-    "\n"                                                                                       //
-    "The threads or streams a verb runs on, the activation scratch and the staging, shared\n"  //
-    "across models.\n"                                                                         //
-    "\n"                                                                                       //
-    "An executor owns host threads or device streams; a model owns weights. Keeping them\n"    //
-    "apart is what lets one executor serve several models, and what makes the cost of\n"       //
-    "spawning visible at the line that spawns rather than hidden in a constructor.\n"          //
-    "\n"                                                                                       //
-    "Construct one through the residency it drives - `for_ram`, `on_pool` or `for_vram` -\n"   //
-    "since each spawns something different and takes different arguments. A receiver names\n"  //
-    "it: `model.on(executor)` blocks on it, `model.deferred(executor)` submits to it. Calls\n" //
-    "run in submission order, and a deferred one finding its `deferred_limit` table full\n"    //
-    "raises `ContendedError` once waited for. Used in a `with` block, it waits for its\n"      //
-    "calls and closes on exit, or leaves both to the last GPU arena it made that is alive.\n"  //
-    "\n"                                                                                       //
-    "Example:\n"                                                                               //
-    "  >>> with uform.Executor.for_ram() as executor:\n"                                       //
+static char const doc_Executor[] =                                                            //
+    "Executor\n"                                                                              //
+    "\n"                                                                                      //
+    "The threads or streams a verb runs on, the activation scratch and the staging, shared\n" //
+    "across models.\n"                                                                        //
+    "\n"                                                                                      //
+    "An executor owns host threads or device streams; a model owns weights. Keeping them\n"   //
+    "apart is what lets one executor serve several models, and what makes the cost of\n"      //
+    "spawning visible at the line that spawns rather than hidden in a constructor.\n"         //
+    "\n"                                                                                      //
+    "Construct one through the residency it drives - `for_ram`, `on_pool` or `for_vram` -\n"  //
+    "since each spawns something different and takes different arguments. A receiver names\n" //
+    "it: `model.on(executor)` blocks on it, `model.deferred(executor)` submits to it. It\n"   //
+    "runs one call at a time, and a call finding another one holding it raises a\n"           //
+    "`ContendedError` once waited for. In a `with` block, it waits for its calls and\n"       //
+    "closes on exit, or leaves both to the last GPU arena it made that is alive.\n"           //
+    "\n"                                                                                      //
+    "Example:\n"                                                                              //
+    "  >>> with uform.Executor.for_ram() as executor:\n"                                      //
     "  ...     executor.drain(uform.Mood.PARKED)";
 
 /** Wraps a fresh handle, or frees it when the wrapper cannot be allocated; a new
@@ -1136,42 +1134,39 @@ int uform_py_executor_optional(PyObject *object, uform_executor_t *executor) {
     return !object || object == Py_None ? 0 : uform_py_executor_from_object(object, executor);
 }
 
-static char const doc_Executor_for_ram[] =                                                       //
-    "for_ram(threads=0, *, memory_domains=None, deferred_limit=0, cpu_class=None) -> Executor\n" //
-    "\n"                                                                                         //
-    "Spawns host threads for RAM-resident models, interleaved across the compute domains\n"      //
-    "local to the named memory domains.\n"                                                       //
-    "Calls `uform_executor_for_ram`.\n"                                                          //
-    "\n"                                                                                         //
-    "Args:\n"                                                                                    //
-    "  threads (int, optional): Threads to spawn; 0 takes 7/8 of the cores the domains\n"        //
-    "    carry.\n"                                                                               //
-    "  memory_domains (Sequence[int], optional): NUMA node IDs of the models it will\n"          //
-    "    drive; None derives every node the process may allocate on.\n"                          //
-    "  deferred_limit (int, optional): Deferred calls tracked at once; 0 takes a default.\n"     //
-    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.\n"  //
-    "\n"                                                                                         //
-    "Example:\n"                                                                                 //
-    "  >>> with uform.Executor.for_ram(threads=8) as executor:\n"                                //
+static char const doc_Executor_for_ram[] =                                                      //
+    "for_ram(threads=0, *, memory_domains=None, cpu_class=None) -> Executor\n"                  //
+    "\n"                                                                                        //
+    "Creates an executor of host threads for RAM-resident models, interleaved across the\n"     //
+    "compute domains local to the named memory domains.\n"                                      //
+    "Calls `uform_executor_for_ram`.\n"                                                         //
+    "\n"                                                                                        //
+    "Args:\n"                                                                                   //
+    "  threads (int, optional): Threads to spawn; 0 takes 7/8 of the cores the domains\n"       //
+    "    carry.\n"                                                                              //
+    "  memory_domains (Sequence[int], optional): NUMA node IDs of the models it will\n"         //
+    "    drive; None derives every node the process may allocate on.\n"                         //
+    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.\n" //
+    "\n"                                                                                        //
+    "Example:\n"                                                                                //
+    "  >>> with uform.Executor.for_ram(threads=8) as executor:\n"                               //
     "  ...     executor.drain()";
 
 static PyObject *Executor_for_ram(PyTypeObject *type, PyObject *const *args, Py_ssize_t positional_args_count,
                                   PyObject *args_names_tuple) {
-    PyObject *threads_object, *memory_domains_object, *deferred_limit_object, *cpu_class_object;
+    PyObject *threads_object, *memory_domains_object, *cpu_class_object;
     uform_py_argument_t const arguments[] = {
         {"threads", &threads_object},
         {"memory_domains", &memory_domains_object},
-        {"deferred_limit", &deferred_limit_object},
         {"cpu_class", &cpu_class_object},
     };
-    size_t threads = 0, deferred_limit = 0;
+    size_t threads = 0;
     int cpu_class = 0;
     int32_t *memory_domains = NULL;
     size_t memory_domains_count = 0;
     if (uform_py_arguments_parse("for_ram", args, positional_args_count, args_names_tuple, 0, 1, arguments,
                                  sizeof(arguments) / sizeof(*arguments)) != 0 ||
         uform_py_size_from_object(threads_object, "threads", &threads) != 0 ||
-        uform_py_size_from_object(deferred_limit_object, "deferred_limit", &deferred_limit) != 0 ||
         uform_py_class_from_object(cpu_class_object, "cpu_class", &uform_py_cpu_class, &cpu_class) != 0 ||
         uform_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
                                       &memory_domains_count) != 0)
@@ -1183,8 +1178,7 @@ static PyObject *Executor_for_ram(PyTypeObject *type, PyObject *const *args, Py_
         .executor = &handle,
         .outcome = &outcome,
         .ram = {memory_domains, memory_domains_count, (uform_cpu_class_t)cpu_class},
-        .threads = threads,
-        .deferred_limit = deferred_limit};
+        .threads = threads};
     Py_BEGIN_ALLOW_THREADS;
     uform_executor_for_ram(&executor_arguments);
     Py_END_ALLOW_THREADS;
@@ -1195,7 +1189,7 @@ static PyObject *Executor_for_ram(PyTypeObject *type, PyObject *const *args, Py_
 }
 
 static char const doc_Executor_on_pool[] =                                                     //
-    "on_pool(pool, /, *, memory_domains=None, deferred_limit=0, cpu_class=None) -> Executor\n" //
+    "on_pool(pool, /, *, memory_domains=None, cpu_class=None) -> Executor\n"                   //
     "\n"                                                                                       //
     "Drives RAM-resident models on a ForkUnion pool another library already spawned, so\n"     //
     "UForm, USearch and UStore in one process share one set of threads while each keeps its\n" //
@@ -1208,23 +1202,19 @@ static char const doc_Executor_on_pool[] =                                      
     "    pointers over; the pool must outlive the executor.\n"                                 //
     "  memory_domains (Sequence[int], optional): NUMA node IDs of the models it will\n"        //
     "    drive; None derives every node the process may allocate on.\n"                        //
-    "  deferred_limit (int, optional): Deferred calls tracked at once; 0 takes a default.\n"   //
     "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.";
 
 static PyObject *Executor_on_pool(PyTypeObject *type, PyObject *const *args, Py_ssize_t positional_args_count,
                                   PyObject *args_names_tuple) {
-    PyObject *pool_object, *memory_domains_object, *deferred_limit_object, *cpu_class_object;
+    PyObject *pool_object, *memory_domains_object, *cpu_class_object;
     uform_py_argument_t const arguments[] = {
         {"pool", &pool_object},
         {"memory_domains", &memory_domains_object},
-        {"deferred_limit", &deferred_limit_object},
         {"cpu_class", &cpu_class_object},
     };
-    size_t deferred_limit = 0;
     int cpu_class = 0;
     if (uform_py_arguments_parse("on_pool", args, positional_args_count, args_names_tuple, 1, 1, arguments,
                                  sizeof(arguments) / sizeof(*arguments)) != 0 ||
-        uform_py_size_from_object(deferred_limit_object, "deferred_limit", &deferred_limit) != 0 ||
         uform_py_class_from_object(cpu_class_object, "cpu_class", &uform_py_cpu_class, &cpu_class) != 0)
         return NULL;
 
@@ -1246,8 +1236,7 @@ static PyObject *Executor_on_pool(PyTypeObject *type, PyObject *const *args, Py_
         .executor = &handle,
         .outcome = &outcome,
         .ram = {memory_domains, memory_domains_count, (uform_cpu_class_t)cpu_class},
-        .pool = pool,
-        .deferred_limit = deferred_limit};
+        .pool = pool};
     Py_BEGIN_ALLOW_THREADS;
     uform_executor_on_pool(&executor_arguments);
     Py_END_ALLOW_THREADS;
@@ -1258,11 +1247,12 @@ static PyObject *Executor_on_pool(PyTypeObject *type, PyObject *const *args, Py_
 }
 
 static char const doc_Executor_for_vram[] =                                                     //
-    "for_vram(devices=None, *, scratch_limit=0, deferred_limit=0, gpu_class=None, "             //
+    "for_vram(devices=None, *, scratch_limit=0, gpu_class=None, "                               //
     "memory_domains=None, cpu_class=None) -> Executor\n"                                        //
     "\n"                                                                                        //
-    "Opens one submission stream on every named device, all of them driven by whichever\n"      //
-    "thread submits, and spawns the host threads that decode what the devices cannot.\n"        //
+    "Opens one submission stream on every named device, all of them driven by the host\n"       //
+    "thread running the call, and spawns the host threads that decode what the devices\n"       //
+    "cannot.\n"                                                                                 //
     "Calls `uform_executor_for_vram`.\n"                                                        //
     "\n"                                                                                        //
     "Args:\n"                                                                                   //
@@ -1270,7 +1260,6 @@ static char const doc_Executor_for_vram[] =                                     
     "    derives one free device.\n"                                                            //
     "  scratch_limit (int, optional): The ceiling on scratch bytes per device; 0 lets\n"        //
     "    scratch grow as batches ask, and a batch larger than the ceiling runs in passes.\n"    //
-    "  deferred_limit (int, optional): Deferred calls tracked at once; 0 takes a default.\n"    //
     "  gpu_class (GPUClass, optional): The class every device dispatches as; None derives\n"    //
     "    the devices' own, which must agree.\n"                                                 //
     "  memory_domains (Sequence[int], optional): NUMA node IDs whose cores the host\n"          //
@@ -1283,24 +1272,19 @@ static char const doc_Executor_for_vram[] =                                     
 
 static PyObject *Executor_for_vram(PyTypeObject *type, PyObject *const *args, Py_ssize_t positional_args_count,
                                    PyObject *args_names_tuple) {
-    PyObject *devices_object, *scratch_limit_object, *deferred_limit_object, *gpu_class_object,
-        *memory_domains_object, *cpu_class_object;
+    PyObject *devices_object, *scratch_limit_object, *gpu_class_object, *memory_domains_object, *cpu_class_object;
     uform_py_argument_t const arguments[] = {
-        {"devices", &devices_object},
-        {"scratch_limit", &scratch_limit_object},
-        {"deferred_limit", &deferred_limit_object},
-        {"gpu_class", &gpu_class_object},
-        {"memory_domains", &memory_domains_object},
+        {"devices", &devices_object},     {"scratch_limit", &scratch_limit_object},
+        {"gpu_class", &gpu_class_object}, {"memory_domains", &memory_domains_object},
         {"cpu_class", &cpu_class_object},
     };
-    size_t scratch_limit = 0, deferred_limit = 0;
+    size_t scratch_limit = 0;
     int gpu_class = 0, cpu_class = 0;
     int32_t *devices = NULL, *memory_domains = NULL;
     size_t devices_count = 0, memory_domains_count = 0;
     if (uform_py_arguments_parse("for_vram", args, positional_args_count, args_names_tuple, 0, 1, arguments,
                                  sizeof(arguments) / sizeof(*arguments)) != 0 ||
         uform_py_size_from_object(scratch_limit_object, "scratch_limit", &scratch_limit) != 0 ||
-        uform_py_size_from_object(deferred_limit_object, "deferred_limit", &deferred_limit) != 0 ||
         uform_py_class_from_object(gpu_class_object, "gpu_class", &uform_py_gpu_class, &gpu_class) != 0 ||
         uform_py_class_from_object(cpu_class_object, "cpu_class", &uform_py_cpu_class, &cpu_class) != 0)
         return NULL;
@@ -1318,8 +1302,7 @@ static PyObject *Executor_for_vram(PyTypeObject *type, PyObject *const *args, Py
         .outcome = &outcome,
         .vram = {devices, devices_count, (uform_gpu_class_t)gpu_class},
         .ram = {memory_domains, memory_domains_count, (uform_cpu_class_t)cpu_class},
-        .scratch_limit = scratch_limit,
-        .deferred_limit = deferred_limit};
+        .scratch_limit = scratch_limit};
     Py_BEGIN_ALLOW_THREADS;
     uform_executor_for_vram(&executor_arguments);
     Py_END_ALLOW_THREADS;
@@ -1330,21 +1313,20 @@ static PyObject *Executor_for_vram(PyTypeObject *type, PyObject *const *args, Py
     return executor_adopt(type, handle);
 }
 
-static char const doc_Executor_drain[] =                                                    //
-    "drain(mood=Mood.PARKED) -> None\n"                                                     //
-    "\n"                                                                                    //
-    "Waits for every call submitted to this executor before the drain began, then sets\n"   //
-    "what it does with its threads or streams whenever it next goes idle; the last drain\n" //
-    "wins.\n"                                                                               //
-    "Calls `uform_executor_drain`.\n"                                                       //
-    "\n"                                                                                    //
-    "Args:\n"                                                                               //
-    "  mood (Mood, optional): `Mood.PARKED` frees the core, so the next call pays a\n"      //
-    "    wake-up; `Mood.SPINNING` keeps polling, trading a core for the next call's\n"      //
-    "    latency.\n"                                                                        //
-    "\n"                                                                                    //
-    "Raises:\n"                                                                             //
-    "  Error: What befell the executor itself, such as a lost device; every call\n"         //
+static char const doc_Executor_drain[] =                                                  //
+    "drain(mood=Mood.PARKED) -> None\n"                                                   //
+    "\n"                                                                                  //
+    "Waits until no call holds this executor, then sets what its threads or streams do\n" //
+    "until its next call.\n"                                                              //
+    "Calls `uform_executor_drain`.\n"                                                     //
+    "\n"                                                                                  //
+    "Args:\n"                                                                             //
+    "  mood (Mood, optional): `Mood.PARKED` frees the core, so the next call pays a\n"    //
+    "    wake-up; `Mood.SPINNING` keeps polling, trading a core for the next call's\n"    //
+    "    latency.\n"                                                                      //
+    "\n"                                                                                  //
+    "Raises:\n"                                                                           //
+    "  Error: What befell the executor itself, such as a lost device; every call\n"       //
     "    reports its own failure through its own verb.";
 
 static PyObject *Executor_drain(Executor *executor, PyObject *const *args, Py_ssize_t positional_args_count,

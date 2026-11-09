@@ -97,8 +97,9 @@ typedef enum uform_modality_t {
 /** The canonical spelling of a modality, as @c uform_modality_text_k spells "text". */
 UFORM_EXPORT char const* uform_modality_name(uform_modality_t modality);
 
-/** Reads a modality back; @c uform_modality_text_k when unrecognized. */
-UFORM_EXPORT uform_modality_t uform_modality_from_name(uform_bytes_view_t name);
+/** Reads a modality back from its spelling into @p modality, or fails with
+ *  @c uform_status_invalid_argument_k. */
+UFORM_EXPORT uform_status_t uform_modality_from_name(uform_bytes_view_t name, uform_modality_t *modality);
 
 /** The image slice of a batch envelope; a zero @c patch_side leaves images out of the run. */
 typedef struct uform_image_shape_t {
@@ -182,8 +183,9 @@ typedef enum uform_objective_t {
 /** The canonical spelling of an objective, as @c uform_objective_joint_k spells "joint". */
 UFORM_EXPORT char const* uform_objective_name(uform_objective_t objective);
 
-/** Reads an objective back; @c uform_objective_masked_k when unrecognized. */
-UFORM_EXPORT uform_objective_t uform_objective_from_name(uform_bytes_view_t name);
+/** Reads an objective back from its spelling into @p objective, or fails with
+ *  @c uform_status_invalid_argument_k. */
+UFORM_EXPORT uform_status_t uform_objective_from_name(uform_bytes_view_t name, uform_objective_t *objective);
 
 /** How the masked objective corrupts a batch and weighs its heads; every zero derives
  *  the default named. */
@@ -236,8 +238,9 @@ typedef enum uform_negatives_t {
 /** The canonical spelling of a negatives policy, as @c uform_negatives_named_k spells "named". */
 UFORM_EXPORT char const* uform_negatives_name(uform_negatives_t negatives);
 
-/** Reads a negatives policy back; @c uform_negatives_ambient_k when unrecognized. */
-UFORM_EXPORT uform_negatives_t uform_negatives_from_name(uform_bytes_view_t name);
+/** Reads a negatives policy back from its spelling into @p negatives, or fails with
+ *  @c uform_status_invalid_argument_k. */
+UFORM_EXPORT uform_status_t uform_negatives_from_name(uform_bytes_view_t name, uform_negatives_t *negatives);
 
 /** How a contrastive term turns a row of scores into forces, mirroring the trainer's pair-loss
  *  forms; zero keeps the term's own form: sigmoid for pooled vertices, ranked for token vectors. */
@@ -491,8 +494,9 @@ UFORM_EXPORT void uform_mesh_free(uform_mesh_t mesh);
  *  @c uform_multimem_tier_peer_read_k spells "peer-read". */
 UFORM_EXPORT char const* uform_multimem_tier_name(uform_multimem_tier_t tier);
 
-/** Reads a multimem tier back; @c uform_multimem_tier_switch_reduced_k when unrecognized. */
-UFORM_EXPORT uform_multimem_tier_t uform_multimem_tier_from_name(uform_bytes_view_t name);
+/** Reads a multimem tier back from its spelling into @p tier, or fails with
+ *  @c uform_status_invalid_argument_k. */
+UFORM_EXPORT uform_status_t uform_multimem_tier_from_name(uform_bytes_view_t name, uform_multimem_tier_t *tier);
 
 /** A training run: the tower replicas, gradients, optimizer moments, heads, temperatures and the
  *  collectives sized by them, on the executor's devices. */

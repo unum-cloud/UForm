@@ -1110,10 +1110,12 @@ mod tests {
     use core::ops::ControlFlow;
     use core::pin::pin;
     use core::task::{Context, Poll, Waker};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     use super::*;
     use crate::model::Model;
-    use crate::types::{Error, Executor, Mood};
+    use crate::types::{Executor, Mood};
 
     fn model() -> Result<Model> { Model::load_ram_buffer(&crate::model::tests::checkpoint()) }
 
@@ -1181,8 +1183,8 @@ mod tests {
         .concat()
     }
 
-    /// One executor per test, since an executor orders the calls submitted to it.
-    fn executor() -> Result<Executor> { Executor::for_ram(&[], None, 1, 0) }
+    /// One executor per test, since an executor runs one call at a time.
+    fn executor() -> Result<Executor> { Executor::for_ram(&[], None, 1) }
 
     /// The rows an embeddings surface holds, copied out of the arena.
     fn embeddings_of(encoded: &Encoded<'_>) -> Result<Vec<f32>> {
@@ -1444,10 +1446,10 @@ mod tests {
         Ok(())
     }
 
-    /// An executor of the stand-in holds deferred calls until a drain, so a call is observably not
-    /// final until then, and awaiting it stays pending.
+    /// An awaited call stays pending until a poll sees it final, then answers what a blocking one
+    /// does, and a poll past that refuses rather than answering twice.
     #[test]
-    fn an_awaited_call_is_pending_until_final() -> Result<()> {
+    fn an_awaited_call_answers_once_final() -> Result<()> {
         let model = model()?;
         let executor = executor()?;
         let mut arena = Arena::new_in(&executor)?;
@@ -1455,13 +1457,12 @@ mod tests {
             model
                 .deferred(&executor)
                 .text_encode(vec!["uform"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
-        assert_eq!(call.status(), Err(Status::Deferred));
         let mut awaited = pin!(call.into_future());
         let mut context = Context::from_waker(Waker::noop());
-        assert!(awaited.as_mut().poll(&mut context).is_pending());
-        executor.drain(Mood::Parked)?;
-        let Poll::Ready(encoded) = awaited.as_mut().poll(&mut context) else {
-            panic!("a drained call must be final");
+        let encoded = loop {
+            if let Poll::Ready(encoded) = awaited.as_mut().poll(&mut context) {
+                break encoded;
+            }
         };
         let blocking =
             embeddings_of(&model.text_encode(&["uform"], Outputs::EMBEDDINGS, Scalar::F32, &mut Arena::new()?)?)?;
@@ -1470,8 +1471,49 @@ mod tests {
         Ok(())
     }
 
-    /// Dropping an unfinished call waits for it, and a leaked one leaves its arena busy rather than
-    /// unsafe: a call naming it is refused as contended.
+    /// While a deferred call holds its executor at a gate in its handler, a blocking call there
+    /// fails `Contended` without running. Where the call ran at submission, it is final on return.
+    #[test]
+    fn a_held_executor_refuses_other_calls() -> Result<()> {
+        let model = model()?;
+        let executor = executor()?;
+        let mut arena = Arena::new_in(&executor)?;
+        let (reached, opened) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let submitter = std::thread::current().id();
+        let gate = Box::leak(Box::new({
+            let (reached, opened) = (reached.clone(), opened.clone());
+            move |_: usize, _: usize| {
+                // A call run at submission is on the submitter, which could never open it.
+                if std::thread::current().id() != submitter {
+                    reached.store(true, Ordering::Release);
+                    while !opened.load(Ordering::Acquire) {}
+                }
+                ControlFlow::Continue(())
+            }
+        }));
+        let config = TextEncodeConfig {
+            progress: Some(gate),
+            ..TextEncodeConfig::from(Scalar::F32)
+        };
+        let call = model
+            .deferred(&executor)
+            .text_encode(vec!["uform"], Outputs::EMBEDDINGS, config, &mut arena)?;
+        if call.status() == Err(Status::Deferred) {
+            while !reached.load(Ordering::Acquire) {}
+            let refused = model.on(&executor).describe();
+            assert_eq!(refused.err().map(|error| error.status), Some(Status::Contended));
+            opened.store(true, Ordering::Release);
+        }
+        assert!(call.wait().is_ok());
+        assert!(
+            model.on(&executor).describe().is_ok(),
+            "a final call gives its executor back"
+        );
+        Ok(())
+    }
+
+    /// Dropping an unfinished call waits for it, and a leaked one still ends on the executor's own
+    /// thread, giving its arena back once a drain sees the executor free.
     #[test]
     fn unfinished_calls_drop_by_waiting_and_leaked_ones_keep_their_arena() -> Result<()> {
         let model = model()?;
@@ -1489,28 +1531,10 @@ mod tests {
             .deferred(&executor)
             .text_encode(vec!["c"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
         core::mem::forget(leaked);
-        let busy = model.text_encode(&["d"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena);
-        assert!(matches!(
-            busy,
-            Err(Error {
-                status: Status::Contended,
-                ..
-            })
-        ));
         executor.drain(Mood::Parked)?;
-        Ok(())
-    }
-
-    #[test]
-    fn a_full_deferred_table_answers_contended() -> Result<()> {
-        let model = model()?;
-        let executor = Executor::for_ram(&[], None, 1, 1)?;
-        let (mut first_arena, mut second_arena) = (Arena::new_in(&executor)?, Arena::new_in(&executor)?);
-        let receiver = model.deferred(&executor);
-        let first = receiver.text_encode(vec!["a"], Outputs::EMBEDDINGS, Scalar::F32, &mut first_arena)?;
-        let second = receiver.text_encode(vec!["b"], Outputs::EMBEDDINGS, Scalar::F32, &mut second_arena)?;
-        assert_eq!(second.status(), Err(Status::Contended));
-        assert!(first.wait().is_ok());
+        assert!(model
+            .text_encode(&["d"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena)
+            .is_ok());
         Ok(())
     }
 }

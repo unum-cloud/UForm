@@ -202,7 +202,6 @@ pub struct uform_executor_for_ram_t {
     pub outcome: *mut uform_outcome_t,
     pub ram: uform_ram_options_t,
     pub threads: usize,
-    pub deferred_limit: usize,
 }
 
 #[repr(C)]
@@ -211,7 +210,6 @@ pub struct uform_executor_on_pool_t {
     pub outcome: *mut uform_outcome_t,
     pub ram: uform_ram_options_t,
     pub pool: *mut c_void,
-    pub deferred_limit: usize,
 }
 
 #[repr(C)]
@@ -222,7 +220,6 @@ pub struct uform_executor_for_vram_t {
     pub ram: uform_ram_options_t,
     pub streams: *const *mut c_void,
     pub scratch_limit: usize,
-    pub deferred_limit: usize,
 }
 
 pub type uform_mood_t = c_int;
@@ -272,15 +269,15 @@ extern "C" {
     pub fn uform_arena_describe(arguments: *mut uform_arena_describe_t);
 
     pub fn uform_status_name(status: uform_status_t) -> *const c_char;
-    pub fn uform_status_from_name(name: uform_bytes_view_t) -> uform_status_t;
+    pub fn uform_status_from_name(name: uform_bytes_view_t, status: *mut uform_status_t) -> uform_status_t;
     pub fn uform_scalar_name(scalar: uform_scalar_t) -> *const c_char;
-    pub fn uform_scalar_from_name(name: uform_bytes_view_t) -> uform_scalar_t;
+    pub fn uform_scalar_from_name(name: uform_bytes_view_t, scalar: *mut uform_scalar_t) -> uform_status_t;
     pub fn uform_mood_name(mood: uform_mood_t) -> *const c_char;
-    pub fn uform_mood_from_name(name: uform_bytes_view_t) -> uform_mood_t;
+    pub fn uform_mood_from_name(name: uform_bytes_view_t, mood: *mut uform_mood_t) -> uform_status_t;
     pub fn uform_cpu_class_name(cpu_class: uform_cpu_class_t) -> *const c_char;
-    pub fn uform_cpu_class_from_name(name: uform_bytes_view_t) -> uform_cpu_class_t;
+    pub fn uform_cpu_class_from_name(name: uform_bytes_view_t, cpu_class: *mut uform_cpu_class_t) -> uform_status_t;
     pub fn uform_gpu_class_name(gpu_class: uform_gpu_class_t) -> *const c_char;
-    pub fn uform_gpu_class_from_name(name: uform_bytes_view_t) -> uform_gpu_class_t;
+    pub fn uform_gpu_class_from_name(name: uform_bytes_view_t, gpu_class: *mut uform_gpu_class_t) -> uform_status_t;
 
     pub fn uform_gpu_devices(arguments: *mut uform_gpu_devices_t);
 
@@ -510,7 +507,7 @@ pub enum Status {
     /// The request contradicts a frozen configuration, like resuming a checkpoint
     /// of another geometry.
     ConfigMismatch = 13,
-    /// The call was refused rather than waited for, like a submission to a full deferred table.
+    /// The call was refused rather than waited for: another call holds its executor or its arena.
     Contended = 14,
     /// A progress handler stopped the call; it unwound and published nothing.
     Cancelled = 15,
@@ -556,9 +553,7 @@ impl FromStr for Status {
 
     /// Calls `uform_status_from_name`, refusing "success", which names no failure.
     fn from_str(text: &str) -> Result<Self> {
-        read_spelling(text, uform_status_from_name, uform_status_name, |value| {
-            Status::from_raw(value).err()
-        })
+        read_spelling(text, uform_status_from_name, |value| Status::from_raw(value).err())
     }
 }
 
@@ -616,20 +611,16 @@ pub(crate) fn spelling(name: unsafe extern "C" fn(c_int) -> *const c_char, value
     unsafe { static_string(name(value)) }
 }
 
-/// Reads a spelling back through its C `uform_*_from_name`, refusing one the C table spells
-/// otherwise, since every such inverse answers a default for a name it does not know.
+/// Reads a spelling back through its C `uform_*_from_name`, passing on the status it fails with.
 pub(crate) fn read_spelling<Value>(
     text: &str,
-    from_name: unsafe extern "C" fn(uform_bytes_view_t) -> c_int,
-    name: unsafe extern "C" fn(c_int) -> *const c_char,
+    from_name: unsafe extern "C" fn(uform_bytes_view_t, *mut c_int) -> uform_status_t,
     lift: fn(c_int) -> Option<Value>,
 ) -> Result<Value> {
-    let value = unsafe { from_name(text.as_bytes().into()) };
-    match spelling(name, value) == text {
-        true => lift(value),
-        false => None,
-    }
-    .ok_or(fail(Status::InvalidArgument, "no enumerator is spelled that way"))
+    let mut value: c_int = 0;
+    let status = unsafe { from_name(text.as_bytes().into(), &mut value) };
+    Status::from_raw(status).map_err(|status| fail(status, "no enumerator is spelled that way"))?;
+    lift(value).ok_or(fail(Status::InvalidArgument, "no enumerator is spelled that way"))
 }
 
 /// The version of the linked library.
@@ -729,9 +720,7 @@ impl FromStr for Scalar {
     type Err = Error;
 
     /// Calls `uform_scalar_from_name`.
-    fn from_str(text: &str) -> Result<Self> {
-        read_spelling(text, uform_scalar_from_name, uform_scalar_name, Scalar::from_raw)
-    }
+    fn from_str(text: &str) -> Result<Self> { read_spelling(text, uform_scalar_from_name, Scalar::from_raw) }
 }
 
 // endregion: Scalars
@@ -826,14 +815,7 @@ impl FromStr for CPUClass {
     type Err = Error;
 
     /// Calls `uform_cpu_class_from_name`.
-    fn from_str(text: &str) -> Result<Self> {
-        read_spelling(
-            text,
-            uform_cpu_class_from_name,
-            uform_cpu_class_name,
-            CPUClass::from_raw,
-        )
-    }
+    fn from_str(text: &str) -> Result<Self> { read_spelling(text, uform_cpu_class_from_name, CPUClass::from_raw) }
 }
 
 /// The GPU families UForm ships tuned variants for, the device twin of [`CPUClass`]: dispatch
@@ -902,14 +884,7 @@ impl FromStr for GPUClass {
     type Err = Error;
 
     /// Calls `uform_gpu_class_from_name`.
-    fn from_str(text: &str) -> Result<Self> {
-        read_spelling(
-            text,
-            uform_gpu_class_from_name,
-            uform_gpu_class_name,
-            GPUClass::from_raw,
-        )
-    }
+    fn from_str(text: &str) -> Result<Self> { read_spelling(text, uform_gpu_class_from_name, GPUClass::from_raw) }
 }
 
 /// The GPU vendors one binary drives at once.
@@ -1319,10 +1294,10 @@ pub(crate) fn lower_progress(
 #[repr(i32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
 pub enum Mood {
-    /// Sleep on futexes or events, freeing the core; the next call pays a wake-up.
+    /// Sleep in the kernel until the next call, freeing the cores.
     #[default]
     Parked = 0,
-    /// Poll them, trading a core for the lowest wake-up latency.
+    /// Keep polling, trading the cores for the lowest wake-up latency.
     Spinning = 1,
 }
 
@@ -1347,9 +1322,7 @@ impl FromStr for Mood {
     type Err = Error;
 
     /// Calls `uform_mood_from_name`.
-    fn from_str(text: &str) -> Result<Self> {
-        read_spelling(text, uform_mood_from_name, uform_mood_name, Mood::from_raw)
-    }
+    fn from_str(text: &str) -> Result<Self> { read_spelling(text, uform_mood_from_name, Mood::from_raw) }
 }
 
 /// Where an executor computes, and with it where the arenas it makes keep their memory.
@@ -1384,10 +1357,8 @@ impl Residency {
 /// [`Executor::default`] is the C interface's null executor: it owns nothing, and every call
 /// handed it runs on the calling thread.
 ///
-/// Calls on one executor run in submission order, so threads wanting to overlap take one apiece;
-/// it is `Send` but not `Sync`.
-/// Every constructor takes a `deferred_limit` sizing its table of deferred calls, where zero takes
-/// the default; a deferred submission finding the table full fails with [`Status::Contended`].
+/// An executor runs one call at a time, so threads wanting to overlap take one apiece; it is `Send`
+/// but not `Sync`. A call finding another one holding it fails with [`Status::Contended`].
 /// [`Arena::new_in`] places an arena where it computes: a host arena may outlive it, while a GPU
 /// arena holds it until the arena drops.
 ///
@@ -1416,19 +1387,14 @@ impl Executor {
         }
     }
 
-    /// Spawns host threads for RAM-resident models, interleaved across the compute domains local to
-    /// `memory_domains`, which is the same list the models were loaded with.
+    /// Creates an executor of host threads for RAM-resident models, interleaved across the compute
+    /// domains local to `memory_domains`, which is the same list the models were loaded with.
     ///
     /// Zero `threads` takes 7/8 of the cores those domains carry, and `cpu_class` pins the class
     /// its calls dispatch as, where `None` derives the CPU's own.
     ///
     /// Calls `uform_executor_for_ram`.
-    pub fn for_ram(
-        memory_domains: &[i32],
-        cpu_class: Option<CPUClass>,
-        threads: usize,
-        deferred_limit: usize,
-    ) -> Result<Self> {
+    pub fn for_ram(memory_domains: &[i32], cpu_class: Option<CPUClass>, threads: usize) -> Result<Self> {
         let mut handle = ptr::null_mut();
         let mut outcome = uform_outcome_t::default();
         unsafe {
@@ -1437,7 +1403,6 @@ impl Executor {
                 outcome: &mut outcome,
                 ram: ram_options(memory_domains, cpu_class),
                 threads,
-                deferred_limit,
             })
         };
         let executor = Executor::adopt(handle);
@@ -1450,12 +1415,7 @@ impl Executor {
     /// Calls `uform_executor_on_pool`.
     ///
     /// # Safety `pool` must address a live ForkUnion `fu_pool_t` that outlives the executor.
-    pub unsafe fn on_pool(
-        memory_domains: &[i32],
-        cpu_class: Option<CPUClass>,
-        pool: *mut c_void,
-        deferred_limit: usize,
-    ) -> Result<Self> {
+    pub unsafe fn on_pool(memory_domains: &[i32], cpu_class: Option<CPUClass>, pool: *mut c_void) -> Result<Self> {
         let mut handle = ptr::null_mut();
         let mut outcome = uform_outcome_t::default();
         uform_executor_on_pool(&mut uform_executor_on_pool_t {
@@ -1463,14 +1423,13 @@ impl Executor {
             outcome: &mut outcome,
             ram: ram_options(memory_domains, cpu_class),
             pool,
-            deferred_limit,
         });
         let executor = Executor::adopt(handle);
         check(outcome).map(|()| executor)
     }
 
     /// Opens one submission stream on every named device, or borrows the caller's, all of them
-    /// driven by whichever host thread submits - which is why this takes no thread count.
+    /// driven by the host thread running the call - which is why this takes no thread count.
     ///
     /// `devices` are positions in what [`gpu_devices`] lists, and `gpu_class` pins the class every
     /// one of them dispatches as, where `None` derives theirs. The host decoders take 7/8 of the
@@ -1488,7 +1447,6 @@ impl Executor {
         cpu_class: Option<CPUClass>,
         streams: &[*mut c_void],
         scratch_limit: usize,
-        deferred_limit: usize,
     ) -> Result<Self> {
         if !streams.is_empty() && streams.len() != devices.len() {
             return Err(fail(Status::ShapeMismatch, "pass no streams or one per device"));
@@ -1506,14 +1464,13 @@ impl Executor {
                 false => streams.as_ptr(),
             },
             scratch_limit,
-            deferred_limit,
         });
         let executor = Executor::adopt(handle);
         check(outcome).map(|()| executor)
     }
 
-    /// Waits for every call submitted to this executor before the drain began, then adopts `mood`
-    /// whenever it next goes idle; a failure is the executor's own, such as a device fault, never
+    /// Waits until no call holds this executor and its devices finished their work, then applies
+    /// `mood` until its next call; a failure is the executor's own, such as a device fault, never
     /// one of a drained call.
     ///
     /// Calls `uform_executor_drain`.
@@ -2000,13 +1957,13 @@ mod tests {
         assert_eq!(local.describe()?, host);
         assert!(local.host().is_ok());
 
-        let executor = Executor::for_ram(&[], None, 1, 0)?;
+        let executor = Executor::for_ram(&[], None, 1)?;
         let placed = Arena::new_in(&executor)?;
         drop(executor);
         assert_eq!(placed.describe()?, host, "an arena outlives its executor");
 
         // A GPU arena frees on its executor's first stream, so it keeps the executor past its drop.
-        let Ok(gpu) = (unsafe { Executor::for_vram(&[0], None, &[], None, &[], 0, 0) }) else {
+        let Ok(gpu) = (unsafe { Executor::for_vram(&[0], None, &[], None, &[], 0) }) else {
             return Ok(());
         };
         let device = Arena::new_in(&gpu)?;
@@ -2029,9 +1986,9 @@ mod tests {
     /// A pool that lends no threads and streams that do not pair with the devices are refused.
     #[test]
     fn executors_refuse_malformed_placements() {
-        let pooled = unsafe { Executor::on_pool(&[], None, ptr::null_mut(), 0) };
+        let pooled = unsafe { Executor::on_pool(&[], None, ptr::null_mut()) };
         assert_eq!(pooled.unwrap_err().status, Status::InvalidArgument);
-        let mismatched = unsafe { Executor::for_vram(&[0, 1], None, &[], None, &[ptr::null_mut()], 0, 0) };
+        let mismatched = unsafe { Executor::for_vram(&[0, 1], None, &[], None, &[ptr::null_mut()], 0) };
         assert_eq!(mismatched.unwrap_err().status, Status::ShapeMismatch);
     }
 

@@ -52,6 +52,7 @@ set_target_properties(uform_static_stub PROPERTIES OUTPUT_NAME "uform_static")
 if (UFORM_BUILD_TEST)
     add_executable(uform_test_c_stub ${PROJECT_SOURCE_DIR}/c/test.c)
     target_link_libraries(uform_test_c_stub PRIVATE uform_static_stub forkunion::static)
+    target_compile_definitions(uform_test_c_stub PRIVATE UFORM_TEST_STUB=1)
     set_target_properties(
         uform_test_c_stub
         PROPERTIES C_STANDARD 99

@@ -218,11 +218,9 @@ def test_deferred_awaits(model: uform.Model, executor: uform.Executor):
     assert len(asyncio.run(encode()).embeddings) == 2
 
 
-def test_a_deferred_call_holds_its_arena(model: uform.Model, executor: uform.Executor, arena: uform.Arena):
-    """Until a deferred call is waited on or dropped, its arena refuses another call."""
+def test_a_final_deferred_call_gives_back_its_arena(model: uform.Model, executor: uform.Executor, arena: uform.Arena):
+    """Once a deferred call is final, its executor and its arena serve the next call at once."""
     call = model.deferred(executor).text_encode(TEXTS, arena)
-    with pytest.raises(uform.ContendedError):
-        model.on(executor).text_encode(TEXTS, arena)
     call.wait()
     model.on(executor).text_encode(TEXTS, arena)
 
@@ -231,16 +229,6 @@ def test_a_dropped_deferred_call_waits(model: uform.Model, executor: uform.Execu
     """Dropping a `Deferred` waits for its call, then lets go of the arena."""
     model.deferred(executor).text_encode(TEXTS, arena)
     assert len(model.text_encode(TEXTS, arena).embeddings) == len(TEXTS)
-
-
-def test_a_full_deferred_table_is_contended(model: uform.Model):
-    """A submission past `deferred_limit` finishes contended, raising at the wait."""
-    with uform.Executor.for_ram(deferred_limit=1) as executor:
-        first = model.deferred(executor).text_encode(TEXTS, uform.Arena(executor))
-        second = model.deferred(executor).text_encode(TEXTS, uform.Arena(executor))
-        with pytest.raises(uform.ContendedError):
-            second.wait()
-        assert len(first.wait().embeddings) == len(TEXTS)
 
 
 def test_progress_reports_and_cancels(model: uform.Model, arena: uform.Arena):
@@ -254,7 +242,7 @@ def test_progress_reports_and_cancels(model: uform.Model, arena: uform.Arena):
 
 
 def test_progress_cancels_a_deferred_call(model: uform.Model, executor: uform.Executor, arena: uform.Arena):
-    """A deferred call's handler runs on whichever thread waits, and its exception surfaces there."""
+    """A deferred call's handler runs on the executor's thread, and its exception surfaces at the wait."""
 
     def explode(completed: int, total: int) -> bool:
         raise LookupError("from the handler")

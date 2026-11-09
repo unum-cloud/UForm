@@ -3,18 +3,18 @@
  *  @author Ash Vardanian
  *  @date October 17, 2026
  *  @brief What every verb of the C interface shares: the outcome and progress crossings, the
- *      executor and arena handles, and the deferred calls every verb enters through.
+ *      executor and arena handles, and the one entry every verb's call takes.
  *
- *  Each verb file includes this, so one verb reads the same in every header it implements. The
- *  registry of deferred calls and the functions touching the handles' members are defined once, in
- *  @c types.cpp, so a wait or a free finds the calls of every verb naming its handle.
+ *  Each verb file includes this, so one verb reads the same in every header it implements. An
+ *  executor runs one call at a time: an eager one on its caller, a deferred one on its own pool's
+ *  thread 0, which forks the rest of the pool from inside its slice, so nothing waits in a table.
  *
  *  Every verb opens the same way:
  *
  *  @code{.cpp}
  *  UFORM_EXPORT void uform_text_encode(uform_text_encode_t *arguments) {
  *      if (submitted<uform_text_encode>(arguments)) return;
- *      call_outcome_t outcome(arguments->outcome, arguments->arena);
+ *      call_outcome_t outcome(*arguments);
  *      uform_arena_t const arena = claim_arena(arguments->arena, arguments->executor, {inputs}, outcome);
  *      if (!arena) return;
  *      // ...
@@ -84,15 +84,9 @@ using utilities::u8_t;
 /** Reports a progress handler hears at most when its call names zero steps. */
 inline constexpr std::size_t default_progress_steps_k = 10;
 
-/** Calls a deferred table holds when its executor's constructor names no limit. */
-inline constexpr std::size_t deferred_limit_default_k = 64;
-
 /** One core in this many stays idle when an executor derives its thread count, so threads are 7/8
  *  of the cores. */
 inline constexpr std::size_t idle_cores_denominator_k = 8;
-
-/** The ticket no call outlives, so a blocking call runs everything its executor holds. */
-inline constexpr u64_t every_ticket_k = std::numeric_limits<u64_t>::max();
 
 /** A borrowed byte run of the C interface, a path or a spelling, as the engine's string view. */
 [[nodiscard]] inline sz::string_view_t text_of(uform_bytes_view_t bytes) noexcept {
@@ -1003,7 +997,8 @@ struct vram_device_t {
     chunked_arena_t transfers;
 };
 
-/** The devices of a VRAM executor, and the host threads that decode what the devices cannot. */
+/** The devices of a VRAM executor and its decoders, a caller-inclusive pool whose thread 0 is the
+ *  caller: it stages and feeds the devices and waits on them, while the rest decode for them. */
 struct vram_executor_t {
     per_gpu_array<vram_device_t> devices;
     executor_t decoders;
@@ -1058,9 +1053,10 @@ struct vram_replica_t {
 
 #pragma region Deferred Calls
 
-/** Every argument structure that names an executor, so a deferred submission keeps its call by
- *  value; whatever the copy points to stays the caller's until final. */
+/** Every argument structure that names an executor, so a delegated call runs a copy its caller's
+ *  scope cannot end; whatever the copy points to stays the caller's until final. */
 using deferred_arguments_t = std::variant<                                                        //
+    std::monostate,                                                                               //
     uform_model_load_ram_t, uform_model_load_ram_buffer_t,                                        //
     uform_model_load_vram_t, uform_model_load_vram_buffer_t, uform_model_describe_t,              //
     uform_text_encode_t, uform_text_choose_t, uform_image_encode_t, uform_image_encode_pixels_t,  //
@@ -1068,109 +1064,147 @@ using deferred_arguments_t = std::variant<                                      
     uform_mesh_bootstrap_t, uform_trainer_init_vram_t, uform_trainer_step_t, uform_trainer_save_t //
     >;
 
-/** Where one entry of a deferred table stands. */
-enum class deferred_stage_t : u8_t {
-
-    /** Nothing in it; a submission may take it. */
+/** Whether an executor runs no call, or one call from its claim to its end. */
+enum class call_claim_t : u32_t {
     free_k,
-
-    /** A submitted call waits in it for its wait, a drain, a blocking call or a free. */
     held_k,
-
-    /** Some thread took the call and runs it. */
-    running_k,
 };
 
-/** One entry of an executor's deferred table: the copied call, the verb that runs it, and its
- *  place in line. */
-struct deferred_call_t {
-    deferred_arguments_t arguments;
-    void (*verb)(void *) = nullptr;
+/** The handles one call names, besides its executor, whose frees wait for the call to end. */
+inline constexpr std::size_t named_handles_max_k = 4;
 
-    /** Submission order, counted from one across every executor. */
-    u64_t ticket = 0;
-    deferred_stage_t stage = deferred_stage_t::free_k;
+/** The one call that holds an executor, from its claim to its end. */
+struct holding_call_t {
+
+    /** Taken by an exchange at the entry, released by a store just before the status. */
+    call_claim_t claim = call_claim_t::free_k;
+
+    /** The holding call's arguments; meeting them again, the entry runs the verb's body. */
+    void const *arguments = nullptr;
+
+    /** A delegated call's copy of its arguments, which outlives the caller's structure. */
+    deferred_arguments_t delegated_arguments;
+
+    /** The caller's outcome, published last. */
+    uform_outcome_t *outcome = nullptr;
+
+    /** The status the verb body recorded, which @ref end_call publishes. */
+    uform_outcome_t recorded {uform_status_internal_k, "The call finished without reporting a status"};
+
+    /** The counts of the handles the call names, raised at the entry, lowered at its end. */
+    u64_t *named_calls[named_handles_max_k] {};
+
+    /** The body pool thread 0 runs for a delegated call. */
+    void (*delegated_body)(void *) = nullptr;
+
+    /** The kernel ID of the thread running the body, or zero before thread 0 takes it up. */
+    u64_t body_thread = 0;
 };
-
-/** Every listed executor and the lock every deferred table is read under, so a wait or a free finds
- *  the calls naming its handle without asking each executor. */
-struct deferred_registry_t {
-    fu::spin_mutex_t guard;
-
-    /** Bumped under @ref guard whenever a taken call becomes final, and waited on outside it
-     *  through the waiting executor's @ref host_verbs_t. */
-    u64_t finished = 0;
-
-    /** The last ticket handed out. */
-    u64_t tickets = 0;
-
-    /** The newest listed executor. */
-    uform_executor_handle_t *executors = nullptr;
-};
-
-/** The one registry every verb's calls list in. */
-extern deferred_registry_t deferred_registry;
-
-/** The held call whose arguments this thread passes back into their verb, which then runs them in
- *  place rather than holding them again. */
-extern thread_local void const *resuming_call;
 
 /** Lets go of @p arena when the call whose published outcome is @p call holds it. */
 void release_arena(uform_arena_t arena, uform_outcome_t const *call) noexcept;
 
-/** Runs every call @p executor holds with a ticket up to @p last on this thread, oldest first. */
-void run_held(uform_executor_t executor, u64_t last) noexcept;
+/** Takes @p executor for one call; false while another call holds it. */
+bool take_call_claim(uform_executor_handle_t &executor) noexcept;
 
-/** Returns once no deferred call reads or writes @p handle, running the held ones on this thread
- *  together with every call held before them on the same executor - what every wait and every
- *  free does first. */
-void finish_calls_using(void const *handle) noexcept;
+/** Whether a caller-exclusive pool backs @p executor , running deferred calls on its threads. */
+bool delegates(uform_executor_handle_t &executor) noexcept;
 
-/** Copies @p arguments into a free entry of @p executor 's table, holding @p arena for the call, or
- *  finishes @p outcome contended when the arena serves another call or the table is full. */
-void hold_deferred(uform_executor_t executor, deferred_arguments_t const &arguments, void (*verb)(void *),
-                   uform_arena_t arena, uform_outcome_t *outcome) noexcept;
+/** Starts the held call on the pool's thread 0, which runs @p body and ends the call. */
+uform_status_t delegate_call(uform_executor_handle_t &executor, void (*body)(void *)) noexcept;
+
+/** Keeps @p recorded , the body's status, for @ref end_call to publish. */
+void record_status(uform_executor_t executor, uform_outcome_t const &recorded) noexcept;
+
+/** Ends the call holding @p executor : the named counts, the claim, then the status. */
+void end_call(uform_executor_handle_t &executor) noexcept;
+
+/** Returns once no executor call names the handle whose count is @p named_calls . */
+void wait_named_calls(u64_t &named_calls) noexcept;
+
+/** Whether the calling thread runs the body of the call holding @p executor . */
+bool runs_holding_call(uform_executor_handle_t &executor) noexcept;
+
+/** Returns once no call holds @p executor and its pool finished the last one. */
+void wait_while_claimed(uform_executor_handle_t &executor) noexcept;
 
 /**
- *  @brief Every verb's entry. A deferred call on an executor is copied into the executor's table,
- *      holding its arena, and answers true; a blocking one first runs the calls the executor holds
- *      and answers false.
+ *  @brief Every verb's entry: claims the call's executor and runs its body, answering true once the
+ *      call needs nothing more from the verb.
  *
- *  A call the runner of a held call passes back answers false at once, so the verb runs it
- *  in place, and so does a call with no executor, which is final when it returns whatever
- *  its completion says.
+ *  A blocking call, or one on a pool that needs its caller, runs its body here; a deferred one on a
+ *  caller-exclusive pool runs it on the pool's thread 0. The body is the same verb meeting its own
+ *  arguments again, which answers false so the verb runs. A call with no executor answers false at
+ *  once and is final when it returns.
  */
 template <auto verb_, typename arguments_type_>
 bool submitted(arguments_type_ *arguments) noexcept {
-    if (resuming_call == arguments) return resuming_call = nullptr, false;
-    uform_executor_t const executor = arguments->executor;
-    if (!executor) return false;
-    if (arguments->completion != uform_completion_deferred_k) return run_held(executor, every_ticket_k), false;
-    uform_arena_t arena = nullptr;
-    if constexpr (requires { arguments->arena; }) arena = arguments->arena;
-    hold_deferred(
-        executor, deferred_arguments_t {std::in_place_type<arguments_type_>, *arguments},
-        [](void *erased) noexcept { verb_(static_cast<arguments_type_ *>(erased)); }, arena, arguments->outcome);
+    // Dependent, so the handle's members resolve at instantiation
+    auto *const executor = arguments->executor;
+    if (!executor || arguments == executor->holding_call.arguments) return false;
+    if (!take_call_claim(*executor))
+        return propagate_error(uform_status_contended_k, arguments->outcome, "Another call holds the executor"), true;
+    auto &call = executor->holding_call;
+    call.outcome = arguments->outcome;
+    call.recorded = {uform_status_internal_k, "The call finished without reporting a status"};
+    std::size_t named = 0;
+    auto const name = [&](auto handle) noexcept {
+        // Outputs for handles the call creates, and handles this build never defines, hold no count
+        if constexpr (requires { handle->named_calls; })
+            if (handle) {
+                fu::standard_atomic_ref<u64_t> {handle->named_calls}.fetch_add(1, std::memory_order_relaxed);
+                call.named_calls[named++] = &handle->named_calls;
+            }
+    };
+    if constexpr (requires { arguments->model; }) name(arguments->model);
+    if constexpr (requires { arguments->arena; }) name(arguments->arena);
+    if constexpr (requires { arguments->mesh; }) name(arguments->mesh);
+    if constexpr (requires { arguments->trainer; }) name(arguments->trainer);
+    propagate_pending(arguments->outcome); // before the body or the dispatch, never after
+    if (arguments->completion != uform_completion_deferred_k || !delegates(*executor)) {
+        call.arguments = arguments;
+        verb_(arguments);
+        return end_call(*executor), true;
+    }
+    call.arguments = &call.delegated_arguments.template emplace<arguments_type_>(*arguments);
+    using executor_handle_t = std::remove_pointer_t<decltype(arguments->executor)>;
+    uform_status_t const delegated = delegate_call(*executor, [](void *context) noexcept {
+        auto &held = static_cast<executor_handle_t *>(context)->holding_call;
+        verb_(std::get_if<arguments_type_>(&held.delegated_arguments));
+    });
+    if (delegated != uform_status_success_k)
+        call.recorded = {delegated, "The lent pool runs its lender's dispatch"}, end_call(*executor);
     return true;
 }
 
 /**
- *  @brief A verb's outcome while it runs: the caller's reads deferred from the start, every step
- *      records into a private one, and the end lets go of the arena before the one final store.
+ *  @brief A verb's outcome while it runs: every step records into a private one, and the end lets
+ *      go of the arena before the status leaves.
  *
- *  Declared first in a verb, it unwinds last, so a waiter that sees the final status may reuse the
- *  arena at once. A path that forgot to report finishes @c uform_status_internal_k rather than
- *  hanging its waiters.
+ *  Declared first in a verb, it unwinds last. Without an executor it publishes the status itself.
+ *  With one it hands the status to @ref end_call, which publishes it once the executor is free, so
+ *  a waiter that sees it final may reuse the arena and the executor at once. A path that forgot to
+ *  report finishes @c uform_status_internal_k rather than hanging its waiters.
  */
 class call_outcome_t {
   public:
-    explicit call_outcome_t(uform_outcome_t *published, uform_arena_t arena = nullptr) noexcept
-        : published_(published), arena_(arena) {
+    /** For the verbs that take no executor. */
+    explicit call_outcome_t(uform_outcome_t *published) noexcept : published_(published) {
         propagate_pending(published_);
     }
+
+    /** For a verb's call, whose executor, when it names one, publishes the status. */
+    template <typename arguments_type_>
+    explicit call_outcome_t(arguments_type_ const &arguments) noexcept
+        : published_(arguments.outcome), executor_(arguments.executor) {
+        if constexpr (requires { arguments.arena; }) arena_ = arguments.arena;
+        if (!executor_) propagate_pending(published_);
+    }
+
     ~call_outcome_t() noexcept {
         release_arena(arena_, published_);
-        propagate_error(recorded_.status, published_, recorded_.message);
+        if (executor_) record_status(executor_, recorded_);
+        else propagate_error(recorded_.status, published_, recorded_.message);
     }
     call_outcome_t(call_outcome_t const &) = delete;
     call_outcome_t &operator=(call_outcome_t const &) = delete;
@@ -1183,7 +1217,8 @@ class call_outcome_t {
 
   private:
     uform_outcome_t *published_;
-    uform_arena_t arena_;
+    uform_executor_t executor_ = nullptr;
+    uform_arena_t arena_ = nullptr;
     uform_outcome_t recorded_ {uform_status_internal_k, "The call finished without reporting a status"};
 };
 
@@ -1205,18 +1240,15 @@ uform_arena_t claim_arena(uform_arena_t arena, uform_executor_t executor, std::i
 
 namespace uf = unum::uform;
 
-/** The state behind @c uform_executor_t: its deferred table and one residency's executor; the
+/** The state behind @c uform_executor_t: the one call it holds and one residency's executor; the
  *  variant is the kind tag, so no second word can disagree. */
 struct uform_executor_handle_t {
 
-    /** One entry per call it tracks at once, sized at creation, so a submission never allocates. */
-    uf::st::basic_vector<uf::deferred_call_t> deferred;
+    /** The one call that holds the executor, from its claim to its end. */
+    uf::holding_call_t holding_call;
 
-    /** The next listed executor, so a wait or a free finds the calls naming its handle. */
-    uform_executor_handle_t *next_listed = nullptr;
-
-    /** How its callers wait on the calls it runs: the verbs of the CPU class its host threads run,
-     *  a static table that outlives the executor. */
+    /** How its callers wait on what its threads write: the verbs of the CPU class they run, a
+     *  static table that outlives the executor. */
     uf::host_verbs_t const *host_verbs = nullptr;
 
     std::variant<uf::ram_executor_t, uf::vram_executor_t> executor;
@@ -1233,10 +1265,12 @@ struct uform_arena_handle_t {
      *  null for host pages, which serve any call computing on the host. */
     uform_executor_t executor = nullptr;
 
-    /** The published outcome of the call holding the arena, from its claim or deferred submission
-     *  until just before its final store; touched through the standard reference, since a held call
-     *  finishes on whichever thread runs it. */
+    /** The published outcome of the call holding the arena, from its claim until just before its
+     *  final store, read through the standard reference since a call may end on a pool thread. */
     uform_outcome_t const *holder = nullptr;
+
+    /** Executor calls naming the arena that have not ended, which its free waits out. */
+    uf::u64_t named_calls = 0;
 };
 
 /** What @c uform_model_t owns: the geometry its checkpoint carried, the precision its blocks run
@@ -1264,6 +1298,9 @@ struct uform_model_handle_t {
     uform_model_handle_t() noexcept = default;
     uform_model_handle_t(uform_model_handle_t const &) = delete;
     uform_model_handle_t &operator=(uform_model_handle_t const &) = delete;
+
+    /** Executor calls naming the model that have not ended, which its free waits out. */
+    uf::u64_t named_calls = 0;
 
     /** Destroys every tower through the verbs that made it; defined beside them in
      *  @c model.cpp . */

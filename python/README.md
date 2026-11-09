@@ -55,12 +55,12 @@ A trainer runs `step` and `save` blocking on the executor it was created on, and
 
 ## Executors
 
-`uform.Executor.for_ram(threads=0, *, memory_domains=None, deferred_limit=0, cpu_class=None)` spawns host threads, and `uform.Executor.for_vram(devices=None, *, scratch_limit=0, deferred_limit=0, gpu_class=None)` opens one stream per device.
+`uform.Executor.for_ram(threads=0, *, memory_domains=None, cpu_class=None)` creates an executor of host threads, and `uform.Executor.for_vram(devices=None, *, scratch_limit=0, gpu_class=None)` opens one stream per device.
 A device is named by its position in `uform.gpu_devices()`, which lists every GPU the process can drive as a `uform.GPUDevice`, NVIDIA devices first, then AMD.
 A `uform.CPUClass` or `uform.GPUClass` pin dispatches as that class, and `None` derives the hardware's own.
 `uform.Executor.on_pool(pool)` mirrors the C verb that borrows a ForkUnion pool, and raises `UnsupportedError` until borrowing is designed.
-Calls on one executor run in submission order, and a deferred call finding its `deferred_limit` table full raises `ContendedError` once waited for.
-`executor.drain(uform.Mood.PARKED)` waits for every earlier call and sets what the executor does once idle.
+An executor runs one call at a time, and a call finding another one holding it raises `ContendedError` once waited for. A deferred call on the executor's own threads finishes while Python only awaits it, and its progress callbacks run on those threads, holding the GIL while they do.
+`executor.drain(uform.Mood.PARKED)` waits until no call holds the executor and its devices are idle, then applies the mood.
 In a `with` block, it waits for its calls and closes on exit.
 
 ## Arenas

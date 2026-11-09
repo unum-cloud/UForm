@@ -45,7 +45,7 @@ let embedding = Array(encoded.embeddings![0])                        // [Float],
 ## Receivers & Deferred Calls
 
 The receiver chooses where a verb runs and how it completes, and the verb stays the same.
-Called on the model, a verb runs on the calling thread; on `model.on(executor)` it blocks on that executor, after every call submitted there before it; on `model.deferred(executor)` it submits there and answers a `Deferred` at once.
+Called on the model, a verb runs on the calling thread; on `model.on(executor)` it blocks on that executor, throwing `contended` while another call holds it; on `model.deferred(executor)` it submits there and answers a `Deferred` at once.
 
 ```swift
 let here = try model.textEncode(texts, arena: arena)                  // the calling thread
@@ -69,7 +69,7 @@ let encoded = try await call.value  // or: try call.wait()
 ```
 
 A failure this binding catches before the call crosses, like heights and widths that do not name one per image, throws at submission, and one the library catches arrives through `status` and `wait`.
-A submission finding the executor's deferred table full, sized by `deferredLimit`, finishes at once with `contended`.
+A call finding another one holding its executor finishes at once with `contended`.
 
 ## Executors
 
@@ -77,15 +77,15 @@ A model says where its weights live; an `Executor` says who runs the calls on th
 One executor serves any number of models of its residency, so several models share one machine's cores or devices.
 
 ```swift
-let hostThreads = try Executor.forRam(memoryDomains: [0, 1], threads: 0, deferredLimit: 0)
+let hostThreads = try Executor.forRam(memoryDomains: [0, 1], threads: 0)
 let deviceStreams = try Executor.forVram(devices: [0, 1], streams: nil, scratchLimit: 1 << 30)
 try hostThreads.drain(mood: .parked)
 ```
 
 Each factory takes every argument its C constructor has, and only those.
 A thread count of zero takes 7/8 of the cores the memory domains carry, and `forVram` takes no thread count at all, since the submitting thread drives one stream per device.
-`Executor.onPool(memoryDomains:cpuClass:pool:deferredLimit:)` mirrors the C verb that borrows a ForkUnion pool, and reports `unsupported` until the library wires borrowed pools.
-`drain(mood:)` waits for the executor's earlier calls and picks whether its threads park or spin once idle.
+`Executor.onPool(memoryDomains:cpuClass:pool:)` mirrors the C verb that borrows a ForkUnion pool, and reports `unsupported` until the library wires borrowed pools.
+`drain(mood:)` waits until no call holds the executor and its devices are idle, then picks whether its threads park or spin.
 
 ## Arenas
 

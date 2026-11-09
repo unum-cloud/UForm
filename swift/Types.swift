@@ -41,8 +41,8 @@ public struct Status: Hashable, Sendable, CustomStringConvertible {
     public static let `internal` = Status(raw: uform_status_internal_k)
     /// The request contradicts a frozen configuration.
     public static let configMismatch = Status(raw: uform_status_config_mismatch_k)
-    /// A call was refused rather than waited for - a full deferred table, or an arena
-    /// serving another call.
+    /// A call was refused rather than waited for - another call holds its executor or its
+    /// arena.
     public static let contended = Status(raw: uform_status_contended_k)
     /// A progress handler asked the call to stop; it unwound and published nothing.
     public static let cancelled = Status(raw: uform_status_cancelled_k)
@@ -56,7 +56,7 @@ public struct Status: Hashable, Sendable, CustomStringConvertible {
 
     /// Reads a spelling back, and nil for one no status carries. Calls `uform_status_from_name`.
     public init?(name: String) {
-        guard let raw = parsed(name, uform_status_from_name, uform_status_name) else { return nil }
+        guard let raw = parsed(name, uform_status_from_name) else { return nil }
         self.raw = raw
     }
 
@@ -85,17 +85,14 @@ public struct UFormError: Swift.Error, CustomStringConvertible, Equatable, Senda
     }
 }
 
-/// Reads `name` through a C `from_name` table, keeping only a value whose own spelling echoes it,
-/// since every table answers some default for a name it does not know.
-func parsed<Raw>(
-    _ name: String,
-    _ read: (uform_bytes_view_t) -> Raw,
-    _ spell: (Raw) -> UnsafePointer<CChar>?
-) -> Raw? {
-    let raw = Array(name.utf8).withUnsafeBufferPointer {
-        read(uform_bytes_view_t(data: $0.baseAddress, length: $0.count))
+/// Reads `name` through a C `from_name` verb, and nil when it fails with `invalidArgument`.
+func parsed<Raw>(_ name: String, _ read: (uform_bytes_view_t, UnsafeMutablePointer<Raw>?) -> uform_status_t) -> Raw? {
+    withUnsafeTemporaryAllocation(of: Raw.self, capacity: 1) { output in
+        let status = Array(name.utf8).withUnsafeBufferPointer {
+            read(uform_bytes_view_t(data: $0.baseAddress, length: $0.count), output.baseAddress)
+        }
+        return status == uform_status_success_k ? output[0] : nil
     }
-    return spell(raw).map { String(cString: $0) } == name ? raw : nil
 }
 
 // MARK: - Scalars & Moods
@@ -143,7 +140,7 @@ public struct Scalar: Hashable, Sendable, CustomStringConvertible {
 
     /// Reads a spelling back, and nil for one no kind carries. Calls `uform_scalar_from_name`.
     public init?(name: String) {
-        guard let raw = parsed(name, uform_scalar_from_name, uform_scalar_name) else { return nil }
+        guard let raw = parsed(name, uform_scalar_from_name) else { return nil }
         self.raw = raw
     }
 
@@ -165,7 +162,7 @@ public struct Mood: Hashable, Sendable, CustomStringConvertible {
 
     /// Reads a spelling back, and nil for one no mood carries. Calls `uform_mood_from_name`.
     public init?(name: String) {
-        guard let raw = parsed(name, uform_mood_from_name, uform_mood_name) else { return nil }
+        guard let raw = parsed(name, uform_mood_from_name) else { return nil }
         self.raw = raw
     }
 
@@ -222,9 +219,7 @@ public struct CPUClass: Hashable, Sendable, CustomStringConvertible {
 
     /// Reads a spelling back, and nil for one no class carries. Calls `uform_cpu_class_from_name`.
     public init?(name: String) {
-        guard let raw = parsed(name, uform_cpu_class_from_name, uform_cpu_class_name),
-            raw != uform_cpu_class_unknown_k
-        else { return nil }
+        guard let raw = parsed(name, uform_cpu_class_from_name) else { return nil }
         self.raw = raw
     }
 
@@ -273,9 +268,7 @@ public struct GPUClass: Hashable, Sendable, CustomStringConvertible {
 
     /// Reads a spelling back, and nil for one no class carries. Calls `uform_gpu_class_from_name`.
     public init?(name: String) {
-        guard let raw = parsed(name, uform_gpu_class_from_name, uform_gpu_class_name),
-            raw != uform_gpu_class_unknown_k
-        else { return nil }
+        guard let raw = parsed(name, uform_gpu_class_from_name) else { return nil }
         self.raw = raw
     }
 
@@ -623,7 +616,7 @@ extension Deferred {
 /// staging they use.
 ///
 /// One executor serves any number of models of its residency, so several models share one machine's
-/// cores or devices; a mismatch reports `device`. Calls on one executor run in submission order.
+/// cores or devices; a mismatch reports `device`. An executor runs one call at a time.
 public final class Executor: @unchecked Sendable {
     /// The native handle, released by `deinit`.
     let raw: uform_executor_t
@@ -632,16 +625,14 @@ public final class Executor: @unchecked Sendable {
         self.raw = raw
     }
 
-    /// Spawns host threads for RAM-resident models, interleaved across the compute domains local to
-    /// `memoryDomains`; an empty list derives every node the process may allocate on. Zero
-    /// `threads` takes 7/8 of the cores those domains carry, and zero `deferredLimit` sizes the
-    /// deferred table by default. A `cpuClass` dispatches as if the CPU were of that class; nil
-    /// derives its own. Calls `uform_executor_for_ram`.
+    /// Creates an executor of host threads for RAM-resident models, interleaved across the compute
+    /// domains local to `memoryDomains`; an empty list derives every node the process may allocate
+    /// on. Zero `threads` takes 7/8 of the cores those domains carry. A `cpuClass` dispatches as if
+    /// the CPU were of that class; nil derives its own. Calls `uform_executor_for_ram`.
     public static func forRam(
         memoryDomains: [Int32] = [],
         cpuClass: CPUClass? = nil,
-        threads: Int = 0,
-        deferredLimit: Int = 0
+        threads: Int = 0
     ) throws(UFormError) -> Executor {
         let landing = Landing()
         let executor = landing.slots(uform_executor_t?.none)
@@ -649,8 +640,7 @@ public final class Executor: @unchecked Sendable {
             executor: executor,
             outcome: landing.outcome,
             ram: landing.ram(memoryDomains, cpuClass),
-            threads: threads,
-            deferred_limit: deferredLimit
+            threads: threads
         )
         uform_executor_for_ram(&arguments)
         return try landing.read { () throws(UFormError) in Executor(raw: try created(executor)) }
@@ -662,8 +652,7 @@ public final class Executor: @unchecked Sendable {
     public static func onPool(
         memoryDomains: [Int32] = [],
         cpuClass: CPUClass? = nil,
-        pool: UnsafeMutableRawPointer,
-        deferredLimit: Int = 0
+        pool: UnsafeMutableRawPointer
     ) throws(UFormError) -> Executor {
         let landing = Landing()
         let executor = landing.slots(uform_executor_t?.none)
@@ -671,8 +660,7 @@ public final class Executor: @unchecked Sendable {
             executor: executor,
             outcome: landing.outcome,
             ram: landing.ram(memoryDomains, cpuClass),
-            pool: pool,
-            deferred_limit: deferredLimit
+            pool: pool
         )
         uform_executor_on_pool(&arguments)
         return try landing.read { () throws(UFormError) in Executor(raw: try created(executor)) }
@@ -690,8 +678,7 @@ public final class Executor: @unchecked Sendable {
         memoryDomains: [Int32] = [],
         cpuClass: CPUClass? = nil,
         streams: [UnsafeMutableRawPointer?]? = nil,
-        scratchLimit: Int = 0,
-        deferredLimit: Int = 0
+        scratchLimit: Int = 0
     ) throws(UFormError) -> Executor {
         // The C side reads one stream per device behind a pointer that carries no count.
         if let streams, streams.count != devices.count {
@@ -706,8 +693,7 @@ public final class Executor: @unchecked Sendable {
             vram: landing.vram(devices, gpuClass),
             ram: landing.ram(memoryDomains, cpuClass),
             streams: lentStreams,
-            scratch_limit: scratchLimit,
-            deferred_limit: deferredLimit
+            scratch_limit: scratchLimit
         )
         uform_executor_for_vram(&arguments)
         return try landing.read { () throws(UFormError) in Executor(raw: try created(executor)) }
@@ -716,9 +702,8 @@ public final class Executor: @unchecked Sendable {
     /// Calls `uform_executor_free`.
     deinit { uform_executor_free(raw) }
 
-    /// Waits for every call submitted before it, then adopts `mood` whenever the
-    /// executor next goes idle; a failure is the executor's own, never one of a drained
-    /// call. Calls `uform_executor_drain`.
+    /// Waits until no call holds the executor, then applies `mood` until its next call; a
+    /// failure is the executor's own, never one of a drained call. Calls `uform_executor_drain`.
     public func drain(mood: Mood = .parked) throws(UFormError) {
         let landing = Landing()
         var arguments = uform_executor_drain_t(executor: raw, outcome: landing.outcome, mood: mood.raw)

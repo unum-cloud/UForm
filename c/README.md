@@ -85,32 +85,54 @@ int main(int argc, char** argv) {
 
 Every call stores its result in the `uform_outcome_t` it names: a status, and a static message that is `NULL` exactly on success.
 `uform_completion_blocking_k`, the default, returns with the status final and every output readable.
-`uform_completion_deferred_k` returns once submitted, and the status reads `uform_status_deferred_k` until the call is final.
+`uform_completion_deferred_k` returns once the executor's own thread took the call, and the status reads `uform_status_deferred_k` until the call is final.
 `uform_outcome_status` polls with acquire ordering and `uform_outcome_wait` blocks until final, and these are the only ways to read a status another thread may still store.
 Submission copies the structure, while everything it points to stays borrowed until final.
-Calls on one executor run in submission order, so a caller orders dependent calls by waiting on the first.
-A submission finding the executor's deferred table full, sized by `deferred_limit` and 64 entries by default, finishes `uform_status_contended_k`.
+An executor runs one call at a time: a call finding another one holding its executor finishes `uform_status_contended_k` without running, so a caller orders dependent calls by waiting on the first.
+A call lets go of its arena, its handles and its executor before it stores the final status, so whoever reads it final may reuse all three at once.
 A call stops early only when its `uform_progress_t` handler returns `uform_cancel_k`, and then finishes `uform_status_cancelled_k`.
 
 ```c
 uform_outcome_t outcomes[4] = {0};
-for (size_t shard = 0; shard != 4; ++shard) {
+for (size_t shard = 0; shard != 4; ++shard) { // one executor per shard, each running one call at a time
     encodes[shard].outcome = &outcomes[shard];
+    encodes[shard].executor = executors[shard];
     encodes[shard].completion = uform_completion_deferred_k;
     uform_image_encode(&encodes[shard]);
 }
 for (size_t shard = 0; shard != 4; ++shard) uform_outcome_wait(&outcomes[shard]);
 ```
 
+### Inclusive and Exclusive Executors
+
+The threads of an executor either include the thread that calls it or work without it.
+A caller-inclusive pool needs its caller as one of its threads, so a deferred call on it runs at submission and is final when it returns.
+A caller-exclusive pool has threads of its own: a deferred call returns as soon as the pool's thread 0 takes it, and that thread runs the call, forks included, and stores the status.
+`uform_executor_for_ram` and `uform_executor_for_vram` spawn caller-exclusive pools wherever the build has threads, and WebAssembly's single thread is inclusive.
+Because a deferred call needs nobody to drive it, one thread can keep several executors busy, here across UForm, USearch and UStore, by only reading status words:
+
+```c
+text_encode.completion = uform_completion_deferred_k;   // UForm, on a VRAM executor
+dense_search.completion = usearch_completion_deferred_k; // USearch, on a RAM executor
+blobs_read.completion = ustore_completion_deferred_k;    // UStore, on an NVMe executor
+uform_text_encode(&text_encode);
+usearch_dense_search(&dense_search);
+ustore_blobs_read(&blobs_read);
+while (uform_outcome_status(text_encode.outcome) == uform_status_deferred_k ||
+       usearch_outcome_status(dense_search.outcome) == usearch_status_deferred_k ||
+       ustore_outcome_status(blobs_read.outcome) == ustore_status_deferred_k)
+    prepare_next_batch();
+```
+
 ## Executors
 
 An executor owns what a call runs on but a model does not: host threads or device streams, activation scratch, and the pinned buffer staging passes through.
 
-- `uform_executor_for_ram` spawns host threads across the compute domains local to the memory domains of its `uform_ram_options_t`, 7/8 of their cores when `threads` is zero.
+- `uform_executor_for_ram` creates an executor of host threads across the compute domains local to the memory domains of its `uform_ram_options_t`, 7/8 of their cores when `threads` is zero.
 - `uform_executor_on_pool` lends UForm a ForkUnion `fu_pool_t` another library spawned, so UForm, USearch and UStore in one process share one set of threads; the pool must outlive the executor.
 - `uform_executor_for_vram` opens one stream on every device of its `uform_vram_options_t`, named by their position in `uform_gpu_devices`, beside host threads for the decoding the devices cannot do.
-- `uform_executor_drain` waits for every call submitted before it and sets the `uform_mood_t` the executor adopts when idle, parked or spinning.
-- `uform_executor_free` drains, releases what the executor owns and returns what it borrowed.
+- `uform_executor_drain` waits until no call holds the executor, then applies the `uform_mood_t` its threads keep until the next call: parked sleeps in the kernel, spinning keeps polling.
+- `uform_executor_free` waits the same way, releases what the executor owns and returns what it borrowed.
 
 One executor serves any number of models of its residency, and a call pairing a model with an executor of another residency reports `uform_status_device_k`.
 A `NULL` executor runs the call on the calling thread, final when it returns.

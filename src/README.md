@@ -22,15 +22,15 @@ Every exported verb takes one argument structure and opens the same way:
 ```cpp
 UFORM_EXPORT void uform_text_encode(uform_text_encode_t *arguments) {
     if (submitted<uform_text_encode>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    call_outcome_t outcome(*arguments);
     uform_arena_t const arena = claim_arena(arguments->arena, arguments->executor, {inputs}, outcome);
     if (!arena) return;
     // ...
 }
 ```
 
-- `submitted<verb>` copies a deferred call by value into its executor's table, holding its arena, while a blocking call first runs every call the executor holds.
-- `call_outcome_t` marks the outcome pending, collects every step's status privately, and on unwinding releases the arena before the one final store, so a path that forgot to report finishes `uform_status_internal_k` rather than hanging its waiters.
+- `submitted<verb>` claims the executor for the call and runs the verb's body: here for a blocking call or a caller-inclusive pool, on pool thread 0 for a deferred one, through `fu_pool_unsafe_for_threads` with a slice that runs the whole call there, over a copy of the arguments held in the executor's `holding_call`. The body is the same verb meeting its own arguments again.
+- `call_outcome_t` collects every step's status privately and on unwinding releases the arena; without an executor it stores the final status itself, and with one it hands the status to `end_call`, which lowers the named handles' counts, frees the executor, and only then stores it, so a path that forgot to report finishes `uform_status_internal_k` rather than hanging its waiters.
 - `claim_arena` refuses a null arena, one of another residency or executor, one another call holds, and inputs inside it, then rewinds it for the call's outputs.
 
 A verb runs the variant its model picked at load through that variant's table, and never asks which residency or vendor the model holds.

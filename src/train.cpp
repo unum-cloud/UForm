@@ -47,6 +47,10 @@ struct uform_mesh_handle_t {
      *  waits for zero. */
     u64_t trainers = 0;
 
+    /** Executor calls naming the mesh that have not ended, which its free and description wait
+     *  out. */
+    u64_t named_calls = 0;
+
     std::unique_ptr<ut::mesh_t> mesh;
 };
 
@@ -57,6 +61,9 @@ struct uform_trainer_handle_t {
     std::variant<uform_mesh_t, std::unique_ptr<uform_mesh_handle_t>> mesh;
     std::unique_ptr<ut::trainer_t> trainer;
     std::unique_ptr<ut::items_source_t> items;
+
+    /** Executor calls naming the trainer that have not ended, which its free waits out. */
+    u64_t named_calls = 0;
 
     /** One step's modalities and sides in the engine's spelling, and its embeddings before they
      *  land in the arena. */
@@ -393,7 +400,7 @@ extern "C" {
 
 UFORM_EXPORT void uform_mesh_bootstrap(uform_mesh_bootstrap_t *arguments) {
     if (submitted<uform_mesh_bootstrap>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     *arguments->mesh = nullptr;
     if (!drives_vram(arguments->executor))
         return propagate_error(uform_status_device_k, outcome, "The verb needs a VRAM executor"), void();
@@ -408,7 +415,7 @@ UFORM_EXPORT void uform_mesh_describe(uform_mesh_describe_t *arguments) {
     if (!arguments->mesh || !arguments->description)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The mesh and the output are required"),
                void();
-    finish_calls_using(arguments->mesh);
+    wait_named_calls(arguments->mesh->named_calls);
     mesh_topology_t const &topology = arguments->mesh->mesh->topology;
     mesh_shape_t const &shape = topology.shape;
     st::basic_vector<i32_t> devices;
@@ -431,7 +438,7 @@ UFORM_EXPORT void uform_mesh_describe(uform_mesh_describe_t *arguments) {
 
 UFORM_EXPORT void uform_mesh_free(uform_mesh_t mesh) {
     if (!mesh) return;
-    finish_calls_using(mesh);
+    wait_named_calls(mesh->named_calls);
     fu::standard_atomic_ref<u64_t> trainers {mesh->trainers};
     for (u64_t seen = trainers.load(std::memory_order_acquire); seen; seen = trainers.load(std::memory_order_acquire))
         mesh->executor->host_verbs->wait(mesh->trainers, seen);
@@ -440,7 +447,7 @@ UFORM_EXPORT void uform_mesh_free(uform_mesh_t mesh) {
 
 UFORM_EXPORT void uform_trainer_init_vram(uform_trainer_init_vram_t *arguments) {
     if (submitted<uform_trainer_init_vram>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     *arguments->trainer = nullptr;
     uform_executor_t const executor = arguments->executor;
     if (!drives_vram(executor))
@@ -495,8 +502,8 @@ UFORM_EXPORT void uform_trainer_init_vram(uform_trainer_init_vram_t *arguments) 
 
 UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t *arguments) {
     if (submitted<uform_trainer_step>(arguments)) return;
+    call_outcome_t outcome(*arguments); // lets go of the arena only when this call holds it
     uform_arena_t const requested = arguments->embeddings ? arguments->arena : nullptr;
-    call_outcome_t outcome(arguments->outcome, requested);
     uform_trainer_handle_t *const handle = arguments->trainer;
     if (!handle || handle->executor != arguments->executor)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The trainer and its executor are required"),
@@ -594,7 +601,7 @@ UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t *arguments) {
 
 UFORM_EXPORT void uform_trainer_save(uform_trainer_save_t *arguments) {
     if (submitted<uform_trainer_save>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     uform_trainer_handle_t *const handle = arguments->trainer;
     if (!handle || handle->executor != arguments->executor || !arguments->path.length)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The trainer, its executor and a path"),
@@ -611,7 +618,7 @@ UFORM_EXPORT void uform_trainer_save(uform_trainer_save_t *arguments) {
 
 UFORM_EXPORT void uform_trainer_free(uform_trainer_t trainer) {
     if (!trainer) return;
-    finish_calls_using(trainer);
+    wait_named_calls(trainer->named_calls);
     trainer->items.reset();
     trainer->trainer.reset();
     if (uform_mesh_t const *borrowed = std::get_if<uform_mesh_t>(&trainer->mesh))

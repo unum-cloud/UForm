@@ -170,16 +170,17 @@ int main(int argc, char **argv) {
     std::string_view const home = residency;
     if (home != "ram" && home != "vram")
         return fmt::println(stderr, "uform_bench_encoder: --residency takes ram or vram, not {}", home), 1;
-    uform_cpu_class_t const cpu_class = uform_cpu_class_from_name(bytes_of(cpu_class_text));
-    uform_gpu_class_t const gpu_class = uform_gpu_class_from_name(bytes_of(gpu_class_text));
-    if (*cpu_class_text && cpu_class == uform_cpu_class_unknown_k)
+    uform_cpu_class_t cpu_class = uform_cpu_class_unknown_k;
+    uform_gpu_class_t gpu_class = uform_gpu_class_unknown_k;
+    if (*cpu_class_text && uform_cpu_class_from_name(bytes_of(cpu_class_text), &cpu_class) != uform_status_success_k)
         return fmt::println(stderr, "uform_bench_encoder: {} names no CPU class", cpu_class_text), 1;
-    if (*gpu_class_text && gpu_class == uform_gpu_class_unknown_k)
+    if (*gpu_class_text && uform_gpu_class_from_name(bytes_of(gpu_class_text), &gpu_class) != uform_status_success_k)
         return fmt::println(stderr, "uform_bench_encoder: {} names no GPU class", gpu_class_text), 1;
     if ((*cpu_class_text && home != "ram") || (*gpu_class_text && home != "vram"))
         return fmt::println(stderr, "uform_bench_encoder: --cpu-class pins ram, --gpu-class pins vram"), 1;
-    uform_scalar_t const precision = uform_scalar_from_name(bytes_of(precision_text));
-    if (precision != uform_scalar_bf16_k && precision != uform_scalar_e4m3_k)
+    uform_scalar_t precision = uform_scalar_unknown_k;
+    if (uform_scalar_from_name(bytes_of(precision_text), &precision) != uform_status_success_k ||
+        (precision != uform_scalar_bf16_k && precision != uform_scalar_e4m3_k))
         return fmt::println(stderr, "uform_bench_encoder: --precision takes bf16 or e4m3, not {}", precision_text), 1;
 
     settings_t const settings = read_settings();

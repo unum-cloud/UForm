@@ -31,7 +31,7 @@ public struct Modality: Hashable, Sendable, CustomStringConvertible {
     /// Reads a spelling back, and nil for one no modality
     /// carries. Calls `uform_modality_from_name`.
     public init?(name: String) {
-        guard let raw = parsed(name, uform_modality_from_name, uform_modality_name) else { return nil }
+        guard let raw = parsed(name, uform_modality_from_name) else { return nil }
         self.raw = raw
     }
 
@@ -56,7 +56,7 @@ public struct Objective: Hashable, Sendable, CustomStringConvertible {
     /// Reads a spelling back, and nil for one no objective
     /// carries. Calls `uform_objective_from_name`.
     public init?(name: String) {
-        guard let raw = parsed(name, uform_objective_from_name, uform_objective_name) else { return nil }
+        guard let raw = parsed(name, uform_objective_from_name) else { return nil }
         self.raw = raw
     }
 
@@ -78,7 +78,7 @@ public struct Negatives: Hashable, Sendable, CustomStringConvertible {
 
     /// Reads a spelling back, and nil for one no policy carries. Calls `uform_negatives_from_name`.
     public init?(name: String) {
-        guard let raw = parsed(name, uform_negatives_from_name, uform_negatives_name) else { return nil }
+        guard let raw = parsed(name, uform_negatives_from_name) else { return nil }
         self.raw = raw
     }
 
@@ -101,7 +101,7 @@ public struct MultimemTier: Hashable, Sendable, CustomStringConvertible {
     /// Reads a spelling back, and nil for one no tier
     /// carries. Calls `uform_multimem_tier_from_name`.
     public init?(name: String) {
-        guard let raw = parsed(name, uform_multimem_tier_from_name, uform_multimem_tier_name) else { return nil }
+        guard let raw = parsed(name, uform_multimem_tier_from_name) else { return nil }
         self.raw = raw
     }
 

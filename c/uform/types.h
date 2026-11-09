@@ -25,32 +25,39 @@
  *
  *  @section types_asynchrony Asynchrony
  *
- *  Every call names its @c completion, and synchronous and deferred calls share one shape. A
- *  blocking call, the default, returns with its final status stored and every output readable. A
- *  deferred call returns once submitted and finishes on its executor. A call with a @c NULL
- *  executor runs on the calling thread and is final when it returns. Submission copies the
- *  structure; everything it points to stays borrowed until final.
+ *  Every call names its @c completion, and blocking and deferred calls share one shape. A blocking
+ *  call, the default, returns with its final status stored and every output readable. A call with a
+ *  @c NULL executor runs on the calling thread and is final on return, whatever its completion.
  *
- *  - @c outcome->status reads @c uform_status_deferred_k until final, even for a call
- *    refused at submission.
- *  - The message, then the final status, are stored with release ordering and a wake.
- *  - The caller reads the status with acquire ordering, polling through @c uform_outcome_status or
- *    waiting through @c uform_outcome_wait.
- *  - A GPU executor stores the final status from a host callback that still fires after
- *    a device fault.
- *  - Executors own their streams, so a caller orders dependent calls by waiting on the first.
- *  - A submission finding the deferred table full, sized by @c deferred_limit, finishes
- *    @c uform_status_contended_k.
- *  - A call stops early only when its progress handler returns @c uform_cancel_k.
+ *  An executor runs one call at a time. A call that finds another one holding its executor, from
+ *  any thread, finishes @c uform_status_contended_k without running.
+ *
+ *  A deferred call on a caller-exclusive executor returns once handed to the executor's thread 0,
+ *  which runs it there, forks included, and finishes it, so polling alone sees it final. A deferred
+ *  call on a caller-inclusive executor, whose threads need their caller, or on a VRAM executor,
+ *  whose caller stages and feeds its devices, runs at submission and is final on return. Submission
+ *  copies the structure; everything it points to stays borrowed until final, and @c outcome->status
+ *  reads @c uform_status_deferred_k until then.
+ *
+ *  A call lets go of its arena and of the handles it names, then of its executor, and only then
+ *  stores the message and the final status with release ordering. A caller that reads the status
+ *  final with acquire ordering may reuse the arena, submit the next call or free any handle at
+ *  once. Waits, drains and frees only wait: the executor's own threads finish every call. A free
+ *  waits for the calls naming its handle, so one issued from a callback of such a call waits on
+ *  itself. A call stops early only when its progress handler returns @c uform_cancel_k.
+ *
+ *  One thread keeps several executors busy by giving each a deferred call and polling the statuses.
+ *  A VRAM call is final when it returns, so a manager submits it last:
  *
  *  @code{.c}
- *  uform_outcome_t outcomes[4] = {0};
- *  for (size_t shard = 0; shard != 4; ++shard) {
- *      encodes[shard].outcome = &outcomes[shard];
- *      encodes[shard].completion = uform_completion_deferred_k;
- *      uform_image_encode(&encodes[shard]);
- *  }
- *  for (size_t shard = 0; shard != 4; ++shard) uform_outcome_wait(&outcomes[shard]);
+ *  uform_outcome_t text_outcome = {0}, image_outcome = {0};
+ *  text_encode.outcome = &text_outcome, text_encode.completion = uform_completion_deferred_k;
+ *  image_encode.outcome = &image_outcome, image_encode.completion = uform_completion_deferred_k;
+ *  uform_text_encode(&text_encode);   // on a RAM executor
+ *  uform_image_encode(&image_encode); // on a VRAM executor
+ *  while (uform_outcome_status(&text_outcome) == uform_status_deferred_k ||
+ *         uform_outcome_status(&image_outcome) == uform_status_deferred_k)
+ *      prepare_next_batch();
  *  @endcode
  *
  *  @section types_memory Memory
@@ -70,7 +77,7 @@
  *    memory domains or the memory of its GPU, decided once.
  *  - A call rewinds the arena it is given, invalidating the previous call's outputs, and writes views into
  *    it. Any verb may reuse any arena of its residency, one call at a time.
- *  - Blocking calls borrow the arena; deferred calls hold it until final.
+ *  - A call holds its arena from its start until final.
  *
  *  Outputs are views the call writes, so none carries a capacity or a stride for the caller to
  *  pick, and an arena keeps its high-water mark, so a steady loop allocates once. On a VRAM
@@ -171,16 +178,12 @@ typedef struct uform_bytes_view_t {
  *  Values USearch spends on index states UForm has no counterpart for - a read-only handle, an
  *  exhausted ID space, an uninitialized reservation - stay unused here rather than renumbered.
  *
- *  Statuses fall into five categories. Resources: @c uform_status_out_of_memory_k,
- *  @c uform_status_io_k and @c uform_status_device_k. Input: @c uform_status_shape_mismatch_k,
- *  @c uform_status_unsupported_layout_k, @c uform_status_unknown_kind_k,
- *  @c uform_status_malformed_k and @c uform_status_invalid_argument_k. State:
- *  @c uform_status_config_mismatch_k, @c uform_status_contended_k and
- *  @c uform_status_unsupported_k. Interruptions: @c uform_status_cancelled_k and
- *  @c uform_status_deferred_k. Defects: @c uform_status_internal_k. Any verb that allocates,
- *  binds a device or touches a file may also return a Resources status; any verb taking a
- *  progress callback may return @c uform_status_cancelled_k. A verb's own block lists only what
- *  its contract adds.
+ *  Statuses fall into five categories: resources, for memory, I/O and devices; input, for shapes,
+ *  layouts, kinds, malformed data and invalid arguments; state, for frozen configurations, held
+ *  executors and arenas, and unsupported verbs; interruptions, for cancellation and deferral; and
+ *  defects. Any verb that allocates, binds a device or touches a file may also return a resources
+ *  status, and any verb taking a progress callback may be cancelled. A verb's own block lists only
+ *  what its contract adds.
  */
 typedef enum uform_status_t {
 
@@ -221,8 +224,8 @@ typedef enum uform_status_t {
      *  of another geometry. */
     uform_status_config_mismatch_k = 13,
 
-    /** The call was refused rather than waited for, like a submission to a full deferred table, or
-     *  a blocking call from inside a callback of the executor it would wait on. */
+    /** The call was refused rather than waited for: another call holds its executor or arena, or a
+     *  drain came from a callback of the call it would wait on. */
     uform_status_contended_k = 14,
 
     /** A progress handler asked the call to stop; it unwound and published nothing. */
@@ -650,8 +653,7 @@ typedef struct uform_vram_options_t {
  *  @c uform_status_device_k. Scratch grows to the largest batch asked of it, is rewound per call,
  *  and is kept between calls.
  *
- *  Calls on one executor run in submission order. Every executor tracks its deferred calls in a
- *  fixed table sized at creation, so submitting never allocates.
+ *  An executor runs one call at a time, holding nothing for later, so submitting never allocates.
  *
  *  The library stages only to change layout on the side that computes, or to make pageable memory DMA-able:
  *
@@ -678,13 +680,11 @@ typedef struct uform_executor_for_ram_t {
 
     /** Threads to spawn; zero takes 7/8 of the cores those domains carry. */
     size_t threads;
-
-    /** Deferred calls it tracks at once, sizing its deferred table; zero takes a default. */
-    size_t deferred_limit;
 } uform_executor_for_ram_t;
 
-/** Spawns host threads for RAM-resident models, interleaved across the compute domains local to the
- *  named memory domains. */
+/** Creates an executor of host threads for RAM-resident models, interleaved across the compute
+ *  domains local to the named memory domains; where the build has threads, they run deferred calls
+ *  on their own. */
 UFORM_EXPORT void uform_executor_for_ram(uform_executor_for_ram_t* arguments);
 
 /** The arguments of @c uform_executor_on_pool. */
@@ -701,10 +701,7 @@ typedef struct uform_executor_on_pool_t {
 
     /** The ForkUnion @c fu_pool_t to borrow; it must outlive the executor, and keeps
      *  its lender's mood. */
-    void* pool;
-
-    /** Deferred calls it tracks at once, sizing its deferred table; zero takes a default. */
-    size_t deferred_limit;
+    void *pool;
 } uform_executor_on_pool_t;
 
 /** Creates a RAM executor over a borrowed ForkUnion pool, so UForm, USearch and UStore in one
@@ -734,54 +731,51 @@ typedef struct uform_executor_for_vram_t {
     /** The @b optional ceiling on scratch bytes per device; zero lets scratch grow as batches ask.
      *  A batch larger than the ceiling fits runs in several passes. */
     size_t scratch_limit;
-
-    /** Deferred calls it tracks at once, sizing its deferred table; zero takes a default. */
-    size_t deferred_limit;
 } uform_executor_for_vram_t;
 
 /**
- *  @brief Opens one submission stream on every named device, all of them driven by whichever
- *      host thread submits; borrowing the caller's streams reports
- *      @c uform_status_unsupported_k for now.
+ *  @brief Opens one submission stream on every named device, all driven by the host thread running
+ *      the call; borrowing the caller's streams reports @c uform_status_unsupported_k for now.
  *
  *  Text and JPEG images never leave the device; the rest of decoding - container demux, PNG and
  *  WebP, audio, and every modality on AMD - runs on host threads the executor spawns beside its
  *  streams, 7/8 of the cores local to the memory domains @c ram names, dispatching as its
- *  @c cpu_class . A GPU executor never changes process-wide device flags.
+ *  @c cpu_class . Their thread 0 runs a deferred call, and a GPU executor never changes any
+ *  device flag that spans the process.
  */
 UFORM_EXPORT void uform_executor_for_vram(uform_executor_for_vram_t* arguments);
 
-/** What an executor does with its threads or streams once it goes idle. */
+/** What an executor's threads do between a drain and its next call. */
 typedef enum uform_mood_t {
 
-    /** Sleep on futexes or events created with blocking sync, freeing the core. */
+    /** Sleep in the kernel until the next call, freeing the cores. */
     uform_mood_parked_k = 0,
 
-    /** Poll them, trading a core for the lowest wake-up latency. */
+    /** Keep polling, trading the cores for the lowest wake-up latency. */
     uform_mood_spinning_k = 1,
 } uform_mood_t;
 
 /** The arguments of @c uform_executor_drain. */
 typedef struct uform_executor_drain_t {
 
-    /** The executor whose submitted calls are awaited. */
+    /** The executor whose call is awaited. */
     uform_executor_t executor;
 
     /** Output for an executor-level failure, such as a device fault; never one of
      *  a drained call. */
     uform_outcome_t* outcome;
 
-    /** What the executor does whenever it next goes idle; the last drain wins. */
+    /** What the executor's threads do until its next call. */
     uform_mood_t mood;
 } uform_executor_drain_t;
 
-/** Waits for every call submitted before the drain began, so later submissions can't
- *  hold it up, then sets the mood the executor adopts whenever it next goes idle.
- *  Reports only executor-level failures. */
+/** Waits until no call holds the executor and its devices are idle, then applies the mood. Reports
+ *  only executor-level failures, and @c uform_status_contended_k from a callback of the call it
+ *  would wait on. */
 UFORM_EXPORT void uform_executor_drain(uform_executor_drain_t* arguments);
 
-/** Drains every call, releases the scratch and the streams it owns, returns borrowed streams and
- *  pools, and frees the executor; @c NULL is safe, and it cannot fail, so takes no outcome. */
+/** Waits until no call holds the executor, releases what it owns, returns what it borrowed, and
+ *  frees it; @c NULL is safe, and it cannot fail, so it takes no outcome. */
 UFORM_EXPORT void uform_executor_free(uform_executor_t executor);
 
 /**
@@ -897,34 +891,39 @@ UFORM_EXPORT void uform_arena_describe(uform_arena_describe_t *arguments);
  */
 UFORM_EXPORT char const* uform_status_name(uform_status_t status);
 
-/** Reads a status back; @c uform_status_invalid_argument_k when unrecognized. */
-UFORM_EXPORT uform_status_t uform_status_from_name(uform_bytes_view_t name);
+/** Reads a status back from its spelling into @p status, or fails with
+ *  @c uform_status_invalid_argument_k. */
+UFORM_EXPORT uform_status_t uform_status_from_name(uform_bytes_view_t name, uform_status_t *status);
 
 /** The canonical spelling of a scalar kind, as @c uform_scalar_f32_k spells "f32". */
 UFORM_EXPORT char const* uform_scalar_name(uform_scalar_t scalar);
 
-/** Reads a scalar kind back; @c uform_scalar_unknown_k when unrecognized. */
-UFORM_EXPORT uform_scalar_t uform_scalar_from_name(uform_bytes_view_t name);
+/** Reads a scalar kind back from its spelling into @p scalar, or fails with
+ *  @c uform_status_invalid_argument_k. */
+UFORM_EXPORT uform_status_t uform_scalar_from_name(uform_bytes_view_t name, uform_scalar_t *scalar);
 
 /** The canonical spelling of a mood, as @c uform_mood_parked_k spells "parked". */
 UFORM_EXPORT char const* uform_mood_name(uform_mood_t mood);
 
-/** Reads a mood back; @c uform_mood_parked_k when unrecognized. */
-UFORM_EXPORT uform_mood_t uform_mood_from_name(uform_bytes_view_t name);
+/** Reads a mood back from its spelling into @p mood, or fails with
+ *  @c uform_status_invalid_argument_k. */
+UFORM_EXPORT uform_status_t uform_mood_from_name(uform_bytes_view_t name, uform_mood_t *mood);
 
 /** The canonical spelling of a CPU class, as
  *  @c uform_cpu_class_intel_haswell_k spells "intel-haswell". */
 UFORM_EXPORT char const* uform_cpu_class_name(uform_cpu_class_t cpu_class);
 
-/** Reads a CPU class back; @c uform_cpu_class_unknown_k when unrecognized. */
-UFORM_EXPORT uform_cpu_class_t uform_cpu_class_from_name(uform_bytes_view_t name);
+/** Reads a CPU class back from its spelling into @p cpu_class, or fails with
+ *  @c uform_status_invalid_argument_k. */
+UFORM_EXPORT uform_status_t uform_cpu_class_from_name(uform_bytes_view_t name, uform_cpu_class_t *cpu_class);
 
 /** The canonical spelling of a GPU class, as
  *  @c uform_gpu_class_nvidia_hopper_k spells "nvidia-hopper". */
 UFORM_EXPORT char const* uform_gpu_class_name(uform_gpu_class_t gpu_class);
 
-/** Reads a GPU class back; @c uform_gpu_class_unknown_k when unrecognized. */
-UFORM_EXPORT uform_gpu_class_t uform_gpu_class_from_name(uform_bytes_view_t name);
+/** Reads a GPU class back from its spelling into @p gpu_class, or fails with
+ *  @c uform_status_invalid_argument_k. */
+UFORM_EXPORT uform_status_t uform_gpu_class_from_name(uform_bytes_view_t name, uform_gpu_class_t *gpu_class);
 
 /**
  *  @brief Reports the version of the library this process linked, which may differ from the

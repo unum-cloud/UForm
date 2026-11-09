@@ -74,10 +74,9 @@ abstract class ModelVerbs<Receiving extends "blocking" | "deferred"> extends Enc
   }
 }
 
-/**
- *  The verbs of one model, blocking on one executor: `model.on(executor)`. Every call starts after
- *  every earlier submission to that executor, and returns with its outputs written.
- */
+/** The verbs of one model, blocking on one executor: `model.on(executor)`. Every call returns
+ *  with its outputs written, and one that finds another call holding the executor throws
+ *  `contended` without running. */
 export class ModelOn extends ModelVerbs<"blocking"> {
   /** Made by `model.on(executor)`, never directly. */
   constructor(compiled: CompiledModel, executor: Executor | undefined) {
@@ -121,8 +120,8 @@ export class Model extends ModelOn implements Disposable {
   }
 
   /**
-   *  The same verbs, each blocking on `executor`, after every earlier submission
-   *  to it. Binding-only.
+   *  The same verbs, each blocking on `executor`; one that finds another call holding it throws
+   *  `contended`. Binding-only.
    *  @param executor - The threads or streams to run on; its residency must match the model's.
    */
   on(executor: Executor): ModelOn {

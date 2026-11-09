@@ -48,7 +48,7 @@ The model runs it on the calling thread, `model.on(executor)` blocks on an execu
 
 ```mojo
 model.text_encode(texts, Outputs.EMBEDDINGS, arena)                          # the calling thread
-model.on(executor).text_encode(texts, Outputs.EMBEDDINGS, arena)             # blocking, after every earlier submission
+model.on(executor).text_encode(texts, Outputs.EMBEDDINGS, arena)             # blocking; `CONTENDED` while another call holds it
 var call = model.deferred(executor).text_encode(texts, Outputs.EMBEDDINGS, arena)  # Deferred[...]
 print(call.wait().embeddings().value().row[DType.float32](0)[0])
 ```
@@ -87,11 +87,11 @@ There is a constructor per C one, and each fixes a kind that must match the resi
 var threads = Executor.for_ram(library, RamOptions.on(domains), threads=8)  # zero takes 7/8 of the cores
 var shared = Executor.on_pool(library, fork_union_pool)                       # borrows a fu_pool_t
 var streams = Executor.for_vram(library, VramOptions.on(devices))             # one host thread, a stream per device
-threads.drain(Mood.SPINNING)                                                # waits for every call, then keeps spinning
+threads.drain(Mood.SPINNING)                                                # waits until no call holds it, then keeps spinning
 ```
 
-Calls on one executor start in submission order, so threads that genuinely overlap take one executor apiece.
-A submission finding the executor's deferred table full finishes at once with `Status.CONTENDED`.
+An executor runs one call at a time, so threads that genuinely overlap take one executor apiece.
+A call finding another one holding its executor finishes at once with `Status.CONTENDED`.
 
 ## Arenas
 

@@ -1,7 +1,14 @@
-// The binding suite: the Node addon first, then the WebAssembly module under Node, both over
-// whichever C library the build linked. The checkpoint is the one `UFORM_TEST_CHECKPOINT` names, or
-// else stand-in bytes only the stub loads, so widths come from the model's description and only
-// text, where every byte is a token, pins exact token counts.
+/**
+ *  @file javascript/uform.test.js
+ *  @author Ash Vardanian
+ *  @date October 18, 2026
+ *  @brief The binding suite: the Node addon first, then the WebAssembly module under Node, both
+ *      over whichever C library the build linked.
+ *
+ *  The checkpoint is the one `UFORM_TEST_CHECKPOINT` names, or else stand-in bytes only the stub
+ *  loads, so widths come from the model's description and only text, where every byte is a token,
+ *  pins exact token counts.
+ */
 const test = require("node:test");
 const assert = require("node:assert");
 const fs = require("node:fs");
@@ -93,15 +100,15 @@ test("names come from the C tables", () => {
   assert.strictEqual(uform.Objective.Joint, "joint");
 });
 
-test("executors: RAM spawns, VRAM and borrowed pools refuse with their statuses", () => {
-  const executor = Executor.forRam({ threads: 2, deferredLimit: 4 });
+test("executors: RAM spawns, while VRAM without a device and a null pool refuse", () => {
+  const executor = Executor.forRam({ threads: 2 });
   executor.drain(uform.Mood.Spinning);
   throwsStatus(() => executor.drain("dozing"), Status.InvalidArgument);
   executor.free();
   executor.free();
   throwsStatus(() => new Arena(executor), Status.InvalidArgument);
   throwsStatus(() => Executor.forVram({ devices: [0] }), Status.Device);
-  throwsStatus(() => Executor.onPool(1n), Status.Unsupported);
+  throwsStatus(() => Executor.onPool(0n), Status.InvalidArgument);
   assert.throws(() => new Executor(Symbol(), {}), (error) => error.code === Status.InvalidArgument);
 });
 
@@ -176,7 +183,6 @@ test("receivers choose completion and the verb stays: blocking and deferred agre
   assert.strictEqual(model.on(executor).describe().dimensions, dimensions);
 
   const call = model.deferred(executor).textEncode(["hello"], arena);
-  assert.strictEqual(call.status, Status.Deferred);
   const awaited = await call;
   assert.strictEqual(call.status, Status.Success);
   assert.deepStrictEqual(Array.from(awaited.embeddings.data), reference.hello);
@@ -192,26 +198,30 @@ test("receivers choose completion and the verb stays: blocking and deferred agre
   throwsStatus(() => model.deferred(undefined), Status.InvalidArgument);
 });
 
-test("a deferred call holds its arena until final, so a second one is contended", async () => {
+test("a final deferred call gives back its executor and its arena at once", async () => {
   using executor = Executor.forRam();
   using model = Model.loadRam(checkpointPath);
   using arena = new Arena(executor);
-  const first = model.deferred(executor).textEncode(["first"], arena);
-  const second = model.deferred(executor).textEncode(["second"], arena);
-  assert.strictEqual(second.status, Status.Contended);
-  await assert.rejects(Promise.resolve(second), (error) => error.code === Status.Contended);
-  const landed = await first;
-  assert.strictEqual(landed.embeddings.rows, 1);
+  const first = await model.deferred(executor).textEncode(["first"], arena);
+  assert.strictEqual(first.embeddings.rows, 1);
+  const second = await model.deferred(executor).textEncode(["second", "third"], arena);
+  assert.strictEqual(second.embeddings.rows, 2);
   executor.drain();
 });
 
-test("a full deferred table refuses the next submission", () => {
-  using executor = Executor.forRam({ deferredLimit: 1 });
+test("a call naming an arena another call holds throws contended without running", () => {
   using model = Model.loadRam(checkpointPath);
-  const first = model.deferred(executor).textEncode(["one"], new Arena(executor));
-  const second = model.deferred(executor).textEncode(["two"], new Arena(executor));
-  assert.strictEqual(second.status, Status.Contended);
-  assert.strictEqual(first.wait().embeddings.rows, 1);
+  using arena = new Arena();
+  const refused = [];
+  const progress = () => {
+    try {
+      model.textEncode(["c"], arena);
+    } catch (error) {
+      refused.push(error.code);
+    }
+  };
+  assert.strictEqual(model.textEncode(["a", "b"], arena, { progress }).embeddings.rows, 2);
+  assert.ok(refused.length > 0 && refused.every((code) => code === Status.Contended));
 });
 
 test("pixels take ImageData and RGB alike", () => {
@@ -282,7 +292,7 @@ test("classes pin by their C names, and the GPU listing answers", () => {
   const description = model.describe();
   assert.strictEqual(description.cpuClass, "serial");
   assert.strictEqual(description.gpuClass, null);
-  throwsStatus(() => Model.loadRam(checkpointPath, { cpuClass: "intel-pentium" }), Status.UnknownKind);
+  throwsStatus(() => Model.loadRam(checkpointPath, { cpuClass: "intel-pentium" }), Status.InvalidArgument);
   Executor.forRam({ cpuClass: "serial" }).free();
 });
 

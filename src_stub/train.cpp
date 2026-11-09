@@ -25,11 +25,10 @@ char const *uform_modality_name(uform_modality_t modality) {
     }
 }
 
-uform_modality_t uform_modality_from_name(uform_bytes_view_t name) {
-    if (named(name, "image")) return uform_modality_image_k;
-    if (named(name, "video")) return uform_modality_video_k;
-    if (named(name, "audio")) return uform_modality_audio_k;
-    return uform_modality_text_k;
+uform_status_t uform_modality_from_name(uform_bytes_view_t name, uform_modality_t *modality) {
+    return read_name<uform_modality_t>(
+        name, {uform_modality_text_k, uform_modality_image_k, uform_modality_video_k, uform_modality_audio_k},
+        uform_modality_name, modality);
 }
 
 char const *uform_objective_name(uform_objective_t objective) {
@@ -41,10 +40,10 @@ char const *uform_objective_name(uform_objective_t objective) {
     }
 }
 
-uform_objective_t uform_objective_from_name(uform_bytes_view_t name) {
-    if (named(name, "contrastive")) return uform_objective_contrastive_k;
-    if (named(name, "joint")) return uform_objective_joint_k;
-    return uform_objective_masked_k;
+uform_status_t uform_objective_from_name(uform_bytes_view_t name, uform_objective_t *objective) {
+    return read_name<uform_objective_t>(
+        name, {uform_objective_masked_k, uform_objective_contrastive_k, uform_objective_joint_k}, uform_objective_name,
+        objective);
 }
 
 char const *uform_negatives_name(uform_negatives_t negatives) {
@@ -55,8 +54,9 @@ char const *uform_negatives_name(uform_negatives_t negatives) {
     }
 }
 
-uform_negatives_t uform_negatives_from_name(uform_bytes_view_t name) {
-    return named(name, "named") ? uform_negatives_named_k : uform_negatives_ambient_k;
+uform_status_t uform_negatives_from_name(uform_bytes_view_t name, uform_negatives_t *negatives) {
+    return read_name<uform_negatives_t>(name, {uform_negatives_ambient_k, uform_negatives_named_k},
+                                        uform_negatives_name, negatives);
 }
 
 char const *uform_multimem_tier_name(uform_multimem_tier_t tier) {
@@ -67,8 +67,9 @@ char const *uform_multimem_tier_name(uform_multimem_tier_t tier) {
     }
 }
 
-uform_multimem_tier_t uform_multimem_tier_from_name(uform_bytes_view_t name) {
-    return named(name, "peer-read") ? uform_multimem_tier_peer_read_k : uform_multimem_tier_switch_reduced_k;
+uform_status_t uform_multimem_tier_from_name(uform_bytes_view_t name, uform_multimem_tier_t *tier) {
+    return read_name<uform_multimem_tier_t>(
+        name, {uform_multimem_tier_switch_reduced_k, uform_multimem_tier_peer_read_k}, uform_multimem_tier_name, tier);
 }
 
 void uform_mesh_bootstrap(uform_mesh_bootstrap_t *arguments) {

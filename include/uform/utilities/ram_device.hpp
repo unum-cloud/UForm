@@ -89,6 +89,9 @@ class pool_view_t {
         return fu_pool_threads_count(pool_, &threads) == fu_success_k ? threads : 0;
     }
 
+    /** The ForkUnion pool itself, for the verbs this view does not wrap. */
+    [[nodiscard]] fu_pool_t pool() const noexcept { return pool_; }
+
   private:
 
     /** The pool every dispatch runs on, owned elsewhere. */

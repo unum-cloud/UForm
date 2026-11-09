@@ -26,9 +26,9 @@ use std::path::Path;
 use crate::types::{
     check, fail, lower_progress, path_view, read_spelling, spelling, uform_arena_t, uform_bytes_view_t,
     uform_completion_blocking_k, uform_completion_t, uform_executor_t, uform_gpu_class_t, uform_outcome_t,
-    uform_progress_t, uform_rows_view_t, uform_scalar_t, uform_tape_view_t, Accepts, Arena, Callbacks, Calling,
-    Completion, Deferring, Error, Executor, Exported, GPUClass, Gathered, Handles, On, ProgressCallback, Result, Rows,
-    Scalar, Status, TapeView,
+    uform_progress_t, uform_rows_view_t, uform_scalar_t, uform_status_t, uform_tape_view_t, Accepts, Arena, Callbacks,
+    Calling, Completion, Deferring, Error, Executor, Exported, GPUClass, Gathered, Handles, On, ProgressCallback,
+    Result, Rows, Scalar, Status, TapeView,
 };
 
 // region: Raw Declarations
@@ -172,13 +172,13 @@ pub struct uform_trainer_save_t {
 
 extern "C" {
     pub fn uform_modality_name(modality: uform_modality_t) -> *const c_char;
-    pub fn uform_modality_from_name(name: uform_bytes_view_t) -> uform_modality_t;
+    pub fn uform_modality_from_name(name: uform_bytes_view_t, modality: *mut uform_modality_t) -> uform_status_t;
     pub fn uform_objective_name(objective: uform_objective_t) -> *const c_char;
-    pub fn uform_objective_from_name(name: uform_bytes_view_t) -> uform_objective_t;
+    pub fn uform_objective_from_name(name: uform_bytes_view_t, objective: *mut uform_objective_t) -> uform_status_t;
     pub fn uform_negatives_name(negatives: uform_negatives_t) -> *const c_char;
-    pub fn uform_negatives_from_name(name: uform_bytes_view_t) -> uform_negatives_t;
+    pub fn uform_negatives_from_name(name: uform_bytes_view_t, negatives: *mut uform_negatives_t) -> uform_status_t;
     pub fn uform_multimem_tier_name(tier: uform_multimem_tier_t) -> *const c_char;
-    pub fn uform_multimem_tier_from_name(name: uform_bytes_view_t) -> uform_multimem_tier_t;
+    pub fn uform_multimem_tier_from_name(name: uform_bytes_view_t, tier: *mut uform_multimem_tier_t) -> uform_status_t;
 
     pub fn uform_mesh_bootstrap(arguments: *mut uform_mesh_bootstrap_t);
     pub fn uform_mesh_describe(arguments: *mut uform_mesh_describe_t);
@@ -233,9 +233,7 @@ impl FromStr for Modality {
     type Err = Error;
 
     /// Calls `uform_modality_from_name`.
-    fn from_str(text: &str) -> Result<Self> {
-        read_spelling(text, uform_modality_from_name, uform_modality_name, Modality::from_raw)
-    }
+    fn from_str(text: &str) -> Result<Self> { read_spelling(text, uform_modality_from_name, Modality::from_raw) }
 }
 
 /// Which losses a step relaxes, one enumerator per combination the engine trains.
@@ -275,14 +273,7 @@ impl FromStr for Objective {
     type Err = Error;
 
     /// Calls `uform_objective_from_name`.
-    fn from_str(text: &str) -> Result<Self> {
-        read_spelling(
-            text,
-            uform_objective_from_name,
-            uform_objective_name,
-            Objective::from_raw,
-        )
-    }
+    fn from_str(text: &str) -> Result<Self> { read_spelling(text, uform_objective_from_name, Objective::from_raw) }
 }
 
 /// Which pairs the contrastive loss pushes apart.
@@ -319,14 +310,7 @@ impl FromStr for Negatives {
     type Err = Error;
 
     /// Calls `uform_negatives_from_name`.
-    fn from_str(text: &str) -> Result<Self> {
-        read_spelling(
-            text,
-            uform_negatives_from_name,
-            uform_negatives_name,
-            Negatives::from_raw,
-        )
-    }
+    fn from_str(text: &str) -> Result<Self> { read_spelling(text, uform_negatives_from_name, Negatives::from_raw) }
 }
 
 /// How a mesh's NVLink domains reduce.
@@ -364,12 +348,7 @@ impl FromStr for MultimemTier {
 
     /// Calls `uform_multimem_tier_from_name`.
     fn from_str(text: &str) -> Result<Self> {
-        read_spelling(
-            text,
-            uform_multimem_tier_from_name,
-            uform_multimem_tier_name,
-            MultimemTier::from_raw,
-        )
+        read_spelling(text, uform_multimem_tier_from_name, MultimemTier::from_raw)
     }
 }
 
@@ -1007,7 +986,7 @@ impl Mesh {
 /// ```no_run
 /// use uform::*;
 ///
-/// let executor = unsafe { Executor::for_vram(&[0], None, &[], None, &[], 0, 0)? };
+/// let executor = unsafe { Executor::for_vram(&[0], None, &[], None, &[], 0)? };
 /// let trainer = Trainer::init_vram(&executor, TrainerInitVramConfig {
 ///     depth: 12,
 ///     hidden: 512,
@@ -1394,7 +1373,7 @@ mod tests {
     /// the device's fault.
     #[test]
     fn a_build_without_gpus_refuses_to_train() -> Result<()> {
-        let executor = Executor::for_ram(&[], None, 1, 0)?;
+        let executor = Executor::for_ram(&[], None, 1)?;
         let options = MeshOptions {
             directory: Path::new("/tmp"),
             job: "uform-rust",
@@ -1434,7 +1413,7 @@ mod tests {
     #[test]
     fn steps_check_their_lists_before_the_call() -> Result<()> {
         let trainer = null_trainer();
-        let executor = Executor::for_ram(&[], None, 1, 0)?;
+        let executor = Executor::for_ram(&[], None, 1)?;
         let receiver = trainer.on(&executor);
         let modalities = [Modality::Text, Modality::Image];
         let contents = ["a caption".as_bytes(), b"\xff\xd8\xff".as_slice()];

@@ -257,7 +257,7 @@ class ConfigMismatchError(Error, ValueError):
     """The request contradicts a frozen configuration, like resuming a checkpoint of another geometry."""
 
 class ContendedError(Error):
-    """An executor's deferred table or an arena is already serving another call."""
+    """Another call already holds the executor or the arena."""
 
 class CancelledError(Error):
     """A progress handler stopped the call, which published nothing."""
@@ -279,10 +279,9 @@ class Executor:
         threads: int = 0,
         *,
         memory_domains: Sequence[int] | None = None,
-        deferred_limit: int = 0,
         cpu_class: CPUClass | None = None,
     ) -> Executor:
-        """Spawns host threads for RAM-resident models. Calls `uform_executor_for_ram`."""
+        """Creates an executor of host threads for RAM-resident models. Calls `uform_executor_for_ram`."""
         ...
 
     @classmethod
@@ -292,7 +291,6 @@ class Executor:
         /,
         *,
         memory_domains: Sequence[int] | None = None,
-        deferred_limit: int = 0,
         cpu_class: CPUClass | None = None,
     ) -> Executor:
         """Borrows a ForkUnion pool; raises `UnsupportedError` until borrowing is designed. Calls `uform_executor_on_pool`."""
@@ -304,7 +302,6 @@ class Executor:
         devices: Sequence[int] | None = None,
         *,
         scratch_limit: int = 0,
-        deferred_limit: int = 0,
         gpu_class: GPUClass | None = None,
         memory_domains: Sequence[int] | None = None,
         cpu_class: CPUClass | None = None,
@@ -313,7 +310,7 @@ class Executor:
         ...
 
     def drain(self, mood: Mood = ...) -> None:
-        """Waits for every call submitted before it, then sets the idle mood. Calls `uform_executor_drain`."""
+        """Waits until no call holds the executor, then sets its mood until the next call. Calls `uform_executor_drain`."""
         ...
 
     def __enter__(self) -> Self: ...

@@ -5,7 +5,7 @@
 //! ```no_run
 //! use uform::*;
 //!
-//! let executor = Executor::for_ram(&[], None, 0, 0)?;
+//! let executor = Executor::for_ram(&[], None, 0)?;
 //! let mut arena = Arena::new_in(&executor)?;
 //! let model = Model::load_ram("model.safetensors")?;
 //! let texts = ["a photo of a cat", "a dog on the beach"];

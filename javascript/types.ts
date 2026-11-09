@@ -254,18 +254,14 @@ export interface ExecutorForRamConfig {
   cpuClass?: string;
   /** Threads to spawn; absent takes 7/8 of the cores the domains carry. */
   threads?: number;
-  /** Deferred calls tracked at once; absent takes a default. */
-  deferredLimit?: number;
 }
 
-/** Where the borrowed pool of a RAM executor is placed, and how many deferred calls it tracks. */
+/** Where the borrowed pool of a RAM executor places its models. */
 export interface ExecutorOnPoolConfig {
   /** NUMA node IDs of the models it will drive; absent derives every node. */
   memoryDomains?: number[];
   /** The CPU class to dispatch as, spelled like "intel-haswell"; absent derives the CPU's own. */
   cpuClass?: string;
-  /** Deferred calls tracked at once; absent takes a default. */
-  deferredLimit?: number;
 }
 
 /** Which devices a VRAM executor drives, and on which streams. */
@@ -284,8 +280,6 @@ export interface ExecutorForVramConfig {
   streams?: bigint[];
   /** Ceiling on scratch bytes per device; absent lets scratch grow as batches ask. */
   scratchLimit?: number;
-  /** Deferred calls tracked at once; absent takes a default. */
-  deferredLimit?: number;
 }
 
 /** The token the factories hold, which is what a direct `new Executor` cannot produce. */
@@ -311,7 +305,8 @@ export class Executor implements Disposable {
     this.compiled = compiled;
   }
 
-  /** Spawns host threads for RAM-resident models. Calls `uform_executor_for_ram`. */
+  /** Creates an executor of host threads for RAM-resident models.
+   *  Calls `uform_executor_for_ram`. */
   static forRam(config: ExecutorForRamConfig = {}): Executor {
     return new Executor(executorSeal, backend().Executor.forRam(config));
   }
@@ -328,8 +323,8 @@ export class Executor implements Disposable {
   }
 
   /**
-   *  Waits for every call submitted to this executor so far, then idles in
-   *  `mood`. Calls `uform_executor_drain`.
+   *  Waits until no call holds this executor, then keeps `mood` until its next
+   *  call. Calls `uform_executor_drain`.
    *  @param [mood=Mood.Parked] - What the threads or streams do once they go idle.
    */
   drain(mood: Mood = Mood.Parked): void {

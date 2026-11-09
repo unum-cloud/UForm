@@ -17,9 +17,7 @@ using namespace unum::uform;
 template <auto verb_, typename arguments_type_>
 static void refuse(arguments_type_ *arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
-    uform_arena_t arena = nullptr;
-    if constexpr (requires { arguments->arena; }) arena = arguments->arena;
-    call_outcome_t outcome(arguments->outcome, arena);
+    call_outcome_t outcome(*arguments);
     if constexpr (requires { *arguments->mesh = nullptr; }) *arguments->mesh = nullptr;
     if constexpr (requires { *arguments->trainer = nullptr; }) *arguments->trainer = nullptr;
     if (!arguments->executor || !std::holds_alternative<vram_executor_t>(arguments->executor->executor))
@@ -36,7 +34,7 @@ UFORM_EXPORT void uform_mesh_describe(uform_mesh_describe_t *arguments) {
     propagate_error(uform_status_unsupported_k, outcome, "This build trains on no GPU");
 }
 
-UFORM_EXPORT void uform_mesh_free(uform_mesh_t mesh) { finish_calls_using(mesh); }
+UFORM_EXPORT void uform_mesh_free(uform_mesh_t) {}
 
 UFORM_EXPORT void uform_trainer_init_vram(uform_trainer_init_vram_t *arguments) {
     refuse<uform_trainer_init_vram>(arguments);
@@ -46,6 +44,6 @@ UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t *arguments) { refuse<u
 
 UFORM_EXPORT void uform_trainer_save(uform_trainer_save_t *arguments) { refuse<uform_trainer_save>(arguments); }
 
-UFORM_EXPORT void uform_trainer_free(uform_trainer_t trainer) { finish_calls_using(trainer); }
+UFORM_EXPORT void uform_trainer_free(uform_trainer_t) {}
 
 } // extern "C"

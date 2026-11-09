@@ -30,19 +30,19 @@ extern "C" {
 
 UFORM_EXPORT void uform_image_encode(uform_image_encode_t *arguments) {
     if (submitted<uform_image_encode>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    call_outcome_t outcome(*arguments);
     refuse_files(*arguments, outcome);
 }
 
 UFORM_EXPORT void uform_video_encode(uform_video_encode_t *arguments) {
     if (submitted<uform_video_encode>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    call_outcome_t outcome(*arguments);
     refuse_files(*arguments, outcome);
 }
 
 UFORM_EXPORT void uform_audio_encode(uform_audio_encode_t *arguments) {
     if (submitted<uform_audio_encode>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    call_outcome_t outcome(*arguments);
     refuse_files(*arguments, outcome);
 }
 

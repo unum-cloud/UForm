@@ -82,7 +82,7 @@ struct Status(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     comptime CONFIG_MISMATCH = Self(13)
     """The request contradicts a frozen configuration, like resuming a checkpoint of another geometry."""
     comptime CONTENDED = Self(14)
-    """The call was refused rather than waited for, like a submission to a full deferred table."""
+    """The call was refused rather than waited for: another call holds its executor or its arena."""
     comptime CANCELLED = Self(15)
     """A progress handler asked the call to stop; it unwound and published nothing."""
     comptime UNSUPPORTED = Self(16)
@@ -306,9 +306,9 @@ struct Mood(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     var code: c_int
     """The raw `uform_mood_t` value the ABI exchanges."""
     comptime PARKED = Self(0)
-    """Sleep on futexes or events, freeing the core; the next call pays a wake-up."""
+    """Sleep in the kernel until the next call, freeing the cores."""
     comptime SPINNING = Self(1)
-    """Poll them, trading a core for the lowest wake-up latency."""
+    """Keep polling, trading the cores for the lowest wake-up latency."""
 
 
 @fieldwise_init
@@ -520,8 +520,8 @@ comptime OutcomeStatus = def(Pointer[Outcome, MutAnyOrigin]) thin abi("C") -> c_
 comptime NameOf = def(c_int) thin abi("C") -> CString
 """The `_name` family: an enumerator's static spelling."""
 
-comptime FromName = def(BytesViewArguments) thin abi("C") -> c_int
-"""The `_from_name` family: reads a spelling back into its enumerator."""
+comptime FromName = def(BytesViewArguments, Pointer[c_int, MutAnyOrigin]) thin abi("C") -> c_int
+"""The `_from_name` family: reads a spelling back into its enumerator, or fails with `INVALID_ARGUMENT`."""
 
 comptime GPUDevices = Verb[GPUDevicesArguments]
 """`uform_gpu_devices`."""
@@ -1030,7 +1030,6 @@ struct ExecutorForRamArguments(ImplicitlyCopyable):
     var outcome: Optional[Pointer[Outcome, MutUntrackedOrigin]]
     var ram: RamOptionsArguments
     var threads: c_size_t
-    var deferred_limit: c_size_t
 
 
 @fieldwise_init
@@ -1041,7 +1040,6 @@ struct ExecutorOnPoolArguments(ImplicitlyCopyable):
     var outcome: Optional[Pointer[Outcome, MutUntrackedOrigin]]
     var ram: RamOptionsArguments
     var pool: Address
-    var deferred_limit: c_size_t
 
 
 @fieldwise_init
@@ -1054,7 +1052,6 @@ struct ExecutorForVramArguments(ImplicitlyCopyable):
     var ram: RamOptionsArguments
     var streams: Optional[Pointer[Address, ImmUntrackedOrigin]]
     var scratch_limit: c_size_t
-    var deferred_limit: c_size_t
 
 
 @fieldwise_init
@@ -1094,8 +1091,8 @@ struct Executor:
     """The threads or streams a verb runs on, freed once it and every device arena it made go out of scope.
 
     `Executor(library)` owns nothing: every verb handed it runs on the calling thread. The spawning
-    constructors fix a kind that must match the residency of every model they drive. Calls on one
-    executor start in submission order, so threads that genuinely overlap take one apiece.
+    constructors fix a kind that must match the residency of every model they drive. An executor
+    runs one call at a time, so threads that genuinely overlap take one apiece.
     """
 
     var library: Library
@@ -1123,15 +1120,14 @@ struct Executor:
     def for_ram[
         ram_origin: ImmOrigin, //
     ](
-        library: Library, ram: RamOptions[ram_origin] = RamOptions(), threads: Int = 0, deferred_limit: Int = 0
+        library: Library, ram: RamOptions[ram_origin] = RamOptions(), threads: Int = 0
     ) raises Error -> Self:
-        """Spawns host threads for RAM-resident models. Calls `uform_executor_for_ram`.
+        """Creates an executor of host threads for RAM-resident models. Calls `uform_executor_for_ram`.
 
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
             ram: The memory domains of the models it will drive; copied, not borrowed.
             threads: Threads to spawn; zero takes 7/8 of the cores those domains carry.
-            deferred_limit: Deferred calls it tracks at once; zero takes a default.
 
         Raises:
             `Error` if the domains cannot be resolved or the OS refuses the threads.
@@ -1146,7 +1142,6 @@ struct Executor:
                 outcome.unsafe_origin_cast[MutUntrackedOrigin](),
                 ram.arguments(),
                 c_size_t(threads),
-                c_size_t(deferred_limit),
             ),
             library.symbols().executor_for_ram,
         )
@@ -1156,7 +1151,7 @@ struct Executor:
     @staticmethod
     def on_pool[
         ram_origin: ImmOrigin, //
-    ](library: Library, pool: Address, ram: RamOptions[ram_origin] = RamOptions(), deferred_limit: Int = 0) raises Error -> Self:
+    ](library: Library, pool: Address, ram: RamOptions[ram_origin] = RamOptions()) raises Error -> Self:
         """Schedules onto a borrowed ForkUnion pool, so UForm, USearch and UStore in one process share one
         set of threads. Calls `uform_executor_on_pool`.
 
@@ -1164,7 +1159,6 @@ struct Executor:
             library: The loaded engine, kept so the shared object stays mapped.
             pool: A live ForkUnion `fu_pool_t`, which must outlive the executor.
             ram: The memory domains of the models it will drive; copied, not borrowed.
-            deferred_limit: Deferred calls it tracks at once; zero takes a default.
 
         Raises:
             `Error` if the pool or the domains are refused.
@@ -1179,7 +1173,6 @@ struct Executor:
                 outcome.unsafe_origin_cast[MutUntrackedOrigin](),
                 ram.arguments(),
                 pool,
-                c_size_t(deferred_limit),
             ),
             library.symbols().executor_on_pool,
         )
@@ -1195,10 +1188,9 @@ struct Executor:
         ram: RamOptions[ram_origin] = RamOptions(),
         streams: Address = NULL_ADDRESS,
         scratch_limit: Int = 0,
-        deferred_limit: Int = 0,
     ) raises Error -> Self:
-        """Opens one submission stream on every named device, all driven by the calling thread, and host
-        threads for the decoding the devices cannot do. Calls `uform_executor_for_vram`.
+        """Opens one submission stream on every named device, all driven by the thread running the call,
+        and host threads for the decoding the devices cannot do. Calls `uform_executor_for_vram`.
 
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
@@ -1207,7 +1199,6 @@ struct Executor:
             streams: Borrowed CUDA streams, one per device; any but `NULL_ADDRESS` reports `UNSUPPORTED`
                 until borrowing is wired.
             scratch_limit: Ceiling on scratch bytes per device; zero lets scratch grow as batches ask.
-            deferred_limit: Deferred calls it tracks at once; zero takes a default.
 
         Raises:
             `Error` if a device cannot be selected, or with `UNSUPPORTED` in a build without one.
@@ -1227,7 +1218,6 @@ struct Executor:
                 ram.arguments(),
                 borrowed,
                 c_size_t(scratch_limit),
-                c_size_t(deferred_limit),
             ),
             library.symbols().executor_for_vram,
         )
@@ -1235,7 +1225,7 @@ struct Executor:
         return Self(library=library, address=created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0])
 
     def drain(self, mood: Mood = Mood.PARKED) raises Error:
-        """Waits for every call submitted before the drain, then adopts `mood` whenever it next idles.
+        """Waits until no call holds the executor, then applies `mood` until its next call.
         Calls `uform_executor_drain`.
 
         Raises:

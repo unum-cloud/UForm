@@ -208,7 +208,7 @@ extern "C" {
 
 UFORM_EXPORT void uform_text_encode(uform_text_encode_t *arguments) {
     if (submitted<uform_text_encode>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    call_outcome_t outcome(*arguments);
     uform_tape_view_t const tape = arguments->texts;
     text_packer_t packer {tape_of<b8_t const>(tape, arguments->count)};
     encode_call(*arguments, packer, tape, uform_scalar_u8_k, {tape.data, tape.offsets}, outcome);
@@ -216,7 +216,7 @@ UFORM_EXPORT void uform_text_encode(uform_text_encode_t *arguments) {
 
 UFORM_EXPORT void uform_text_choose(uform_text_choose_t *arguments) {
     if (submitted<uform_text_choose>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    call_outcome_t outcome(*arguments);
     uform_tape_view_t const tape = arguments->texts;
     choice_packer_t packer {tape_of<b8_t const>(tape, arguments->count)};
     encode_call(
@@ -227,7 +227,7 @@ UFORM_EXPORT void uform_text_choose(uform_text_choose_t *arguments) {
 
 UFORM_EXPORT void uform_image_encode_pixels(uform_image_encode_pixels_t *arguments) {
     if (submitted<uform_image_encode_pixels>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    call_outcome_t outcome(*arguments);
     uform_tape_view_t const tape = arguments->pixels;
     std::size_t const count = arguments->count;
     pixels_packer_t packer {tape_of<b8_t const>(tape, count),
@@ -239,7 +239,7 @@ UFORM_EXPORT void uform_image_encode_pixels(uform_image_encode_pixels_t *argumen
 
 UFORM_EXPORT void uform_audio_encode_samples(uform_audio_encode_samples_t *arguments) {
     if (submitted<uform_audio_encode_samples>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    call_outcome_t outcome(*arguments);
     uform_tape_view_t const tape = arguments->samples;
     samples_packer_t packer {tape_of<f32_t const>(tape, arguments->count), arguments->sample_rate};
     encode_call(*arguments, packer, tape, uform_scalar_f32_k, {tape.data, tape.offsets}, outcome);

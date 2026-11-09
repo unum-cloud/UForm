@@ -257,7 +257,7 @@ extern "C" {
 
 UFORM_EXPORT void uform_model_load_ram(uform_model_load_ram_t *arguments) {
     if (submitted<uform_model_load_ram>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     ue::precision_t precision {};
     if (rejects_load(*arguments, arguments->path, precision, outcome)) return;
     load_ram(arguments->model, arguments->executor, arguments->ram, map_checkpoint(arguments->path), precision,
@@ -266,7 +266,7 @@ UFORM_EXPORT void uform_model_load_ram(uform_model_load_ram_t *arguments) {
 
 UFORM_EXPORT void uform_model_load_ram_buffer(uform_model_load_ram_buffer_t *arguments) {
     if (submitted<uform_model_load_ram_buffer>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     ue::precision_t precision {};
     if (rejects_load(*arguments, arguments->buffer, precision, outcome)) return;
     load_ram(arguments->model, arguments->executor, arguments->ram, view_checkpoint(arguments->buffer), precision,
@@ -275,7 +275,7 @@ UFORM_EXPORT void uform_model_load_ram_buffer(uform_model_load_ram_buffer_t *arg
 
 UFORM_EXPORT void uform_model_load_vram(uform_model_load_vram_t *arguments) {
     if (submitted<uform_model_load_vram>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     ue::precision_t precision {};
     if (rejects_load(*arguments, arguments->path, precision, outcome)) return;
     load_vram(arguments->model, arguments->executor, arguments->vram, map_checkpoint(arguments->path), precision,
@@ -284,7 +284,7 @@ UFORM_EXPORT void uform_model_load_vram(uform_model_load_vram_t *arguments) {
 
 UFORM_EXPORT void uform_model_load_vram_buffer(uform_model_load_vram_buffer_t *arguments) {
     if (submitted<uform_model_load_vram_buffer>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     ue::precision_t precision {};
     if (rejects_load(*arguments, arguments->buffer, precision, outcome)) return;
     load_vram(arguments->model, arguments->executor, arguments->vram, view_checkpoint(arguments->buffer), precision,
@@ -293,7 +293,7 @@ UFORM_EXPORT void uform_model_load_vram_buffer(uform_model_load_vram_buffer_t *a
 
 UFORM_EXPORT void uform_model_describe(uform_model_describe_t *arguments) {
     if (submitted<uform_model_describe>(arguments)) return;
-    call_outcome_t outcome(arguments->outcome);
+    call_outcome_t outcome(*arguments);
     if (!arguments->model || !arguments->description)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The model and description must not be null"),
                void();
@@ -319,7 +319,8 @@ UFORM_EXPORT void uform_model_describe(uform_model_describe_t *arguments) {
 }
 
 UFORM_EXPORT void uform_model_free(uform_model_t model) {
-    finish_calls_using(model);
+    if (!model) return;
+    wait_named_calls(model->named_calls);
     delete model;
 }
 

@@ -1,15 +1,16 @@
-//
-//  Test.swift UForm
-//
-//  The boundary suite: what the binding itself decides - name tables, handle lifetimes, tape
-//  lowering, which surfaces a call keeps, the rows it wrote, the progress trampoline, the arena
-//  views, and how blocking and deferred calls complete. The checkpoint is the one
-//  `UFORM_TEST_CHECKPOINT` names, or else stand-in bytes only the stub loads, so widths come from
-//  the model's description and only text, a byte per token, pins counts.
-//
-//  Suites run in parallel and every test gets a fresh instance, so each test spawns the
-//  executor it drives.
-//
+/**
+ *  @file swift/Test.swift
+ *  @author Ash Vardanian
+ *  @date October 18, 2026
+ *  @brief The boundary suite: what the binding itself decides - name tables, handle lifetimes, tape
+ *      lowering, which surfaces a call keeps, the rows it wrote, the progress trampoline, the arena
+ *      views, and how blocking and deferred calls complete.
+ *
+ *  The checkpoint is the one `UFORM_TEST_CHECKPOINT` names, or else stand-in bytes only the stub
+ *  loads, so widths come from the model's description and only text, a byte per token, pins
+ *  counts. Suites run in parallel and every test gets a fresh instance, so each test spawns the
+ *  executor it drives.
+ */
 
 import Foundation
 import Testing
@@ -102,6 +103,11 @@ private final class Reports: @unchecked Sendable {
     var completed = 0
 }
 
+/// The statuses a handler's own calls failed with; a handler never runs on two threads at once.
+private final class Refusals: @unchecked Sendable {
+    var statuses: [UForm.Status?] = []
+}
+
 @Suite("Vocabulary")
 struct VocabularyTests {
 
@@ -155,7 +161,7 @@ struct VocabularyTests {
 struct ExecutorTests {
 
     @Test func factoriesMirrorTheirConstructors() throws {
-        let executor = try Executor.forRam(memoryDomains: [], threads: 2, deferredLimit: 4)
+        let executor = try Executor.forRam(memoryDomains: [], threads: 2)
         try executor.drain(mood: .spinning)
         _ = try Arena(on: executor)
         _ = try Arena()
@@ -424,24 +430,36 @@ struct DeferredTests {
         let here = values(try model.textEncode(texts, arena: try Arena()).embeddings)
         let blocking = values(try model.on(executor).textEncode(texts, arena: try Arena(on: executor)).embeddings)
         let call = try model.deferred(executor).textEncode(texts, arena: try Arena(on: executor))
-        #expect(call.status == .deferred)
         let deferred = values(try call.wait().embeddings)
         #expect(call.status == .success)
         #expect(here == blocking && blocking == deferred)
         #expect(values(try call.wait().embeddings) == deferred)
     }
 
-    /// A blocking call on the same executor runs the deferred calls submitted before it first.
-    @Test func aBlockingCallRunsTheDeferredOnesBeforeIt() throws {
+    /// A call made from the handler of a call holding the executor finishes `contended` without
+    /// running, and the holding call carries on.
+    @Test func aHeldExecutorRefusesOtherCalls() throws {
         let model = try model()
         let executor = try Executor.forRam()
-        let call = try model.deferred(executor).imageEncode([png()], arena: try Arena(on: executor))
-        #expect(call.status == .deferred)
+        let refusals = Refusals()
+        let config = EncodeConfig(progress: { _, _ in
+            do throws(UFormError) {
+                _ = try model.on(executor).describe()
+                refusals.statuses.append(nil)
+            }
+            catch {
+                refusals.statuses.append(error.status)
+            }
+            return .continue
+        })
+        let call = try model.deferred(executor).textEncode(["a", "b"], arena: try Arena(on: executor), config: config)
+        #expect(try call.wait().embeddings?.count == 2)
+        #expect(!refusals.statuses.isEmpty && refusals.statuses.allSatisfy { $0 == .contended })
         _ = try model.on(executor).describe()
-        #expect(call.status == .success)
     }
 
-    /// Draining runs every earlier call, and the deferred inputs were copied at submission.
+    /// Draining waits until no call holds the executor, and the deferred inputs were copied at
+    /// submission.
     @Test func drainingFinishesTheCopiedCalls() throws {
         let model = try model()
         let executor = try Executor.forRam()
@@ -464,7 +482,6 @@ struct DeferredTests {
             outputs: [.embeddings, .states],
             arena: try Arena(on: executor)
         )
-        #expect(call.status == .deferred)
         let encoded = try await call.value
         #expect(try #require(encoded.states)[0].count > 0 && encoded.embeddings?.count == 1)
     }
@@ -481,33 +498,19 @@ struct DeferredTests {
         #expect(failureStatus(of: try cancelled.wait()) == .cancelled)
     }
 
-    /// A submission finding the deferred table full finishes at once, without waiting for an entry.
-    @Test func aFullDeferredTableRefusesAtOnce() throws {
-        let model = try model()
-        let executor = try Executor.forRam(deferredLimit: 1)
-        let held = try model.deferred(executor).textEncode(["held"], arena: try Arena(on: executor))
-        let refused = try model.deferred(executor).textEncode(["refused"], arena: try Arena(on: executor))
-        #expect(held.status == .deferred)
-        #expect(refused.status == .contended)
-        #expect(failureStatus(of: try refused.wait()) == .contended)
-        #expect(try held.wait().embeddings?.count == 1)
-    }
-
-    /// A deferred call holds its arena until final, so another call naming it meanwhile is refused
-    /// without ending the holder's views, and the arena serves again once the call is final.
-    @Test func aDeferredCallHoldsItsArena() throws {
+    /// A final deferred call gives back its executor and its arena, so both serve the next call.
+    @Test func aFinalDeferredCallGivesBackItsArena() throws {
         let model = try model()
         let executor = try Executor.forRam()
         let arena = try Arena(on: executor)
         let call = try model.deferred(executor).textEncode(["held"], arena: arena)
-        #expect(failureStatus(of: try model.textEncode(["other"], arena: arena)) == .contended)
-        #expect(try model.deferred(executor).textEncode(["other"], arena: arena).status == .contended)
         let held = try call.wait()
         #expect(held.embeddings?.count == 1)
         #expect(try model.textEncode(["other", "again"], arena: arena).embeddings?.count == 2)
     }
 
-    /// Releasing an unfinished call waits for it, so its outcome and copied inputs never dangle.
+    /// Releasing a deferred call waits until it is final, so its outcome and copied inputs never
+    /// dangle.
     @Test func releasingADeferredCallWaitsForIt() throws {
         let model = try model()
         let executor = try Executor.forRam()
@@ -521,7 +524,6 @@ struct DeferredTests {
             arena: try Arena(),
             config: config
         )
-        #expect(call?.status == .deferred)
         call = nil
         #expect(reports.completed == 2)
     }

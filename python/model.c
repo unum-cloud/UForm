@@ -335,7 +335,8 @@ release:
 static char const doc_Model_on[] =                                                             //
     "on(executor) -> On[Model]\n"                                                              //
     "\n"                                                                                       //
-    "A receiver whose verbs block on `executor`, after every call submitted to it before.\n"   //
+    "A receiver whose verbs block on `executor`. A verb that finds another call holding the\n" //
+    "executor raises `ContendedError` without running.\n"                                      //
     "It offers every verb the model does, with the same arguments and answers. Python-only.\n" //
     "\n"                                                                                       //
     "Args:\n"                                                                                  //

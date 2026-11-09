@@ -16,6 +16,13 @@
  *  or @c UFORM_TEST_CHECKPOINT, as written by @c test/tiny_checkpoint.cpp; without either, a small
  *  file is written to the temporary directory, which only the stand-in loads.
  */
+#ifndef UFORM_TEST_STUB
+#define UFORM_TEST_STUB 0
+#endif
+
+#if !UFORM_TEST_STUB   // the stand-in runs every call on its caller, built as C99 without threads to race
+#include <stdatomic.h> // `atomic_int` - the gate a deferred call waits at
+#endif
 #include <stdbool.h> // `bool`
 #include <stdint.h>  // `uint8_t`, `uint32_t`
 #include <stdio.h>   // `printf`, `fopen`, `fwrite`, `remove`
@@ -48,11 +55,10 @@ static uform_bytes_view_t view_of(char const* text) {
 /** Bytes one value of an output @p scalar spans. */
 static size_t scalar_bytes(uform_scalar_t scalar) { return scalar == uform_scalar_f32_k ? 4 : 2; }
 
-static uform_executor_t create_executor(size_t deferred_limit) {
+static uform_executor_t create_executor(void) {
     uform_outcome_t outcome = {0};
     uform_executor_t executor = NULL;
-    uform_executor_for_ram(&(uform_executor_for_ram_t) {
-        .executor = &executor, .outcome = &outcome, .threads = 1, .deferred_limit = deferred_limit});
+    uform_executor_for_ram(&(uform_executor_for_ram_t) {.executor = &executor, .outcome = &outcome, .threads = 2});
     expect(!outcome.message, outcome.message);
     expect(executor != NULL, "A RAM executor must be created");
     return executor;
@@ -142,61 +148,106 @@ static void test_library_probes(void) {
     expect(uform_capabilities_available() != NULL, "The available capabilities must be reported");
 
     uform_status_t const statuses[] = {
-        uform_status_success_k,          uform_status_deferred_k,         uform_status_out_of_memory_k,
-        uform_status_shape_mismatch_k,   uform_status_unsupported_layout_k, uform_status_unknown_kind_k,
-        uform_status_io_k,               uform_status_device_k,           uform_status_malformed_k,
-        uform_status_internal_k,         uform_status_config_mismatch_k,  uform_status_contended_k,
-        uform_status_cancelled_k,        uform_status_unsupported_k,      uform_status_invalid_argument_k,
+        uform_status_success_k,
+        uform_status_deferred_k,
+        uform_status_out_of_memory_k,
+        uform_status_shape_mismatch_k,
+        uform_status_unsupported_layout_k,
+        uform_status_unknown_kind_k,
+        uform_status_io_k,
+        uform_status_device_k,
+        uform_status_malformed_k,
+        uform_status_internal_k,
+        uform_status_config_mismatch_k,
+        uform_status_contended_k,
+        uform_status_cancelled_k,
+        uform_status_unsupported_k,
+        uform_status_invalid_argument_k,
     };
-    for (size_t position = 0; position != sizeof(statuses) / sizeof(statuses[0]); ++position)
-        expect(uform_status_from_name(view_of(uform_status_name(statuses[position]))) == statuses[position],
-               "Every status reads back from its name");
+    for (size_t position = 0; position != sizeof(statuses) / sizeof(statuses[0]); ++position) {
+        uform_status_t read = uform_status_internal_k;
+        expect(
+            uform_status_from_name(view_of(uform_status_name(statuses[position])), &read) == uform_status_success_k &&
+                read == statuses[position],
+            "Every status reads back from its name");
+    }
     expect(strcmp(uform_status_name(uform_status_deferred_k), "deferred") == 0, "The non-final status spells deferred");
     expect(strcmp(uform_status_name(uform_status_out_of_memory_k), "out-of-memory") == 0, "Names are dash-separated");
     expect(strcmp(uform_status_name((uform_status_t)6), "unrecognized") == 0, "An unused value spells unrecognized");
-    expect(uform_status_from_name(view_of("no-such")) == uform_status_invalid_argument_k,
-           "An unrecognized status name is an invalid argument");
+    uform_status_t untouched_status = uform_status_io_k;
+    expect(uform_status_from_name(view_of("no-such"), &untouched_status) == uform_status_invalid_argument_k &&
+               untouched_status == uform_status_io_k,
+           "An unrecognized status name fails and writes nothing");
 
-    uform_scalar_t const scalars[] = {uform_scalar_f64_k,  uform_scalar_f32_k,  uform_scalar_bf16_k,
-                                      uform_scalar_f16_k,  uform_scalar_e5m2_k, uform_scalar_e4m3_k,
-                                      uform_scalar_e3m2_k, uform_scalar_e2m3_k, uform_scalar_i8_k,
-                                      uform_scalar_i4x2_k, uform_scalar_i32_k,  uform_scalar_u8_k,
-                                      uform_scalar_u4x2_k, uform_scalar_u1x8_k};
-    for (size_t position = 0; position != sizeof(scalars) / sizeof(scalars[0]); ++position)
-        expect(uform_scalar_from_name(view_of(uform_scalar_name(scalars[position]))) == scalars[position],
+    uform_scalar_t const scalars[] = {
+        uform_scalar_f64_k,  uform_scalar_f32_k,  uform_scalar_bf16_k, uform_scalar_f16_k, uform_scalar_e5m2_k,
+        uform_scalar_e4m3_k, uform_scalar_e3m2_k, uform_scalar_e2m3_k, uform_scalar_i8_k,  uform_scalar_i4x2_k,
+        uform_scalar_i32_k,  uform_scalar_u8_k,   uform_scalar_u4x2_k, uform_scalar_u1x8_k};
+    for (size_t position = 0; position != sizeof(scalars) / sizeof(scalars[0]); ++position) {
+        uform_scalar_t read = uform_scalar_unknown_k;
+        expect(uform_scalar_from_name(view_of(uform_scalar_name(scalars[position])), &read) == uform_status_success_k &&
+                   read == scalars[position],
                "Every scalar reads back from its name");
+    }
     expect(strcmp(uform_scalar_name(uform_scalar_f32_k), "f32") == 0, "A scalar spells its name");
-    expect(uform_scalar_from_name(view_of("f33")) == uform_scalar_unknown_k, "An unrecognized scalar is unknown");
+    uform_scalar_t untouched_scalar = uform_scalar_f32_k;
+    expect(uform_scalar_from_name(view_of("f33"), &untouched_scalar) == uform_status_invalid_argument_k &&
+               untouched_scalar == uform_scalar_f32_k,
+           "An unrecognized scalar fails and writes nothing");
 
-    expect(uform_mood_from_name(view_of("spinning")) == uform_mood_spinning_k, "A mood reads back from its name");
+    uform_mood_t mood = uform_mood_parked_k;
+    expect(uform_mood_from_name(view_of("spinning"), &mood) == uform_status_success_k && mood == uform_mood_spinning_k,
+           "A mood reads back from its name");
+    expect(uform_mood_from_name(view_of("sleepy"), &mood) == uform_status_invalid_argument_k &&
+               mood == uform_mood_spinning_k,
+           "An unrecognized mood fails rather than reading as parked");
     expect(strcmp(uform_mood_name(uform_mood_parked_k), "parked") == 0, "A mood spells its name");
     uform_modality_t const modalities[] = {uform_modality_text_k, uform_modality_image_k, uform_modality_video_k,
                                            uform_modality_audio_k};
-    for (size_t position = 0; position != 4; ++position)
-        expect(uform_modality_from_name(view_of(uform_modality_name(modalities[position]))) == modalities[position],
+    for (size_t position = 0; position != 4; ++position) {
+        uform_modality_t read = uform_modality_audio_k;
+        expect(uform_modality_from_name(view_of(uform_modality_name(modalities[position])), &read) ==
+                       uform_status_success_k &&
+                   read == modalities[position],
                "Every modality reads back from its name");
+    }
     expect(strcmp(uform_multimem_tier_name(uform_multimem_tier_peer_read_k), "peer-read") == 0,
            "A multimem tier spells its name");
-    expect(uform_multimem_tier_from_name(view_of("peer-read")) == uform_multimem_tier_peer_read_k &&
-               uform_multimem_tier_from_name(view_of("ring")) == uform_multimem_tier_switch_reduced_k,
-           "A multimem tier reads back from its name, and an unrecognized one as switch-reduced");
+    uform_multimem_tier_t tier = uform_multimem_tier_switch_reduced_k;
+    expect(uform_multimem_tier_from_name(view_of("peer-read"), &tier) == uform_status_success_k &&
+               tier == uform_multimem_tier_peer_read_k,
+           "A multimem tier reads back from its name");
+    expect(uform_multimem_tier_from_name(view_of("ring"), &tier) == uform_status_invalid_argument_k &&
+               tier == uform_multimem_tier_peer_read_k,
+           "An unrecognized multimem tier fails rather than reading as switch-reduced");
 
-    for (uform_cpu_class_t code = uform_cpu_class_serial_k; code <= uform_cpu_class_wasm64_extended_k; ++code)
-        expect(uform_cpu_class_from_name(view_of(uform_cpu_class_name(code))) == code,
+    for (uform_cpu_class_t code = uform_cpu_class_serial_k; code <= uform_cpu_class_wasm64_extended_k; ++code) {
+        uform_cpu_class_t read = uform_cpu_class_unknown_k;
+        expect(uform_cpu_class_from_name(view_of(uform_cpu_class_name(code)), &read) == uform_status_success_k &&
+                   read == code,
                "Every CPU class reads back from its name");
-    for (uform_gpu_class_t code = uform_gpu_class_nvidia_ampere_k; code <= uform_gpu_class_apple_metal10_k; ++code)
-        expect(uform_gpu_class_from_name(view_of(uform_gpu_class_name(code))) == code,
+    }
+    for (uform_gpu_class_t code = uform_gpu_class_nvidia_ampere_k; code <= uform_gpu_class_apple_metal10_k; ++code) {
+        uform_gpu_class_t read = uform_gpu_class_unknown_k;
+        expect(uform_gpu_class_from_name(view_of(uform_gpu_class_name(code)), &read) == uform_status_success_k &&
+                   read == code,
                "Every GPU class reads back from its name");
+    }
     expect(strcmp(uform_cpu_class_name(uform_cpu_class_intel_haswell_k), "intel-haswell") == 0,
            "A CPU class spells its name as USearch does");
-    expect(uform_gpu_class_from_name(view_of("nvidia-volta")) == uform_gpu_class_unknown_k,
-           "An unrecognized GPU class is unknown");
+    uform_gpu_class_t untouched_gpu_class = uform_gpu_class_nvidia_ada_k;
+    expect(
+        uform_gpu_class_from_name(view_of("nvidia-volta"), &untouched_gpu_class) == uform_status_invalid_argument_k &&
+            untouched_gpu_class == uform_gpu_class_nvidia_ada_k,
+        "An unrecognized GPU class fails and writes nothing");
 
     uform_outcome_t outcome = {0};
     uform_gpu_device_t devices[8];
     size_t devices_count = 0;
-    uform_gpu_devices(&(uform_gpu_devices_t) {
-        .outcome = &outcome, .devices = devices, .devices_capacity = 8, .devices_count = &devices_count});
+    uform_gpu_devices(&(uform_gpu_devices_t) {.outcome = &outcome,
+                                              .devices = devices,
+                                              .devices_capacity = 8,
+                                              .devices_count = &devices_count});
     expect(!outcome.message, outcome.message);
     for (size_t position = 0; position != devices_count && position != 8; ++position) {
         printf("- GPU #%zu: %s %s, %u units, %llu MiB\n", position, devices[position].name,
@@ -211,7 +262,7 @@ static void test_library_probes(void) {
  *  nowhere yet; a drain of an idle executor succeeds, and every free takes @c NULL. */
 static void test_executors(void) {
     printf("Test: Executors\n");
-    uform_executor_t const executor = create_executor(0);
+    uform_executor_t const executor = create_executor();
     uform_outcome_t outcome = {uform_status_io_k, "a stale message the call must overwrite"};
     uform_executor_drain(&(uform_executor_drain_t) {.executor = executor, .outcome = &outcome});
     expect(outcome.status == uform_status_success_k && outcome.message == NULL, "An idle drain succeeds clean");
@@ -237,7 +288,7 @@ static void test_executors(void) {
  *  leaving no model. */
 static void test_model_load(void) {
     printf("Test: Model Load\n");
-    uform_executor_t const executor = create_executor(0);
+    uform_executor_t const executor = create_executor();
     uform_model_description_t description = {0};
     uform_model_t const model = load_model(executor, &description);
     expect(description.quantization == uform_scalar_bf16_k, "A model runs in the quantization asked for");
@@ -342,7 +393,7 @@ static void test_model_load(void) {
  *  output left null. */
 static void test_text_shapes(void) {
     printf("Test: Text Shapes\n");
-    uform_executor_t const executor = create_executor(0);
+    uform_executor_t const executor = create_executor();
     uform_arena_t const arena = create_arena(executor);
     uform_model_description_t model_description = {0};
     uform_model_t const model = load_model(executor, &model_description);
@@ -400,7 +451,7 @@ static void test_text_shapes(void) {
  *  them, @c unsupported_k. */
 static void test_heads(void) {
     printf("Test: Heads\n");
-    uform_executor_t const executor = create_executor(0);
+    uform_executor_t const executor = create_executor();
     uform_arena_t const arena = create_arena(executor);
     uform_model_description_t description = {0};
     uform_model_t const model = load_model(executor, &description);
@@ -574,7 +625,7 @@ static void check_media(media_outputs_t const* outputs, size_t count, uform_mode
  *  decodes nothing, so it encodes any bytes. */
 static void test_media_shapes(void) {
     printf("Test: Media Shapes\n");
-    uform_executor_t const executor = create_executor(0);
+    uform_executor_t const executor = create_executor();
     uform_arena_t const arena = create_arena(executor);
     uform_model_description_t model = {0};
     uform_model_t const handle = load_model(executor, &model);
@@ -758,12 +809,12 @@ static void drain(uform_executor_t executor) {
     expect(!outcome.message, outcome.message);
 }
 
-/** A deferred call reads deferred through @c uform_outcome_status until drained, then lands what a
- *  blocking one does, though its descriptor died at submission; without an executor a call is final
- *  when it returns. */
+/** A deferred call finishes on the executor's own thread while its caller only polls, lands what a
+ *  blocking one does though its descriptor died at submission, and refuses every other call on its
+ *  executor meanwhile; without an executor a call is final when it returns. */
 static void test_blocking_and_deferred(void) {
     printf("Test: Blocking and Deferred\n");
-    uform_executor_t const executor = create_executor(0);
+    uform_executor_t const executor = create_executor();
     uform_model_description_t description = {0};
     uform_model_t const model = load_model(executor, &description);
     size_t const lengths[] = {3, 40, 17, 1};
@@ -777,36 +828,108 @@ static void test_blocking_and_deferred(void) {
     expect(!blocking.outcome.message, blocking.outcome.message);
 
     encode_texts(model, executor, uform_completion_deferred_k, &texts, &deferred, silent);
-    expect(uform_outcome_status(&deferred.outcome) == uform_status_deferred_k, "A submitted call is deferred");
-    drain(executor);
-    expect(uform_outcome_status(&deferred.outcome) == uform_status_success_k, "A drained call is final");
-    expect(same_outputs(&blocking, &deferred, texts.count), "A deferred call lands what a blocking one does");
-
-    encode_texts(model, executor, uform_completion_deferred_k, &texts, &deferred, silent);
     expect(uform_outcome_wait(&deferred.outcome) == uform_status_success_k, "A waited call finishes");
     expect(same_outputs(&blocking, &deferred, texts.count), "A waited call lands what a blocking one does");
+    encode_texts(model, executor, uform_completion_blocking_k, &texts, &blocking, silent);
+    expect(!blocking.outcome.message, "A final call lets go of its executor at once");
 
     // An arena made by an executor serves a call without one, since both compute on the host.
     encode_texts(model, NULL, uform_completion_deferred_k, &texts, &deferred, silent);
     expect(deferred.outcome.status == uform_status_success_k, "A call without an executor is final when it returns");
     expect(same_outputs(&blocking, &deferred, texts.count), "Every receiver agrees");
 
-    // An earlier deferred call finishes before a blocking one on the same executor runs.
+    // A drain waits for the call holding the executor, then parks its threads until the next call.
     encode_texts(model, executor, uform_completion_deferred_k, &texts, &deferred, silent);
+    drain(executor);
+    expect(deferred.outcome.status == uform_status_success_k, "A drain waits for the call holding the executor");
     encode_texts(model, executor, uform_completion_blocking_k, &texts, &blocking, silent);
-    expect(deferred.outcome.status == uform_status_success_k, "A blocking call runs the earlier calls first");
+    expect(!blocking.outcome.message, "A parked executor takes the next call");
 
-    // Freeing the executor finishes the calls it still holds.
+    // Freeing the executor waits for the call holding it.
     encode_texts(model, executor, uform_completion_deferred_k, &texts, &deferred, silent);
     uform_executor_free(executor);
-    expect(deferred.outcome.status == uform_status_success_k, "A free finishes the calls naming the executor");
-    expect(same_outputs(&blocking, &deferred, texts.count), "A call finished by a free lands its outputs");
+    expect(deferred.outcome.status == uform_status_success_k, "A free waits for the call holding the executor");
+    expect(same_outputs(&blocking, &deferred, texts.count), "A call outliving its submission lands its outputs");
 
     uform_arena_free(deferred.arena);
     uform_arena_free(blocking.arena);
     uform_model_free(model);
     printf("Test: Blocking and Deferred - PASSED\n");
 }
+
+#if !UFORM_TEST_STUB
+
+/** Holds the call reporting to it at its first progress report until the test opens it, so a
+ *  deferred call stays in flight while the test probes the executor and the arena it holds. */
+typedef struct gate_t {
+
+    /** The progress report the call stopped at, written before @ref reached. */
+    size_t completed, total;
+
+    /** Set by the held call once it reaches the gate. */
+    atomic_int reached;
+
+    /** Set by the test to let the call go on. */
+    atomic_int opened;
+} gate_t;
+
+static uform_continuation_t wait_at_gate(size_t completed, size_t total, void *state) {
+    gate_t *const gate = (gate_t *)state;
+    gate->completed = completed, gate->total = total;
+    atomic_store(&gate->reached, 1);
+    while (!atomic_load(&gate->opened)) {}
+    return uform_continue_k;
+}
+
+/** While a deferred call runs on the executor's own thread, its executor and its arena refuse
+ *  every other call; once the gate opens, polling alone sees the call land what a blocking one
+ *  does, and both serve again. */
+static void test_held_calls(void) {
+    printf("Test: Held Calls\n");
+    uform_executor_t const executor = create_executor();
+    uform_model_description_t description = {0};
+    uform_model_t const model = load_model(executor, &description);
+    size_t const lengths[] = {3, 40, 17, 1};
+    texts_t texts;
+    fill_texts(&texts, 4, lengths);
+    text_outputs_t blocking = {.arena = create_arena(executor)};
+    text_outputs_t deferred = {.arena = create_arena(executor)};
+    uform_progress_t const silent = {0};
+    encode_texts(model, executor, uform_completion_blocking_k, &texts, &blocking, silent);
+    expect(!blocking.outcome.message, blocking.outcome.message);
+
+    gate_t gate = {0, 0, 0, 0};
+    encode_texts(model, executor, uform_completion_deferred_k, &texts, &deferred,
+                 (uform_progress_t) {wait_at_gate, &gate, 1});
+    while (!atomic_load(&gate.reached)) {}
+    expect(gate.completed <= gate.total && gate.total == texts.count, "A report counts the batch's items");
+    expect(uform_outcome_status(&deferred.outcome) == uform_status_deferred_k, "A running call is deferred");
+
+    text_outputs_t contender = {.arena = blocking.arena};
+    encode_texts(model, executor, uform_completion_blocking_k, &texts, &contender, silent);
+    expect(contender.outcome.status == uform_status_contended_k, "A held executor refuses a blocking call");
+    encode_texts(model, executor, uform_completion_deferred_k, &texts, &contender, silent);
+    expect(contender.outcome.status == uform_status_contended_k, "A held executor refuses a deferred call");
+    text_outputs_t borrower = {.arena = deferred.arena};
+    encode_texts(model, NULL, uform_completion_blocking_k, &texts, &borrower, silent);
+    expect(borrower.outcome.status == uform_status_contended_k, "A held arena refuses a call without an executor");
+    expect(borrower.embeddings.data == NULL, "A refused call leaves its outputs NULL");
+
+    atomic_store(&gate.opened, 1);
+    while (uform_outcome_status(&deferred.outcome) == uform_status_deferred_k) {}
+    expect(deferred.outcome.status == uform_status_success_k, "Polling alone sees a deferred call finish");
+    expect(same_outputs(&blocking, &deferred, texts.count), "A deferred call lands what a blocking one does");
+    encode_texts(model, NULL, uform_completion_blocking_k, &texts, &borrower, silent);
+    expect(!borrower.outcome.message, "A final call lets go of its arena");
+
+    uform_arena_free(deferred.arena);
+    uform_arena_free(blocking.arena);
+    uform_model_free(model);
+    uform_executor_free(executor);
+    printf("Test: Held Calls - PASSED\n");
+}
+
+#endif
 
 /** An executor over a pool its lender spawned encodes what an owned one does, and a null
  *  pool is refused. */
@@ -825,7 +948,7 @@ static void test_executor_on_pool(void) {
     expect(!outcome.message, outcome.message);
     expect(lent != NULL, "An executor over a lent pool must be created");
 
-    uform_executor_t const owned = create_executor(0);
+    uform_executor_t const owned = create_executor();
     uform_model_description_t description = {0};
     uform_model_t const model = load_model(owned, &description);
     size_t const lengths[] = {3, 40, 17, 1};
@@ -857,42 +980,12 @@ static void test_executor_on_pool(void) {
     printf("Test: Executor On Pool - PASSED\n");
 }
 
-/** A submission past the deferred limit is refused at once and lets go of its arena, and a
- *  drain makes room. */
-static void test_deferred_limit(void) {
-    printf("Test: Deferred Limit\n");
-    uform_executor_t const executor = create_executor(1);
-    uform_model_description_t description = {0};
-    uform_model_t const model = load_model(executor, &description);
-    size_t const lengths[] = {9, 2};
-    texts_t texts;
-    fill_texts(&texts, 2, lengths);
-    text_outputs_t first = {.arena = create_arena(executor)};
-    text_outputs_t second = {.arena = create_arena(executor)};
-    uform_progress_t const silent = {0};
-
-    encode_texts(model, executor, uform_completion_deferred_k, &texts, &first, silent);
-    encode_texts(model, executor, uform_completion_deferred_k, &texts, &second, silent);
-    expect(second.outcome.status == uform_status_contended_k, "A full deferred table refuses at once");
-    drain(executor);
-    expect(first.outcome.status == uform_status_success_k, "The earlier call finishes at the drain");
-    encode_texts(model, executor, uform_completion_deferred_k, &texts, &second, silent);
-    drain(executor);
-    expect(second.outcome.status == uform_status_success_k, "A drained table takes a call again");
-
-    uform_arena_free(second.arena);
-    uform_arena_free(first.arena);
-    uform_model_free(model);
-    uform_executor_free(executor);
-    printf("Test: Deferred Limit - PASSED\n");
-}
-
 /** An arena keeps its high-water mark, so a repeated call lands where the last did; inputs inside
- *  it are refused; a deferred call holds it, refusing another call meanwhile, until final; and it
+ *  it are refused; a running call holds it, refusing another call meanwhile, until final; and it
  *  describes the host pages a RAM executor gave it. */
 static void test_arenas(void) {
     printf("Test: Arenas\n");
-    uform_executor_t const executor = create_executor(0);
+    uform_executor_t const executor = create_executor();
     uform_model_description_t description = {0};
     uform_model_t const model = load_model(executor, &description);
     size_t const lengths[] = {30, 12, 64};
@@ -921,29 +1014,6 @@ static void test_arenas(void) {
                                               .outputs_scalar = uform_scalar_f32_k});
     expect(outcome.status == uform_status_invalid_argument_k, "Inputs inside the rewound arena are refused");
     expect(embeddings.data == NULL, "A refused call leaves its outputs NULL");
-
-    encode_texts(model, executor, uform_completion_deferred_k, &texts, &outputs, silent);
-    expect(uform_outcome_status(&outputs.outcome) == uform_status_deferred_k, "A submitted call is deferred");
-    // Without an executor the call runs at once, draining nothing, so it meets the
-    // deferred call's hold.
-    uform_text_encode_t other = {.model = model,
-                                 .outcome = &outcome,
-                                 .count = texts.count,
-                                 .texts = tape_of(&texts),
-                                 .embeddings = &embeddings,
-                                 .arena = outputs.arena,
-                                 .outputs_scalar = uform_scalar_f32_k};
-    uform_text_encode(&other);
-    expect(outcome.status == uform_status_contended_k, "An arena a deferred call holds refuses another call");
-    expect(embeddings.data == NULL, "A refused call leaves its outputs NULL");
-    text_outputs_t contender = {.arena = outputs.arena};
-    encode_texts(model, executor, uform_completion_deferred_k, &texts, &contender, silent);
-    expect(contender.outcome.status == uform_status_contended_k, "A deferred contender is refused at submission");
-
-    expect(uform_outcome_wait(&outputs.outcome) == uform_status_success_k, "A waited call finishes");
-    uform_text_encode(&other);
-    expect(!outcome.message, outcome.message);
-    expect(embeddings.data != NULL, "A final call lets go of its arena");
 
     uform_arena_description_t placement = {uform_residency_unknown_k, 0};
     uform_arena_describe(
@@ -984,7 +1054,7 @@ static uform_continuation_t record_progress(size_t completed, size_t total, void
  *  null, blocking or deferred. */
 static void test_progress(void) {
     printf("Test: Progress\n");
-    uform_executor_t const executor = create_executor(0);
+    uform_executor_t const executor = create_executor();
     uform_model_description_t description = {0};
     uform_model_t const model = load_model(executor, &description);
     size_t lengths[texts_capacity];
@@ -1028,7 +1098,7 @@ static void test_progress(void) {
  *  storage or with decreasing offsets, and GPU-only verbs given a RAM executor. */
 static void test_refusals(void) {
     printf("Test: Refusals\n");
-    uform_executor_t const executor = create_executor(0);
+    uform_executor_t const executor = create_executor();
     uform_arena_t const arena = create_arena(executor);
     uform_model_description_t description = {0};
     uform_model_t const model = load_model(executor, &description);
@@ -1148,8 +1218,10 @@ int main(int argc, char* argv[]) {
     if (selected("heads")) test_heads();
     if (selected("media_shapes")) test_media_shapes();
     if (selected("blocking_and_deferred")) test_blocking_and_deferred();
+#if !UFORM_TEST_STUB
+    if (selected("held_calls")) test_held_calls();
+#endif
     if (selected("executor_on_pool")) test_executor_on_pool();
-    if (selected("deferred_limit")) test_deferred_limit();
     if (selected("arenas")) test_arenas();
     if (selected("progress")) test_progress();
     if (selected("refusals")) test_refusals();

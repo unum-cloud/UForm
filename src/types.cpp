@@ -3,47 +3,25 @@
  *  @author Ash Vardanian
  *  @date October 17, 2026
  *  @brief The verbs of @c types.h: outcomes, executors, arenas, the name tables and the
- *      library-wide probes, and the registry of deferred calls behind every verb.
+ *      library-wide probes, and the one call each executor holds at a time.
  *
- *  A deferred call waits in its executor's table until something needs its result: a wait
- *  on its outcome, a drain, a blocking call on the same executor, or a free of a handle it
- *  names. Whichever thread asks runs it, and every call held before it on that executor,
- *  in submission order.
+ *  A deferred call on a caller-exclusive pool runs whole on the pool's thread 0, which forks the
+ *  rest of the pool from inside its slice and ends the call there; every other call runs on its
+ *  caller. Nothing waits in a table, so a wait, a drain or a free only waits.
  */
 #include <cstring> // `std::memcpy` - a listed device's name
 
 #include <memory> // `std::unique_ptr` - a handle under construction
 #include <new>    // `std::nothrow`
 
+#include <forkunion/topology.hpp> // `fu::current_thread_id` - the thread running an executor's call
+
 #include "encoder_punned.hpp" // `entries_kit_of`, `vendor_of` - a listed device's description
 
 namespace ue = unum::uform::encoder;
 using namespace unum::uform;
 
-deferred_registry_t uf::deferred_registry;
-thread_local void const *uf::resuming_call = nullptr;
-
-#pragma region Deferred Calls
-
-/** Whether the call in @p call reads or writes @p handle: its outcome, its executor, or a model,
- *  arena, mesh or trainer it names. An output for a handle the call creates holds nothing yet. */
-static bool deferred_uses(deferred_call_t const &call, void const *handle) noexcept {
-    return std::visit(
-        [&](auto const &arguments) noexcept {
-            auto const names = [&](auto named) noexcept {
-                if constexpr (std::is_pointer_v<std::remove_pointer_t<decltype(named)>>) return false;
-                else return static_cast<void const *>(named) == handle;
-            };
-            bool used = static_cast<void const *>(arguments.outcome) == handle ||
-                        static_cast<void const *>(arguments.executor) == handle;
-            if constexpr (requires { arguments.model; }) used = used || names(arguments.model);
-            if constexpr (requires { arguments.arena; }) used = used || names(arguments.arena);
-            if constexpr (requires { arguments.mesh; }) used = used || names(arguments.mesh);
-            if constexpr (requires { arguments.trainer; }) used = used || names(arguments.trainer);
-            return used;
-        },
-        call.arguments);
-}
+#pragma region Executor Calls
 
 /** Holds @p arena for the call whose published outcome is @p call, answering whether it was free or
  *  already that call's; a null arena holds nothing, left for the verb to refuse. */
@@ -61,90 +39,86 @@ void uf::release_arena(uform_arena_t arena, uform_outcome_t const *call) noexcep
             call, nullptr, std::memory_order_release);
 }
 
-void uf::run_held(uform_executor_t executor, u64_t last) noexcept {
-    for (;;) {
-        deferred_call_t *oldest = nullptr;
-        {
-            st::unique_lock<fu::spin_mutex_t> lock(deferred_registry.guard);
-            for (deferred_call_t &call : executor->deferred)
-                if (call.stage == deferred_stage_t::held_k && call.ticket <= last &&
-                    (!oldest || call.ticket < oldest->ticket))
-                    oldest = &call;
-            if (!oldest) return;
-            oldest->stage = deferred_stage_t::running_k;
-        }
-        std::visit(
-            [&](auto &arguments) noexcept {
-                resuming_call = &arguments;
-                oldest->verb(&arguments);
-            },
-            oldest->arguments);
-        {
-            st::unique_lock<fu::spin_mutex_t> lock(deferred_registry.guard);
-            oldest->stage = deferred_stage_t::free_k;
-            fu::standard_atomic_ref<u64_t> {deferred_registry.finished}.fetch_add(1, std::memory_order_release);
-        }
-    }
+/** The pool a call of @p executor forks on: the RAM threads, or a VRAM executor's decoders. */
+static fu_pool_t pool_of(uform_executor_handle_t &executor) noexcept {
+    if (ram_executor_t *const ram = std::get_if<ram_executor_t>(&executor.executor)) return view_of(ram->pool).pool();
+    return std::get<vram_executor_t>(executor.executor).decoders.view().pool();
 }
 
-/** Waits until no call @p executor took with a ticket up to @p last still runs
- *  on another thread. */
-static void wait_running(uform_executor_handle_t &executor, u64_t last) noexcept {
-    for (;;) {
-        u64_t seen = 0;
-        {
-            st::unique_lock<fu::spin_mutex_t> lock(deferred_registry.guard);
-            std::size_t running = 0;
-            for (deferred_call_t const &call : executor.deferred)
-                running += call.stage == deferred_stage_t::running_k && call.ticket <= last;
-            if (!running) return;
-            seen = fu::standard_atomic_ref<u64_t> {deferred_registry.finished}.load(std::memory_order_relaxed);
-        }
-        executor.host_verbs->wait(deferred_registry.finished, seen);
-    }
+bool uf::take_call_claim(uform_executor_handle_t &executor) noexcept {
+    fu::standard_atomic_ref<call_claim_t> claim {executor.holding_call.claim};
+    if (claim.exchange(call_claim_t::held_k, std::memory_order_acquire) != call_claim_t::free_k) return false;
+    // The last call's thread 0 may still be leaving the slice it ended that call in
+    if (delegates(executor)) fu_pool_unsafe_join(pool_of(executor), 0);
+    fu::standard_atomic_ref<u64_t> {executor.holding_call.body_thread}.store(fu::current_thread_id(),
+                                                                             std::memory_order_relaxed);
+    return true;
 }
 
-void uf::finish_calls_using(void const *handle) noexcept {
-    if (!handle) return;
-    for (;;) {
-        uform_executor_handle_t *holding = nullptr;
-        host_verbs_t const *running = nullptr; // a static table, still valid once the lock lets the executor go
-        u64_t last = 0, seen = 0;
-        {
-            st::unique_lock<fu::spin_mutex_t> lock(deferred_registry.guard);
-            for (uform_executor_handle_t *executor = deferred_registry.executors; executor && !holding;
-                 executor = executor->next_listed)
-                for (deferred_call_t const &call : executor->deferred)
-                    if (call.stage == deferred_stage_t::held_k && deferred_uses(call, handle))
-                        holding = executor, last = last > call.ticket ? last : call.ticket;
-                    else if (call.stage == deferred_stage_t::running_k && deferred_uses(call, handle))
-                        running = executor->host_verbs;
-            seen = fu::standard_atomic_ref<u64_t> {deferred_registry.finished}.load(std::memory_order_relaxed);
-        }
-        if (holding) run_held(holding, last); // takes the lock itself, so it runs outside it
-        else if (running) running->wait(deferred_registry.finished, seen);
-        else return;
-    }
+void uf::record_status(uform_executor_t executor, uform_outcome_t const &recorded) noexcept {
+    executor->holding_call.recorded = recorded;
 }
 
-void uf::hold_deferred(uform_executor_t executor, deferred_arguments_t const &arguments, void (*verb)(void *),
-                       uform_arena_t arena, uform_outcome_t *outcome) noexcept {
-    propagate_pending(outcome);
-    if (!hold_arena(arena, outcome))
-        return propagate_error(uform_status_contended_k, outcome, "The arena serves another call"), void();
-    {
-        st::unique_lock<fu::spin_mutex_t> lock(deferred_registry.guard);
-        for (deferred_call_t &call : executor->deferred)
-            if (call.stage == deferred_stage_t::free_k) {
-                call.arguments = arguments;
-                call.verb = verb;
-                call.ticket = ++deferred_registry.tickets;
-                call.stage = deferred_stage_t::held_k;
-                return;
-            }
-    }
-    release_arena(arena, outcome); // a refused submission never runs, so nothing else would let go of its arena
-    propagate_error(uform_status_contended_k, outcome, "The deferred table is full");
+bool uf::delegates(uform_executor_handle_t &executor) noexcept {
+    fu_caller_exclusivity_t exclusivity = fu_caller_inclusive_k;
+    return fu_pool_caller_exclusivity(pool_of(executor), &exclusivity) == fu_success_k &&
+           exclusivity == fu_caller_exclusive_k;
+}
+
+uform_status_t uf::delegate_call(uform_executor_handle_t &executor, void (*body)(void *)) noexcept {
+    executor.holding_call.delegated_body = body;
+    // The caller is not the body's thread: a drain it issues meanwhile must wait, not refuse
+    fu::standard_atomic_ref<u64_t> {executor.holding_call.body_thread}.store(0, std::memory_order_relaxed);
+    // Thread 0 runs the whole call in its slice, forking the rest of the pool as it goes
+    fu_for_threads_t const run_on_thread_zero = [](fu_lambda_context_t context, std::size_t thread,
+                                                   std::size_t) noexcept {
+        if (thread != 0) return;
+        uform_executor_handle_t &held = *static_cast<uform_executor_handle_t *>(context);
+        fu::standard_atomic_ref<u64_t> {held.holding_call.body_thread}.store(fu::current_thread_id(),
+                                                                             std::memory_order_relaxed);
+        held.holding_call.delegated_body(context);
+        end_call(held);
+    };
+    // The token stays local: thread 0 may end the call before this thread stores it
+    fu_generation_t generation = 0;
+    fu_status_t const status = fu_pool_unsafe_for_threads(pool_of(executor), run_on_thread_zero, &executor,
+                                                          &generation);
+    return status == fu_success_k ? uform_status_success_k : uform_status_contended_k;
+}
+
+void uf::end_call(uform_executor_handle_t &executor) noexcept {
+    holding_call_t &call = executor.holding_call;
+    uform_outcome_t *const outcome = call.outcome;
+    uform_outcome_t const recorded = call.recorded;
+    for (u64_t *&named : call.named_calls)
+        if (named) fu::standard_atomic_ref<u64_t> {*named}.fetch_sub(1, std::memory_order_release), named = nullptr;
+    call.arguments = nullptr;
+    call.delegated_body = nullptr;
+    call.delegated_arguments.emplace<std::monostate>();
+    // ! Past this store a waiter may free the executor; only the caller's outcome is touched after
+    fu::standard_atomic_ref<call_claim_t> {call.claim}.store(call_claim_t::free_k, std::memory_order_release);
+    propagate_error(recorded.status, outcome, recorded.message);
+}
+
+void uf::wait_named_calls(u64_t &named_calls) noexcept {
+    fu::standard_atomic_ref<u64_t> count {named_calls};
+    for (u64_t seen = count.load(std::memory_order_acquire); seen; seen = count.load(std::memory_order_acquire))
+        // No executor owns a handle
+        fu::standard_yield_t {}(&named_calls, seen, std::size_t {0}, fu::wait_capped_k);
+}
+
+bool uf::runs_holding_call(uform_executor_handle_t &executor) noexcept {
+    holding_call_t &call = executor.holding_call;
+    if (fu::standard_atomic_ref<call_claim_t> {call.claim}.load(std::memory_order_acquire) == call_claim_t::free_k)
+        return false;
+    return fu::standard_atomic_ref<u64_t> {call.body_thread}.load(std::memory_order_relaxed) == fu::current_thread_id();
+}
+
+void uf::wait_while_claimed(uform_executor_handle_t &executor) noexcept {
+    fu::standard_atomic_ref<call_claim_t> claim {executor.holding_call.claim};
+    while (claim.load(std::memory_order_acquire) == call_claim_t::held_k)
+        fu::standard_yield_t {}(&executor.holding_call.claim, call_claim_t::held_k, std::size_t {0}, fu::wait_capped_k);
+    if (delegates(executor)) fu_pool_unsafe_join(pool_of(executor), 0); // its thread 0 may still be leaving its slice
 }
 
 uform_arena_t uf::claim_arena(uform_arena_t arena, uform_executor_t executor,
@@ -169,7 +143,7 @@ uform_arena_t uf::claim_arena(uform_arena_t arena, uform_executor_t executor,
     return arena;
 }
 
-#pragma endregion Deferred Calls
+#pragma endregion Executor Calls
 
 #pragma region Executors
 
@@ -214,31 +188,20 @@ static std::size_t cores_of(topology_t const &topology, st::basic_vector<i32_t> 
     return cores;
 }
 
-/** Sizes @p executor 's deferred table at @p limit entries, zero taking the default, gives it the
- *  host verbs of the newest class under @p ceiling , lists it, and hands it out through @p output;
- *  frees it once @p outcome records why not. */
+/** Gives @p executor the host verbs of the newest class under @p ceiling and hands it out through
+ *  @p output. */
 static void hand_out_executor(std::unique_ptr<uform_executor_handle_t> executor, cpu_ceiling_t ceiling,
-                              std::size_t limit, uform_executor_t *output, uform_outcome_t *outcome) noexcept {
-    if (st::failed(executor->deferred.resize(limit ? limit : deferred_limit_default_k)))
-        return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the deferred table"), void();
+                              uform_executor_t *output, uform_outcome_t *outcome) noexcept {
     executor->host_verbs = pick_host_verbs(cpu_ladder_t {}, ceiling);
-    {
-        st::unique_lock<fu::spin_mutex_t> lock(deferred_registry.guard);
-        executor->next_listed = deferred_registry.executors;
-        deferred_registry.executors = executor.get();
-    }
     *output = executor.release();
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
 
-/** Takes @p executor off the list; the caller already finished every call it held. */
-static void delist_executor(uform_executor_handle_t &executor) noexcept {
-    st::unique_lock<fu::spin_mutex_t> lock(deferred_registry.guard);
-    for (uform_executor_handle_t **link = &deferred_registry.executors; *link; link = &(*link)->next_listed)
-        if (*link == &executor) {
-            *link = executor.next_listed;
-            return;
-        }
+/** Pools that run deferred calls on their own threads where the build has threads, and include
+ *  their caller otherwise, as WebAssembly's single thread does. */
+static caller_exclusivity_t spawned_exclusivity() noexcept {
+    return (fu_comptime_capabilities() & fu_capability_os_threads_k) ? caller_exclusivity_t::caller_exclusive_k
+                                                                     : caller_exclusivity_t::caller_inclusive_k;
 }
 
 /** Reads the name, compute units and memory of @p home_ 's device @p vendor_ordinal through its
@@ -329,12 +292,25 @@ static bool open_device(per_gpu_array<vram_device_t> &devices, i32_t listed, nk_
 
 #pragma endregion Executors
 
+/** Whether @p name spells @p spelling exactly, with no terminator assumed on either side. */
+static bool named(uform_bytes_view_t name, sz::string_view_t spelling) noexcept { return text_of(name) == spelling; }
+
+/** Writes to @p output the one of @p values that @p spell spells as @p name, or fails with
+ *  @c uform_status_invalid_argument_k and writes nothing. */
+template <typename value_type_>
+static uform_status_t read_name(uform_bytes_view_t name, std::initializer_list<value_type_> values,
+                                char const *(*spell)(value_type_), value_type_ *output) noexcept {
+    if (!output) return uform_status_invalid_argument_k;
+    for (value_type_ const value : values)
+        if (named(name, spell(value))) return *output = value, uform_status_success_k;
+    return uform_status_invalid_argument_k;
+}
+
 extern "C" {
 
 #pragma region Outcomes Executors and Arenas
 
 UFORM_EXPORT uform_status_t uform_outcome_wait(uform_outcome_t *outcome) {
-    finish_calls_using(outcome); // waits on a deferred call through its executor's class waiter
     fu::standard_atomic_ref<uform_status_t> status {outcome->status};
     uform_status_t seen = status.load(std::memory_order_acquire);
     for (; seen == uform_status_deferred_k; seen = status.load(std::memory_order_acquire))
@@ -376,12 +352,12 @@ UFORM_EXPORT void uform_gpu_devices(uform_gpu_devices_t *arguments) {
 /** Sets the ceiling @p ram pins, or the machine's, then hands out @p executor , whose pool and
  *  memory domains are set. */
 static void hand_out_ram_executor(std::unique_ptr<uform_executor_handle_t> executor, uform_ram_options_t const &ram,
-                                  std::size_t limit, uform_executor_t *output, uform_outcome_t *outcome) noexcept {
+                                  uform_executor_t *output, uform_outcome_t *outcome) noexcept {
     expected<cpu_ceiling_t> ceiling = pick_cpu_ceiling(ram.cpu_class);
     if (!ceiling)
         return propagate_error(uform_status_unsupported_k, outcome, "The CPU does not admit the pinned class"), void();
     std::get<ram_executor_t>(executor->executor).ceiling = *ceiling;
-    hand_out_executor(std::move(executor), *ceiling, limit, output, outcome);
+    hand_out_executor(std::move(executor), *ceiling, output, outcome);
 }
 
 UFORM_EXPORT void uform_executor_for_ram(uform_executor_for_ram_t *arguments) {
@@ -396,10 +372,10 @@ UFORM_EXPORT void uform_executor_for_ram(uform_executor_for_ram_t *arguments) {
     if (!adopt_memory_domains(ram.memory_domains, arguments->ram, *topology, outcome)) return;
     std::size_t const threads = arguments->threads ? arguments->threads
                                                    : derived_threads(cores_of(*topology, ram.memory_domains));
-    expected<executor_t> pool = executor_t::make(*topology, threads, caller_exclusivity_t::caller_inclusive_k);
+    expected<executor_t> pool = executor_t::make(*topology, threads, spawned_exclusivity());
     if (!pool) return propagate_error(status_of(pool.status_), outcome, "Failed to spawn the threads"), void();
     ram.pool = std::move(*pool);
-    hand_out_ram_executor(std::move(executor), arguments->ram, arguments->deferred_limit, arguments->executor, outcome);
+    hand_out_ram_executor(std::move(executor), arguments->ram, arguments->executor, outcome);
 }
 
 UFORM_EXPORT void uform_executor_on_pool(uform_executor_on_pool_t *arguments) {
@@ -415,7 +391,7 @@ UFORM_EXPORT void uform_executor_on_pool(uform_executor_on_pool_t *arguments) {
     ram_executor_t &ram = std::get<ram_executor_t>(executor->executor);
     if (!adopt_memory_domains(ram.memory_domains, arguments->ram, *topology, outcome)) return;
     ram.pool = std::move(*pool);
-    hand_out_ram_executor(std::move(executor), arguments->ram, arguments->deferred_limit, arguments->executor, outcome);
+    hand_out_ram_executor(std::move(executor), arguments->ram, arguments->executor, outcome);
 }
 
 UFORM_EXPORT void uform_executor_for_vram(uform_executor_for_vram_t *arguments) {
@@ -452,11 +428,12 @@ UFORM_EXPORT void uform_executor_for_vram(uform_executor_for_vram_t *arguments) 
             return propagate_error(uform_status_config_mismatch_k, outcome, "The devices differ in class"), void();
     st::basic_vector<i32_t> memory_domains;
     if (!adopt_memory_domains(memory_domains, arguments->ram, *topology, outcome)) return;
+    // The caller is decoder 0: it stages, feeds the devices and waits, so calls finish on return
     expected<executor_t> decoders = executor_t::make(*topology, derived_threads(cores_of(*topology, memory_domains)),
                                                      caller_exclusivity_t::caller_inclusive_k);
     if (!decoders) return propagate_error(status_of(decoders.status_), outcome, "Failed to spawn the decoders"), void();
     devices.decoders = std::move(*decoders);
-    hand_out_executor(std::move(executor), *ceiling, arguments->deferred_limit, arguments->executor, outcome);
+    hand_out_executor(std::move(executor), *ceiling, arguments->executor, outcome);
 }
 
 UFORM_EXPORT void uform_executor_drain(uform_executor_drain_t *arguments) {
@@ -464,25 +441,30 @@ UFORM_EXPORT void uform_executor_drain(uform_executor_drain_t *arguments) {
     if (!arguments->executor) // runs every call to completion before returning, so nothing waits behind it
         return propagate_error(uform_status_success_k, outcome, nullptr), void();
     uform_executor_handle_t &executor = *arguments->executor;
-    u64_t last = 0;
-    {
-        st::unique_lock<fu::spin_mutex_t> lock(deferred_registry.guard);
-        last = deferred_registry.tickets;
-    }
-    run_held(&executor, last);
-    wait_running(executor, last);
+    if (arguments->mood != uform_mood_parked_k && arguments->mood != uform_mood_spinning_k)
+        return propagate_error(uform_status_invalid_argument_k, outcome, "The mood names no value"), void();
+    if (runs_holding_call(executor))
+        return propagate_error(uform_status_contended_k, outcome, "A callback cannot drain the executor running it"),
+               void();
+    wait_while_claimed(executor);
     if (vram_executor_t *const devices = std::get_if<vram_executor_t>(&executor.executor))
         for (vram_device_t &device : devices->devices)
             if (nk_status_t const status = nk_stream_synchronize_best(device.capabilities, device.stream.get());
                 status != nk_success_k)
                 return propagate_error(status_of(status), outcome, "A device failed the work queued on it"), void();
+    // A parked pool sleeps until its next dispatch, while a lent one keeps its lender's mood
+    if (arguments->mood == uform_mood_parked_k) {
+        if (ram_executor_t *const ram = std::get_if<ram_executor_t>(&executor.executor)) {
+            if (executor_t *const owned = std::get_if<executor_t>(&ram->pool)) fu_pool_sleep(owned->view().pool(), 0);
+        }
+        else fu_pool_sleep(std::get<vram_executor_t>(executor.executor).decoders.view().pool(), 0);
+    }
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
 
 UFORM_EXPORT void uform_executor_free(uform_executor_t executor) {
     if (!executor) return;
-    finish_calls_using(executor);
-    delist_executor(*executor);
+    wait_while_claimed(*executor);
     delete executor;
 }
 
@@ -506,7 +488,8 @@ UFORM_EXPORT void uform_arena_init(uform_arena_init_t *arguments) {
 }
 
 UFORM_EXPORT void uform_arena_free(uform_arena_t arena) {
-    finish_calls_using(arena);
+    if (!arena) return;
+    wait_named_calls(arena->named_calls);
     delete arena;
 }
 
@@ -526,9 +509,6 @@ UFORM_EXPORT void uform_arena_describe(uform_arena_describe_t *arguments) {
 #pragma endregion Outcomes Executors and Arenas
 
 #pragma region Names
-
-/** Whether @p name spells @p spelling exactly, with no terminator assumed on either side. */
-static bool named(uform_bytes_view_t name, sz::string_view_t spelling) noexcept { return text_of(name) == spelling; }
 
 UFORM_EXPORT char const *uform_status_name(uform_status_t status) {
     switch (status) {
@@ -551,14 +531,14 @@ UFORM_EXPORT char const *uform_status_name(uform_status_t status) {
     return "unrecognized";
 }
 
-UFORM_EXPORT uform_status_t uform_status_from_name(uform_bytes_view_t name) {
-    for (uform_status_t const status :
-         {uform_status_success_k, uform_status_deferred_k, uform_status_out_of_memory_k, uform_status_shape_mismatch_k,
-          uform_status_unsupported_layout_k, uform_status_unknown_kind_k, uform_status_io_k, uform_status_device_k,
-          uform_status_malformed_k, uform_status_internal_k, uform_status_config_mismatch_k, uform_status_contended_k,
-          uform_status_cancelled_k, uform_status_unsupported_k, uform_status_invalid_argument_k})
-        if (named(name, uform_status_name(status))) return status;
-    return uform_status_invalid_argument_k;
+UFORM_EXPORT uform_status_t uform_status_from_name(uform_bytes_view_t name, uform_status_t *status) {
+    return read_name<uform_status_t>(
+        name,
+        {uform_status_success_k, uform_status_deferred_k, uform_status_out_of_memory_k, uform_status_shape_mismatch_k,
+         uform_status_unsupported_layout_k, uform_status_unknown_kind_k, uform_status_io_k, uform_status_device_k,
+         uform_status_malformed_k, uform_status_internal_k, uform_status_config_mismatch_k, uform_status_contended_k,
+         uform_status_cancelled_k, uform_status_unsupported_k, uform_status_invalid_argument_k},
+        uform_status_name, status);
 }
 
 UFORM_EXPORT char const *uform_scalar_name(uform_scalar_t scalar) {
@@ -582,13 +562,13 @@ UFORM_EXPORT char const *uform_scalar_name(uform_scalar_t scalar) {
     return "unrecognized";
 }
 
-UFORM_EXPORT uform_scalar_t uform_scalar_from_name(uform_bytes_view_t name) {
-    for (uform_scalar_t const scalar :
-         {uform_scalar_f64_k, uform_scalar_f32_k, uform_scalar_bf16_k, uform_scalar_f16_k, uform_scalar_e5m2_k,
-          uform_scalar_e4m3_k, uform_scalar_e3m2_k, uform_scalar_e2m3_k, uform_scalar_i8_k, uform_scalar_i4x2_k,
-          uform_scalar_i32_k, uform_scalar_u8_k, uform_scalar_u4x2_k, uform_scalar_u1x8_k})
-        if (named(name, uform_scalar_name(scalar))) return scalar;
-    return uform_scalar_unknown_k;
+UFORM_EXPORT uform_status_t uform_scalar_from_name(uform_bytes_view_t name, uform_scalar_t *scalar) {
+    return read_name<uform_scalar_t>(
+        name,
+        {uform_scalar_f64_k, uform_scalar_f32_k, uform_scalar_bf16_k, uform_scalar_f16_k, uform_scalar_e5m2_k,
+         uform_scalar_e4m3_k, uform_scalar_e3m2_k, uform_scalar_e2m3_k, uform_scalar_i8_k, uform_scalar_i4x2_k,
+         uform_scalar_i32_k, uform_scalar_u8_k, uform_scalar_u4x2_k, uform_scalar_u1x8_k},
+        uform_scalar_name, scalar);
 }
 
 UFORM_EXPORT char const *uform_mood_name(uform_mood_t mood) {
@@ -599,8 +579,8 @@ UFORM_EXPORT char const *uform_mood_name(uform_mood_t mood) {
     return "unrecognized";
 }
 
-UFORM_EXPORT uform_mood_t uform_mood_from_name(uform_bytes_view_t name) {
-    return named(name, "spinning") ? uform_mood_spinning_k : uform_mood_parked_k;
+UFORM_EXPORT uform_status_t uform_mood_from_name(uform_bytes_view_t name, uform_mood_t *mood) {
+    return read_name<uform_mood_t>(name, {uform_mood_parked_k, uform_mood_spinning_k}, uform_mood_name, mood);
 }
 
 UFORM_EXPORT char const *uform_cpu_class_name(uform_cpu_class_t cpu_class) {
@@ -628,16 +608,16 @@ UFORM_EXPORT char const *uform_cpu_class_name(uform_cpu_class_t cpu_class) {
     return "unrecognized";
 }
 
-UFORM_EXPORT uform_cpu_class_t uform_cpu_class_from_name(uform_bytes_view_t name) {
-    for (uform_cpu_class_t const cpu_class :
-         {uform_cpu_class_serial_k, uform_cpu_class_intel_haswell_k, uform_cpu_class_intel_sierra_k,
-          uform_cpu_class_intel_skylake_k, uform_cpu_class_intel_icelake_k, uform_cpu_class_amd_genoa_k,
-          uform_cpu_class_intel_sapphire_k, uform_cpu_class_intel_granite_k, uform_cpu_class_intel_diamond_k,
-          uform_cpu_class_aws_g2_k, uform_cpu_class_apple_m2_k, uform_cpu_class_apple_m4_k, uform_cpu_class_aws_g5_k,
-          uform_cpu_class_nvidia_vera_k, uform_cpu_class_alibaba_c930_k, uform_cpu_class_wasm32_v128_k,
-          uform_cpu_class_wasm64_extended_k, uform_cpu_class_monoversioned_k})
-        if (named(name, uform_cpu_class_name(cpu_class))) return cpu_class;
-    return uform_cpu_class_unknown_k;
+UFORM_EXPORT uform_status_t uform_cpu_class_from_name(uform_bytes_view_t name, uform_cpu_class_t *cpu_class) {
+    return read_name<uform_cpu_class_t>(
+        name,
+        {uform_cpu_class_serial_k, uform_cpu_class_intel_haswell_k, uform_cpu_class_intel_sierra_k,
+         uform_cpu_class_intel_skylake_k, uform_cpu_class_intel_icelake_k, uform_cpu_class_amd_genoa_k,
+         uform_cpu_class_intel_sapphire_k, uform_cpu_class_intel_granite_k, uform_cpu_class_intel_diamond_k,
+         uform_cpu_class_aws_g2_k, uform_cpu_class_apple_m2_k, uform_cpu_class_apple_m4_k, uform_cpu_class_aws_g5_k,
+         uform_cpu_class_nvidia_vera_k, uform_cpu_class_alibaba_c930_k, uform_cpu_class_wasm32_v128_k,
+         uform_cpu_class_wasm64_extended_k, uform_cpu_class_monoversioned_k},
+        uform_cpu_class_name, cpu_class);
 }
 
 UFORM_EXPORT char const *uform_gpu_class_name(uform_gpu_class_t gpu_class) {
@@ -659,14 +639,14 @@ UFORM_EXPORT char const *uform_gpu_class_name(uform_gpu_class_t gpu_class) {
     return "unrecognized";
 }
 
-UFORM_EXPORT uform_gpu_class_t uform_gpu_class_from_name(uform_bytes_view_t name) {
-    for (uform_gpu_class_t const gpu_class :
-         {uform_gpu_class_nvidia_ampere_k, uform_gpu_class_nvidia_ada_k, uform_gpu_class_nvidia_hopper_k,
-          uform_gpu_class_nvidia_blackwell_k, uform_gpu_class_nvidia_blackwellrtx_k, uform_gpu_class_nvidia_rubin_k,
-          uform_gpu_class_amd_cdna3_k, uform_gpu_class_amd_cdna4_k, uform_gpu_class_amd_cdna5_k,
-          uform_gpu_class_apple_metal7_k, uform_gpu_class_apple_metal9_k, uform_gpu_class_apple_metal10_k})
-        if (named(name, uform_gpu_class_name(gpu_class))) return gpu_class;
-    return uform_gpu_class_unknown_k;
+UFORM_EXPORT uform_status_t uform_gpu_class_from_name(uform_bytes_view_t name, uform_gpu_class_t *gpu_class) {
+    return read_name<uform_gpu_class_t>(
+        name,
+        {uform_gpu_class_nvidia_ampere_k, uform_gpu_class_nvidia_ada_k, uform_gpu_class_nvidia_hopper_k,
+         uform_gpu_class_nvidia_blackwell_k, uform_gpu_class_nvidia_blackwellrtx_k, uform_gpu_class_nvidia_rubin_k,
+         uform_gpu_class_amd_cdna3_k, uform_gpu_class_amd_cdna4_k, uform_gpu_class_amd_cdna5_k,
+         uform_gpu_class_apple_metal7_k, uform_gpu_class_apple_metal9_k, uform_gpu_class_apple_metal10_k},
+        uform_gpu_class_name, gpu_class);
 }
 
 UFORM_EXPORT char const *uform_modality_name(uform_modality_t modality) {
@@ -679,10 +659,10 @@ UFORM_EXPORT char const *uform_modality_name(uform_modality_t modality) {
     return "unrecognized";
 }
 
-UFORM_EXPORT uform_modality_t uform_modality_from_name(uform_bytes_view_t name) {
-    for (uform_modality_t const modality : {uform_modality_image_k, uform_modality_video_k, uform_modality_audio_k})
-        if (named(name, uform_modality_name(modality))) return modality;
-    return uform_modality_text_k;
+UFORM_EXPORT uform_status_t uform_modality_from_name(uform_bytes_view_t name, uform_modality_t *modality) {
+    return read_name<uform_modality_t>(
+        name, {uform_modality_text_k, uform_modality_image_k, uform_modality_video_k, uform_modality_audio_k},
+        uform_modality_name, modality);
 }
 
 UFORM_EXPORT char const *uform_objective_name(uform_objective_t objective) {
@@ -694,10 +674,10 @@ UFORM_EXPORT char const *uform_objective_name(uform_objective_t objective) {
     return "unrecognized";
 }
 
-UFORM_EXPORT uform_objective_t uform_objective_from_name(uform_bytes_view_t name) {
-    for (uform_objective_t const objective : {uform_objective_contrastive_k, uform_objective_joint_k})
-        if (named(name, uform_objective_name(objective))) return objective;
-    return uform_objective_masked_k;
+UFORM_EXPORT uform_status_t uform_objective_from_name(uform_bytes_view_t name, uform_objective_t *objective) {
+    return read_name<uform_objective_t>(
+        name, {uform_objective_masked_k, uform_objective_contrastive_k, uform_objective_joint_k}, uform_objective_name,
+        objective);
 }
 
 UFORM_EXPORT char const *uform_negatives_name(uform_negatives_t negatives) {
@@ -708,8 +688,9 @@ UFORM_EXPORT char const *uform_negatives_name(uform_negatives_t negatives) {
     return "unrecognized";
 }
 
-UFORM_EXPORT uform_negatives_t uform_negatives_from_name(uform_bytes_view_t name) {
-    return named(name, "named") ? uform_negatives_named_k : uform_negatives_ambient_k;
+UFORM_EXPORT uform_status_t uform_negatives_from_name(uform_bytes_view_t name, uform_negatives_t *negatives) {
+    return read_name<uform_negatives_t>(name, {uform_negatives_ambient_k, uform_negatives_named_k},
+                                        uform_negatives_name, negatives);
 }
 
 UFORM_EXPORT char const *uform_multimem_tier_name(uform_multimem_tier_t tier) {
@@ -720,8 +701,9 @@ UFORM_EXPORT char const *uform_multimem_tier_name(uform_multimem_tier_t tier) {
     return "unrecognized";
 }
 
-UFORM_EXPORT uform_multimem_tier_t uform_multimem_tier_from_name(uform_bytes_view_t name) {
-    return named(name, "peer-read") ? uform_multimem_tier_peer_read_k : uform_multimem_tier_switch_reduced_k;
+UFORM_EXPORT uform_status_t uform_multimem_tier_from_name(uform_bytes_view_t name, uform_multimem_tier_t *tier) {
+    return read_name<uform_multimem_tier_t>(
+        name, {uform_multimem_tier_switch_reduced_k, uform_multimem_tier_peer_read_k}, uform_multimem_tier_name, tier);
 }
 
 #pragma endregion Names

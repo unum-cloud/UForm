@@ -116,7 +116,7 @@ def test_unknown_enum_values_are_refused(checkpoint: Path):
 
 def test_executor_drains_and_closes(model: uform.Model):
     """An executor drains in either mood and closes on leaving its `with` block, refusing later receivers."""
-    with uform.Executor.for_ram(threads=1, deferred_limit=4) as executor:
+    with uform.Executor.for_ram(threads=1) as executor:
         executor.drain(uform.Mood.SPINNING)
         executor.drain()
     with pytest.raises(uform.InvalidArgumentError):

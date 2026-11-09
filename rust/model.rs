@@ -320,7 +320,7 @@ impl<'config, Bytes: Deref<Target = [u8]>> From<&'config Bytes> for ModelLoadVra
 /// use uform::*;
 ///
 /// let model = Model::load_ram("model.safetensors")?;
-/// let executor = Executor::for_ram(&[], None, 0, 0)?;
+/// let executor = Executor::for_ram(&[], None, 0)?;
 /// let mut arena = Arena::new_in(&executor)?;
 /// let encoded = model.on(&executor).text_encode(&["a caption"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
 /// if let Some(embeddings) = encoded.embeddings {
@@ -351,7 +351,7 @@ impl Model {
         }
     }
 
-    /// The receiver whose verbs block on `executor`, after the calls submitted there before them.
+    /// The receiver whose verbs block on `executor`, failing `Contended` while another holds it.
     ///
     /// Rust-only.
     pub fn on<'model>(&'model self, executor: &'model Executor) -> On<'model, Model> {
@@ -372,7 +372,7 @@ impl Model {
     /// use uform::*;
     ///
     /// let model = Model::load_ram("model.safetensors")?;
-    /// let executor = Executor::for_ram(&[], None, 0, 0)?;
+    /// let executor = Executor::for_ram(&[], None, 0)?;
     /// let mut arena = Arena::new_in(&executor)?;
     /// let texts = vec![String::from("a caption")];
     /// let call = model.deferred(&executor).text_encode(&texts, Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
@@ -386,7 +386,7 @@ impl Model {
     /// use uform::*;
     ///
     /// let model = Model::load_ram("model.safetensors")?;
-    /// let executor = Executor::for_ram(&[], None, 0, 0)?;
+    /// let executor = Executor::for_ram(&[], None, 0)?;
     /// let mut arena = Arena::new_in(&executor)?;
     /// let texts = vec![String::from("a caption")];
     /// let call = model.deferred(&executor).text_encode(texts, Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
@@ -638,7 +638,7 @@ pub(crate) mod tests {
         assert_eq!(local.quantization, Scalar::BF16);
         assert!(local.dimensions != 0 && local.context != 0);
 
-        let executor = Executor::for_ram(&[], None, 1, 0)?;
+        let executor = Executor::for_ram(&[], None, 1)?;
         assert_eq!(model.on(&executor).describe()?, local);
         assert_eq!(model.deferred(&executor).describe()?.wait()?, local);
         Ok(())

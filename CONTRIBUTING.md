@@ -259,7 +259,7 @@ AMD compiles one code object per listed target either way.
 - `UFORM_SITE_PACKAGES` and `UFORM_CUDF_ROOT`: the directory the libcudf wheel discovery searches, or the prefix holding the libraries themselves.
 
 Binaries take long kebab-case flags with no short forms, as `uform_bench_encoder --checkpoint model.safetensors --cpu-class intel-haswell` does, and spell classes, scalars and statuses as the C name tables do.
-A namespace-scope `_k` constant names an invariant or the default a zero field derives, as `deferred_limit_default_k` and `default_progress_steps_k` in `src/lib.hpp` do, while a size a caller may want otherwise is a field of an argument structure.
+A namespace-scope `_k` constant names an invariant or the default a zero field derives, as `idle_cores_denominator_k` and `default_progress_steps_k` in `src/lib.hpp` do, while a size a caller may want otherwise is a field of an argument structure.
 
 ## Data Scripts
 

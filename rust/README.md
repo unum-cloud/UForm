@@ -35,7 +35,7 @@ CC=clang-22 CXX=clang++-22 cargo test --features stub
 ```rust
 use uform::*;
 
-let executor = Executor::for_ram(&[], None, 0, 0)?;           // the threads every receiver names
+let executor = Executor::for_ram(&[], None, 0)?;           // the threads every receiver names
 let mut arena = Arena::new_in(&executor)?;                    // the memory outputs land in
 let model = Model::load_ram("model.safetensors")?;            // BFloat16 blocks, as the checkpoint stores them
 
@@ -52,7 +52,7 @@ if let Some(embeddings) = encoded.embeddings {
 The receiver decides where a verb runs and how it completes, while the verb and its arguments stay the same:
 
 - `model.text_encode(..)` runs on the calling thread, through `&Model`.
-- `model.on(&executor).text_encode(..)` blocks on the executor, after the calls submitted there before it.
+- `model.on(&executor).text_encode(..)` blocks on the executor, failing `Contended` while another call holds it.
 - `model.deferred(&executor).text_encode(..)` submits the call and answers a `Deferred`.
 
 `ModelVerbs` and `EncodeVerbs` write every verb once for all three, and `TrainVerbs` does so for a trainer's two receivers.
@@ -78,7 +78,7 @@ The library reads a deferred call's inputs after the verb returns, so a deferred
 Lending `&Vec<String>` fails to compile with "a deferred receiver needs owned inputs", and a config borrowing a local fails as "does not live long enough".
 A deferred call allocates one box holding its outcome, argument struct and inputs until it is final.
 An executor without threads of its own may hold a deferred call until its `wait`, its next `drain` or blocking call, or the drop of what it names, so `drain` it before an `.await` there.
-A submission finding the executor's deferred table full finishes at once with `Status::Contended`.
+A call finding another one holding its executor finishes at once with `Status::Contended`.
 
 ## Executors
 
@@ -86,21 +86,20 @@ An executor owns host threads or device streams, the activation scratch, and the
 One executor serves any number of models of its residency.
 
 ```rust
-let threads = Executor::for_ram(&[], None, 8, 0)?;                      // eight threads, where zero takes 7/8 of the cores
-let domains = Executor::for_ram(&[0, 1], None, 0, 0)?;                  // threads interleaved across two NUMA nodes
-let serial = Executor::for_ram(&[], Some(CPUClass::Serial), 0, 0)?;     // dispatches as the portable floor
-let streams = unsafe { Executor::for_vram(&[0, 1], None, &[], 0, 0)? }; // one stream per device, scratch grown as asked
+let threads = Executor::for_ram(&[], None, 8)?;                      // eight threads, where zero takes 7/8 of the cores
+let domains = Executor::for_ram(&[0, 1], None, 0)?;                  // threads interleaved across two NUMA nodes
+let serial = Executor::for_ram(&[], Some(CPUClass::Serial), 0)?;        // dispatches as the portable floor
+let streams = unsafe { Executor::for_vram(&[0, 1], None, &[], None, &[], 0)? }; // one stream per device, scratch grown as asked
 let shared = unsafe { Executor::on_pool(&[], None, pool, 0)? };         // borrows a ForkUnion pool's threads
 let local = Executor::default();                                        // owns nothing, runs on the calling thread
 
-threads.drain(Mood::Spinning)?;                                         // waits for every call, then keeps spinning
+threads.drain(Mood::Spinning)?;                                         // waits until no call holds it, then keeps spinning
 ```
 
 The second argument pins a `CPUClass` or a `GPUClass` to dispatch as, and `None` derives the hardware's own.
 `gpu_devices(&mut devices)` fills a slice of `GPUDevice` and answers how many GPUs the process can drive, and a device's position there is the ordinal `for_vram` and `load_vram` name it by.
 `for_vram` and `on_pool` are `unsafe`, since the streams or the pool they borrow must outlive the executor; `on_pool` mirrors the C verb and answers `Status::Unsupported` until borrowing is designed, as `for_vram` does for borrowed streams.
-Each constructor ends with a `deferred_limit` sizing its table of deferred calls, where zero takes the default.
-Calls on one executor run in submission order, so two threads that genuinely overlap take one apiece; an executor is `Send` but not `Sync`, while models stay freely shared.
+An executor runs one call at a time, so two threads that genuinely overlap take one apiece; an executor is `Send` but not `Sync`, while models stay freely shared.
 Dropping an executor drains it, unless a GPU arena it made still holds it, which then does so on its own drop.
 
 ## Arenas
@@ -193,7 +192,7 @@ Training is GPU-only.
 The configuration arrives as structs mirroring the C ones field by field, so a field left at its default is zero, which the library derives:
 
 ```rust
-let executor = unsafe { Executor::for_vram(&[0, 1], None, &[], 0, 0)? };
+let executor = unsafe { Executor::for_vram(&[0, 1], None, &[], None, &[], 0)? };
 let mesh = Mesh::bootstrap(&executor, &MeshOptions {
     host_domain_index: rank,
     host_domain_count: nodes,
