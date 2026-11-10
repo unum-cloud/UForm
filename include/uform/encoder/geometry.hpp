@@ -70,9 +70,11 @@ struct geometry_t {
 
     [[nodiscard]] u32_t heads() const noexcept { return hidden / head_width; }
     [[nodiscard]] u32_t ffn() const noexcept { return ffn_expansion * hidden; }
-    [[nodiscard]] u32_t image_scalars() const noexcept { return image_patch_side * image_patch_side * image_channels; }
-    [[nodiscard]] u32_t video_scalars() const noexcept {
-        return video_tube_frames * video_patch_side * video_patch_side * video_channels;
+    [[nodiscard]] std::size_t image_scalars() const noexcept {
+        return std::size_t {image_patch_side} * image_patch_side * image_channels;
+    }
+    [[nodiscard]] std::size_t video_scalars() const noexcept {
+        return std::size_t {video_tube_frames} * video_patch_side * video_patch_side * video_channels;
     }
 
     /**

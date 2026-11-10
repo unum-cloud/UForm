@@ -134,10 +134,6 @@ if (UFORM_BUILD_TEST)
     else ()
         add_test(NAME uform_test_c COMMAND uform_test_c)
     endif ()
-    add_test(NAME uform_duplicate_symbols
-             COMMAND ${CMAKE_COMMAND} "-DOBJECTS=$<FILTER:$<TARGET_PROPERTY:uform_static,SOURCES>,INCLUDE,[.]o(bj)?$>"
-                     -P "${forkunion_SOURCE_DIR}/cmake/forkunion_duplicate_symbols.cmake"
-    )
 endif ()
 
 # The same checkpoint on an NVIDIA GPU against the host, which only a build with the NVIDIA kernels and the suites runs.

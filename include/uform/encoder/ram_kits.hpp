@@ -923,7 +923,7 @@ struct elementwise_ladder {
 #pragma region Entries
 
 /** Rows @c [t,:] of @p rows for each text segment's cells, copied from @c table[token] ; other rows
- *  stay as they are. Token IDs are trusted: packers write bytes only. */
+ *  stay as they are. Token IDs are trusted: every ID is below the vocabulary the load proved. */
 [[nodiscard]] inline static uu::status_t gather_bytes(segment_layout_t const &layout,
                                                       nk::tensor_view<token_id_t, 1> grid_tokens, bf16r2_view_t table,
                                                       bf16r2_span_t rows, uu::pool_view_t pool) noexcept {

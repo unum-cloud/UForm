@@ -99,7 +99,8 @@ inline failure_t validate_images(ue::geometry_t const &geometry) noexcept {
 
 /** The patch count an image of @p native extent spans before truncation. */
 inline std::size_t native_patches(um::image_extent_t native, u32_t patch_side) noexcept {
-    return divide_round_up(native.width, patch_side) * divide_round_up(native.height, patch_side);
+    return divide_round_up(std::size_t {native.width}, patch_side) *
+           divide_round_up(std::size_t {native.height}, patch_side);
 }
 
 /** The refusal of every audio verb: a model without the audio entry. */
@@ -386,9 +387,6 @@ inline failure_t validate_tape(uform_tape_view_t const &tape, std::size_t count,
     if (!tape.offsets || (!tape.data && count && tape.offsets[count] != tape.offsets[0]))
         return {uform_status_invalid_argument_k, "The tape must name its storage and offsets"};
     if (tape.scalar != element) return {uform_status_unsupported_layout_k, "The tape holds another scalar"};
-    for (std::size_t item = 0; item != count; ++item)
-        if (tape.offsets[item + 1] < tape.offsets[item])
-            return {uform_status_malformed_k, "The tape's offsets must not decrease"};
     return {};
 }
 
@@ -511,6 +509,10 @@ void encode_items(arguments_type_ &arguments, packer_type_ &packer, site_type_ &
     requested_t const requested = requested_of(arguments);
     std::size_t const row_bytes = geometry.hidden * output_bytes(requested.scalar);
     std::size_t const token_row_bytes = geometry.token_width * output_bytes(requested.scalar);
+    std::size_t const cell_bytes = packer.cell_bytes(geometry);
+    if (wraps_on_multiply(tokens, fu::max_of(fu::max_of(row_bytes, token_row_bytes), cell_bytes)) ||
+        wraps_on_multiply(count, geometry.masked_vocabulary))
+        return fail({uform_status_out_of_memory_k, "The batch's outputs overflow the address space"});
     bool const ragged = requested.states || requested.token_vectors;
     std::size_t *const offsets_memory = staging.template allocate<std::size_t>(count + 1);
     std::size_t *const landed_offsets_memory = ragged ? memory.template allocate<std::size_t>(count + 1) : nullptr;
@@ -544,7 +546,6 @@ void encode_items(arguments_type_ &arguments, packer_type_ &packer, site_type_ &
         widest_items = items > widest_items ? items : widest_items;
         widest_tokens = cells > widest_tokens ? cells : widest_tokens;
     }
-    std::size_t const cell_bytes = packer.cell_bytes(geometry);
     u32_t *const segment_offsets = transfers.template allocate<u32_t>(widest_items + 1);
     u32_t *const segment_lengths = transfers.template allocate<u32_t>(widest_items + 1);
     modality_t *const segment_modality = transfers.template allocate<modality_t>(widest_items + 1);

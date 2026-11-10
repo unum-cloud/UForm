@@ -21,9 +21,7 @@ struct images_packer_t {
     static constexpr modality_t modality_k = modality_t::image_k;
     tape_view<b8_t const> tape;
 
-    std::size_t cell_bytes(ue::geometry_t const &geometry) const noexcept {
-        return std::size_t {geometry.image_patch_side} * geometry.image_patch_side * geometry.image_channels;
-    }
+    std::size_t cell_bytes(ue::geometry_t const &geometry) const noexcept { return geometry.image_scalars(); }
     failure_t validate(ue::geometry_t const &geometry) const noexcept { return validate_images(geometry); }
     failure_t prepare(chunked_arena_t &, std::size_t, ue::geometry_t const &) noexcept { return {}; }
 
@@ -59,9 +57,7 @@ struct videos_packer_t {
     static constexpr modality_t modality_k = modality_t::video_k;
     tape_view<b8_t const> tape;
 
-    std::size_t cell_bytes(ue::geometry_t const &geometry) const noexcept {
-        return std::size_t {geometry.video_scalars()};
-    }
+    std::size_t cell_bytes(ue::geometry_t const &geometry) const noexcept { return geometry.video_scalars(); }
 
     failure_t validate(ue::geometry_t const &geometry) const noexcept {
         if (!geometry.video_patch_side || !geometry.video_tube_frames)

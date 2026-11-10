@@ -1100,8 +1100,38 @@ static void test_progress(void) {
     printf("Test: Progress - PASSED\n");
 }
 
+#if !UFORM_TEST_STUB
+
+/** Loads @p header as a safetensors file over @p payload_bytes zeros, answering the outcome. */
+static uform_outcome_t load_forged(uform_executor_t executor, char const *header, size_t payload_bytes) {
+    size_t const header_bytes = strlen(header), header_length = (header_bytes + 7) / 8 * 8;
+    size_t const length = 8 + header_length + payload_bytes;
+    uint8_t *const buffer = (uint8_t *)calloc(length, 1);
+    expect(buffer != NULL, "The forged checkpoint must be allocated");
+    for (size_t byte = 0; byte != 8; ++byte) buffer[byte] = (uint8_t)((uint64_t)header_length >> (byte * 8));
+    memset(buffer + 8, ' ', header_length);
+    memcpy(buffer + 8, header, header_bytes);
+    uform_outcome_t outcome = {0};
+    uform_model_t model = NULL;
+    uform_model_load_ram_buffer(&(uform_model_load_ram_buffer_t) {.model = &model,
+                                                                  .executor = executor,
+                                                                  .outcome = &outcome,
+                                                                  .buffer = {buffer, length},
+                                                                  .quantization = uform_scalar_bf16_k});
+    uform_model_free(model);
+    free(buffer);
+    return outcome;
+}
+
+/** Whether @p outcome is a malformed load whose stage spells @p message . */
+static bool refused_as(uform_outcome_t outcome, char const *message) {
+    return outcome.status == uform_status_malformed_k && outcome.message && strcmp(outcome.message, message) == 0;
+}
+#endif
+
 /** Every refusal a caller can provoke: a null arena, a null model, no output named, a tape without
- *  storage or with decreasing offsets, and GPU-only verbs given a RAM executor. */
+ *  storage, and GPU-only verbs given a RAM executor; against the engine also forged checkpoints and
+ *  pixel counts that wrap. */
 static void test_refusals(void) {
     printf("Test: Refusals\n");
     uform_executor_t const executor = create_executor();
@@ -1140,11 +1170,54 @@ static void test_refusals(void) {
     uform_text_encode(&encode);
     expect(outcome.status == uform_status_invalid_argument_k, "A tape without offsets is refused");
 
-    size_t const decreasing[] = {0, 6, 4};
-    encode.texts.offsets = decreasing;
-    uform_text_encode(&encode);
-    expect(outcome.status == uform_status_malformed_k, "Decreasing offsets are malformed");
-    expect(embeddings.data == NULL, "A refused call leaves outputs NULL");
+#if !UFORM_TEST_STUB // the stand-in loads any readable bytes and multiplies pixels unchecked
+    uint8_t const wrapped_pixels[26] = {0};
+    size_t const wrapped_offsets[] = {0, sizeof(wrapped_pixels)};
+    uint32_t const wrapped_heights[] = {2154230017u}, wrapped_widths[] = {2854344542u};
+    uform_image_encode_pixels(
+        &(uform_image_encode_pixels_t) {.model = model,
+                                        .executor = executor,
+                                        .outcome = &outcome,
+                                        .count = 1,
+                                        .pixels = {wrapped_pixels, wrapped_offsets, uform_scalar_u8_k},
+                                        .heights = wrapped_heights,
+                                        .widths = wrapped_widths,
+                                        .embeddings = &embeddings,
+                                        .arena = arena,
+                                        .outputs_scalar = uform_scalar_f32_k});
+    expect(outcome.status == uform_status_shape_mismatch_k, "Pixels whose three channels wrap 64 bits are refused");
+
+    char const *const reading = "The checkpoint is not a safetensors file";
+    char const *const measuring = "The checkpoint carries no usable geometry";
+    expect(refused_as(load_forged(executor,
+                                  "{\"model.embedding\":{\"dtype\":\"BF16\",\"shape\":[1152921504606846976,8]," //
+                                  "\"data_offsets\":[0,0]}}",
+                                  0),
+                      reading),
+           "A shape whose product wraps is refused while reading");
+    char const geometry[] =
+        "{\"__metadata__\":{\"depth\":\"1\",\"hidden\":\"8\",\"ffn_expansion\":\"1\",\"head_width\":\"8\"," //
+        "\"rms_epsilon\":\"0.00001\",\"rope_temporal\":\"4\",\"rope_height\":\"2\",\"rope_width\":\"2\","   //
+        "\"rope_base\":\"10000\",\"context\":\"4\",\"image_patch_side\":\"0\",\"image_channels\":\"1\","    //
+        "\"image_pixel_mean\":\"0.5\",\"image_pixel_std\":\"0.5\",\"video_patch_side\":\"1\","              //
+        "\"video_tube_frames\":\"%s\",\"video_frame_stride\":\"1\",\"video_channels\":\"2\","               //
+        "\"video_pixel_mean\":\"0.5,0.5\",\"video_pixel_std\":\"0.5,0.5\",\"audio_chunk_samples\":\"0\","   //
+        "\"audio_sample_rate\":\"16000\"},"                                                                 //
+        "\"model.embedding\":{\"dtype\":\"BF16\",\"shape\":[%zu,8],\"data_offsets\":[0,%zu]},"              //
+        "\"model.blocks.0.gate_up\":{\"dtype\":\"BF16\",\"shape\":[16,8],\"data_offsets\":[%zu,%zu]},"      //
+        "\"model.video_projection\":{\"dtype\":\"BF16\",\"shape\":[8,2],\"data_offsets\":[%zu,%zu]}}";
+    char header[2048];
+    size_t const short_vocabulary = 200, full_vocabulary = 258;
+    snprintf(header, sizeof(header), geometry, "1", short_vocabulary, short_vocabulary * 16, short_vocabulary * 16,
+             short_vocabulary * 16 + 256, short_vocabulary * 16 + 256, short_vocabulary * 16 + 288);
+    expect(refused_as(load_forged(executor, header, short_vocabulary * 16 + 288), measuring),
+           "An embedding short of the bytes and the mask is refused with the geometry");
+    // Two-channel tubes of 2^31+1 frames take 2^32+2 scalars, which 32 bits wrap to 2.
+    snprintf(header, sizeof(header), geometry, "2147483649", full_vocabulary, full_vocabulary * 16,
+             full_vocabulary * 16, full_vocabulary * 16 + 256, full_vocabulary * 16 + 256, full_vocabulary * 16 + 288);
+    expect(refused_as(load_forged(executor, header, full_vocabulary * 16 + 288), measuring),
+           "A tube that misses its projection is refused with the geometry");
+#endif
 
     uform_mesh_t mesh = NULL;
     uform_mesh_bootstrap(&(uform_mesh_bootstrap_t) {.mesh = &mesh, .executor = executor, .outcome = &outcome});
@@ -1176,13 +1249,13 @@ static void test_refusals(void) {
 }
 
 /** Writes a small stand-in checkpoint to the temporary directory, answering its path. */
-static char const* write_scratch_checkpoint(void) {
+static char const *write_scratch_checkpoint(void) {
     static char path[1024];
-    char const* directory = getenv("TMPDIR");
+    char const *directory = getenv("TMPDIR");
     if (!directory || !*directory) directory = getenv("TEMP");
     if (!directory || !*directory) directory = "/tmp";
     snprintf(path, sizeof(path), "%s/uform-test-checkpoint.safetensors", directory);
-    FILE* const file = fopen(path, "wb");
+    FILE *const file = fopen(path, "wb");
     expect(file != NULL, "The scratch checkpoint must be writable");
     char const contents[] = "{\"__metadata__\":{\"stand-in\":\"any readable bytes load\"}}";
     uint64_t const header_length = sizeof(contents) - 1;
@@ -1195,23 +1268,23 @@ static char const* write_scratch_checkpoint(void) {
 }
 
 /** Prints the version line, then the capabilities as "- Compiled for:" and "- This machine:". */
-static void print_machine(FILE* stream) {
+static void print_machine(FILE *stream) {
     fprintf(stream, "UForm %s\n- Compiled for: %s\n- This machine: %s\n", uform_version_name(),
             uform_capabilities_compiled(), uform_capabilities_available());
 }
 
-int main(int argc, char* argv[]) {
+int main(int argc, char *argv[]) {
     print_machine(stdout);
     // ctest hides passing output, so the job summary is where a green run shows what it covered
-    char const* const summary_path = getenv("GITHUB_STEP_SUMMARY");
-    FILE* const summary = summary_path ? fopen(summary_path, "a") : NULL;
+    char const *const summary_path = getenv("GITHUB_STEP_SUMMARY");
+    FILE *const summary = summary_path ? fopen(summary_path, "a") : NULL;
     if (summary) print_machine(summary), fclose(summary);
-    char const* const filter = getenv("UFORM_FILTER");
+    char const *const filter = getenv("UFORM_FILTER");
     if (filter && *filter) test_filter = filter;
     printf("- Filter: %s\n", test_filter ? test_filter : "none");
 
-    char const* const environment_checkpoint = getenv("UFORM_TEST_CHECKPOINT");
-    char const* scratch = NULL;
+    char const *const environment_checkpoint = getenv("UFORM_TEST_CHECKPOINT");
+    char const *scratch = NULL;
     if (argc > 1) checkpoint_path = argv[1];
     else if (environment_checkpoint && *environment_checkpoint) checkpoint_path = environment_checkpoint;
     else checkpoint_path = scratch = write_scratch_checkpoint();

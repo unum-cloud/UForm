@@ -1,7 +1,7 @@
 # UForm for Swift
 
 The Swift package binds the C ABI in `c/uform/` through `UFormC`, the `libuform_static` engine CMake builds, packed with those headers.
-It requires Swift 6.2 or newer, on macOS 15, iOS 18, tvOS 18, watchOS 11, visionOS 2, or Linux.
+It requires Swift 6.4 or newer, on macOS 15, iOS 18, tvOS 18, watchOS 11, visionOS 2, or Linux.
 Models are tokenizer-free, so the package has no dependencies beyond the C library: text crosses as UTF-8 bytes, media as encoded files or decoded samples.
 
 ## Installation

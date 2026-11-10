@@ -93,18 +93,18 @@ struct pixels_packer_t {
      *  the resize reads. */
     nk::tensor_span<pixel_t, 2> expanded {};
 
-    std::size_t cell_bytes(ue::geometry_t const &geometry) const noexcept {
-        return std::size_t {geometry.image_patch_side} * geometry.image_patch_side * geometry.image_channels;
-    }
+    std::size_t cell_bytes(ue::geometry_t const &geometry) const noexcept { return geometry.image_scalars(); }
 
     failure_t validate(ue::geometry_t const &geometry) const noexcept {
         if (failure_t const refused = validate_images(geometry); refused.message) return refused;
         std::size_t const count = tape.size();
         if (count && (heights.empty() || widths.empty()))
             return {uform_status_invalid_argument_k, "Every item needs its height and width"};
-        for (std::size_t item = 0; item != count; ++item)
-            if (tape[item].size() != std::size_t {heights[item]} * widths[item] * 3)
+        for (std::size_t item = 0; item != count; ++item) {
+            std::size_t const pixels = std::size_t {heights[item]} * widths[item];
+            if (wraps_on_multiply(pixels, 3) || tape[item].size() != pixels * 3)
                 return {uform_status_shape_mismatch_k, "An item's bytes disagree with its height and width"};
+        }
         return {};
     }
 
@@ -166,6 +166,9 @@ struct samples_packer_t {
     failure_t validate(ue::geometry_t const &geometry) const noexcept {
         if (failure_t const refused = validate_audio(geometry); refused.message) return refused;
         if (!sample_rate) return {uform_status_invalid_argument_k, "The sample rate must not be zero"};
+        for (std::size_t item = 0; item != tape.size(); ++item)
+            if (wraps_on_multiply(tape[item].size(), geometry.audio_sample_rate))
+                return {uform_status_shape_mismatch_k, "A recording's resample overflows"};
         return {};
     }
 

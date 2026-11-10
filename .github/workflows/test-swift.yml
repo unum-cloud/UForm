@@ -10,7 +10,7 @@ jobs:
   # The suite links the stub packed as the release packs the engine, for the host's slice alone.
   test_swift_macos:
     name: Test Swift on macOS
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 30
     env:
       UFORM_SWIFT_ARTIFACT: build_swift/UFormC.xcframework
@@ -28,14 +28,17 @@ jobs:
     name: Test Swift on Ubuntu
     runs-on: ubuntu-26.04
     timeout-minutes: 30
+    container: swift:6.4
     env:
       UFORM_SWIFT_ARTIFACT: build_swift/UFormC.artifactbundle
     steps:
+      - name: Install CMake
+        run: apt-get update && apt-get install -y cmake ninja-build
       - name: Checkout Repository
         uses: actions/checkout@v7
       - name: Build the Stub Artifact Bundle
         run: |
-          cmake --preset swift -D UFORM_BUILD_STUB=ON
+          cmake --preset swift -D UFORM_BUILD_STUB=ON -D CMAKE_C_COMPILER=clang -D CMAKE_CXX_COMPILER=clang++
           cmake --build --preset swift
       - name: Test Swift
         run: swift test

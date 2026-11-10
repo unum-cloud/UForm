@@ -8,6 +8,7 @@
 #include <cmath> // `std::pow`
 
 #include <charconv>     // `std::from_chars`
+#include <limits>       // `std::numeric_limits`
 #include <system_error> // `std::errc`
 
 #include "uform/encoder/entries.hpp" // `rope_angles_t`
@@ -115,7 +116,22 @@ expected<geometry_t> geometry_t::from(checkpoint_to_load_t const &checkpoint) no
         return result_t::fail(status_t::invalid_argument_k, "the embedding must be [vocabulary,{}]", geometry.hidden);
     if (gate_up.empty() || gate_up.extent(0) != 2u * geometry.ffn())
         return result_t::fail(status_t::invalid_argument_k, "the first gate_up must have {} rows", 2u * geometry.ffn());
+    if (embedding.extent(0) <= byte_mask_k)
+        return result_t::fail(status_t::invalid_argument_k, "the embedding must cover every byte and the mask");
     geometry.vocabulary = static_cast<u32_t>(embedding.extent(0));
+    nk::tensor_view<nk_bf16_t, 2> const image_projection = checkpoint["model.image_projection"];
+    std::size_t const image_columns = image_projection.empty() ? 0 : image_projection.extent(1);
+    if (geometry.image_patch_side && (!geometry.image_channels || image_columns % geometry.image_channels != 0 ||
+                                      image_columns / geometry.image_channels !=
+                                          std::size_t {geometry.image_patch_side} * geometry.image_patch_side))
+        return result_t::fail(status_t::invalid_argument_k, "the image projection must take one patch of scalars");
+    nk::tensor_view<nk_bf16_t, 2> const video_projection = checkpoint["model.video_projection"];
+    std::size_t const video_columns = video_projection.empty() ? 0 : video_projection.extent(1);
+    std::size_t const video_tube = std::size_t {geometry.video_tube_frames} * geometry.video_channels;
+    if (geometry.video_patch_side &&
+        (!video_tube || video_columns % video_tube != 0 ||
+         video_columns / video_tube != std::size_t {geometry.video_patch_side} * geometry.video_patch_side))
+        return result_t::fail(status_t::invalid_argument_k, "the video projection must take one tube of scalars");
 
     nk::tensor_view<nk_bf16_t, 2> const projection = checkpoint["model.token_head.projection"];
     if (!projection.empty() && projection.extent(1) != geometry.hidden)
@@ -125,6 +141,8 @@ expected<geometry_t> geometry_t::from(checkpoint_to_load_t const &checkpoint) no
     if (!decoder.empty() && decoder.extent(1) != geometry.hidden)
         return result_t::fail(status_t::invalid_argument_k, "the byte decoder must be [vocabulary,{}]",
                               geometry.hidden);
+    if (!decoder.empty() && decoder.extent(0) <= (std::numeric_limits<u8_t>::max)())
+        return result_t::fail(status_t::invalid_argument_k, "the byte decoder must score every byte");
     geometry.masked_vocabulary = static_cast<u32_t>(decoder.empty() ? 0 : decoder.extent(0));
     nk::tensor_view<f32_t, 2> const temperatures = checkpoint.float32("choices.inverse_temperatures");
     geometry.choice_temperature_groups = static_cast<u32_t>(decoder.empty()        ? 0

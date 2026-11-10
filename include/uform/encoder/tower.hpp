@@ -213,7 +213,7 @@ struct scratch_cursor_t {
     template <typename value_type_>
     [[nodiscard]] nk::tensor_span<value_type_, 1> take(std::size_t count) noexcept {
         std::size_t const offset = used;
-        used += uu::divide_round_up(count * sizeof(value_type_), nk_default_alignment_k) * nk_default_alignment_k;
+        used += uu::round_up_to_multiple(count * sizeof(value_type_), nk_default_alignment_k);
         if (scratch.empty()) return {static_cast<value_type_ *>(nullptr), count};
         return {static_cast<value_type_ *>(static_cast<void *>(scratch.data() + offset)), count};
     }

@@ -12,13 +12,16 @@
  */
 #pragma once
 
+#include <cassert> // `assert`
 #include <cstddef> // `std::ptrdiff_t`
 #include <cstdint> // `std::int32_t`, `std::uint32_t`
 
+#include <concepts>        // `std::unsigned_integral`
+#include <limits>          // `std::numeric_limits`
 #include <utility>         // `std::move`
 #include <span>            // `std::span` — byte runs and tape offsets
 #include <new>             // `std::launder` — typed spans over byte regions
-#include <type_traits>     // `std::is_implicit_lifetime_v`
+#include <type_traits>     // `std::is_trivially_copyable_v`, `std::type_identity_t`
 #include <format>          // `std::vformat_to`, `std::make_format_args`, `std::formatter`
 #include <source_location> // `std::source_location`
 
@@ -102,7 +105,7 @@ using f32r4_span_t = nk::tensor_span<f32_t, 4>;
  *  touches no memory, so device regions qualify. */
 template <typename value_type_>
 [[nodiscard]] inline nk::tensor_span<value_type_, 1> typed_span(b8r1_span_t bytes) noexcept {
-    static_assert(std::is_implicit_lifetime_v<value_type_>);
+    static_assert(std::is_trivially_copyable_v<value_type_>);
     std::size_t const count = bytes.extent(0) / sizeof(value_type_);
     return {std::launder(static_cast<value_type_ *>(static_cast<void *>(bytes.data()))), count};
 }
@@ -110,7 +113,7 @@ template <typename value_type_>
 /** The read-only twin of @ref typed_span . */
 template <typename value_type_>
 [[nodiscard]] inline nk::tensor_view<value_type_, 1> typed_view(b8r1_view_t bytes) noexcept {
-    static_assert(std::is_implicit_lifetime_v<value_type_>);
+    static_assert(std::is_trivially_copyable_v<value_type_>);
     std::size_t const count = bytes.extent(0) / sizeof(value_type_);
     return {std::launder(static_cast<value_type_ const *>(static_cast<void const *>(bytes.data()))), count};
 }
@@ -126,6 +129,7 @@ struct tape_view {
     [[nodiscard]] std::size_t size() const noexcept { return offsets.empty() ? 0 : offsets.size() - 1; }
     [[nodiscard]] bool empty() const noexcept { return offsets.empty(); }
     [[nodiscard]] std::span<element_type_> operator[](std::size_t index) const noexcept {
+        assert(offsets[index + 1] >= offsets[index] && "A tape's offsets must not decrease");
         return elements.subspan(offsets[index], offsets[index + 1] - offsets[index]);
     }
 };
@@ -192,9 +196,28 @@ struct concurrency_round_t {
     u32_t ordinal = 0;
 };
 
-/** @c ceil(numerator/denominator) over non-negative integers — grid sizing, chunk counts. */
-[[nodiscard]] inline constexpr std::size_t divide_round_up(std::size_t numerator, std::size_t denominator) noexcept {
-    return (numerator + denominator - 1u) / denominator;
+/** @p value divided by @p divisor and rounded up, without the overflow <tt>value + divisor - 1</tt>
+ *  risks near the limit. */
+template <std::unsigned_integral integer_type_>
+[[nodiscard]] constexpr integer_type_ divide_round_up(integer_type_ value,
+                                                      std::type_identity_t<integer_type_> divisor) noexcept {
+    return static_cast<integer_type_>(value / divisor + (value % divisor != 0));
+}
+
+/** The least multiple of @p multiple at or above @p value, saturating at the greatest
+ *  multiple @p integer_type_ holds. */
+template <std::unsigned_integral integer_type_>
+[[nodiscard]] constexpr integer_type_ round_up_to_multiple(integer_type_ value,
+                                                           std::type_identity_t<integer_type_> multiple) noexcept {
+    integer_type_ const below = static_cast<integer_type_>(value - value % multiple);
+    if (below == value || below > (std::numeric_limits<integer_type_>::max)() - multiple) return below;
+    return static_cast<integer_type_>(below + multiple);
+}
+
+/** Whether @p a times @p b exceeds what @p integer_type_ holds. */
+template <std::unsigned_integral integer_type_>
+[[nodiscard]] constexpr bool wraps_on_multiply(integer_type_ a, std::type_identity_t<integer_type_> b) noexcept {
+    return b != 0 && a > (std::numeric_limits<integer_type_>::max)() / b;
 }
 
 /** @c ceil(log2(value)) for @c value>=1 — the recursive-doubling round count over

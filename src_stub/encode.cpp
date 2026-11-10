@@ -51,8 +51,8 @@ static void clear_outputs(arguments_ &arguments) {
 }
 
 /** The refusals every encode verb shares: no model, no output named, token vectors the stand-in's
- *  model has no head for, an output scalar it does not write, and a tape without storage, of
- *  another element, or with decreasing offsets. */
+ *  model has no head for, an output scalar it does not write, and a tape without storage or one
+ *  holding another element. */
 template <typename arguments_>
 static bool reject_call(arguments_ const &arguments, uform_tape_view_t tape, uform_scalar_t element,
                         uform_outcome_t *outcome) {
@@ -71,10 +71,6 @@ static bool reject_call(arguments_ const &arguments, uform_tape_view_t tape, ufo
         return true;
     if (reject_if(tape.scalar != element, uform_status_unsupported_layout_k, "The tape holds another scalar", outcome))
         return true;
-    for (std::size_t item = 0; item != arguments.count; ++item)
-        if (reject_if(tape.offsets[item + 1] < tape.offsets[item], uform_status_malformed_k,
-                      "The tape's offsets must not decrease", outcome))
-            return true;
     return false;
 }
 

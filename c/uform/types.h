@@ -297,7 +297,8 @@ typedef enum uform_status_t {
     uform_status_unsupported_k = 16,
 
     /** An argument breaks the verb's contract - a required pointer left @c NULL, inputs inside the
-     *  arena the call rewinds, a name no table spells. */
+     *  arena the call rewinds, a name no table spells. The outcome itself is never @c NULL: it is
+     *  where this status lands. */
     uform_status_invalid_argument_k = 17,
 } uform_status_t;
 
@@ -401,7 +402,8 @@ typedef struct uform_tape_view_t {
     /** First element of the tape, which every offset counts from. */
     void const* data;
 
-    /** The call's @c count + 1 non-decreasing offsets, in elements. */
+    /** The call's @c count + 1 non-decreasing offsets, in elements: the caller's contract, asserted
+     *  in debug builds. */
     size_t const* offsets;
 
     /** The scalar type the elements hold: @c u8 for text and encoded files, @c f32
@@ -991,7 +993,7 @@ UFORM_EXPORT uform_status_t uform_gpu_class_from_name(uform_bytes_view_t name, u
  *      @c UFORM_VERSION_MAJOR family of macros it was compiled against.
  *  @param[out] major The major version, which changes whenever an argument structure does.
  *  @param[out] minor The minor version.
- *  @param[out] patch The patch version.
+ *  @param[out] patch The patch version, where none of the three outputs may be @c NULL.
  */
 UFORM_EXPORT void uform_version(int* major, int* minor, int* patch);
 

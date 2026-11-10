@@ -107,11 +107,6 @@ inline constexpr std::size_t arena_alignment_k = 256u;
  *  landings, and payloads never false-share a line. */
 inline constexpr std::size_t cache_line_bytes_k = 128u;
 
-/** Round @p bytes up to the next multiple of @p granularity (any positive step). */
-[[nodiscard]] inline constexpr std::size_t round_up_to_multiple(std::size_t bytes, std::size_t granularity) noexcept {
-    return (bytes + granularity - 1u) / granularity * granularity;
-}
-
 /** One device's memory picture, straight from the driver — see
  *  @ref unum::uform::utilities::gpu_memory_report . */
 struct gpu_memory_report_t {

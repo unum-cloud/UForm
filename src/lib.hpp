@@ -72,6 +72,7 @@ using utilities::max_gpus_per_host_k;
 using utilities::per_gpu_array;
 using utilities::pixel_t;
 using utilities::pool_view_t;
+using utilities::round_up_to_multiple;
 using utilities::status_t;
 using utilities::tape_view;
 using utilities::token_id_t;
@@ -80,6 +81,7 @@ using utilities::u16_t;
 using utilities::u32_t;
 using utilities::u64_t;
 using utilities::u8_t;
+using utilities::wraps_on_multiply;
 
 /** Reports a progress handler hears at most when its call names zero steps. */
 inline constexpr std::size_t default_progress_steps_k = 10;
@@ -883,7 +885,8 @@ class chunked_arena_t {
     /** Hands out @p bytes aligned for any kernel, growing by a chunk as large as everything held so
      *  far when full, or null when the policy or the limit refuses. */
     [[nodiscard]] void *allocate(std::size_t bytes) noexcept {
-        std::size_t const aligned = divide_round_up(bytes, nk_default_alignment_k) * nk_default_alignment_k;
+        std::size_t const aligned = round_up_to_multiple(bytes, nk_default_alignment_k);
+        if (aligned < bytes) return nullptr; // saturated within an alignment of the address space
         for (; current_ != chunks_.size(); ++current_, used_ = 0)
             if (chunks_[current_].size() - used_ >= aligned) {
                 b8_t *const landed = chunks_[current_].data() + used_;
@@ -893,7 +896,7 @@ class chunked_arena_t {
         std::size_t held = 0;
         for (bytes_span_t const chunk : chunks_) held += chunk.size();
         std::size_t const capacity = held > aligned ? held : aligned;
-        if (limit_ && held + capacity > limit_) return nullptr;
+        if (limit_ && capacity > limit_ - held) return nullptr;
         if (!policy_.allocate) return nullptr;
         b8_t *const allocated = static_cast<b8_t *>(policy_.allocate(capacity, policy_.handle, stream_));
         if (!allocated) return nullptr;

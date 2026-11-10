@@ -141,7 +141,10 @@ using namespace uu;
         u64_t const begin = yyjson_get_uint(yyjson_arr_get(offsets, 0));
         u64_t const end = yyjson_get_uint(yyjson_arr_get(offsets, 1));
         bool const in_bounds = begin <= end && end <= payload_bytes && begin % scalar_size == 0;
-        if (!in_bounds || end - begin != rows * cols * scalar_size)
+        u64_t const scalars = (end - begin) / scalar_size;
+        bool const shaped = (end - begin) % scalar_size == 0 &&
+                            (cols ? scalars % cols == 0 && scalars / cols == rows : scalars == 0);
+        if (!in_bounds || !shaped)
             return expected_t::fail(status_t::invalid_argument_k,
                                     "{} holds bytes [{}, {}), its shape [{},{}] disagrees", key_text, begin, end, rows,
                                     cols);

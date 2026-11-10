@@ -1277,8 +1277,8 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
             expected<um::image_plan_t> planned = um::plan_image(bytes, shape.image.patch_side, columns);
             if (!planned) return expected_t::fail(std::move(planned));
             kept = std::size_t {planned->grid.rows} * planned->grid.columns;
-            spanned = divide_round_up(planned->native.width, shape.image.patch_side) *
-                      divide_round_up(planned->native.height, shape.image.patch_side);
+            spanned = divide_round_up(std::size_t {planned->native.width}, shape.image.patch_side) *
+                      divide_round_up(std::size_t {planned->native.height}, shape.image.patch_side);
         }
         else if (modality == modality_t::video_k) {
             expected<um::demuxed_t> clip = um::demux_video(bytes);

@@ -521,8 +521,6 @@ UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t *arguments) {
     if (count && contents.scalar != uform_scalar_u8_k)
         return propagate_error(uform_status_unsupported_layout_k, outcome, "Training items are bytes"), void();
     for (std::size_t item = 0; item != count; ++item) {
-        if (contents.offsets[item + 1] < contents.offsets[item])
-            return propagate_error(uform_status_malformed_k, outcome, "The tape's offsets must not decrease"), void();
         if (arguments->modalities[item] > uform_modality_audio_k)
             return propagate_error(uform_status_invalid_argument_k, outcome, "An item's modality is unrecognized"),
                    void();
@@ -544,8 +542,6 @@ UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t *arguments) {
         return propagate_error(uform_status_unsupported_layout_k, outcome, "Choices are bytes, their targets f32"),
                void();
     for (std::size_t item = 0; choices.offsets && item != count; ++item) {
-        if (choices.offsets[item + 1] < choices.offsets[item])
-            return propagate_error(uform_status_malformed_k, outcome, "The choice offsets must not decrease"), void();
         std::size_t const offered = choices.offsets[item + 1] - choices.offsets[item];
         if (targets.offsets[item + 1] - targets.offsets[item] != offered)
             return propagate_error(uform_status_shape_mismatch_k, outcome, "Every choice needs one target"), void();
@@ -556,10 +552,17 @@ UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t *arguments) {
                void();
     if (arguments->embeddings && !config.contrasts())
         return propagate_error(uform_status_unsupported_k, outcome, "Only a contrastive objective pools items"), void();
-    uform_arena_t const arena = requested
-                                    ? claim_arena(requested, arguments->executor,
-                                                  {contents.data, contents.offsets, arguments->modalities}, outcome)
-                                    : nullptr;
+    uform_relations_view_t const &relations = arguments->relations;
+    uform_arena_t const arena =
+        requested
+            ? claim_arena(requested, arguments->executor,
+                          {contents.data, contents.offsets, arguments->modalities, arguments->bags,
+                           arguments->temperature_groups, choices.data, choices.offsets, targets.data, targets.offsets,
+                           relations.attract.offsets, relations.attract.ids, relations.attract.weights,
+                           relations.repel.offsets, relations.repel.ids, relations.repel.weights,
+                           relations.ignore.offsets, relations.ignore.ids, relations.ignore.weights},
+                          outcome)
+            : nullptr;
     if (requested && !arena) return;
 
     ut::items_source_t &source = *handle->items;
