@@ -14,7 +14,6 @@
 
 #include <memory> // `std::unique_ptr` - a model under construction
 #include <new>    // `std::nothrow`
-#include <span>   // `std::span` - a checkpoint buffer
 
 #include "encoder_punned.hpp" // `encoder_verbs`, `pick_cpu_variant`, `pick_gpu_variant`
 
