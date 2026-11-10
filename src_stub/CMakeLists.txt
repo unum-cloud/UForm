@@ -23,7 +23,7 @@ foreach (target_ uform_shared_stub uform_static_stub)
     )
     target_link_libraries(${target_} PRIVATE Threads::Threads forkunion::header)
     target_compile_features(${target_} PRIVATE cxx_std_23)
-    target_compile_definitions(${target_} PRIVATE UFORM_EXPORTING)
+    target_compile_definitions(${target_} PRIVATE UFORM_EXPORTING=1)
     set_target_properties(
         ${target_}
         PROPERTIES PREFIX "lib"
@@ -45,6 +45,7 @@ foreach (target_ uform_shared_stub uform_static_stub)
 endforeach ()
 
 set_target_properties(uform_shared_stub PROPERTIES OUTPUT_NAME "uform_shared")
+target_compile_definitions(uform_shared_stub INTERFACE UFORM_SHARED=1)
 set_target_properties(uform_static_stub PROPERTIES OUTPUT_NAME "uform_static")
 
 # The C suite the engine's library runs too, linked against the static stand-in. It is written in C, but the library

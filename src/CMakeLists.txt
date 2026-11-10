@@ -474,7 +474,7 @@ else ()
     target_sources(uform_host PRIVATE encode_media_absent.cpp)
 endif ()
 target_compile_features(uform_host PUBLIC cxx_std_23)
-target_compile_definitions(uform_host PRIVATE UFORM_EXPORTING)
+target_compile_definitions(uform_host PRIVATE UFORM_EXPORTING=1)
 set_target_properties(
     uform_host
     PROPERTIES C_VISIBILITY_PRESET hidden
@@ -510,8 +510,8 @@ if (UFORM_BUILD_TRAIN)
 
     # `src/train` → `uform::train`: the training stack compiled once, never per consumer, linked by the `uform_base`
     # tool and the conformance suites alike.
-    # Dependencies stay lean: NumKong, StringZilla, yyjson and the CUDA Driver API, with no NCCL or NVSHMEM; the runtime
-    # arrives only through NumKong's kernel units. `src/` and `include/` are the include roots of all three libraries,
+    # Dependencies stay lean: NumKong, StringZilla, ForkUnion, yyjson and the CUDA Driver API, with no NCCL or NVSHMEM;
+    # the runtime arrives only through NumKong's kernel units. `src/` and `include/` are the include roots of all three libraries,
     # so sources include `"uform/utilities/vram_nvidia_schedule.cuh"` and `"uform/utilities/types.hpp"`.
     add_library(
         uform_train STATIC
@@ -536,7 +536,14 @@ if (UFORM_BUILD_TRAIN)
         uform_train PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/c"
     )
     target_link_libraries(
-        uform_train PUBLIC numkong::static stringzilla::static smashtable::header yyjson CUDA::cuda_driver
+        uform_train
+        PUBLIC numkong::static
+               stringzilla::static
+               forkunion::header
+               forkunion::static
+               smashtable::header
+               yyjson
+               CUDA::cuda_driver
     )
     target_compile_features(uform_train PUBLIC cxx_std_23)
     # NumKong accessors are `constexpr` for device-callability; `nvcc` needs the (long-stable) flag to allow it.
@@ -563,7 +570,7 @@ if (UFORM_BUILD_TRAIN)
     add_library(uform_nvidia_train OBJECT train.cpp)
     set_source_files_properties(train.cpp PROPERTIES LANGUAGE CUDA)
     target_link_libraries(uform_nvidia_train PRIVATE uform_host uform::train)
-    target_compile_definitions(uform_nvidia_train PRIVATE UFORM_EXPORTING)
+    target_compile_definitions(uform_nvidia_train PRIVATE UFORM_EXPORTING=1)
     set_target_properties(uform_nvidia_train PROPERTIES CUDA_VISIBILITY_PRESET hidden)
 
     # `src/loaders` → `uform::loaders`: GPU-native data ingestion, one translation unit per format / modality cell,

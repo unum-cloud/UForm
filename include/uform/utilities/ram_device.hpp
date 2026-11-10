@@ -18,7 +18,7 @@
 
 #include <forkunion/forkunion.h> // `fu_pool_t`, `fu_topology_t`, `fu_pool_for_n`
 
-#include "uform/utilities/types.hpp" // `status_t`, `expected`
+#include "uform/utilities/types.hpp" // `status_t`, `expected`, `bytes_span_t`
 
 namespace unum::uform::utilities {
 
@@ -169,6 +169,18 @@ class topology_t {
     /** The harvested topology, owned and deleted here. */
     fu_topology_t topology_ = nullptr;
 };
+
+/** Allocates @p bytes on the memory domain @p domain , answering an empty span on failure. */
+[[nodiscard]] inline bytes_span_t allocate_on_memory_domain(fu_memory_domain_id_t domain, std::size_t bytes) noexcept {
+    void *memory = nullptr;
+    if (fu_allocate_on_domain_id(domain, bytes, &memory) != fu_success_k) return {};
+    return {static_cast<b8_t *>(memory), bytes};
+}
+
+/** Frees @p memory , which @ref allocate_on_memory_domain placed on @p domain . */
+inline void free_on_memory_domain(fu_memory_domain_id_t domain, bytes_span_t memory) noexcept {
+    fu_free_on_domain_id(domain, memory.data(), memory.size());
+}
 
 /**
  *  @brief A ForkUnion pool spawned and deleted here.

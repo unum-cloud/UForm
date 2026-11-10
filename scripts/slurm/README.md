@@ -152,7 +152,7 @@ Bootstrap falls back to the environment only for the multicast extent, the excha
 - `CUDA_VISIBLE_DEVICES`, set by the launcher or operator: the standard device mask.
   The two-domain single-box repro splits one node's GPUs into two pseudo-nodes with it.
 
-- `UFORM_DEBUG_ASSERTS`, set by the operator: arms `uform_base`'s gradient-boundary signal probes, as `--telemetry signals` does.
+- `--telemetry signals`, passed by the operator: arms `uform_base`'s gradient-boundary signal probes.
 
 ### Test Fixtures
 

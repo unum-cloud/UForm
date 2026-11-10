@@ -109,51 +109,112 @@
 #include <stddef.h> // `size_t`
 #include <stdint.h> // `uint8_t`, `int32_t`
 
-/* Inferring target OS: Windows, macOS, Linux, FreeBSD, or WASI */
-#if defined(WIN32) || defined(_WIN32) || defined(__WIN32__) || defined(__NT__)
-#define UFORM_OS_WINDOWS_ 1
-#else
-#define UFORM_OS_WINDOWS_ 0
+#pragma region Platform Identity
+
+/*  Derived once from the OS predefines, which no other file reads and no build sets. */
+#if defined(UFORM_OS_LINUX_) || defined(UFORM_OS_APPLE_) || defined(UFORM_OS_WINDOWS_) || \
+    defined(UFORM_OS_FREEBSD_) || defined(UFORM_OS_WASI_) || defined(UFORM_OS_POSIX_)
+#error "UFORM_OS_*_ are identity, derived from the compiler; set a UFORM_WITH_* facility instead"
 #endif
-#if defined(__APPLE__) && defined(__MACH__)
-#define UFORM_OS_APPLE_ 1
-#else
-#define UFORM_OS_APPLE_ 0
-#endif
+
+/** Whether the kernel is Linux, Android included, as 1 or 0. */
 #if defined(__linux__)
 #define UFORM_OS_LINUX_ 1
 #else
 #define UFORM_OS_LINUX_ 0
 #endif
+
+/** Whether the kernel is Darwin: macOS, iOS, tvOS, watchOS or visionOS, as 1 or 0. */
+#if defined(__APPLE__)
+#define UFORM_OS_APPLE_ 1
+#else
+#define UFORM_OS_APPLE_ 0
+#endif
+
+/** Whether the target is Windows, MinGW included and Cygwin not, as 1 or 0. */
+#if defined(_WIN32)
+#define UFORM_OS_WINDOWS_ 1
+#else
+#define UFORM_OS_WINDOWS_ 0
+#endif
+
+/** Whether the kernel is FreeBSD, as 1 or 0. */
 #if defined(__FreeBSD__)
 #define UFORM_OS_FREEBSD_ 1
 #else
 #define UFORM_OS_FREEBSD_ 0
 #endif
+
+/** Whether the target is WebAssembly under WASI, which has files but no mappings, as 1 or 0. */
 #if defined(__wasi__)
 #define UFORM_OS_WASI_ 1
 #else
 #define UFORM_OS_WASI_ 0
 #endif
-#define UFORM_OS_POSIX_ (UFORM_OS_LINUX_ || UFORM_OS_APPLE_ || UFORM_OS_FREEBSD_)
 
-#ifdef __cplusplus
-extern "C" {
+/** Whether the POSIX interfaces exist: Linux, Darwin, FreeBSD or Cygwin, as 1 or 0. */
+#if UFORM_OS_LINUX_ || UFORM_OS_APPLE_ || UFORM_OS_FREEBSD_ || defined(__CYGWIN__)
+#define UFORM_OS_POSIX_ 1
+#else
+#define UFORM_OS_POSIX_ 0
 #endif
 
-/** Marks exported functions: exported while building the shared library, imported when consuming it
- *  on Windows, and of default visibility on ELF and Mach-O. Define it to override. */
-#ifndef UFORM_EXPORT
-#if (defined(_WIN32) || defined(__CYGWIN__)) && defined(UFORM_EXPORTING)
+#if UFORM_OS_LINUX_ + UFORM_OS_APPLE_ + UFORM_OS_WINDOWS_ + UFORM_OS_FREEBSD_ + UFORM_OS_WASI_ > 1
+#error "Two operating-system identities hold at once"
+#endif
+#if UFORM_OS_POSIX_ && UFORM_OS_WINDOWS_
+#error "POSIX and Windows identities hold at once"
+#endif
+
+#pragma endregion Platform Identity
+
+#pragma region Facilities
+
+/** Whether the InfiniBand transport is linked, as 1 or 0, which the training target passes on. */
+#if !defined(UFORM_WITH_INFINIBAND)
+#define UFORM_WITH_INFINIBAND 0
+#endif
+#if UFORM_WITH_INFINIBAND && !UFORM_OS_LINUX_
+#error "UFORM_WITH_INFINIBAND needs Linux"
+#endif
+
+/** Whether this unit builds the shared library, as 1 or 0. */
+#if !defined(UFORM_EXPORTING)
+#define UFORM_EXPORTING 0
+#endif
+
+/** Whether this unit links the shared library rather than the archive, as 1 or 0. */
+#if !defined(UFORM_SHARED)
+#define UFORM_SHARED 0
+#endif
+
+/**
+ *  @brief Marks every function the library exports, and nothing else.
+ *
+ *  On Windows it exports from the shared library, which builds with @c UFORM_EXPORTING, imports
+ *  where a consumer of that library sets @c UFORM_SHARED, as linking @c uform::shared does, and
+ *  expands to nothing for the archive. GCC and Clang give the function default visibility, so it
+ *  survives @c -fvisibility=hidden. Define it to override.
+ */
+#if !defined(UFORM_EXPORT)
+#if UFORM_OS_WINDOWS_ && UFORM_EXPORTING
 #define UFORM_EXPORT __declspec(dllexport)
-#elif defined(_WIN32) || defined(__CYGWIN__)
+#elif UFORM_OS_WINDOWS_ && UFORM_SHARED
 #define UFORM_EXPORT __declspec(dllimport)
+#elif UFORM_OS_WINDOWS_
+#define UFORM_EXPORT
 #elif defined(__GNUC__) || defined(__clang__)
 #define UFORM_EXPORT __attribute__((visibility("default")))
 #else
 #define UFORM_EXPORT
 #endif
-#endif // UFORM_EXPORT
+#endif // !defined(UFORM_EXPORT)
+
+#pragma endregion Facilities
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /** The library's version, which the release tooling rewrites in place. */
 #define UFORM_VERSION_MAJOR 4

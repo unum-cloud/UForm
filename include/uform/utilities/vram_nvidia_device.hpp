@@ -51,6 +51,7 @@
 #include <cuda_fp8.h>  // `__nv_fp8_e4m3` behind the `e4m3_t` alias
 
 #include "uform/utilities/types.hpp" // `expected`, `status_t`, `st::basic_vector` for exception-free chunk bookkeeping
+#include "uform/utilities/ram_device.hpp" // `allocate_on_memory_domain` — pinned pages beside the GPU reading them
 
 namespace unum::uform::utilities {
 
@@ -550,8 +551,10 @@ using gpu_registrable_alloc_t = gpu_registrable_alloc<b8_t>;
  *      two host-side surfaces of a replayed step: generation staging cells that captured copy nodes
  *      re-read at every launch, and loss landings polled without a stream synchronize.
  *
- *  Stateless; needs a current context at the call, like every driver allocation here. Satisfies
- *  @c std::alloc_traits , so NumKong's owning tensor composes directly:
+ *  Holds only the memory domain its pages land on: by default the driver places them wherever it
+ *  likes, and a domain, such as the one nearest the GPU that reads them, places them there before
+ *  the driver pins them. Needs a current context at the call, like every driver allocation here.
+ *  Satisfies @c std::alloc_traits , so NumKong's owning tensor composes directly:
  *
  *      nk::tensor<f32_t, pinned_alloc<f32_t>, 1> landings;
  */
@@ -568,21 +571,50 @@ struct pinned_alloc {
     };
 
     constexpr pinned_alloc() noexcept = default;
+
+    /** Places every allocation on @p memory_domain , an identifier the operating system gives. */
+    explicit constexpr pinned_alloc(fu_memory_domain_id_t memory_domain) noexcept : memory_domain_(memory_domain) {}
+
     template <typename other_type_>
-    constexpr pinned_alloc(pinned_alloc<other_type_> const &) noexcept {}
+    constexpr pinned_alloc(pinned_alloc<other_type_> const &other) noexcept : memory_domain_(other.memory_domain()) {}
 
     /** Pin @p count elements of portable host memory; @c nullptr on failure. */
     [[nodiscard]] value_type *allocate(std::size_t count) noexcept {
-        void *base = nullptr;
-        if (cuMemHostAlloc(&base, count * sizeof(value_type), CU_MEMHOSTALLOC_PORTABLE) != CUDA_SUCCESS) return nullptr;
-        return static_cast<value_type *>(base);
+        std::size_t const bytes = count * sizeof(value_type);
+        if (memory_domain_ < 0) {
+            void *base = nullptr;
+            if (cuMemHostAlloc(&base, bytes, CU_MEMHOSTALLOC_PORTABLE) != CUDA_SUCCESS) return nullptr;
+            return static_cast<value_type *>(base);
+        }
+        bytes_span_t const placed = allocate_on_memory_domain(memory_domain_, bytes);
+        if (placed.empty()) return nullptr;
+        if (cuMemHostRegister(placed.data(), bytes, CU_MEMHOSTREGISTER_PORTABLE) != CUDA_SUCCESS) {
+            free_on_memory_domain(memory_domain_, placed);
+            return nullptr;
+        }
+        return static_cast<value_type *>(static_cast<void *>(placed.data()));
     }
 
-    void deallocate(value_type *base, std::size_t) noexcept {
-        if (base != nullptr) cuMemFreeHost(base);
+    void deallocate(value_type *base, std::size_t count) noexcept { // vendor-boundary: the allocator traits' shape
+        if (base == nullptr) return;
+        if (memory_domain_ < 0) {
+            [[maybe_unused]] CUresult const freed = cuMemFreeHost(base);
+            return;
+        }
+        [[maybe_unused]] CUresult const unregistered = cuMemHostUnregister(base);
+        free_on_memory_domain(memory_domain_,
+                              {static_cast<b8_t *>(static_cast<void *>(base)), count * sizeof(value_type)});
     }
 
-    [[nodiscard]] constexpr bool operator==(pinned_alloc const &) const noexcept { return true; }
+    /** The memory domain allocations land on, or -1 wherever the driver places them. */
+    [[nodiscard]] constexpr fu_memory_domain_id_t memory_domain() const noexcept { return memory_domain_; }
+
+    [[nodiscard]] constexpr bool operator==(pinned_alloc const &other) const noexcept {
+        return memory_domain_ == other.memory_domain_;
+    }
+
+  private:
+    fu_memory_domain_id_t memory_domain_ = -1;
 };
 
 /** The canonical byte-typed pinned-allocator handle — what APIs receive and rebind. */

@@ -15,6 +15,8 @@ add_library(uform_shared SHARED ${uform_library_exclusion_})
 add_library(uform::shared ALIAS uform_shared)
 # The encoder's variants follow `uform_host`, so the baseline's copy of an inline function they share comes first.
 target_link_libraries(uform_shared PRIVATE uform_host ${uform_encoder_variants_})
+# A consumer of the shared library imports its symbols on Windows, where the archive needs no such marking.
+target_compile_definitions(uform_shared INTERFACE UFORM_SHARED=1)
 # The archives it links, NumKong's, ForkUnion's and yyjson's among them, were compiled with default visibility, and the
 # standard library headers declare their templates visible, so only the linker can keep those symbols in.
 if (APPLE)

@@ -87,11 +87,11 @@
 
 #include <cstdint> // `std::uint32_t`
 #include <cstring> // `std::memcpy`, `std::strcmp`
-#include <cstdio>  // `std::fopen`, `std::fwrite`, `std::fread`, `std::rename`
+#include <cstdio>  // `std::fopen`, `std::fread`
 #include <cstdlib> // `std::getenv`
 #include <cerrno>  // `errno`, `EEXIST`, `ENOMEM` — the directory creation's failures
 
-#include <unistd.h>   // `::gethostname`, `::fsync`
+#include <unistd.h>   // `::gethostname`
 #include <sys/stat.h> // `::mkdir` — the exchange directory, created level by level
 
 #include <charconv>  // `std::from_chars`
@@ -104,6 +104,7 @@
 #include <stringzilla/stringzilla.hpp> // `sz::string_t`, `sz::string_view_t` — exception-free text handling
 
 #include "uform/utilities/array.hpp"              // `per_gpu_array` for the device UUIDs
+#include "uform/utilities/blocking_files.hpp"     // `replace_file_durably` — every published exchange file
 #include "uform/utilities/vram_nvidia_device.hpp" // `cuda_failure`
 #include "uform/utilities/types.hpp" // `expected`, `expected_t`, `status_t`, `format_into`, `st::basic_vector`
 
@@ -623,29 +624,17 @@ struct mesh_topology_t {
      *  earlier phase's files. */
     [[nodiscard]] u32_t next_collective_id() noexcept { return next_collective_id_++; }
 
-    /** Durably publish this host_domain's @p text under the exchange @p key : written to a
-     *  temporary file, @c fsync -ed, then atomically @c rename -d into place, so a peer
-     *  never reads a half-written payload. The primitive every wiring phase reuses to add
-     *  payloads, not machinery. */
+    /** Durably publish this host_domain's @p text under the exchange @p key through
+     *  @ref replace_file_durably , so a peer never reads a half-written payload. The primitive
+     *  every wiring phase reuses to add payloads, not machinery. */
     [[nodiscard]] expected_t publish_text(sz::string_view_t key, sz::string_view_t text) const noexcept {
         if (host_domain_count() <= 1) return {};
         expected<sz::string_t> final_path = host_domain_file_path_(host_domain_index, key);
         if (!final_path) return expected_t::fail(std::move(final_path));
-        sz::string_t temporary_path;
-        if (!format_into(temporary_path, "{}.tmp", final_path.value_))
-            return expected_t::fail(status_t::bad_alloc_k, "exchange path assembly failed (key={})", key);
-        std::FILE *file = std::fopen(temporary_path.c_str(), "w");
-        if (file == nullptr)
-            return expected_t::fail(status_t::io_k, "opening \"{}\" for writing failed", temporary_path);
-        bool const written = std::fwrite(text.data(), 1u, text.size(), file) == text.size() && std::fflush(file) == 0 &&
-                             ::fsync(fileno(file)) == 0;
-        std::fclose(file);
-        if (!written)
-            return expected_t::fail(status_t::io_k, "writing {} bytes to \"{}\" failed", text.size(), temporary_path);
-        if (std::rename(temporary_path.c_str(), final_path.value_.c_str()) != 0)
-            return expected_t::fail(status_t::io_k, "renaming \"{}\" into place failed (error={})", final_path.value_,
-                                    errno);
-        return {};
+        std::string_view const payload = text;
+        return replace_file_durably(final_path->view(), [payload](file_appender_t &file) noexcept {
+            return file.append(std::as_bytes(std::span {payload}));
+        });
     }
 
     /** Poll, through @ref poll_pause , until @p peer_host_domain 's payload under @p key exists,

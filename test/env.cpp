@@ -38,7 +38,7 @@ inline constexpr std::size_t probe_heap_bytes_k = 16ull * 1024 * 1024 + 384;
 /** The ordinary bump allocation preceding the heap, so the mapped prefix carries a used tail. */
 inline constexpr std::size_t probe_tail_bytes_k = 3ull * 1024 * 1024;
 
-#if defined(UFORM_WITH_INFINIBAND)
+#if UFORM_WITH_INFINIBAND
 
 /**
  *  @brief Register one GPU's registrable arena range through the endpoint the collectives build,

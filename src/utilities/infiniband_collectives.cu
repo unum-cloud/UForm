@@ -12,18 +12,18 @@
 
 #include <cuda.h> // `cuMemGetHandleForAddressRange`, `cuMemsetD8`, `cuMemcpyHtoD`
 
-#if defined(UFORM_WITH_INFINIBAND)
+#include "uform/utilities/infiniband_collectives.cuh" // the declarations these bodies define
+
+#if UFORM_WITH_INFINIBAND
 #include <unistd.h> // `::close`, `::sysconf` — dmabuf descriptors and their page granularity
 
 #include <infiniband/mlx5dv.h> // `mlx5dv_init_obj`, `mlx5_wqe_*`, `mlx5_cqe64` — the direct-verbs layer
 #include <infiniband/verbs.h>  // `ibv_context`, `ibv_pd`, `ibv_cq`, `ibv_qp` — the RC bring-up
 #endif
 
-#include "uform/utilities/infiniband_collectives.cuh" // the declarations these bodies define
-
 using namespace unum::uform::utilities;
 
-#if defined(UFORM_WITH_INFINIBAND)
+#if UFORM_WITH_INFINIBAND
 
 /** Lane width of the single-block doorbell kernels; only lane 0 posts and spins. */
 inline constexpr unsigned infiniband_doorbell_block_threads_k = 32u;
@@ -736,4 +736,4 @@ expected<infiniband_reach_t> colocated_domain_t::reach_(u32_t member_index, gpu_
                                      layout, key.view(), timeout_seconds);
 }
 
-#endif // defined(UFORM_WITH_INFINIBAND)
+#endif // UFORM_WITH_INFINIBAND

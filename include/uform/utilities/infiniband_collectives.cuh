@@ -80,17 +80,17 @@
 #include <cuda/atomic> // `cuda::atomic_ref` — the device producer index a post claims
 #include <cuda/memory> // `cuda::align_down`, `cuda::align_up` — the pages covering a host range
 
-#if defined(UFORM_WITH_INFINIBAND)
+#include "uform/utilities/vram_nvidia_device.hpp" // `gpu_arena_t` backing the device producer / consumer counters
+#include "uform/utilities/mesh.hpp" // `mesh_topology_t` — the coordinate exchange rides the mesh rendezvous
+#include "uform/utilities/vram_nvidia_schedule.cuh" // `b8r1_span_t` — the registered GPU range travels as one typed span
+#include "uform/utilities/types.hpp"                // `expected`, `expected_t`, `status_t`, `format_into`
+
+#if UFORM_WITH_INFINIBAND
 #include <unistd.h> // `::close`, `sysconf` — dmabuf descriptors and page-aligned registrations
 
 #include <infiniband/mlx5dv.h> // `mlx5dv_init_obj`, `mlx5_wqe_*`, `mlx5_cqe64` — the direct-verbs layer
 #include <infiniband/verbs.h>  // `ibv_context`, `ibv_pd`, `ibv_cq`, `ibv_qp` — the RC bring-up
 #endif
-
-#include "uform/utilities/vram_nvidia_device.hpp" // `gpu_arena_t` backing the device producer / consumer counters
-#include "uform/utilities/mesh.hpp" // `mesh_topology_t` — the coordinate exchange rides the mesh rendezvous
-#include "uform/utilities/vram_nvidia_schedule.cuh" // `b8r1_span_t` — the registered GPU range travels as one typed span
-#include "uform/utilities/types.hpp"                // `expected`, `expected_t`, `status_t`, `format_into`
 
 namespace unum::uform::utilities {
 
@@ -326,7 +326,7 @@ struct infiniband_link_t {
     gpu_fault_t *fault = nullptr;
 };
 
-#if defined(UFORM_WITH_INFINIBAND)
+#if UFORM_WITH_INFINIBAND
 
 /** One InfiniBand access-flag set shared by the memory region and the queue pair. */
 inline constexpr int infiniband_access_flags_k = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE |
@@ -1040,7 +1040,7 @@ __device__ inline void infiniband_drain_one(infiniband_completion_handles_t comp
 }
 
 #endif // defined(__CUDACC__)
-#endif // defined(UFORM_WITH_INFINIBAND)
+#endif // UFORM_WITH_INFINIBAND
 
 /** Rank-1 device view of the per-round link table, shaped @b [ceil(log2(D))] — one
  *  @ref unum::uform::utilities::infiniband_link_t per recursive-doubling round,
@@ -1074,7 +1074,7 @@ struct infiniband_alltoall_plan_t {
     std::size_t block_bytes = 0;
 };
 
-#if defined(UFORM_WITH_INFINIBAND)
+#if UFORM_WITH_INFINIBAND
 
 /** Rank-1 device-only table of fabric links owned through a @ref gpu_arena_t . */
 using infiniband_links_tensor_t = nk::tensor<infiniband_link_t, gpu_arena_alloc<infiniband_link_t>, 1>;
@@ -1505,7 +1505,7 @@ struct infiniband_all_to_all {
     u32_t exchanges_ = 0;
 };
 
-#else // !defined(UFORM_WITH_INFINIBAND)
+#else // !UFORM_WITH_INFINIBAND
 
 /** The build-gate stub: only the zero-round single-domain identity exists — every collective is
  *  a no-op, and wiring a real member fails loudly naming the gate. */
@@ -1581,7 +1581,7 @@ struct infiniband_all_to_all {
     [[nodiscard]] expected_t operator()(gpu_stream_t &) noexcept { return {}; }
 };
 
-#endif // defined(UFORM_WITH_INFINIBAND)
+#endif // UFORM_WITH_INFINIBAND
 
 /** The three InfiniBand buffers share the unified enqueue-only shape — a drifted
  *  signature fails here. */

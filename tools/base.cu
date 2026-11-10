@@ -216,9 +216,7 @@ int main(int argc, char **argv) {
     config.batch.max_columns_per_row = config.batch.media_live() ? config.tier.media_columns : config.tier.text_columns;
     fmt::println("uform_base: tier {}: hidden {}, depth {}, {} columns", config.tier.name, config.hidden, config.depth,
                  config.batch.max_columns_per_row);
-    // The library never reads the environment, so the launcher contract maps onto the config and the mesh here:
-    // UFORM_DEBUG_ASSERTS arms the gradient-boundary signal probes, the rest place this process in the run.
-    if (std::getenv("UFORM_DEBUG_ASSERTS") != nullptr) config.telemetry_channels |= telemetry_signals_k;
+    // The library never reads the environment, so the launcher contract places this process here.
     mesh_options_t options;
     options.host_domain_index = host_domain_index_from_environment();
     options.host_domain_count = host_domain_count_from_environment();

@@ -2,27 +2,17 @@
  *  @file src/utilities/safetensors_format.cpp
  *  @author Ash Vardanian
  *  @date July 3, 2026
- *  @brief The checkpoint cell's implementation: yyjson header building / parsing, plain POSIX
- *      writes and a read-only mapping — see the header for the contract.
+ *  @brief The checkpoint cell's implementation: yyjson header building / parsing, a durable
+ *      replacement of the file and a read-only mapping — see the header for the contract.
  */
-#include <cstdio>  // `std::rename` — the written file replaces the previous checkpoint at once
-#include <cstdlib> // `std::malloc`, `std::free`
-#include <cstring> // `std::memcpy` — the length prefix, the header and the tensor bytes
-
-#include <unistd.h>   // `pread`, `pwrite`, `close`
-#include <fcntl.h>    // `open`
-#include <sys/stat.h> // `fstat` — the file extent
+#include <cstring> // `std::memcpy` — the length prefix and the tensor bytes
 
 #include <charconv> // `std::from_chars` — the step metadata parse
-#include <utility>  // `std::exchange`
+#include <utility>  // `std::move`
 
 #include <yyjson.h> // the safetensors JSON header — exceptions-free C
 
 #include "uform/utilities/safetensors_format.hpp"
-
-#if !UFORM_OS_WASI_
-#include <sys/mman.h> // `mmap`, `munmap`
-#endif
 
 namespace uu = unum::uform::utilities;
 using namespace uu;
@@ -35,84 +25,6 @@ using namespace uu;
 /** The safetensors spelling of @p dtype . */
 [[nodiscard]] static char const *dtype_name_(checkpoint_dtype_t dtype) noexcept {
     return dtype == checkpoint_dtype_t::f32_k ? "F32" : "BF16";
-}
-
-/** A move-only owning wrapper over a POSIX file descriptor. */
-struct checkpoint_file_t {
-    checkpoint_file_t() noexcept = default;
-    checkpoint_file_t(checkpoint_file_t const &) = delete;
-    checkpoint_file_t &operator=(checkpoint_file_t const &) = delete;
-    checkpoint_file_t(checkpoint_file_t &&other) noexcept : descriptor_(std::exchange(other.descriptor_, -1)) {}
-    checkpoint_file_t &operator=(checkpoint_file_t &&other) noexcept {
-        if (this != &other) {
-            if (descriptor_ >= 0) ::close(descriptor_);
-            descriptor_ = std::exchange(other.descriptor_, -1);
-        }
-        return *this;
-    }
-    ~checkpoint_file_t() noexcept {
-        if (descriptor_ >= 0) ::close(descriptor_);
-    }
-
-    /** Open @p path with the POSIX @p flags , creating it @c 0644 when they ask to; a path
-     *  holding a NUL, which @c open would cut short there, is refused. */
-    [[nodiscard]] static expected<checkpoint_file_t> make(sz::string_view_t path, int flags) noexcept {
-        if (path.contains('\0'))
-            return expected<checkpoint_file_t>::fail(status_t::invalid_argument_k, "the path holds a NUL byte");
-        sz::string_t path_text; // `open` needs a NUL-terminated `c_str`; short paths stay inline
-        if (sz::failed(path_text.assign(path)))
-            return expected<checkpoint_file_t>::fail(status_t::bad_alloc_k, "path staging failed");
-        checkpoint_file_t file;
-        file.descriptor_ = ::open(path_text.c_str(), flags, 0644);
-        if (file.descriptor_ < 0) return expected<checkpoint_file_t>::fail(status_t::io_k, "open failed: {}", path);
-        return expected<checkpoint_file_t> {std::move(file)};
-    }
-
-    [[nodiscard]] int get() const noexcept { return descriptor_; }
-
-  private:
-    int descriptor_ = -1;
-};
-
-/** Write @p bytes at @p offset , whole or fail — looped, because one @c pwrite moves at
- *  most ~2 GB on Linux and may stop short before that. */
-[[nodiscard]] static expected_t write_at_(checkpoint_file_t const &file, std::size_t offset,
-                                          bytes_view_t bytes) noexcept {
-    for (bytes_view_t remaining = bytes; !remaining.empty();) {
-        ssize_t const moved = ::pwrite(file.get(), remaining.data(), remaining.size(), static_cast<off_t>(offset));
-        if (moved <= 0)
-            return expected_t::fail(status_t::io_k, "pwrite failed at {} ({} bytes left of {})", offset,
-                                    remaining.size(), bytes.size());
-        offset += static_cast<std::size_t>(moved);
-        remaining = remaining.subspan(static_cast<std::size_t>(moved));
-    }
-    return {};
-}
-
-#if UFORM_OS_WASI_
-
-/** Read @p bytes from @p offset , whole or fail, looped as @ref write_at_ is. */
-[[nodiscard]] static expected_t read_at_(checkpoint_file_t const &file, std::size_t offset,
-                                         bytes_span_t bytes) noexcept {
-    for (bytes_span_t remaining = bytes; !remaining.empty();) {
-        ssize_t const moved = ::pread(file.get(), remaining.data(), remaining.size(), static_cast<off_t>(offset));
-        if (moved <= 0)
-            return expected_t::fail(status_t::io_k, "pread failed at {} ({} bytes left of {})", offset,
-                                    remaining.size(), bytes.size());
-        offset += static_cast<std::size_t>(moved);
-        remaining = remaining.subspan(static_cast<std::size_t>(moved));
-    }
-    return {};
-}
-#endif
-
-/** Release @p bytes : unmapped, or freed on WASI, which reads them in for want of @c mmap . */
-static void release_(bytes_span_t bytes) noexcept {
-#if UFORM_OS_WASI_
-    std::free(bytes.data());
-#else
-    ::munmap(bytes.data(), bytes.size());
-#endif
 }
 
 /**
@@ -345,29 +257,17 @@ expected_t checkpoint_to_save_t::save(sz::string_view_t path) noexcept {
     u64_t const header_length = divide_round_up(header.size(), 8) * 8;
     char const padding[8] = {' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
 
-    sz::string_t final_path, partial_path;
-    if (sz::failed(final_path.assign(path)) || !format_into(partial_path, "{}.partial", path))
-        return expected_t::fail(status_t::bad_alloc_k, "path staging failed");
-    {
-        expected<checkpoint_file_t> file = checkpoint_file_t::make(partial_path.view(), O_WRONLY | O_CREAT | O_TRUNC);
-        if (!file) return expected_t::fail(std::move(file));
-        std::string_view const header_text = header;
-        expected_t written = write_at_(*file, 0, std::as_bytes(std::span {&header_length, 1}));
-        if (written) written = write_at_(*file, sizeof(header_length), std::as_bytes(std::span {header_text}));
+    std::string_view const header_text = header;
+    return replace_file_durably(path, [&](file_appender_t &file) noexcept {
+        expected_t written = file.append(std::as_bytes(std::span {&header_length, 1}));
+        if (written) written = file.append(std::as_bytes(std::span {header_text}));
         if (written && header_length != header.size())
-            written = write_at_(*file, sizeof(header_length) + header.size(),
-                                std::as_bytes(std::span {padding}).first(header_length - header.size()));
+            written = file.append(std::as_bytes(std::span {padding}).first(header_length - header.size()));
 
-        // The payload is already contiguous in insertion order — one write moves all of it.
-        std::size_t const payload_base = sizeof(header_length) + header_length;
-        if (written) written = write_at_(*file, payload_base, payload_);
-        if (written && ::fsync(file->get()) != 0)
-            written = expected_t::fail(status_t::io_k, "fsync failed: {}", partial_path.view());
-        if (!written) return written;
-    }
-    if (std::rename(partial_path.c_str(), final_path.c_str()) != 0)
-        return expected_t::fail(status_t::io_k, "renaming {} over {} failed", partial_path.view(), path);
-    return {};
+        // The payload is already contiguous in insertion order — one append moves all of it.
+        if (written) written = file.append(payload_);
+        return written;
+    });
 }
 
 void checkpoint_to_save_t::clear() noexcept {
@@ -378,48 +278,9 @@ void checkpoint_to_save_t::clear() noexcept {
     scratch_.clear();
 }
 
-checkpoint_mapping_t::checkpoint_mapping_t(checkpoint_mapping_t &&other) noexcept
-    : bytes_(std::exchange(other.bytes_, {})) {}
-
-checkpoint_mapping_t &checkpoint_mapping_t::operator=(checkpoint_mapping_t &&other) noexcept {
-    if (this != &other) {
-        if (!bytes_.empty()) release_(bytes_);
-        bytes_ = std::exchange(other.bytes_, {});
-    }
-    return *this;
-}
-
-checkpoint_mapping_t::~checkpoint_mapping_t() noexcept {
-    if (!bytes_.empty()) release_(bytes_);
-}
-
-expected<checkpoint_mapping_t> checkpoint_mapping_t::make(sz::string_view_t path) noexcept {
-    using mapped_t = expected<checkpoint_mapping_t>;
-    expected<checkpoint_file_t> file = checkpoint_file_t::make(path, O_RDONLY);
-    if (!file) return mapped_t::fail(std::move(file));
-    struct ::stat file_stat {};
-    if (::fstat(file->get(), &file_stat) != 0) return mapped_t::fail(status_t::io_k, "fstat failed: {}", path);
-    std::size_t const file_bytes = static_cast<std::size_t>(file_stat.st_size);
-    if (file_bytes == 0) return mapped_t::fail(status_t::invalid_argument_k, "{} is empty", path);
-#if UFORM_OS_WASI_
-    void *const mapped = std::malloc(file_bytes);
-    if (!mapped) return mapped_t::fail(status_t::bad_alloc_k, "{} needs {} bytes", path, file_bytes);
-    if (expected_t read = read_at_(*file, 0, {static_cast<b8_t *>(mapped), file_bytes}); !read) {
-        std::free(mapped);
-        return mapped_t::fail(std::move(read));
-    }
-#else
-    void *const mapped = ::mmap(nullptr, file_bytes, PROT_READ, MAP_PRIVATE, file->get(), 0);
-    if (mapped == MAP_FAILED) return mapped_t::fail(status_t::io_k, "mmap failed: {}", path);
-#endif
-    checkpoint_mapping_t mapping;
-    mapping.bytes_ = {static_cast<b8_t *>(mapped), file_bytes};
-    return mapped_t {std::move(mapping)};
-}
-
 expected<checkpoint_to_load_t> checkpoint_to_load_t::make(sz::string_view_t path) noexcept {
     using loaded_t = expected<checkpoint_to_load_t>;
-    expected<checkpoint_mapping_t> mapping = checkpoint_mapping_t::make(path);
+    expected<mapped_file_t> mapping = mapped_file_t::map(path);
     if (!mapping) return loaded_t::fail(std::move(mapping));
     loaded_t loaded = view(mapping->bytes());
     if (loaded) loaded->mapping_ = std::move(*mapping);

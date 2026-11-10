@@ -862,7 +862,7 @@ static void run_distributed_case(test_suite_t &suite) {
  *  HCAs, verified against the same global Float64 oracle each process computes independently.
  *  Activated by UFORM_HOST_DOMAIN_INDEX in the environment. */
 static void run_cross_domain_case(test_suite_t &suite) {
-#if !defined(UFORM_WITH_INFINIBAND)
+#if !UFORM_WITH_INFINIBAND
     suite.skip("built without UFORM_WITH_INFINIBAND");
 #else
     if (!cuda_devices_visible_(1)) return suite.skip(no_cuda_device_k);
@@ -1737,7 +1737,7 @@ static void run_tokens_distributed_case(test_suite_t &suite) {
  *  the same world on this process's first GPU: the world loss and this process's token forces.
  *  Runs when @c UFORM_HOST_DOMAIN_INDEX names the process's domain. */
 static void run_tokens_cross_domain_case(test_suite_t &suite) {
-#if !defined(UFORM_WITH_INFINIBAND)
+#if !UFORM_WITH_INFINIBAND
     suite.skip("built without UFORM_WITH_INFINIBAND");
 #else
     using layout_t = host_tokens_layout_t;

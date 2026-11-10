@@ -19,13 +19,19 @@
  *    BFloat16 floor, not bitwise: its QK-norm reads BFloat16 rather than the Float32 product, its
  *    pooled rows stay Float32, and its head's SiLU runs in Float32.
  *
+ *  The checkpoint also round-trips: every tensor and metadata pair is saved twice beside it, the
+ *  second save replacing the first, and must read back byte for byte with no staging file left.
+ *
  *  Usage: `uform_test_inference <tiny.safetensors> [<rust_states.f32> <rust_embeddings.f32>]`.
  */
 #include <cmath>   // `std::fabs`, `std::sqrt`
 #include <cstdio>  // `std::fopen`, `std::fread`
 #include <cstring> // `std::strlen`, `std::memset`
 
-#include <vector> // `std::vector`
+#include <algorithm>  // `std::equal`
+#include <filesystem> // `std::filesystem::exists`, `std::filesystem::remove` — the round trip's files
+#include <string>     // `std::string` — the round trip's path
+#include <vector>     // `std::vector`
 
 #include <numkong/capabilities.h>
 #include <numkong/memory.hpp>
@@ -261,6 +267,47 @@ static void token_vectors_unit_length(test_suite_t &suite, encoded_t const &refe
     suite.check(worst < 1e-2, "token vectors have unit length: worst deviation {:.4e}", worst);
 }
 
+/** Saves every tensor and metadata pair of @p checkpoint to @p path twice, the second save
+ *  replacing the first, and reads them back byte for byte with no @c .tmp sibling left behind.
+ *  Float32 entries go first, as the payload packs them ahead of the BFloat16 ones. */
+static void checkpoint_round_trip(test_suite_t &suite, checkpoint_to_load_t const &checkpoint,
+                                  std::string const &path) {
+    checkpoint_to_save_t saved;
+    for (checkpoint_metadata_t const &pair : checkpoint.metadata())
+        suite.check(static_cast<bool>(saved.metadata(pair.key.view(), pair.value.view())), "metadata {}",
+                    pair.key.view());
+    for (checkpoint_dtype_t const dtype : {checkpoint_dtype_t::f32_k, checkpoint_dtype_t::bf16_k})
+        for (checkpoint_entry_t const &entry : checkpoint.entries()) {
+            if (entry.dtype != dtype) continue;
+            sz::string_view_t const name = entry.name.view();
+            expected_t inserted = dtype == checkpoint_dtype_t::f32_k ? saved.insert(name, checkpoint.float32(name))
+                                                                     : saved.insert(name, checkpoint[name]);
+            suite.check(static_cast<bool>(inserted), "insert {}: {}", name, inserted.description_);
+        }
+    for (std::size_t round = 0; round != 2; ++round) {
+        expected_t written = saved.save(sz::string_view_t {path});
+        suite.check(static_cast<bool>(written), "save {}: {}", round, written.description_);
+    }
+    suite.check(!std::filesystem::exists(path + ".tmp"), "{}.tmp outlived the save", path);
+
+    expected<checkpoint_to_load_t> loaded = checkpoint_to_load_t::make(sz::string_view_t {path});
+    suite.check(static_cast<bool>(loaded), "load: {}", loaded.description_);
+    if (loaded) {
+        suite.check_equal(loaded->size(), checkpoint.size(), "tensors");
+        suite.check_equal(loaded->metadata().size(), checkpoint.metadata().size(), "metadata pairs");
+        for (checkpoint_entry_t const &entry : checkpoint.entries()) {
+            sz::string_view_t const name = entry.name.view();
+            bytes_view_t const original = entry.dtype == checkpoint_dtype_t::f32_k ? bytes_of(checkpoint.float32(name))
+                                                                                   : bytes_of(checkpoint[name]);
+            bytes_view_t const reread = entry.dtype == checkpoint_dtype_t::f32_k ? bytes_of(loaded->float32(name))
+                                                                                 : bytes_of((*loaded)[name]);
+            suite.check(std::equal(original.begin(), original.end(), reread.begin(), reread.end()), "{} differs", name);
+        }
+    }
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
+}
+
 /** The class parity compares against: serial, or the one class of a monoversioned build. */
 constexpr cpu_class_t reference_class_k = cpu_class_compiled(cpu_class_t::serial_k) ? cpu_class_t::serial_k
                                                                                     : cpu_class_t::monoversioned_k;
@@ -288,6 +335,7 @@ int main(int argc, char **argv) {
     test_suite_t suite = test_suite_t::make(argv[0]);
     expected<checkpoint_to_load_t> checkpoint = checkpoint_to_load_t::make({argv[1], std::strlen(argv[1])});
     if (!checkpoint) return suite.check(false, "checkpoint: {}", checkpoint.description_), suite.finish();
+    suite.run("checkpoint/round_trip", checkpoint_round_trip, *checkpoint, std::string {argv[1]} + ".round_trip");
     expected<geometry_t> geometry = geometry_t::from(*checkpoint);
     if (!geometry) return suite.check(false, "geometry: {}", geometry.description_), suite.finish();
 

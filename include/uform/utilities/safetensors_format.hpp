@@ -44,6 +44,7 @@
 #include <smashtable/basic_hash_table.hpp> // `hash_map` — every entry's position by its name's hash
 
 #include "uform/utilities/types.hpp" // `expected`, `expected_t`, `status_t`, `sz::string_t`, `st::basic_vector`
+#include "uform/utilities/blocking_files.hpp" // `mapped_file_t`, `replace_file_durably` — the file under a checkpoint
 
 namespace unum::uform::utilities {
 
@@ -116,8 +117,8 @@ struct checkpoint_to_save_t {
 
     /** Write the accumulated entries and metadata to @p path in the safetensors layout — the JSON
      *  header space-padded to an 8-byte boundary like Hugging Face's own writer, then the whole
-     *  contiguous payload in one shot. The file is written beside @p path and renamed over it, so a
-     *  run killed mid-write keeps its previous checkpoint. */
+     *  contiguous payload in one shot. The file is written beside @p path as a @c .tmp sibling,
+     *  flushed, renamed over it and its directory synced, so a crash keeps one whole checkpoint. */
     [[nodiscard]] expected_t save(sz::string_view_t path) noexcept;
 
     /** Drop the entries and metadata, keep every buffer's backing — the next cadence re-inserts and
@@ -149,26 +150,6 @@ struct checkpoint_to_save_t {
     /** The yyjson pool @c save serializes the header in — grown lazily, settled after
      *  the first save. */
     st::basic_vector<char> scratch_ {};
-};
-
-/** A read-only file mapping, unmapped on destruction; empty for a checkpoint viewed
- *  in caller memory. */
-struct checkpoint_mapping_t {
-    checkpoint_mapping_t() noexcept = default;
-    checkpoint_mapping_t(checkpoint_mapping_t const &) = delete;
-    checkpoint_mapping_t &operator=(checkpoint_mapping_t const &) = delete;
-    checkpoint_mapping_t(checkpoint_mapping_t &&other) noexcept;
-    checkpoint_mapping_t &operator=(checkpoint_mapping_t &&other) noexcept;
-    ~checkpoint_mapping_t() noexcept;
-
-    /** Map @p path read-only, whole. */
-    [[nodiscard]] static expected<checkpoint_mapping_t> make(sz::string_view_t path) noexcept;
-
-    /** The mapped bytes. */
-    [[nodiscard]] bytes_view_t bytes() const noexcept { return bytes_; }
-
-  private:
-    bytes_span_t bytes_ {};
 };
 
 /**
@@ -222,7 +203,7 @@ struct checkpoint_to_load_t {
   private:
 
     /** The file mapping when @ref make opened one; empty for @ref view . */
-    checkpoint_mapping_t mapping_ {};
+    mapped_file_t mapping_ {};
 
     /** The payload bytes, inside the mapping or the caller's image. */
     bytes_view_t payload_ {};

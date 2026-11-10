@@ -119,6 +119,23 @@ A requires-clause parenthesizes only what the grammar needs, and never opens wit
 Macros are object-like: include guards, configuration flags such as `UFORM_TARGET_<CLASS>`, and the `UFORM_EXPORT` marker; the hook refuses a function-like one.
 Preprocessor conditionals nest two levels deep at most beside the include guard, no `#elif` chain sits inside another, and the `#endif` closing a pair names its condition, as `#endif // NUMKONG_TARGET_HASWELL` does.
 
+Every all-caps name starts with the full project name, `UFORM_`.
+A trailing `_` marks a name as internal: it may change in any release, and nothing outside this repository may define or test it.
+A name without it is a public contract, either a switch you may set or a value you may read.
+
+| Family                    | Form                           | Example                 |
+| :------------------------ | :----------------------------- | :---------------------- |
+| CPU or GPU class          | `UFORM_TARGET_<CLASS>`         | `UFORM_TARGET_SERIAL`   |
+| Optional facility         | `UFORM_WITH_[<OS>_]<FACILITY>` | `UFORM_WITH_INFINIBAND` |
+| Architecture fact         | `UFORM_ARCH_<ARCH>_`           | `UFORM_ARCH_CUDA_`      |
+| Operating-system identity | `UFORM_OS_<OS>_`               | `UFORM_OS_LINUX_`       |
+
+Every name in these families is always defined, as 0 or 1, and tested with `#if`.
+`defined(...)` appears only in a `!defined` default and in a guard that an `#error` follows.
+A dependency facility, like `UFORM_WITH_INFINIBAND`, defaults to 0, and the target that links the dependency sets it.
+Only the Platform Identity region of `c/uform/types.h` reads operating-system predefines like `__linux__`.
+Compiler predefines like `__clang__`, `__GNUC__` and `_MSC_VER` are read raw where they matter.
+
 ### Errors and Memory
 
 Nothing in the library throws, and every function under `include/uform/` and `src/` is `noexcept`, since an exception escaping into the C ABI would terminate the caller.
