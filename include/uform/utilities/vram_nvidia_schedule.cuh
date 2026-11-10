@@ -593,6 +593,14 @@ template <unsigned block_size_>
     return block_total;
 }
 
+/** The lane masks of one 32-thread warp. */
+struct cuda_warp_t {
+    using mask_t = u32_t;
+
+    /** The lowest lane of a non-empty @p mask. */
+    static __device__ __forceinline__ u32_t first(mask_t mask) noexcept { return __ffs(static_cast<int>(mask)) - 1; }
+};
+
 /** The device-wide nanosecond clock every spin-wait measures its deadline against. */
 [[nodiscard]] __device__ inline u64_t global_nanoseconds() noexcept {
     u64_t value;

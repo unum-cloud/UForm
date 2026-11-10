@@ -13,7 +13,7 @@
  */
 #include <cmath> // `std::ceil`, the pairs a fill's rows hold
 
-#include <algorithm> // `std::upper_bound`, `std::lower_bound`, `std::min`
+#include <algorithm> // `std::upper_bound`, `std::lower_bound`
 #include <span>      // `std::as_bytes`, `std::as_writable_bytes`
 
 #include <cuda.h> // `cuStreamSynchronize`
@@ -103,7 +103,7 @@ static __global__ void pair_segments_kernel_(
             tags.role[segment] = role == anchor_role_k     ? segment_role_t::anchor_k
                                  : role == negative_role_k ? segment_role_t::negative_k
                                                            : segment_role_t::positive_k;
-            tags.prefix_length[segment] = modality == modality_t::text_k ? std::min(prefix_bytes, length) : 0u;
+            tags.prefix_length[segment] = modality == modality_t::text_k ? fu::min_of(prefix_bytes, length) : 0u;
             if (role != anchor_role_k)
                 for (std::size_t axis = 0; axis != shapes.extent(1); ++axis)
                     shapes[segment, axis] = media_shapes[role == negative_role_k ? 1u : 0u, pair, axis];
@@ -238,7 +238,7 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
     // was charged for; each batch admits the keyed prefix whose rows fit.
     std::size_t const row_pairs = static_cast<std::size_t>(
         std::ceil(static_cast<f64_t>(rows) * pairs_per_row(columns)));
-    std::size_t const pairs = std::min(segments / roles, row_pairs), total_pairs = unroll * pairs;
+    std::size_t const pairs = fu::min_of(segments / roles, row_pairs), total_pairs = unroll * pairs;
     if (pairs == 0) return expected_t::fail(status_t::unsupported_k, "{} segments hold no pair", segments);
 
     if (expected_t picked = groups_.draw(seed_, training_step, gpu_rank, file_draw_salt_k, total_pairs, 2); !picked)
@@ -398,7 +398,7 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
     if (st::failed(drawn_on_gpu.resize(st::assume_uninitialized, drawn.size())) ||
         st::failed(keys_on_gpu.resize(st::assume_uninitialized, keys.size())) ||
         st::failed(prefixes.resize(st::assume_uninitialized,
-                                   std::max<std::size_t>(anchor_prefix_bytes + positive_prefix_bytes, 1u))))
+                                   fu::max_of<std::size_t>(anchor_prefix_bytes + positive_prefix_bytes, 1u))))
         return expected_t::fail(status_t::bad_alloc_k, "pair index allocation failed ({} pairs)", total_pairs);
     b8r1_span_t const anchor_prefix {prefixes.data(), anchor_prefix_bytes};
     b8r1_span_t const positive_prefix {prefixes.data() + anchor_prefix_bytes, positive_prefix_bytes};
@@ -431,7 +431,7 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
     if (st::failed(offsets.resize(st::assume_uninitialized, roles * (pairs + 1))) ||
         st::failed(lengths.resize(st::assume_uninitialized, roles * pairs)) ||
         st::failed(modalities.resize(st::assume_uninitialized, roles * pairs)) ||
-        st::failed(media_shapes.resize(st::assume_uninitialized, std::max<std::size_t>(2 * pairs * shape_width, 1u))))
+        st::failed(media_shapes.resize(st::assume_uninitialized, fu::max_of<std::size_t>(2 * pairs * shape_width, 1u))))
         return expected_t::fail(status_t::bad_alloc_k, "pair table allocation failed ({} pairs)", pairs);
     u32r2_span_t const role_offsets {offsets.data(), roles, pairs + 1}, role_lengths {lengths.data(), roles, pairs};
     nk::tensor_span<modality_t, 2> const role_modalities {modalities.data(), roles, pairs};
@@ -447,8 +447,8 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
         auto const advance = [&](std::size_t cursor, u32_t role, std::size_t pair,
                                  st::basic_vector<u64_t> const &offsets, std::size_t prefix_bytes) noexcept {
             u64_t const element = drawn_batches[role, batch, pair];
-            std::size_t const kept = std::min<std::size_t>(prefix_bytes + offsets[element + 1] - offsets[element],
-                                                           columns);
+            std::size_t const kept = fu::min_of<std::size_t>(prefix_bytes + offsets[element + 1] - offsets[element],
+                                                             columns);
             if (kept > columns - cursor % columns) cursor = round_up_to_multiple(cursor, columns);
             return cursor + kept;
         };
@@ -561,7 +561,7 @@ expected_t paired_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvdec_session
     if (modality_ != modality_t::video_k)
         return expected_t::fail(status_t::invalid_argument_k, "the {} column holds no videos", positive_.view());
     video_batch_shape_t video = shape_.video;
-    video.frame_stride = std::max(video.frame_stride, 1u);
+    video.frame_stride = fu::max_of(video.frame_stride, 1u);
     return fill_(gpu_stream, gpu_rank, training_step, batches,
                  [&](multimodal_batch_on_gpu_t &loaded, std::size_t row_begin, std::size_t row_end, column_view_t tape,
                      u64r1_view_t drawn, segment_shapes_span_t shapes, u32r1_span_t offsets, u32r1_span_t lengths,

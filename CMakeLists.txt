@@ -216,11 +216,6 @@ endif ()
 # bounds a build's memory whatever `-j` asks.
 set_property(GLOBAL APPEND PROPERTY JOB_POOLS uform_cuda_units=3)
 
-# `<windows.h>` would otherwise define `min` and `max` as macros, which break `std::min` and `numeric_limits::max`.
-if (WIN32)
-    add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
-endif ()
-
 # The suites precede `c/`, whose C tests load the checkpoint fixture `test/` writes.
 set(uform_bundled_files_)
 link_libraries($<BUILD_INTERFACE:uform_warnings>)

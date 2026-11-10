@@ -53,7 +53,7 @@ __global__ void ut::rmsnorm_backward_kernel(bf16r2_view_t input, bf16r1_view_t s
     u32_t const width = static_cast<u32_t>(input.extent(1));
     unsigned const lane_index = threadIdx.x % warp_size_k, warp_index = threadIdx.x / warp_size_k;
     std::size_t const band_first = static_cast<std::size_t>(blockIdx.x) * kernel_block_size_default_k;
-    std::size_t const band_end = std::min<std::size_t>(rows, band_first + kernel_block_size_default_k);
+    std::size_t const band_end = fu::min_of<std::size_t>(rows, band_first + kernel_block_size_default_k);
     for (std::size_t row = band_first + warp_index; row < band_end; row += warps_k) {
         f32_t const inverse = inverse_rms[row];
         f32_t lane_partial = 0.0f;
@@ -106,7 +106,7 @@ __global__ void ut::rmscast_backward_kernel(f32r2_view_t input, bf16r1_view_t sc
     u32_t const width = static_cast<u32_t>(input.extent(1));
     unsigned const lane_index = threadIdx.x % warp_size_k, warp_index = threadIdx.x / warp_size_k;
     std::size_t const band_first = static_cast<std::size_t>(blockIdx.x) * kernel_block_size_default_k;
-    std::size_t const band_end = std::min<std::size_t>(rows, band_first + kernel_block_size_default_k);
+    std::size_t const band_end = fu::min_of<std::size_t>(rows, band_first + kernel_block_size_default_k);
     bool const residual_present = !residual_grad.empty();
     for (std::size_t row = band_first + warp_index; row < band_end; row += warps_k) {
         f32_t squares_partial = 0.0f, projection_partial = 0.0f;
@@ -412,10 +412,10 @@ expected<transformer_scratch_t> transformer_scratch_t::make(gpu_arena_t &arena,
     std::size_t const ffn = static_cast<std::size_t>(config.ffn_expansion) * hidden;
     std::size_t const tokens = config.max_tokens;
     std::size_t const padded_tokens = round_up_to_multiple(tokens, std::size_t {8});
-    std::size_t const widest = std::max(3 * hidden, 2 * ffn);
+    std::size_t const widest = fu::max_of(3 * hidden, 2 * ffn);
     std::size_t widest_entry = 0;
-    for (u32_t const entry : entry_inputs) widest_entry = std::max<std::size_t>(widest_entry, entry);
-    std::size_t const inputs = std::max({hidden, ffn, widest_entry});
+    for (u32_t const entry : entry_inputs) widest_entry = fu::max_of<std::size_t>(widest_entry, entry);
+    std::size_t const inputs = fu::max_of(fu::max_of(hidden, ffn), widest_entry);
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     gpu_arena_alloc<f32_t> f32_alloc {arena};
     gpu_arena_alloc<b8_t> b8_alloc {arena};
@@ -428,7 +428,7 @@ expected<transformer_scratch_t> transformer_scratch_t::make(gpu_arena_t &arena,
     for (auto const &[columns, depth] : pack_shapes) {
         expected<std::size_t> shape_bytes = pack_bytes_bf16(columns, depth, numerics);
         if (!shape_bytes) return result_t::fail(std::move(shape_bytes));
-        packed_bytes = std::max(packed_bytes, shape_bytes.value_);
+        packed_bytes = fu::max_of(packed_bytes, shape_bytes.value_);
     }
     // The split depth's partials are not monotone in a weight's width, so every shape is asked: the
     // block's four, the tower head's, the token head's, then each entry's.
@@ -449,7 +449,7 @@ expected<transformer_scratch_t> transformer_scratch_t::make(gpu_arena_t &arena,
         expected<std::size_t> shape_bytes = weight_gradient_workspace_bytes_bf16(outputs, weight_inputs, depth,
                                                                                  numerics);
         if (!shape_bytes) return result_t::fail(std::move(shape_bytes));
-        workspace_bytes = std::max(workspace_bytes, shape_bytes.value_);
+        workspace_bytes = fu::max_of(workspace_bytes, shape_bytes.value_);
     }
     nk_size_t packed_keys_values_bytes = 0;
     if (nk_status_t const status = numerics.attention_pack_size_bf16(hidden / transformer_head_dim_k,
@@ -469,7 +469,7 @@ expected<transformer_scratch_t> transformer_scratch_t::make(gpu_arena_t &arena,
     scratch.packed_keys_values =
         b8r1_tensor_arena_t::uninitialized({static_cast<std::size_t>(packed_keys_values_bytes)}, b8_alloc).value;
     scratch.weight_grad_products =
-        f32r1_tensor_arena_t::uninitialized({std::max(widest, inputs) * hidden}, f32_alloc).value;
+        f32r1_tensor_arena_t::uninitialized({fu::max_of(widest, inputs) * hidden}, f32_alloc).value;
     scratch.packed_input = b8r1_tensor_arena_t::uninitialized({packed_bytes}, b8_alloc).value;
     scratch.weight_gradient_workspace = b8r1_tensor_arena_t::uninitialized({workspace_bytes}, b8_alloc).value;
     std::size_t const heads = hidden / transformer_head_dim_k;
@@ -1044,7 +1044,7 @@ expected<transformer_block_e4m3_t> transformer_block_bf16_t::quantize_weights(gp
     block.packed_keys_values_ =
         b8r1_tensor_arena_t::uninitialized({static_cast<std::size_t>(packed_keys_values_bytes)}, b8_alloc).value;
     block.silu_up_e4m3_ = e4m3r2_tensor_arena_t::uninitialized({tokens, ffn}, e4m3_alloc).value;
-    block.products_ = f32r2_tensor_arena_t::uninitialized({tokens, std::max(3 * hidden, 2 * ffn)}, f32_alloc).value;
+    block.products_ = f32r2_tensor_arena_t::uninitialized({tokens, fu::max_of(3 * hidden, 2 * ffn)}, f32_alloc).value;
     block.token_scales_ = f32r1_tensor_arena_t::uninitialized({tokens}, f32_alloc).value;
     max_bits = u32r1_tensor_arena_t::uninitialized({1}, u32_alloc).value;
     if (!block.normalized_e4m3_ || !block.qkv_e4m3_ || !block.packed_keys_values_ || !block.silu_up_e4m3_ ||

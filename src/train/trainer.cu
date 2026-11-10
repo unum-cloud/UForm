@@ -20,7 +20,7 @@
 
 #include <unistd.h> // `getpid`
 
-#include <algorithm> // `std::clamp`, `std::max`, `std::min`, `std::sort`
+#include <algorithm> // `std::clamp`, `std::sort`
 #include <charconv>  // `std::from_chars` — the rows peers measured
 #include <limits>    // `std::numeric_limits`
 
@@ -118,7 +118,7 @@ gpu_numerics_t ut::gpu_numerics_of(nk_capability_t capabilities) noexcept {
 #pragma endregion Numerics
 
 /** A vertex, item or segment index that names nothing. */
-static constexpr u32_t absent_k = std::numeric_limits<u32_t>::max();
+static constexpr u32_t absent_k = (std::numeric_limits<u32_t>::max)();
 
 /** Where an item of @p kept cells and @p modality starts from @p cursor : media on their own half
  *  or whole row, text at the cursor unless it would cross a row. */
@@ -365,7 +365,7 @@ struct device_budget_t {
         if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed");
         expected<std::size_t> held = held_bytes_(devices[member]);
         if (!held) return expected_t::fail(std::move(held));
-        footprints[member].device_bytes = *held - std::min(*held, budgets[member].held_bytes);
+        footprints[member].device_bytes = *held - fu::min_of(*held, budgets[member].held_bytes);
         footprints[member].arena_bytes = probe.arenas[member].used(); // exact, where mapped() moves whole chunks
     }
     // A host destroys its queue pairs only once every host drained its last acknowledgement.
@@ -408,7 +408,7 @@ struct device_budget_t {
             return result_t::fail(std::move(awaited));
         if (!parsed(peer_rows))
             return result_t::fail(status_t::invalid_argument_k, "host domain {} measured {} rows", peer, text.view());
-        agreed = std::min(agreed, peer_rows);
+        agreed = fu::min_of(agreed, peer_rows);
     }
     text.clear();
     if (!format_into(text, "{}", agreed)) return result_t::fail(status_t::bad_alloc_k, "rows formatting failed");
@@ -445,7 +445,7 @@ struct device_budget_t {
     u32_t const configured_rows = config.batch.max_rows_per_gpu;
     u32_t const larger_probe_rows = configured_rows ? std::clamp(configured_rows, 3u, larger_probe_rows_k)
                                                     : larger_probe_rows_k;
-    u32_t const middle_probe_rows = std::min(middle_probe_rows_k, larger_probe_rows - 1u);
+    u32_t const middle_probe_rows = fu::min_of(middle_probe_rows_k, larger_probe_rows - 1u);
     footprint_t smaller[max_gpus_per_host_k] = {}, middle[max_gpus_per_host_k] = {}, larger[max_gpus_per_host_k] = {};
     expected_t probed = probe_footprint_(mesh, config, devices, numerics, smaller_probe_rows_k, budgets,
                                          {smaller, gpus});
@@ -461,12 +461,12 @@ struct device_budget_t {
                                    static_cast<f64_t>(middle[member].arena_bytes)) /
                                   (high_rows - middle_rows);
         footprint_fit_t fit;
-        fit.pair = std::max((upper_slope - lower_slope) / (high_rows - low_rows), 0.0);
+        fit.pair = fu::max_of((upper_slope - lower_slope) / (high_rows - low_rows), 0.0);
         fit.row = lower_slope - fit.pair * (low_rows + middle_rows);
         fit.fixed = low - fit.row * low_rows - fit.pair * low_rows * low_rows;
         return fit;
     };
-    u64_t const representable_rows = std::numeric_limits<u32_t>::max() / config.batch.max_columns_per_row;
+    u64_t const representable_rows = (std::numeric_limits<u32_t>::max)() / config.batch.max_columns_per_row;
     envelope_t envelope; // the device holding the fewest rows decides
     for (std::size_t member = 0; member != gpus; ++member) {
         footprint_t const &low = smaller[member], &high = larger[member];
@@ -481,16 +481,16 @@ struct device_budget_t {
         device.fixed = static_cast<f64_t>(low.device_bytes) - device.row * low_rows - device.pair * low_rows * low_rows;
         envelope_t measured;
         measured.free_bytes = budgets[member].free_bytes;
-        measured.row_bytes = static_cast<std::size_t>(std::max(device.row, 0.0));
+        measured.row_bytes = static_cast<std::size_t>(fu::max_of(device.row, 0.0));
         measured.pair_bytes = static_cast<std::size_t>(device.pair);
-        measured.fixed_bytes = static_cast<std::size_t>(std::max(device.fixed, 0.0));
-        measured.margin_bytes = high.device_bytes - std::min(high.device_bytes, high.arena_bytes);
+        measured.fixed_bytes = static_cast<std::size_t>(fu::max_of(device.fixed, 0.0));
+        measured.margin_bytes = high.device_bytes - fu::min_of(high.device_bytes, high.arena_bytes);
         device.fixed += static_cast<f64_t>(config.reservoir_fixed_bytes);
         device.row += static_cast<f64_t>(config.reservoir_row_bytes);
         u64_t const fitting_rows = device.rows_within(static_cast<f64_t>(measured.free_bytes) -
                                                       static_cast<f64_t>(measured.margin_bytes));
         measured.rows = configured_rows ? configured_rows
-                                        : static_cast<u32_t>(std::min(fitting_rows, representable_rows));
+                                        : static_cast<u32_t>(fu::min_of(fitting_rows, representable_rows));
         if (measured.rows == 0 || measured.rows > fitting_rows)
             return result_t::fail(
                 status_t::bad_alloc_k,
@@ -506,8 +506,8 @@ struct device_budget_t {
         envelope.rows = *agreed;
     }
     for (std::size_t member = 0; member != gpus; ++member)
-        envelope.reserve_bytes = std::max(envelope.reserve_bytes,
-                                          static_cast<std::size_t>(arena_fit(member).at(f64_t(envelope.rows) + 1.0)));
+        envelope.reserve_bytes = fu::max_of(envelope.reserve_bytes,
+                                            static_cast<std::size_t>(arena_fit(member).at(f64_t(envelope.rows) + 1.0)));
     return result_t {envelope};
 }
 
@@ -598,7 +598,7 @@ struct device_budget_t {
     contrastive_config.hidden = config.hidden;
     contrastive_config.to_vertices_per_gpu = static_cast<u32_t>(segments);
     contrastive_config.gpu_subgraphs_per_step = topology.shape.gpus_per_colocated_domain;
-    contrastive_config.temperature_groups = std::max(config.contrastive.temperature_groups, 1u);
+    contrastive_config.temperature_groups = fu::max_of(config.contrastive.temperature_groups, 1u);
     contrastive_config.pair_loss = config.contrastive.pair_loss;
     std::size_t const force_scalars = config.contrasts() ? distributed_contrastive_segments_t::payload_scalars_needed(
                                                                contrastive_config, topology.shape)
@@ -609,7 +609,7 @@ struct device_budget_t {
     contrastive_tokens_config_t tokens_config;
     tokens_config.segments_per_gpu = static_cast<u32_t>(segments);
     tokens_config.head_tokens_per_gpu = static_cast<u32_t>(max_tokens);
-    std::size_t const query_tokens = std::min(max_tokens, segments * late_interaction.max_query_span);
+    std::size_t const query_tokens = fu::min_of(max_tokens, segments * late_interaction.max_query_span);
     tokens_config.query_tokens_per_gpu = static_cast<u32_t>(round_up_to_multiple(
         late_interaction.max_query_tokens_per_gpu ? std::size_t {late_interaction.max_query_tokens_per_gpu}
                                                   : query_tokens,
@@ -735,7 +735,7 @@ expected_t trainer_t::make(trainer_t &placed, mesh_t &mesh, trainer_config_t con
     expected_t assembled = assemble_(placed, mesh, placed.envelope.reserve_bytes);
     if (assembled || assembled.status_ != status_t::bad_alloc_k) return assembled;
     std::size_t committed_bytes = 0;
-    for (gpu_arena_t const &arena : placed.arenas.view()) committed_bytes = std::max(committed_bytes, arena.mapped());
+    for (gpu_arena_t const &arena : placed.arenas.view()) committed_bytes = fu::max_of(committed_bytes, arena.mapped());
     return expected_t::fail(status_t::bad_alloc_k,
                             "{}: {} rows of {} columns per GPU outgrew the device, its arena committed {} of the {} " //
                             "bytes free",
@@ -942,7 +942,7 @@ expected<retrieval_t> trainer_t::evaluate(batch_source_t source, data_epoch_t da
 }
 
 expected_t trainer_t::reseed() noexcept {
-    std::size_t const groups = std::max<std::size_t>(config.contrastive.temperature_groups, 1);
+    std::size_t const groups = fu::max_of<std::size_t>(config.contrastive.temperature_groups, 1);
     st::basic_vector<f32_t> inverse_temperatures, biases, token_inverse_temperatures, token_biases;
     if (config.contrasts()) {
         if (st::failed(inverse_temperatures.resize(groups)) || st::failed(biases.resize(groups)) ||
@@ -1165,7 +1165,7 @@ expected_t synthetic_source_t::fill(trainer_t &trainer, data_epoch_t data_epoch,
 /** The video slice of @p shape with its frame stride read as at least one. */
 [[nodiscard]] static video_batch_shape_t video_shape_(multimodal_batch_shape_t const &shape) noexcept {
     video_batch_shape_t video = shape.video;
-    video.frame_stride = std::max(video.frame_stride, 1u);
+    video.frame_stride = fu::max_of(video.frame_stride, 1u);
     return video;
 }
 
@@ -1272,7 +1272,7 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
         std::size_t kept = 0, spanned = 0;
         // A choice appends the mask byte, and a long state loses its head, never its end.
         if (modality == modality_t::text_k)
-            spanned = bytes.size() + (offered != 0), kept = std::min<std::size_t>(spanned, columns);
+            spanned = bytes.size() + (offered != 0), kept = fu::min_of<std::size_t>(spanned, columns);
         else if (modality == modality_t::image_k) {
             expected<um::image_plan_t> planned = um::plan_image(bytes, shape.image.patch_side, columns);
             if (!planned) return expected_t::fail(std::move(planned));
@@ -1484,7 +1484,7 @@ expected_t items_source_t::relate_(trainer_t &trainer) noexcept {
     std::size_t const gpus = trainer.replicas.size(), count = items.modalities.size();
     u32_t const segments = config.batch.max_segments_per_gpu;
     std::size_t const total_segments = gpus * segments, edges = edges_.capacity();
-    u32_t const groups = std::max(config.contrastive.temperature_groups, 1u);
+    u32_t const groups = fu::max_of(config.contrastive.temperature_groups, 1u);
 
     for (std::size_t member = 0; member != gpus; ++member) {
         switch_to_gpu_t gpu_scope {trainer.streams[member]};

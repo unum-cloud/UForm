@@ -55,7 +55,7 @@ struct vram_steps {
 
     [[nodiscard]] nk_stream_t stream() const noexcept { return stream_handle; }
 
-    [[nodiscard]] std::size_t share(std::size_t tasks) noexcept { return std::max<std::size_t>(tasks, 1); }
+    [[nodiscard]] std::size_t share(std::size_t tasks) noexcept { return fu::max_of<std::size_t>(tasks, 1); }
 
     template <typename body_type_>
     [[nodiscard]] expected_t split(std::size_t tasks, std::size_t, sz::string_view_t what,

@@ -1,14 +1,14 @@
 /**
- *  @brief The Parquet tokens loader's bodies and kernels — see the header for the contract.
  *  @file src/loaders/tokens_loader.cu
  *  @author Ash Vardanian
  *  @date July 4, 2026
+ *  @brief The Parquet tokens loader's bodies and kernels — see the header for the contract.
  *
  *  The pack pair mirrors the mixer's ( @c multimodal_batch.cu ): a serial geometry walk writing
  *  offsets + lengths under the segments-never-cross-rows rule, then a CTA-per-segment gather. The
  *  row draw is a third kernel — a keyed permutation of the pooled files' rows, without replacement.
  */
-#include <algorithm> // `std::min` (floor), `std::upper_bound` (weighted file pick), `std::find` (dedup)
+#include <algorithm> // `std::upper_bound` (weighted file pick), `std::find` (dedup)
 
 #include "uform/loaders/tokens_loader.cuh"
 
@@ -67,7 +67,7 @@ static __global__ void tokens_geometry_kernel_(u64r1_view_t reservoir_offsets, u
         if (segment_index < live_segments) {
             u64_t const source = record_indices[segment_index];
             u64_t const bytes = prefix_bytes + reservoir_offsets[source + 1] - reservoir_offsets[source];
-            columns = static_cast<u32_t>(std::min<u64_t>(bytes, columns_per_row));
+            columns = static_cast<u32_t>(fu::min_of<u64_t>(bytes, columns_per_row));
         }
         // A segment never crosses its row: jump the cursor to the next row when it would.
         u32_t const room_in_row = columns_per_row - cursor % columns_per_row;
@@ -296,7 +296,7 @@ expected_t tokens_loader_jsonl_t::fill(gpu_stream_t &gpu_stream, tokens_base_loa
     std::size_t const total_segments = unroll * documents;
 
     std::size_t const shard_count = absolute_paths_.size();
-    std::size_t const floor_files = std::min<std::size_t>(2, shard_count);
+    std::size_t const floor_files = fu::min_of<std::size_t>(2, shard_count);
     std::size_t const total_bytes = byte_prefix_[shard_count];
     constexpr splitmix64_hash_t hash {};
 
@@ -363,7 +363,7 @@ expected_t tokens_loader_csv_t::fill(gpu_stream_t &gpu_stream, tokens_base_loade
     std::size_t const total_segments = unroll * documents;
 
     std::size_t const shard_count = absolute_paths_.size();
-    std::size_t const floor_files = std::min<std::size_t>(2, shard_count);
+    std::size_t const floor_files = fu::min_of<std::size_t>(2, shard_count);
     std::size_t const total_bytes = byte_prefix_[shard_count];
     constexpr splitmix64_hash_t hash {};
 

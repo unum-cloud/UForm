@@ -1,7 +1,8 @@
 # The CPU UForm's own units are tuned for.
 
-# UFORM_MARCH raises the floor of UForm's own C and C++ units through `uform_warnings`, which every one of them links:
-# an ISA level, `native` for this host, or a CPU name, also when cross-compiling. It lands after the libraries, so MSVC
+# UFORM_MARCH sets the floor of UForm's own C and C++ units through `uform_warnings`, which every one of them links:
+# empty keeps the architecture's floor, whatever a distribution compiler defaults to, an ISA level raises it, `native`
+# tunes for this host, and a CPU name for that CPU, also when cross-compiling. It lands after the libraries, so MSVC
 # reads which capabilities NumKong found this host runs. A WebAssembly module keeps its toolchain's flags, as every unit
 # of one module must agree.
 if (UFORM_MARCH STREQUAL "native" AND CMAKE_CROSSCOMPILING)
@@ -33,4 +34,12 @@ elseif (UFORM_MARCH AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^wasm")
     else ()
         target_compile_options(uform_warnings INTERFACE "$<$<COMPILE_LANGUAGE:C,CXX>:-march=${UFORM_MARCH}>")
     endif ()
+elseif (MSVC OR APPLE)
+    # MSVC's defaults are the floor, and on Apple `-arch` pins it per slice of a universal build.
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|AARCH64|arm64|ARM64)$")
+    target_compile_options(uform_warnings INTERFACE "$<$<COMPILE_LANGUAGE:C,CXX>:-march=armv8-a>")
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+    target_compile_options(uform_warnings INTERFACE "$<$<COMPILE_LANGUAGE:C,CXX>:-march=x86-64>")
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^riscv64$")
+    target_compile_options(uform_warnings INTERFACE "$<$<COMPILE_LANGUAGE:C,CXX>:-march=rv64gc>")
 endif ()

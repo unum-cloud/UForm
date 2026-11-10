@@ -168,7 +168,7 @@ struct batch_sources_t_ {
         u32_t const segment = base + lane;
         bool const live = segment < end && peer.segment_bag[segment] == bag && peer.segment_lengths[segment] != 0u;
         u32_t const matches = __ballot_sync(0xFFFFFFFFu, segment < end && live == inside);
-        if (matches != 0u) return base + static_cast<u32_t>(__ffs(static_cast<int>(matches))) - 1u;
+        if (matches != 0u) return base + cuda_warp_t::first(matches);
     }
     return end;
 }

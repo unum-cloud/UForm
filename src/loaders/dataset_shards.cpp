@@ -336,8 +336,8 @@ expected_t row_group_draw_t::append_shard(sz::string_view_t path, parquet_length
 }
 
 expected_t row_group_draw_t::reserve(std::size_t groups) noexcept {
-    groups = std::min(groups, drawable_groups_.size());
-    std::size_t const shards = std::min(groups, paths_.size());
+    groups = fu::min_of(groups, drawable_groups_.size());
+    std::size_t const shards = fu::min_of(groups, paths_.size());
     if (st::failed(drawn_.reserve(groups)) || st::failed(picked_groups_.reserve(groups)) ||
         st::failed(picked_shards_.reserve(shards)) || st::failed(picked_paths_.reserve(shards)) ||
         st::failed(picked_offsets_.reserve(shards + 1)))
@@ -358,7 +358,7 @@ expected_t row_group_draw_t::draw(u64_t seed, u64_t step, std::size_t rank, u64_
     // Distinct groups accumulate until they hold the rows, then only a fresh shard's group
     // meets the floor.
     constexpr splitmix64_hash_t hash {};
-    std::size_t const floor = std::min(floor_shards, paths_.size());
+    std::size_t const floor = fu::min_of(floor_shards, paths_.size());
     std::size_t pooled = 0, shards = 0;
     for (std::size_t attempt = 0; (pooled < rows || shards < floor) && drawn_.size() != groups; ++attempt) {
         std::size_t const position = hash(seed, step, rank, salt, attempt) % total_rows;
@@ -560,9 +560,9 @@ expected<parquet_length_metadata_t> parquet_file_t::table_metadata(gpu_direct_st
                     statistics += statistic_(chunk_metadata.statistics.max_value, longest_member);
             }
             length.group_complete_rows[group] =
-                complete ? length.group_rows[group] - std::min(incomplete_rows, length.group_rows[group]) : 0;
+                complete ? length.group_rows[group] - fu::min_of(incomplete_rows, length.group_rows[group]) : 0;
             spans[group] = statistics == 3 ? static_cast<std::size_t>(last_member + longest_member - first_member)
-                                           : std::numeric_limits<std::size_t>::max();
+                                           : (std::numeric_limits<std::size_t>::max)();
             length.bytes += length.group_bytes[group];
         }
         if (!tar_backed) return result_t {std::move(length)};
@@ -575,7 +575,7 @@ expected<parquet_length_metadata_t> parquet_file_t::table_metadata(gpu_direct_st
         if (!tar_bytes) return result_t::fail(std::move(tar_bytes));
         length.bytes += *tar_bytes;
         for (std::size_t group = 0; group != groups; ++group)
-            length.group_bytes[group] += std::min(spans[group], *tar_bytes);
+            length.group_bytes[group] += fu::min_of(spans[group], *tar_bytes);
         return result_t {std::move(length)};
     }
     catch (std::exception const &error) {

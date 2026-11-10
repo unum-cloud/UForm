@@ -246,6 +246,9 @@
         "CMAKE_C_COMPILER": null,
         "CMAKE_CXX_COMPILER": null,
         "CMAKE_CUDA_HOST_COMPILER": null,
+        "CMAKE_C_FLAGS": "/DWIN32 /D_WINDOWS /pathmap:${sourceDir}=.",
+        "CMAKE_CXX_FLAGS": "/DWIN32 /D_WINDOWS /EHsc /pathmap:${sourceDir}=.",
+        "CMAKE_CUDA_FLAGS": null,
         "UFORM_WITH_CODECS": "OFF"
       }
     },

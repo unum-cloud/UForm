@@ -6,7 +6,7 @@
  */
 #include <cmath> // `std::ceil` — the reservoir's per-row term at the mixture's density
 
-#include <algorithm> // `std::upper_bound`, `std::min`, `std::max`, `std::any_of`
+#include <algorithm> // `std::upper_bound`, `std::any_of`
 #include <utility>   // `std::swap` — a step's batches into the mixer's table and back
 
 #include <cuda.h> // `cuStreamSynchronize`
@@ -270,7 +270,7 @@ std::size_t mixture_sampler_t::search_(u64_t seed, u32_t epoch, u32_t gpu_index)
     constexpr splitmix64_hash_t hash {};
     f64_t const draw = static_cast<f64_t>(hash(seed, epoch, gpu_index) >> 11) * 0x1.0p-53 *
                        weight_prefix_[weight_prefix_.size() - 1];
-    return std::min<std::size_t>(
+    return fu::min_of<std::size_t>(
         std::upper_bound(weight_prefix_.begin(), weight_prefix_.end(), draw) - weight_prefix_.begin() - 1,
         entries_.size() - 1);
 }
@@ -367,12 +367,12 @@ expected_t dataset_source_t::open(dataset_source_t &placed, trainer_config_t &co
                   std::holds_alternative<choices_loader_parquet_t>(loader)) &&
                  item_cells != 0)
             density = columns / static_cast<f64_t>(item_cells);
-        config.segments_per_row = std::max(config.segments_per_row, density);
+        config.segments_per_row = fu::max_of(config.segments_per_row, density);
         // A fill reads one entry, so a batch row costs that entry's own source rows, a pair or a
         // document each.
         f64_t const entry_row_bytes = static_cast<f64_t>(
             std::visit([](auto const &typed) noexcept { return typed.reservoir().row_bytes; }, loader));
-        row_bytes = std::max(row_bytes, entry_row_bytes * density / roles);
+        row_bytes = fu::max_of(row_bytes, entry_row_bytes * density / roles);
     }
     // One fill pools the rows of every batch it packs, so the per-row term scales with them.
     config.reservoir_fixed_bytes = reservoir.fixed_bytes;

@@ -3,9 +3,13 @@
 # Warnings apply to UForm's own targets only, so dependencies build with their own flags, and CUDA units with nvcc's.
 add_library(uform_warnings INTERFACE)
 if (MSVC)
-    target_compile_options(uform_warnings INTERFACE /W4 /permissive- /Zc:__cplusplus)
+    # The conformance switches MSVC leaves off by default, which every other supported compiler behaves as.
+    target_compile_options(
+        uform_warnings INTERFACE "$<$<COMPILE_LANGUAGE:C,CXX>:/W4;/Zc:preprocessor;/utf-8;/bigobj>"
+                                 "$<$<COMPILE_LANGUAGE:CXX>:/permissive-;/Zc:__cplusplus>"
+    )
     if (UFORM_WERROR)
-        target_compile_options(uform_warnings INTERFACE /WX)
+        target_compile_options(uform_warnings INTERFACE "$<$<COMPILE_LANGUAGE:C,CXX>:/WX>")
     endif ()
 else ()
     target_compile_options(

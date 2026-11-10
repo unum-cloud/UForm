@@ -296,19 +296,25 @@ static void test_model_load(void) {
     expect(description.gpu_class == uform_gpu_class_unknown_k, "A RAM model names no GPU class");
 
     uform_outcome_t pin_outcome = {0};
-    uform_model_t serial = NULL;
-    uform_model_load_ram(&(uform_model_load_ram_t) {.model = &serial,
+    // A monoversioned build compiles its one class alone, so the serial floor is not there to pin.
+    uform_cpu_class_t const pinned_class = description.cpu_class == uform_cpu_class_monoversioned_k
+                                               ? uform_cpu_class_monoversioned_k
+                                               : uform_cpu_class_serial_k;
+    uform_model_t pinned = NULL;
+    uform_model_load_ram(&(uform_model_load_ram_t) {.model = &pinned,
                                                     .executor = executor,
                                                     .outcome = &pin_outcome,
                                                     .path = view_of(checkpoint_path),
-                                                    .ram = {.cpu_class = uform_cpu_class_serial_k},
+                                                    .ram = {.cpu_class = pinned_class},
                                                     .quantization = uform_scalar_bf16_k});
     expect(!pin_outcome.message, pin_outcome.message);
-    uform_model_description_t serial_description = {0};
-    uform_model_describe(&(uform_model_describe_t) {
-        .model = serial, .executor = executor, .outcome = &pin_outcome, .description = &serial_description});
-    expect(serial_description.cpu_class == uform_cpu_class_serial_k, "A pinned load packs for the pinned class");
-    uform_model_free(serial);
+    uform_model_description_t pinned_description = {0};
+    uform_model_describe(&(uform_model_describe_t) {.model = pinned,
+                                                    .executor = executor,
+                                                    .outcome = &pin_outcome,
+                                                    .description = &pinned_description});
+    expect(pinned_description.cpu_class == pinned_class, "A pinned load packs for the pinned class");
+    uform_model_free(pinned);
     uform_model_t foreign = NULL;
     uform_cpu_class_t const foreign_class = description.cpu_class == uform_cpu_class_wasm64_extended_k
                                                 ? uform_cpu_class_intel_diamond_k

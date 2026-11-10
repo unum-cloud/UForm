@@ -116,7 +116,14 @@ set_target_properties(
 if (UFORM_BUILD_TEST)
     add_executable(uform_test_c test.c)
     target_link_libraries(uform_test_c PRIVATE uform_static forkunion::header)
-    set_target_properties(uform_test_c PROPERTIES LINKER_LANGUAGE CXX)
+    # `<stdatomic.h>` needs C11, which MSVC also keeps behind an experimental switch
+    set_target_properties(
+        uform_test_c
+        PROPERTIES LINKER_LANGUAGE CXX
+                   C_STANDARD 11
+                   C_STANDARD_REQUIRED ON
+    )
+    target_compile_options(uform_test_c PRIVATE $<$<C_COMPILER_ID:MSVC>:/experimental:c11atomics>)
     if (EMSCRIPTEN)
         target_link_options(uform_test_c PRIVATE "-sNODERAWFS")
     endif ()
@@ -127,6 +134,10 @@ if (UFORM_BUILD_TEST)
     else ()
         add_test(NAME uform_test_c COMMAND uform_test_c)
     endif ()
+    add_test(NAME uform_duplicate_symbols
+             COMMAND ${CMAKE_COMMAND} "-DOBJECTS=$<FILTER:$<TARGET_PROPERTY:uform_static,SOURCES>,INCLUDE,[.]o(bj)?$>"
+                     -P "${forkunion_SOURCE_DIR}/cmake/forkunion_duplicate_symbols.cmake"
+    )
 endif ()
 
 # The same checkpoint on an NVIDIA GPU against the host, which only a build with the NVIDIA kernels and the suites runs.

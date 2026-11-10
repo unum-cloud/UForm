@@ -1822,20 +1822,20 @@ static PyObject *ArenaBuffer_get_cuda_array_interface(ArenaBuffer *self, void *c
     PyObject *const address = PyLong_FromVoidPtr((void *)self->data);
     PyObject *const data = address ? PyTuple_Pack(2, address, Py_False) : NULL;
     Py_XDECREF(address);
-    PyObject *const interface = data ? PyDict_New() : NULL;
-    if (!interface) {
+    PyObject *const array_interface = data ? PyDict_New() : NULL;
+    if (!array_interface) {
         Py_XDECREF(data);
         return NULL;
     }
-    if (uform_py_dict_steal_item(interface, "data", data) != 0 ||
-        uform_py_dict_steal_item(interface, "shape", extents_to_tuple(self->shape, self->rank)) != 0 ||
-        uform_py_dict_steal_item(interface, "strides", extents_to_tuple(self->strides, self->rank)) != 0 ||
-        uform_py_dict_steal_item(interface, "typestr", PyUnicode_FromStringAndSize(typestr, 3)) != 0 ||
-        uform_py_dict_steal_item(interface, "version", PyLong_FromLong(3)) != 0) {
-        Py_DECREF(interface);
+    if (uform_py_dict_steal_item(array_interface, "data", data) != 0 ||
+        uform_py_dict_steal_item(array_interface, "shape", extents_to_tuple(self->shape, self->rank)) != 0 ||
+        uform_py_dict_steal_item(array_interface, "strides", extents_to_tuple(self->strides, self->rank)) != 0 ||
+        uform_py_dict_steal_item(array_interface, "typestr", PyUnicode_FromStringAndSize(typestr, 3)) != 0 ||
+        uform_py_dict_steal_item(array_interface, "version", PyLong_FromLong(3)) != 0) {
+        Py_DECREF(array_interface);
         return NULL;
     }
-    return interface;
+    return array_interface;
 }
 
 /** The DLPack device the outputs of @p buffer live on, from the engine's description of its arena;

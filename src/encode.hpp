@@ -449,7 +449,7 @@ failure_t land_choices(uform_text_choose_t &arguments, f32r2_view_t logits, site
         f32_t const beta =
             model.choice_inverse_temperatures[arguments.temperature_groups ? arguments.temperature_groups[item] : 0];
         f32_t peak = -std::numeric_limits<f32_t>::infinity(), sum = 0.0f;
-        for (u8_t const byte : offered) peak = std::max(peak, row[byte]);
+        for (u8_t const byte : offered) peak = fu::max_of(peak, row[byte]);
         for (std::size_t choice = 0; choice != offered.size(); ++choice)
             sum += chances[choice] = std::exp(beta * (row[offered[choice]] - peak));
         for (f32_t &chance : chances) chance /= sum;

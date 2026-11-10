@@ -163,8 +163,8 @@ static f64_t host_loss(f64r2_view_t vertices, f64r2_view_t neighbors, std::span<
             if (target > 0) pos_weight += weight;
             else if (target < 0) neg_weight += weight;
         }
-        f64_t const pos_scale = 1.0 / std::max(pos_weight, sum_negatives ? f64_t(1.0) : f64_t(1.0e-12));
-        f64_t const neg_scale = sum_negatives ? pos_scale : 1.0 / std::max(neg_weight, f64_t(1.0e-12));
+        f64_t const pos_scale = 1.0 / fu::max_of(pos_weight, sum_negatives ? f64_t(1.0) : f64_t(1.0e-12));
+        f64_t const neg_scale = sum_negatives ? pos_scale : 1.0 / fu::max_of(neg_weight, f64_t(1.0e-12));
         f64_t vertex_loss = 0.0;
         for (std::size_t prefix_index = 0; prefix_index != prefixes.size(); ++prefix_index) {
             auto const prefix = nk::range(0, prefixes[prefix_index]);
@@ -179,7 +179,7 @@ static f64_t host_loss(f64r2_view_t vertices, f64r2_view_t neighbors, std::span<
                 f64_t const cosine = denominator > 1.0e-2 ? raw / denominator : 0.0;
                 f64_t const logit = beta * cosine + bias;
                 f64_t const negated = -target * logit;
-                f64_t const softplus = std::max(negated, 0.0) + std::log1p(std::exp(-std::fabs(negated)));
+                f64_t const softplus = fu::max_of(negated, 0.0) + std::log1p(std::exp(-std::fabs(negated)));
                 vertex_loss += weight * softplus * (target > 0 ? pos_scale : neg_scale);
             }
         }
@@ -219,7 +219,7 @@ static f64_t host_ranked_loss(f64r2_view_t vertices, f64r2_view_t neighbors, std
                 for (std::size_t negative = 0; negative != num_neighbors; ++negative) {
                     if (!(targets[negative] < 0) || weights[negative] == 0.0) continue;
                     f64_t const margin = scaled[negative] - scaled[positive];
-                    f64_t const softplus = std::max(margin, 0.0) + std::log1p(std::exp(-std::fabs(margin)));
+                    f64_t const softplus = fu::max_of(margin, 0.0) + std::log1p(std::exp(-std::fabs(margin)));
                     loss += weights[positive] * weights[negative] * softplus / (positive_weight * negative_weight);
                 }
             }
@@ -377,7 +377,7 @@ static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::
         return host_pair_loss(form, rows, rows, prefixes, host_relations, inverse_temperature, bias, live_vertices);
     };
     f64_t const oracle = oracle_of(host_tower);
-    f64_t const relative = std::fabs(f64_t(device_loss) - oracle) / std::max(std::fabs(oracle), 1.0e-9);
+    f64_t const relative = std::fabs(f64_t(device_loss) - oracle) / fu::max_of(std::fabs(oracle), 1.0e-9);
     suite.check(relative < 5.0e-3, "loss {:.6f} matches the Float64 oracle {:.6f}: relative {:.2e}", device_loss,
                 oracle, relative);
     // Each cell's softplus stays under 2 at unit β and zero bias, so repel-only rows stay bounded.
@@ -455,7 +455,7 @@ static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::
                 cell(retrieval_column_t::centred_products_k) += centred * centred;
                 auto [target, weight] = host_relations.resolve(u32_t(row), u32_t(other));
                 if (target > 0 && weight != 0.0)
-                    best = std::max(best, cosines[other]), positives += 1.0,
+                    best = fu::max_of(best, cosines[other]), positives += 1.0,
                     cell(retrieval_column_t::attract_cosine_k) += cosines[other];
             }
             for (std::size_t other = 0; other != num_vertices && host_effective[row] != 0u; ++other) {
@@ -479,7 +479,7 @@ static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::
             cell(retrieval_column_t::chance_k) = ranked ? positives / (positives + negatives) : 0.0;
             cell(retrieval_column_t::attracts_k) = positives;
             for (std::size_t column = 0; column != columns; ++column)
-                worst = std::max(worst, std::fabs(f64_t(table_rows[row, column]) - expected[column]));
+                worst = fu::max_of(worst, std::fabs(f64_t(table_rows[row, column]) - expected[column]));
             trace += cell(retrieval_column_t::centred_norm_k);
             frobenius += cell(retrieval_column_t::centred_products_k);
             device_trace += table_rows[row, std::size_t(retrieval_column_t::centred_norm_k)];
@@ -517,8 +517,8 @@ static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::
     if (!widen_from_bf16(staging, host_grad)) return suite.check(false, "gradient widening failed");
     f64_t largest = 0.0, worst = 0.0;
     for (std::size_t index = 0; index != scalars; ++index) {
-        largest = std::max(largest, std::fabs(eager_grad[index]));
-        worst = std::max(worst, std::fabs(eager_grad[index] - host_grad[index]));
+        largest = fu::max_of(largest, std::fabs(eager_grad[index]));
+        worst = fu::max_of(worst, std::fabs(eager_grad[index] - host_grad[index]));
     }
     suite.check(worst <= 1.0e-2 * largest, "captured replays match eager: worst {} over largest {}", worst, largest);
     cuCtxPopCurrent(nullptr);
@@ -714,7 +714,7 @@ static void run_sharded_oracle_case(test_suite_t &suite, oracle_graph_t graph, c
                        (2.0 * step_size);
 
     auto relative = [](f64_t got, f64_t want) noexcept {
-        return std::fabs(got - want) / std::max(std::fabs(want), 1.0e-9);
+        return std::fabs(got - want) / fu::max_of(std::fabs(want), 1.0e-9);
     };
     // The split moves the Float32 sums no further than rounding, and both land near Float64.
     f64_t const tolerance = 1.0e-6, float64_tolerance = 1.0e-5;
@@ -744,7 +744,7 @@ static void run_distributed_case(test_suite_t &suite) {
     if (cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count < 2)
         return suite.skip("needs two CUDA devices");
     // The topology spans the whole box, so the domain takes every visible GPU and shares no handle.
-    std::size_t const gpus = std::min<std::size_t>(static_cast<std::size_t>(device_count), max_gpus_per_host_k);
+    std::size_t const gpus = fu::min_of<std::size_t>(static_cast<std::size_t>(device_count), max_gpus_per_host_k);
     constexpr u32_t vertices_k = 8, hidden_k = 64;
     constexpr std::size_t scalars_k = std::size_t(vertices_k) * hidden_k;
     i32_t devices[max_gpus_per_host_k] = {};
@@ -838,7 +838,7 @@ static void run_distributed_case(test_suite_t &suite) {
         return host_loss(rows, rows, prefixes, host_relations, 1.0, 0.0, gpus * vertices_k, false);
     };
     f64_t const oracle = oracle_of(global_tower);
-    f64_t const relative = std::fabs(distributed_loss - oracle) / std::max(std::fabs(oracle), 1.0e-9);
+    f64_t const relative = std::fabs(distributed_loss - oracle) / fu::max_of(std::fabs(oracle), 1.0e-9);
     sz::string_view_t const tier = domain.value_.description();
     suite.check(relative < 5.0e-3,
                 "distributed loss sum {:.6f} matches the global Float64 oracle {:.6f}: relative {:.2e} over {}",
@@ -853,7 +853,7 @@ static void run_distributed_case(test_suite_t &suite) {
         return suite.check(false, "perturbation rounding failed");
     f64_t const numeric = (oracle_of(plus) - oracle_of(minus)) / (plus[probe_index] - minus[probe_index]);
     f64_t const analytic = distributed_grad[probe_index];
-    suite.check(std::fabs(numeric - analytic) < 5.0e-2 * std::max(std::fabs(numeric), 0.05),
+    suite.check(std::fabs(numeric - analytic) < 5.0e-2 * fu::max_of(std::fabs(numeric), 0.05),
                 "distributed force matches the global finite difference: numeric {:.5f} distributed {:.5f}", numeric,
                 analytic);
 }
@@ -971,7 +971,7 @@ static void run_cross_domain_case(test_suite_t &suite) {
         return host_loss(rows, rows, prefix_dims, host_relations, 1.0, 0.0, world_gpus * vertices_k, false);
     };
     f64_t const oracle = oracle_of(global_tower);
-    f64_t const relative = std::fabs(global_loss - oracle) / std::max(std::fabs(oracle), 1.0e-9);
+    f64_t const relative = std::fabs(global_loss - oracle) / fu::max_of(std::fabs(oracle), 1.0e-9);
     suite.check(relative < 5.0e-3,
                 "cross-domain loss sum {:.6f} matches the global Float64 oracle {:.6f}: relative {:.2e} over {}",
                 global_loss, oracle, relative, tier);
@@ -991,7 +991,7 @@ static void run_cross_domain_case(test_suite_t &suite) {
         return suite.check(false, "perturbation rounding failed");
     f64_t const numeric = (oracle_of(plus) - oracle_of(minus)) / (plus[probe_index] - minus[probe_index]);
     f64_t const analytic = local_grad[probe_index % scalars_k];
-    suite.check(std::fabs(numeric - analytic) < 5.0e-2 * std::max(std::fabs(numeric), 0.05),
+    suite.check(std::fabs(numeric - analytic) < 5.0e-2 * fu::max_of(std::fabs(numeric), 0.05),
                 "cross-domain force matches the global finite difference: numeric {:.5f} distributed {:.5f}", numeric,
                 analytic);
     expected_t closed = topology.barrier("done", 60.0);
@@ -1154,7 +1154,7 @@ static void run_pool_parity_case(test_suite_t &suite) {
             double score_max = -1e300, denominator = 0.0;
             for (u32_t token = 0; token != length; ++token) {
                 probabilities[token] = dot(query_head, host_state_planes[offset + token, head, nk::slice]) * scale;
-                score_max = std::max(score_max, probabilities[token]);
+                score_max = fu::max_of(score_max, probabilities[token]);
             }
             for (u32_t token = 0; token != length; ++token)
                 denominator += probabilities[token] = std::exp(probabilities[token] - score_max);
@@ -1199,9 +1199,9 @@ static void run_pool_parity_case(test_suite_t &suite) {
     for (u32_t segment = 0; segment != segments_k; ++segment) {
         if (host_lengths[segment] == 0u) continue; // PAD vertices stay outside the parity
         for (u32_t channel = 0; channel != hidden_k; ++channel)
-            worst = std::max(worst,
-                             std::abs(host_vertices_rows[segment, channel] - device_vertices_rows[segment, channel]) /
-                                 (std::abs(host_vertices_rows[segment, channel]) + 1.0));
+            worst = fu::max_of(worst,
+                               std::abs(host_vertices_rows[segment, channel] - device_vertices_rows[segment, channel]) /
+                                   (std::abs(host_vertices_rows[segment, channel]) + 1.0));
     }
     suite.check(worst < 3e-2,
                 "pool + head forward matches the FP64 oracle to the BFloat16 floor: worst relative {:.3e}", worst);
@@ -1276,12 +1276,12 @@ static void run_pool_parity_case(test_suite_t &suite) {
                     gaps_zero = gaps_zero && device_value == 0.0;
                     continue;
                 }
-                states_peak = std::max(states_peak, std::abs(host_states_grad_rows[token, channel]));
-                states_worst = std::max(states_worst, std::abs(host_states_grad_rows[token, channel] - device_value));
+                states_peak = fu::max_of(states_peak, std::abs(host_states_grad_rows[token, channel]));
+                states_worst = fu::max_of(states_worst, std::abs(host_states_grad_rows[token, channel] - device_value));
             }
         for (u32_t channel = 0; channel != hidden_k; ++channel) {
-            query_peak = std::max(query_peak, std::abs(host_query_grad[channel]));
-            query_worst = std::max(query_worst, std::abs(host_query_grad[channel] - device_query_grad[channel]));
+            query_peak = fu::max_of(query_peak, std::abs(host_query_grad[channel]));
+            query_worst = fu::max_of(query_worst, std::abs(host_query_grad[channel] - device_query_grad[channel]));
         }
         suite.check(query_widened, "the query gradient widens");
         states_worst /= states_peak;
@@ -1324,9 +1324,9 @@ static void run_pool_parity_case(test_suite_t &suite) {
                 if (host_lengths[segment] == 0u) continue; // PAD vertices stay outside the parity
                 f64r1_view_t const reference = device_vertices_rows[segment, nk::slice];
                 f64r1_view_t const quantized = device_twin_vertices_rows[segment, nk::slice];
-                worst_cosine = std::min(worst_cosine,
-                                        dot(reference, quantized) /
-                                            (std::sqrt(dot(reference, reference) * dot(quantized, quantized)) + 1e-30));
+                worst_cosine = fu::min_of(
+                    worst_cosine, dot(reference, quantized) /
+                                      (std::sqrt(dot(reference, reference) * dot(quantized, quantized)) + 1e-30));
             }
             // Keyed-random weights are the quantizer's worst case (trained weights are
             // smoother), and this observed 0.979 at depth 1 already beats the R&D's FP8
@@ -1388,7 +1388,7 @@ static f64_t host_tokens_loss(std::vector<f64_t> const &vectors, std::size_t gpu
             for (std::size_t other = 0; other != layout_t::spans_k[document % layout_t::segments_k]; ++other) {
                 f64_t const product = dot(f64r1_view_t {vectors.data() + row_of(query, token) * width, width},
                                           f64r1_view_t {vectors.data() + row_of(document, other) * width, width});
-                best = std::max(best, product);
+                best = fu::max_of(best, product);
             }
             sum += best;
         }
@@ -1418,11 +1418,11 @@ static f64_t host_tokens_loss(std::vector<f64_t> const &vectors, std::size_t gpu
             for (scored_t const &negative : negatives) {
                 f64_t const margin = negative.score - positive.score;
                 row += positive.weight * negative.weight *
-                       (std::max(margin, 0.0) + std::log1p(std::exp(-std::fabs(margin))));
+                       (fu::max_of(margin, 0.0) + std::log1p(std::exp(-std::fabs(margin))));
             }
         if (positive_weight > 0 && negative_weight > 0) loss += row / (positive_weight * negative_weight);
     }
-    return loss / f64_t(std::max<std::size_t>(live_queries, 1));
+    return loss / f64_t(fu::max_of<std::size_t>(live_queries, 1));
 }
 
 /** The per-GPU relation rows of @ref host_tokens_layout_t on GPU @p gpu of @p gpus : the
@@ -1440,7 +1440,7 @@ static void append_tokens_relations(host_relations_t &world, std::size_t gpu, st
             world.attract_ids.insert(world.attract_ids.end(), {base + 4, base + 5}),
                 world.attract_scores.insert(world.attract_scores.end(), {1.0f, 0.5f});
         if (segment == 7) {
-            u32_t const low = std::min(base + 1, next + 1), high = std::max(base + 1, next + 1);
+            u32_t const low = fu::min_of(base + 1, next + 1), high = fu::max_of(base + 1, next + 1);
             world.attract_ids.push_back(low), world.attract_scores.push_back(1.0f);
             if (high != low) world.attract_ids.push_back(high), world.attract_scores.push_back(1.0f);
             world.ignore_ids.push_back(base + 7);
@@ -1586,7 +1586,7 @@ static void run_tokens_oracle_case(test_suite_t &suite) {
     f32_t device_loss = 0;
     cuMemcpyDtoH(&device_loss, device_address(inputs->loss_out.data()), sizeof(f32_t));
     f64_t const oracle = host_tokens_loss(vectors, 1, host, beta);
-    f64_t const relative = std::fabs(f64_t(device_loss) - oracle) / std::max(std::fabs(oracle), 1.0e-9);
+    f64_t const relative = std::fabs(f64_t(device_loss) - oracle) / fu::max_of(std::fabs(oracle), 1.0e-9);
     suite.check(relative < 5.0e-3, "tokens loss {:.6f} matches the Float64 oracle {:.6f}: relative {:.2e}", device_loss,
                 oracle, relative);
 
@@ -1604,7 +1604,7 @@ static void run_tokens_oracle_case(test_suite_t &suite) {
             plus[index] += step, minus[index] -= step;
             f64_t const numeric = (host_tokens_loss(plus, 1, host, beta) - host_tokens_loss(minus, 1, host, beta)) /
                                   (2.0 * step);
-            suite.check(std::fabs(numeric - gradient[index]) <= 2.0e-2 * std::max(std::fabs(numeric), 0.02),
+            suite.check(std::fabs(numeric - gradient[index]) <= 2.0e-2 * fu::max_of(std::fabs(numeric), 0.02),
                         "token [{},{}] force: numeric {:.5f} analytic {:.5f}", row, channel, numeric, gradient[index]);
         }
     cuCtxPopCurrent(nullptr);
@@ -1617,7 +1617,7 @@ static void run_tokens_distributed_case(test_suite_t &suite) {
     int device_count = 0;
     if (cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count < 2)
         return suite.skip("needs two CUDA devices");
-    std::size_t const gpus = std::min<std::size_t>(static_cast<std::size_t>(device_count), max_gpus_per_host_k);
+    std::size_t const gpus = fu::min_of<std::size_t>(static_cast<std::size_t>(device_count), max_gpus_per_host_k);
     std::size_t const rank_scalars = layout_t::head_rows_k * layout_t::width_k;
     i32_t devices[max_gpus_per_host_k] = {};
     for (std::size_t rank = 0; rank != gpus; ++rank) devices[rank] = static_cast<i32_t>(rank);
@@ -1721,12 +1721,12 @@ static void run_tokens_distributed_case(test_suite_t &suite) {
         if (!widen_from_bf16(narrowed, widened)) return suite.check(false, "gradient widening failed");
         for (std::size_t index = 0; index != live_scalars; ++index) {
             f64_t const expected = reference_rows[rank, index];
-            largest = std::max(largest, std::fabs(expected));
-            worst = std::max(worst, std::fabs(widened[index] - expected));
+            largest = fu::max_of(largest, std::fabs(expected));
+            worst = fu::max_of(worst, std::fabs(widened[index] - expected));
         }
     }
     f64_t const relative = std::fabs(f64_t(world_loss) - reference_loss) /
-                           std::max(std::fabs(f64_t(reference_loss)), 1.0e-9);
+                           fu::max_of(std::fabs(f64_t(reference_loss)), 1.0e-9);
     suite.check(relative < 1.0e-4, "{}-GPU tokens loss {:.6f} matches the single-GPU {:.6f}: relative {:.2e}", gpus,
                 world_loss, reference_loss, relative);
     suite.check(worst <= 1.0e-2 * largest, "{}-GPU token forces match the single-GPU: worst {:.3g} of {:.3g}", gpus,
@@ -1744,7 +1744,7 @@ static void run_tokens_cross_domain_case(test_suite_t &suite) {
     if (!cuda_devices_visible_(1)) return suite.skip(no_cuda_device_k);
     int device_count = 0;
     cuDeviceGetCount(&device_count);
-    std::size_t const gpus = std::min<std::size_t>(static_cast<std::size_t>(device_count), max_gpus_per_host_k);
+    std::size_t const gpus = fu::min_of<std::size_t>(static_cast<std::size_t>(device_count), max_gpus_per_host_k);
     u32_t const home_domain = u32_t(std::atoi(std::getenv("UFORM_HOST_DOMAIN_INDEX")));
     // A job of its own, since the segments case before it rendezvoused under the launcher's job
     // in this process.
@@ -1863,12 +1863,12 @@ static void run_tokens_cross_domain_case(test_suite_t &suite) {
             std::size_t const world_gpu = home_domain * gpus + rank;
             for (std::size_t index = 0; index != live_scalars; ++index) {
                 f64_t const expected = reference_rows[world_gpu, index];
-                largest = std::max(largest, std::fabs(expected));
-                worst = std::max(worst, std::fabs(widened[index] - expected));
+                largest = fu::max_of(largest, std::fabs(expected));
+                worst = fu::max_of(worst, std::fabs(widened[index] - expected));
             }
         }
         f64_t const relative = std::fabs(f64_t(world_loss) - reference_loss) /
-                               std::max(std::fabs(f64_t(reference_loss)), 1.0e-9);
+                               fu::max_of(std::fabs(f64_t(reference_loss)), 1.0e-9);
         suite.check(relative < 1.0e-4,
                     "step {}: 2-domain tokens loss {:.6f} matches the single-GPU {:.6f}: relative {:.2e}", step,
                     world_loss, reference_loss, relative);

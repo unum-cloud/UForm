@@ -12,8 +12,7 @@
  *    against 256 documents of 1024 tokens at width 128, each query attracting one document
  *    under ranked BCE.
  */
-#include <algorithm> // `std::min` — the bench's attract rows
-#include <chrono>    // `std::chrono::duration` — the CUDA-event windows
+#include <chrono> // `std::chrono::duration` — the CUDA-event windows
 
 #include <cuda.h> // `cuInit`, `cuMemcpyHtoD`, `cuEventRecord`, `cuEventElapsedTime`
 
@@ -254,7 +253,7 @@ static void contrastive_tokens(loop_t &loop, u64_t seed) {
         sides[segment] = query ? late_interaction_side_t::query_k : late_interaction_side_t::document_k;
         offsets[segment + 1u] = offsets[segment] + (query ? query_tokens_k : document_tokens_k);
         if (query) attract_ids[segment] = queries_k + segment, attract_scores[segment] = 1.0f;
-        attract_offsets[segment + 1u] = std::min(segment + 1u, queries_k);
+        attract_offsets[segment + 1u] = fu::min_of(segment + 1u, queries_k);
         repel_offsets[segment + 1u] = 0;
     }
     std::size_t const scalars = std::size_t(head_rows) * width_k;

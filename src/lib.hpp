@@ -907,7 +907,7 @@ class chunked_arena_t {
     template <typename value_type_>
     [[nodiscard]] value_type_ *allocate(std::size_t count) noexcept {
         static_assert(std::is_trivially_copyable_v<value_type_>, "Arenas hold plain outputs only");
-        if (count > std::numeric_limits<std::size_t>::max() / sizeof(value_type_)) return nullptr;
+        if (count > (std::numeric_limits<std::size_t>::max)() / sizeof(value_type_)) return nullptr;
         return static_cast<value_type_ *>(allocate(count * sizeof(value_type_)));
     }
 

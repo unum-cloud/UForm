@@ -1,8 +1,8 @@
 /**
- *  @brief Conformance suite for @ref multimodal_batch_mixer_t — the cross-GPU segment shuffle.
  *  @file test/mixer.cu
  *  @author Ash Vardanian
  *  @date July 6, 2026
+ *  @brief Conformance suite for @ref multimodal_batch_mixer_t — the cross-GPU segment shuffle.
  *
  *  Builds the composition root ( @ref mesh_topology_t::bootstrap → per-GPU arenas / streams →
  *  @ref multimem_domain_t → @ref colocated_domain_t → the mixer), fabricates every member's
@@ -16,9 +16,8 @@
 #include <cstddef> // `std::size_t`
 #include <cstdlib> // `::setenv`, `std::getenv`, `std::atoi` — eager module loading, the host_domain contract
 
-#include <utility>   // `std::move`
-#include <algorithm> // `std::min`
-#include <span>      // `std::span`
+#include <utility> // `std::move`
+#include <span>    // `std::span`
 
 #include <cuda.h> // `cuInit`, `cuDeviceGetCount`, `cuStreamSynchronize`
 
@@ -492,7 +491,7 @@ struct mixer_members_t {
 static void mixer_routes_segments(test_suite_t &suite) {
     int device_count = 0;
     if (cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count < 1) return suite.skip(no_cuda_device_k);
-    u32_t const member_count = std::min<u32_t>(static_cast<u32_t>(device_count), members_cap_k);
+    u32_t const member_count = fu::min_of<u32_t>(static_cast<u32_t>(device_count), members_cap_k);
     u64_t const seed = 0xA5A5C0FFEEULL;
     data_epoch_t const epoch {1u};
 
@@ -561,7 +560,7 @@ static void mixer_routes_segments(test_suite_t &suite) {
 static void mixer_routes_bags(test_suite_t &suite, u32_t rows, u32_t columns_per_row) {
     int device_count = 0;
     if (cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count < 1) return suite.skip(no_cuda_device_k);
-    u32_t const member_count = std::min<u32_t>(static_cast<u32_t>(device_count), members_cap_k);
+    u32_t const member_count = fu::min_of<u32_t>(static_cast<u32_t>(device_count), members_cap_k);
     u64_t const seed = 0xBA65C0FFEEULL;
     data_epoch_t const epoch {2u};
 

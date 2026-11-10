@@ -26,9 +26,8 @@
 
 #include <cstddef> // `std::size_t`
 
-#include <algorithm> // `std::max`
-#include <memory>    // `std::unique_ptr` — the pimpl owning the cuDF table
-#include <span>      // `std::span`
+#include <memory> // `std::unique_ptr` — the pimpl owning the cuDF table
+#include <span>   // `std::span`
 
 #include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`
 #include "uform/utilities/types.hpp"        // `expected`, `status_t`, the scalar aliases, `b8r1_view_t`, `sz::string_t`
@@ -87,19 +86,19 @@ struct reservoir_bound_t {
      *  fill draws past its rows, and the densest group's bytes per row. A footer without groups, as
      *  the footerless formats weigh a file, counts its @c bytes whole. */
     void charge(parquet_length_metadata_t const &shard) noexcept {
-        if (shard.group_rows.empty()) fixed_bytes = std::max(fixed_bytes, 2 * copies_k * shard.bytes);
+        if (shard.group_rows.empty()) fixed_bytes = fu::max_of(fixed_bytes, 2 * copies_k * shard.bytes);
         for (std::size_t group = 0; group != shard.group_rows.size(); ++group) {
-            fixed_bytes = std::max(fixed_bytes, 2 * copies_k * shard.group_bytes[group]);
+            fixed_bytes = fu::max_of(fixed_bytes, 2 * copies_k * shard.group_bytes[group]);
             if (shard.group_rows[group] != 0)
-                row_bytes = std::max(row_bytes,
-                                     copies_k * divide_round_up(shard.group_bytes[group], shard.group_rows[group]));
+                row_bytes = fu::max_of(row_bytes,
+                                       copies_k * divide_round_up(shard.group_bytes[group], shard.group_rows[group]));
         }
     }
 
     /** Widen the bound to cover @p other as well. */
     void charge(reservoir_bound_t other) noexcept {
-        fixed_bytes = std::max(fixed_bytes, other.fixed_bytes);
-        row_bytes = std::max(row_bytes, other.row_bytes);
+        fixed_bytes = fu::max_of(fixed_bytes, other.fixed_bytes);
+        row_bytes = fu::max_of(row_bytes, other.row_bytes);
     }
 };
 

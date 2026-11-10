@@ -28,7 +28,6 @@
 #include <cstdio>  // `std::setvbuf`, `stdout`
 #include <cstdlib> // `std::getenv`, `std::exit`
 
-#include <algorithm>   // `std::min`
 #include <charconv>    // `std::from_chars`
 #include <chrono>      // `std::chrono::milliseconds` — the pause between two polls of a mesh exchange
 #include <format>      // `std::vformat_to`, `std::make_format_args`
@@ -138,7 +137,7 @@ struct settings_t {
     [[maybe_unused]] status_t const sized = listed.resize(listed.capacity());
     uform_gpu_devices_t listing {&outcome, listed.begin(), listed.size(), &count};
     uform_gpu_devices(&listing);
-    [[maybe_unused]] status_t const trimmed = listed.resize(std::min<std::size_t>(count, listed.capacity()));
+    [[maybe_unused]] status_t const trimmed = listed.resize(fu::min_of<std::size_t>(count, listed.capacity()));
     return listed;
 }
 
@@ -158,7 +157,7 @@ struct settings_t {
         return devices;
     }
     for (std::size_t begin = 0; begin <= text.size();) {
-        std::size_t const end = std::min(text.find(',', begin), text.size());
+        std::size_t const end = fu::min_of(text.find(',', begin), text.size());
         u32_t ordinal = 0;
         auto const [parsed_end, parse_status] = std::from_chars(text.data() + begin, text.data() + end, ordinal);
         if (parse_status != std::errc {} || parsed_end != text.data() + end) {
@@ -226,7 +225,8 @@ struct test_suite_t {
 
     /** Reads the settings, then prints the version, capabilities and settings, one a line. */
     [[nodiscard]] static test_suite_t make(char const *program) noexcept {
-        std::setvbuf(stdout, nullptr, _IOLBF, 0); // a redirected log keeps each case line beside its failures
+        // MSVC lacks line buffering; unbuffered keeps each case line beside its failures
+        std::setvbuf(stdout, nullptr, _IONBF, 0);
         test_suite_t suite;
         suite.settings = read_settings();
         suite.program = program;

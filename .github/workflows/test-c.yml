@@ -55,6 +55,20 @@ jobs:
       - name: Test C
         run: ctest --test-dir build_library --output-on-failure
 
+  test_c_windows:
+    name: Test on Windows x64 with Visual Studio 2026
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 60
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Build C
+        run: |
+          cmake --preset msvc2026_x64 -D UFORM_BUILD_TEST=ON
+          cmake --build --preset msvc2026_x64
+      - name: Test C
+        run: ctest --test-dir build_msvc2026_x64 --build-config Release --output-on-failure
+
   test_wasm_node:
     name: Test WASM under Node
     runs-on: ubuntu-26.04

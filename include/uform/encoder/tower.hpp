@@ -31,8 +31,7 @@
 #include <cmath>   // `std::sqrt`
 #include <cstddef> // `std::size_t`
 
-#include <algorithm> // `std::max`
-#include <span>      // `std::span` — the scratch a call borrows
+#include <span> // `std::span` — the scratch a call borrows
 
 #include <numkong/capabilities.h> // `nk_stream_t`, `nk_status_t`
 #include <numkong/memory.hpp>     // `nk::allocator` — packs on NumKong's alignment
@@ -120,8 +119,9 @@ struct packed_weight_t {
  *  widened to Float32. */
 struct block_weights_t {
 
-    /** @c qkv , @c out , @c gate_up and @c down , in that order. */
-    packed_weight_t products[4] {};
+    /** @c qkv , @c out , @c gate_up and @c down , in that order. Unbraced, as MSVC counts a
+     *  braced array member as throwing; each element still takes its own initializers. */
+    packed_weight_t products[4];
     placed_array<f32_t> pre_norm {};
     placed_array<f32_t> post_norm {};
 };
@@ -246,9 +246,9 @@ struct activations_t {
 /** Patch scalars of the widest present media modality, zero for a text-only tower. */
 [[nodiscard]] inline static std::size_t patch_scalars(geometry_t const &geometry) noexcept {
     std::size_t scalars = 0;
-    if (geometry.image_patch_side) scalars = std::max<std::size_t>(scalars, geometry.image_scalars());
-    if (geometry.video_patch_side) scalars = std::max<std::size_t>(scalars, geometry.video_scalars());
-    if (geometry.audio_chunk_samples) scalars = std::max<std::size_t>(scalars, geometry.audio_chunk_samples);
+    if (geometry.image_patch_side) scalars = fu::max_of<std::size_t>(scalars, geometry.image_scalars());
+    if (geometry.video_patch_side) scalars = fu::max_of<std::size_t>(scalars, geometry.video_scalars());
+    if (geometry.audio_chunk_samples) scalars = fu::max_of<std::size_t>(scalars, geometry.audio_chunk_samples);
     return scalars;
 }
 
@@ -257,7 +257,7 @@ struct activations_t {
                                                               std::size_t tokens, std::size_t segments,
                                                               std::size_t keys_values_bytes) noexcept {
     std::size_t const hidden = geometry.hidden, ffn = geometry.ffn();
-    std::size_t const widest = std::max<std::size_t>(3 * hidden, 2 * ffn);
+    std::size_t const widest = fu::max_of<std::size_t>(3 * hidden, 2 * ffn);
     activations_t a;
     a.packed_offsets = cursor.take<u32_t>(segments + 1);
     a.pool_offsets = cursor.take<u32_t>(segments + 1);
@@ -300,7 +300,7 @@ template <typename attention_kit_type_>
     if (status != nk_success_k)
         return expected<std::size_t>::fail(uu::status_t::internal_k, "attention pack sizing failed: {}",
                                            nk_status_name(status));
-    return expected<std::size_t> {std::max<std::size_t>(block_bytes, pool_bytes)};
+    return expected<std::size_t> {fu::max_of<std::size_t>(block_bytes, pool_bytes)};
 }
 
 /** The scratch bytes one call over @p tokens live tokens in @p segments items needs. */

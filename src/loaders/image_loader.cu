@@ -1,8 +1,8 @@
 /**
- *  @brief The Parquet image loader's bodies and kernels — see the header for the contract.
  *  @file src/loaders/image_loader.cu
  *  @author Ash Vardanian
  *  @date July 4, 2026
+ *  @brief The Parquet image loader's bodies and kernels — see the header for the contract.
  *
  *  Its shape mirrors @c tokens_loader.cu : a keyed file pick, one pooled reservoir, a keyed row
  *  draw, then a per-batch decode. The decode is the shared @ref decode_images : JPEG rows
@@ -12,7 +12,7 @@
  */
 #include <unistd.h> // `::write`, `STDERR_FILENO` — the triage-drop diagnostic
 
-#include <algorithm> // `std::upper_bound`, `std::find`, `std::min`, `std::max`
+#include <algorithm> // `std::upper_bound`, `std::find`
 
 #include <nvjpeg.h>                   // vendor-boundary: device-native batched JPEG decode
 #include <nppi_geometry_transforms.h> // vendor-boundary: batched crop+resize
@@ -303,7 +303,7 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
             auto const blob = tape[drawn_rows[index]];
             host_entries[entry] = gather_entry_t {
                 blob.data() + window_offset,
-                static_cast<u32_t>(std::min(blob.size() - window_offset, header_probe_bytes_k))};
+                static_cast<u32_t>(fu::min_of(blob.size() - window_offset, header_probe_bytes_k))};
         }
         if (expected_t uploaded = copy_host_to_device<gather_entry_t>(
                 std::span<gather_entry_t const> {host_entries}.first(count), std::span<gather_entry_t> {device_entries},
@@ -800,7 +800,7 @@ expected_t image_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_session
     std::size_t const total_images = unroll * images_per_batch;
 
     std::size_t const shard_count = absolute_paths_.size();
-    std::size_t const floor_files = std::min<std::size_t>(2, shard_count);
+    std::size_t const floor_files = fu::min_of<std::size_t>(2, shard_count);
     std::size_t const total_rows = row_prefix_[shard_count];
     constexpr splitmix64_hash_t hash {};
 

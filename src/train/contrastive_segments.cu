@@ -8,9 +8,8 @@
  */
 #include <cmath> // `std::sqrt`, `std::fmax` — the prefix norms and their floored squares
 
-#include <algorithm> // `std::max` — the largest product pack
-#include <iterator>  // `std::size` — the retrieval sums
-#include <limits>    // `std::numeric_limits` — the empty maximum
+#include <iterator> // `std::size` — the retrieval sums
+#include <limits>   // `std::numeric_limits` — the empty maximum
 
 #include <cub/block/block_scan.cuh> // `cub::BlockScan` — the ranked rows' positive ranks
 
@@ -834,7 +833,7 @@ expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena
         for (auto const &[columns, depth] : pack_shapes) {
             expected<std::size_t> shape_bytes = pack_bytes_bf16(columns, depth, loss.numerics_);
             if (!shape_bytes) return expected<contrastive_segments_t>::fail(std::move(shape_bytes));
-            packed_bytes = std::max(packed_bytes, shape_bytes.value_);
+            packed_bytes = fu::max_of(packed_bytes, shape_bytes.value_);
         }
     }
     loss.packed_ = b8r1_tensor_arena_t::uninitialized({packed_bytes}, byte_alloc).value;

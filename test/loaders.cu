@@ -29,9 +29,8 @@
 #include <sys/stat.h> // `mkdir` — the glob fixture
 #include <unistd.h>   // `symlink`, `unlink`, `rmdir`
 
-#include <utility>   // `std::move`
-#include <algorithm> // `std::min`, `std::max`
-#include <span>      // `std::span`
+#include <utility> // `std::move`
+#include <span>    // `std::span`
 
 #include <cuda.h> // `cuInit`, `cuStreamSynchronize`
 
@@ -133,7 +132,7 @@ struct fabricated_tape_t {
             if (st::failed(tape.offsets.push_back(static_cast<u64_t>(host.size()))))
                 return result_t::fail(status_t::bad_alloc_k, "tape offset append failed");
         }
-        std::size_t const total = std::max<std::size_t>(host.size(), 1u);
+        std::size_t const total = fu::max_of<std::size_t>(host.size(), 1u);
         // Device memory: `uninitialized` + explicit memset — `zeros` writes through
         // the host pointer.
         tape.device_bytes = b8r1_tensor_arena_t::uninitialized({total}, gpu_arena_alloc<b8_t> {arena}).value;
@@ -430,7 +429,7 @@ static void segment_geometry_packs_multiple_per_row(test_suite_t &suite) {
     u32_t cursor = 0, jumps = 0;
     for (std::size_t index = 0; index != total_segments; ++index) {
         u32_t columns_here = 0;
-        if (index < live_segments) columns_here = static_cast<u32_t>(std::min<u64_t>(item_bytes[index], columns));
+        if (index < live_segments) columns_here = static_cast<u32_t>(fu::min_of<u64_t>(item_bytes[index], columns));
         u32_t const room_in_row = columns - cursor % columns; // a segment never crosses its row
         if (columns_here > room_in_row) {
             cursor += room_in_row;
@@ -847,7 +846,7 @@ static void run_image_decode(test_suite_t &suite, sz::string_view_t label, st::b
     suite.check(offsets[0] == 0u, "[{}] first segment must start at the row origin (got {})", label, offsets[0]);
     u32_t max_alpha = 0u;
     std::size_t const live_pixels = std::size_t {lengths[0]} * patch * patch; // cells × pixels-per-patch
-    for (std::size_t p = 0; p != live_pixels; ++p) max_alpha = std::max<u32_t>(max_alpha, pixels[p, 3]); // alpha lane
+    for (std::size_t p = 0; p != live_pixels; ++p) max_alpha = fu::max_of<u32_t>(max_alpha, pixels[p, 3]); // alpha lane
     suite.check(max_alpha <= 255u, "[{}] alpha channel must be a valid byte", label); // shape-agnostic
 }
 
@@ -910,7 +909,7 @@ static void image_batch_matches_single(test_suite_t &suite, std::span<st::basic_
     // The mean absolute pixel difference between batched `image` and single decode `single`.
     auto distance = [&](std::size_t image, std::size_t single) noexcept -> double {
         landed_t const &alone = singles[single];
-        std::size_t const values = std::size_t {std::min(together.lengths[image], alone.lengths[0])} * cell_pixels;
+        std::size_t const values = std::size_t {fu::min_of(together.lengths[image], alone.lengths[0])} * cell_pixels;
         double total = 0;
         for (std::size_t value = 0; value != values; ++value)
             total += std::abs(double(together.pixels[std::size_t {together.offsets[image]} * cell_pixels + value]) -

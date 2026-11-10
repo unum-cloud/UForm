@@ -8,8 +8,6 @@
  */
 #include <cmath> // `sqrtf`, `rsqrtf`, `expf`, `std::pow` — the decay schedule
 
-#include <algorithm> // `std::min` — the decay ceiling
-
 #include <cuda.h> // `cuMemsetD8`, `cuEventRecord`, `cuStreamWaitEvent`
 
 #include "uform/train/optimizer.hpp"
@@ -363,7 +361,7 @@ expected_t adafactor_t::load(checkpoint_to_load_t const &checkpoint, gpu_stream_
 expected_t adafactor_t::step(f32_t learning_rate, gpu_stream_t &stream, f32r1_view_t reduced_gradients) noexcept {
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     ++steps_;
-    f32_t const decay = std::min(config_.beta2, 1.0f - std::pow(static_cast<f32_t>(steps_), -config_.decay_exponent));
+    f32_t const decay = fu::min_of(config_.beta2, 1.0f - std::pow(static_cast<f32_t>(steps_), -config_.decay_exponent));
     // Adam's bias correction, so the first steps move as far as steps without momentum.
     f32_t const first_moment_correction = 1.0f - std::pow(config_.beta1, static_cast<f32_t>(steps_));
     for (std::size_t index = 0; index != states_.size(); ++index) {

@@ -12,8 +12,7 @@
  */
 #include <cstring> // `std::memcpy` — a target's little-endian Float32 bytes
 
-#include <algorithm> // `std::min`
-#include <span>      // `std::as_writable_bytes`
+#include <span> // `std::as_writable_bytes`
 
 #include <cuda.h> // `cuStreamSynchronize`
 
@@ -189,7 +188,7 @@ expected_t choices_loader_parquet_t::fill(gpu_stream_t &gpu_stream, u32_t gpu_ra
         bool room = true;
         for (std::size_t segment = 0; segment != segments; ++segment) {
             u64_t const row = drawn_rows[batch, segment];
-            std::size_t kept = room ? std::min<std::size_t>(state_offsets[row + 1] - state_offsets[row] + 1u, columns)
+            std::size_t kept = room ? fu::min_of<std::size_t>(state_offsets[row + 1] - state_offsets[row] + 1u, columns)
                                     : 0u;
             if (kept > columns - cursor % columns) cursor = round_up_to_multiple(cursor, columns);
             if (cursor + kept > capacity) room = false, kept = 0;

@@ -1,14 +1,16 @@
 /**
+ *  @file src/loaders/audio_loader.cu
+ *  @author Ash Vardanian
+ *  @date July 5, 2026
  *  @brief The audio loader's bodies: the libav + ForkUnion decoder session and the draw → stage →
  *      decode → chunk batch path — see the header for the contract.
- *  @file src/loaders/audio_loader.cu
  *
  *  Host decode is @ref unum::uform::media::decode_audio , one mono Float32 clip per job across the
  *  pool; the GPU then chunks it into frames of @c chunk_samples raw samples and scatters each clip
  *  into the batch's @c audio_samples as one sub-row segment. No cuFFT, no mel — the spectral
  *  frontend is a learnable layer of the encoder.
  */
-#include <algorithm> // `std::min`, `std::find`, `std::upper_bound` — the weighted file draw
+#include <algorithm> // `std::find`, `std::upper_bound` — the weighted file draw
 #include <utility>   // `std::move` — expected-channel propagation
 
 #include "uform/loaders/audio_loader.cuh"
@@ -226,12 +228,12 @@ expected_t audio_loader_parquet_t::fill(gpu_stream_t &gpu_stream, audio_loader_p
     std::span<audio_batch_shape_t const> const representations {&audio_, 1};
     std::size_t const max_segments = batches[0].segment_lengths.extent(0);
     std::size_t const per_row = columns / media_cells(modality_t::audio_k, static_cast<u32_t>(columns));
-    std::size_t const clips_per_batch = std::min<std::size_t>(max_segments, rows * per_row) / representations.size();
+    std::size_t const clips_per_batch = fu::min_of<std::size_t>(max_segments, rows * per_row) / representations.size();
     if (clips_per_batch == 0) return expected_t::fail(status_t::unsupported_k, "the batch holds no audio clips");
     std::size_t const total_clips = unroll * clips_per_batch;
 
     std::size_t const shard_count = absolute_paths_.size();
-    std::size_t const floor_files = std::min<std::size_t>(2, shard_count);
+    std::size_t const floor_files = fu::min_of<std::size_t>(2, shard_count);
     std::size_t const total_rows = row_prefix_[shard_count];
     constexpr splitmix64_hash_t hash {};
 

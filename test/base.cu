@@ -39,9 +39,8 @@
 #include <cstdlib> // `std::getenv`, `std::strtod`
 #include <cstring> // `std::memcmp`, `std::memcpy`, `std::strlen`
 
-#include <algorithm> // `std::max` — the reusable staging tensor's size
-#include <span>      // `std::span` — device lists
-#include <vector>    // `std::vector` — the world's pooled rows and coding rates
+#include <span>   // `std::span` — device lists
+#include <vector> // `std::vector` — the world's pooled rows and coding rates
 
 #include <cuda.h> // `cuInit`, `cuStreamSynchronize`
 
@@ -199,7 +198,7 @@ inline constexpr char const *world_unhealthy_k = "an earlier case found the worl
     for (differentiable_weights_t const &matrix : list) {
         std::size_t const scalars = matrix.weights.numel();
         total += scalars;
-        largest = std::max(largest, scalars);
+        largest = fu::max_of(largest, scalars);
     }
     st::basic_vector<bf16_t> host;
     if (st::failed(host.resize(st::assume_uninitialized, total)))
@@ -258,8 +257,8 @@ inline constexpr char const *world_unhealthy_k = "an earlier case found the worl
     f32_t largest = 0.0f, worst = 0.0f;
     for (std::size_t index = 0; index != left.size(); ++index) {
         f32_t const expected_value = __bfloat162float(left[index]);
-        largest = std::max(largest, std::fabs(expected_value));
-        worst = std::max(worst, std::fabs(expected_value - __bfloat162float(right[index])));
+        largest = fu::max_of(largest, std::fabs(expected_value));
+        worst = fu::max_of(worst, std::fabs(expected_value - __bfloat162float(right[index])));
     }
     return worst <= 1.0e-2f * largest;
 }
@@ -777,7 +776,7 @@ static void choices_replay(test_suite_t &suite, world_health_t &health, tier_t t
         telemetry_t const telemetry = trainer.telemetry(optimizer_step_t {ordinal});
         if (ordinal == 0u) first = telemetry.choices;
         last = telemetry.choices;
-        token = std::max(token, std::fabs(telemetry.token_ce));
+        token = fu::max_of(token, std::fabs(telemetry.token_ce));
     }
     suite.check(std::isfinite(first) && first > 0.0f, "the first choices term is finite and positive: {}", first);
     // Seed 42 settles from 1.17 onto the soft target's entropy floor, ln2/4 ≈ 0.17: a wide margin.

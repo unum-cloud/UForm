@@ -1,13 +1,13 @@
 /**
- *  @brief Host video ingest — see the header for the contract.
  *  @file src/media/video.cpp
  *  @author Ash Vardanian
  *  @date July 5, 2026
+ *  @brief Host video ingest — see the header for the contract.
  *
  *  Every libav handle is checked and folded into @ref expected , so no libav failure leaves this
  *  file any other way.
  */
-#include <algorithm> // `std::min`, `std::max`
+#include <algorithm> // `std::copy`, `std::fill`
 
 extern "C" {
 #include <libavcodec/avcodec.h>   // vendor-boundary: `avcodec_*`, `av_parser_*`, `AVPacket`, `AVFrame`
@@ -45,7 +45,7 @@ struct video_memory_reader_t {
 static int video_memory_read_(void *opaque, u8_t *buffer, int buffer_size) noexcept {
     auto *reader = static_cast<video_memory_reader_t *>(opaque);
     std::size_t const remaining = reader->bytes.size() - reader->position;
-    std::size_t const to_read = std::min<std::size_t>(static_cast<std::size_t>(buffer_size), remaining);
+    std::size_t const to_read = fu::min_of<std::size_t>(static_cast<std::size_t>(buffer_size), remaining);
     if (to_read == 0) return AVERROR_EOF;
     for (std::size_t index = 0; index != to_read; ++index)
         buffer[index] = std::to_integer<u8_t>(reader->bytes[reader->position + index]);
@@ -211,8 +211,8 @@ expected<demuxed_t> um::demux_video(bytes_view_t container) noexcept {
     AVStream *video_stream = format->streams[video_stream_index];
     if (!from_av_codec_(video_stream->codecpar->codec_id, clip.codec))
         return fail(status_t::invalid_argument_k, "unsupported video codec");
-    clip.extent.width = static_cast<u32_t>(std::max(video_stream->codecpar->width, 0));
-    clip.extent.height = static_cast<u32_t>(std::max(video_stream->codecpar->height, 0));
+    clip.extent.width = static_cast<u32_t>(fu::max_of(video_stream->codecpar->width, 0));
+    clip.extent.height = static_cast<u32_t>(fu::max_of(video_stream->codecpar->height, 0));
     // Many mp4 / webm containers carry no frame index (`nb_frames == 0`); estimate the count from
     // duration × average frame rate, in integers since `duration` is in AV_TIME_BASE units, so
     // sampled frames still spread over the clip.
@@ -400,7 +400,7 @@ expected_t um::decode_video_frames(demuxed_t const &clip, video_grid_t grid, vid
 
     frame_sampler_ sampler;
     sampler.wanted = static_cast<std::size_t>(grid.temporal_groups) * shape.tube_frames;
-    sampler.stride = std::max<u32_t>(shape.frame_stride, 1u);
+    sampler.stride = fu::max_of<u32_t>(shape.frame_stride, 1u);
     sampler.width = grid.patch_columns * shape.patch_side;
     sampler.height = grid.patch_rows * shape.patch_side;
     if (st::failed(sampler.rgb.resize(st::assume_uninitialized,

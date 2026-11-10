@@ -7,8 +7,6 @@
  */
 #include <cmath> // `std::exp` — the SiLU's sigmoid
 
-#include <algorithm> // `std::max` for the widest media entry, `std::min` for the pool pack
-
 #include <cub/block/block_scan.cuh>         // `cub::BlockScan` — the token head's compact offsets
 #include <cub/device/device_radix_sort.cuh> // the deterministic embedding-gradient scatter
 #include <cub/thread/thread_search.cuh>     // `cub::UpperBound` — a compact row's segment
@@ -625,7 +623,8 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, en
     if (packs && audio_present) packs = allocate_pack(tower.packed_audio_projection_, audio_frame_scalars);
     if (!packs) return result_t::fail(std::move(packs));
 
-    u32_t const max_entry_scalars = std::max({image_patch_scalars, video_tube_scalars, audio_frame_scalars});
+    u32_t const max_entry_scalars = fu::max_of(fu::max_of(image_patch_scalars, video_tube_scalars),
+                                               audio_frame_scalars);
     if (max_entry_scalars != 0) {
         tower.patch_scratch_ =
             bf16r2_tensor_arena_t::uninitialized({max_tokens32, max_entry_scalars}, bf16_alloc).value;
@@ -661,7 +660,7 @@ expected<tower_pool_t> tower_pool_t::make(gpu_arena_t &arena, transformer_block_
     std::size_t const heads = block.hidden / transformer_head_dim_k;
 
     // Live tokens of all segments together never exceed the batch, however they split.
-    std::size_t const tokens = std::min<std::size_t>(block.max_tokens, segments * block.max_segment_tokens);
+    std::size_t const tokens = fu::min_of<std::size_t>(block.max_tokens, segments * block.max_segment_tokens);
     nk_size_t packed_bytes = 0;
     if (nk_status_t const status = numerics.attention_pack_size_bf16(heads, transformer_head_dim_k, tokens, segments,
                                                                      &packed_bytes);

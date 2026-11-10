@@ -45,7 +45,7 @@
 
 #include <unistd.h> // `::getpid`
 
-#include <algorithm> // `std::max`, `std::min`, `std::fill`, `std::copy`
+#include <algorithm> // `std::fill`, `std::copy`
 #include <limits>    // `std::numeric_limits`
 #include <span>      // `std::span`
 
@@ -217,7 +217,7 @@ static void finite_differences(test_suite_t &suite, device_t &device, bool omni)
             st::failed(staging.resize(st::assume_uninitialized, scalars)))
             return suite.check(false, "host staging for {} failed", matrix.name);
         f64_t largest = 0;
-        for (f64_t const value : gradient) largest = std::max(largest, std::fabs(value));
+        for (f64_t const value : gradient) largest = fu::max_of(largest, std::fabs(value));
         // The head and pool weights outside the masked objective take no gradient and move no loss.
         if (largest == 0) continue;
         f64_t const weight_rms = std::sqrt(dot(weights, weights) / static_cast<f64_t>(scalars));
@@ -241,7 +241,7 @@ static void finite_differences(test_suite_t &suite, device_t &device, bool omni)
         if (!uploaded || !loss_plus || !loss_minus)
             return suite.check(false, "perturbed forward of {} failed", matrix.name);
         f64_t const measured = *loss_plus - *loss_minus;
-        f64_t const gap = std::fabs(measured - predicted), error = gap / std::max(std::fabs(predicted), 1.0e-6);
+        f64_t const gap = std::fabs(measured - predicted), error = gap / fu::max_of(std::fabs(predicted), 1.0e-6);
         suite.check(error <= finite_difference_tolerance_k,
                     "{}: loss moved {:.6g}, the gradient predicts {:.6g}, off by {:.3g} relative (loss {:.4f})",
                     matrix.name, measured, predicted, error, *base_loss);
@@ -297,7 +297,7 @@ struct host_segments_t {
             f64_t const value = projection_rows[token, channel];
             squares += value * value, along += value * direction_rows[token, channel];
         }
-        loss += along / std::sqrt(std::max(squares, epsilon));
+        loss += along / std::sqrt(fu::max_of(squares, epsilon));
     }
     return expected<f64_t> {loss};
 }
@@ -400,7 +400,7 @@ static void token_head_finite_differences(test_suite_t &suite, device_t &device)
                     unit[output] += projection_rows[output, channel] * normed[channel];
                 norm_squared += unit[output] * unit[output];
             }
-            f64_t const inverse_norm = 1.0 / std::sqrt(std::max(norm_squared, epsilon));
+            f64_t const inverse_norm = 1.0 / std::sqrt(fu::max_of(norm_squared, epsilon));
             for (std::size_t output = 0; output != width; ++output)
                 unit[output] *= inverse_norm, along += unit[output] * direction_rows[row, output];
             for (std::size_t channel = 0; channel != hidden; ++channel) {
@@ -429,13 +429,13 @@ static void token_head_finite_differences(test_suite_t &suite, device_t &device)
             st::failed(minus.resize(st::assume_uninitialized, scalars)))
             return suite.check(false, "host staging for {} failed", name);
         f64_t largest = 0;
-        for (f64_t const value : gradient) largest = std::max(largest, std::fabs(value));
+        for (f64_t const value : gradient) largest = fu::max_of(largest, std::fabs(value));
         if (largest == 0) {
             suite.check(false, "{} takes no gradient through the token head", name);
             continue;
         }
         f64_t const weight_rms = std::sqrt(dot(weights, weights) / static_cast<f64_t>(scalars));
-        f64_t const step = std::min(largest / (8.0 * dot(gradient, gradient)), weight_rms / 4.0);
+        f64_t const step = fu::min_of(largest / (8.0 * dot(gradient, gradient)), weight_rms / 4.0);
         for (std::size_t index = 0; index != scalars; ++index)
             plus[index] = weights[index] + step * gradient[index] / largest,
             minus[index] = weights[index] - step * gradient[index] / largest;
@@ -447,7 +447,7 @@ static void token_head_finite_differences(test_suite_t &suite, device_t &device)
         if (!uploaded || !loss_plus || !loss_minus) return suite.check(false, "perturbed forward of {} failed", name);
         f64_t const predicted = dot(gradient, plus) - dot(gradient, minus);
         f64_t const measured = *loss_plus - *loss_minus;
-        f64_t const error = std::fabs(measured - predicted) / std::max(std::fabs(predicted), 1.0e-6);
+        f64_t const error = std::fabs(measured - predicted) / fu::max_of(std::fabs(predicted), 1.0e-6);
         suite.check(error <= finite_difference_tolerance_k,
                     "{}: loss moved {:.6g}, the gradient predicts {:.6g}, off by {:.3g} relative (loss {:.4f})", name,
                     measured, predicted, error, *base_loss);
@@ -628,8 +628,8 @@ static void adafactor_reference(test_suite_t &suite, device_t &device, f32_t bet
         if (expected_t stepped = optimizer->step(learning_rate, device.stream); !stepped)
             return suite.check(false, "step {}: {}", step, stepped.description_);
         cuStreamSynchronize(device.stream.get());
-        f64_t const decay = std::min<f64_t>(config.beta2,
-                                            1.0 - std::pow(static_cast<f64_t>(step), -config.decay_exponent));
+        f64_t const decay = fu::min_of<f64_t>(config.beta2,
+                                              1.0 - std::pow(static_cast<f64_t>(step), -config.decay_exponent));
         for (u32_t matrix = 0; matrix != 2u; ++matrix) {
             optimized_matrix_t &state = matrices[matrix];
             std::size_t const rows = shapes[matrix][0], columns = shapes[matrix][1];
@@ -653,7 +653,8 @@ static void adafactor_reference(test_suite_t &suite, device_t &device, f32_t bet
             for (std::size_t row = 0; row != rows; ++row)
                 for (std::size_t column = 0; column != columns; ++column)
                     update_energy += update_at(row, column) * update_at(row, column);
-            f64_t const clip = 1.0 / std::max(1.0, std::sqrt(update_energy / (rows * columns)) / config.clip_threshold);
+            f64_t const clip = 1.0 /
+                               fu::max_of(1.0, std::sqrt(update_energy / (rows * columns)) / config.clip_threshold);
             st::basic_vector<f64_t> device_weights;
             if (!download_widened_({state.weights.data(), rows * columns}, device_weights))
                 return suite.check(false, "weights readback failed");
@@ -671,7 +672,7 @@ static void adafactor_reference(test_suite_t &suite, device_t &device, f32_t bet
                     f64_t const corrected = first_moment[row, column] / (1.0 - std::pow(f64_t(beta1), f64_t(step)));
                     f64_t const wanted = start - learning_rate * (beta1 != 0.0f ? corrected : clipped);
                     f64_t const distance = std::fabs(got[row, column] - wanted) / bf16_spacing_(wanted);
-                    worst = std::max(worst, distance);
+                    worst = fu::max_of(worst, distance);
                     off_grid += distance > 1.0 ? 1u : 0u;
                     master[row, column] = wanted;
                 }
@@ -759,7 +760,7 @@ static void adafactor_small_steps(test_suite_t &suite, device_t &device) {
 [[nodiscard]] static f64_t choice_loss_(std::span<f64_t const> logits, std::span<f64_t const> targets,
                                         f64_t brier_weight, std::span<f64_t> gradient) noexcept {
     f64_t largest = logits[0], total = 0, cross_entropy = 0, brier = 0, correlation = 0;
-    for (f64_t const logit : logits) largest = std::max(largest, logit);
+    for (f64_t const logit : logits) largest = fu::max_of(largest, logit);
     for (f64_t const logit : logits) total += std::exp(logit - largest);
     for (std::size_t choice = 0; choice != logits.size(); ++choice) {
         f64_t const probability = std::exp(logits[choice] - largest) / total, miss = probability - targets[choice];
@@ -877,7 +878,7 @@ static void choices_cross_entropy(test_suite_t &suite, device_t &device) {
     }
     f64_t const oracle_loss = config.weight * oracle / 2.0, measured_loss = scored->sum / scored->count;
     suite.check(scored->count == 2.0, "two segments make a choice, {} counted", scored->count);
-    suite.check(std::fabs(measured_loss - oracle_loss) <= 1.0e-3 * std::max(1.0, oracle_loss),
+    suite.check(std::fabs(measured_loss - oracle_loss) <= 1.0e-3 * fu::max_of(1.0, oracle_loss),
                 "the choices loss is {:.6f}, the Float64 oracle {:.6f}", measured_loss, oracle_loss);
 
     st::basic_vector<f64_t> landed_grad, landed_weight_grad;
@@ -888,7 +889,7 @@ static void choices_cross_entropy(test_suite_t &suite, device_t &device) {
     for (std::size_t index = 0; index != states.size(); ++index) {
         std::size_t const row = index / hidden;
         f64_t const added = landed_grad[index] - prior_grad[index];
-        if (row != answers[0] && row != answers[1]) untouched = std::max(untouched, std::fabs(added));
+        if (row != answers[0] && row != answers[1]) untouched = fu::max_of(untouched, std::fabs(added));
         else gap += (added - force[index]) * (added - force[index]), magnitude += force[index] * force[index];
     }
     suite.check(untouched == 0.0, "rows without an answer keep their force, off by {:.3g}", untouched);
@@ -912,7 +913,7 @@ static void choices_cross_entropy(test_suite_t &suite, device_t &device) {
     if (st::failed(staging.resize(st::assume_uninitialized, decoder_scalars)))
         return suite.check(false, "perturbation staging failed");
     f64_t largest = 0, predicted = 0;
-    for (f64_t const value : weight_force) largest = std::max(largest, std::fabs(value));
+    for (f64_t const value : weight_force) largest = fu::max_of(largest, std::fabs(value));
     f64_t const weight_rms = std::sqrt(dot(decoder, decoder) / static_cast<f64_t>(decoder_scalars));
     f64_t const first_step = largest / (8.0 * dot(weight_force, weight_force));
     for (f64_t step = first_step; step == first_step || (predicted < 0.125 * oracle_loss && step <= weight_rms);
@@ -930,7 +931,7 @@ static void choices_cross_entropy(test_suite_t &suite, device_t &device) {
     expected<summand_pair_t> const loss_minus = choose();
     if (!uploaded || !loss_plus || !loss_minus) return suite.check(false, "perturbed choose failed");
     f64_t const measured = loss_plus->sum / loss_plus->count - loss_minus->sum / loss_minus->count;
-    f64_t const error = std::fabs(measured - predicted) / std::max(std::fabs(predicted), 1.0e-6);
+    f64_t const error = std::fabs(measured - predicted) / fu::max_of(std::fabs(predicted), 1.0e-6);
     suite.check(error <= finite_difference_tolerance_k,
                 "the decoder: loss moved {:.6g}, the gradient predicts {:.6g}, off by {:.3g} relative", measured,
                 predicted, error);
@@ -1143,7 +1144,7 @@ static void block_host_replay(test_suite_t &suite, device_t &device) {
                 for (std::size_t key = 0; key != length; ++key) {
                     probabilities[query, key] =
                         dot(qkv[first + query, 0, head, nk::slice], qkv[first + key, 1, head, nk::slice]) * scale;
-                    largest = std::max(largest, probabilities[query, key]);
+                    largest = fu::max_of(largest, probabilities[query, key]);
                 }
                 for (std::size_t key = 0; key != length; ++key)
                     total += probabilities[query, key] = std::exp(probabilities[query, key] - largest);
@@ -1188,8 +1189,8 @@ static void block_host_replay(test_suite_t &suite, device_t &device) {
                                                  : (normalized_grad[channel] - pre[channel] * inverse * projection) *
                                                        inverse;
                         f64_t const got = packed[first + position, role, head, channel];
-                        worst_grad[role] = std::max(worst_grad[role], std::fabs(got - wanted));
-                        largest_grad[role] = std::max(largest_grad[role], std::fabs(wanted));
+                        worst_grad[role] = fu::max_of(worst_grad[role], std::fabs(got - wanted));
+                        largest_grad[role] = fu::max_of(largest_grad[role], std::fabs(wanted));
                     }
                 }
         }
@@ -1205,8 +1206,8 @@ static void block_host_replay(test_suite_t &suite, device_t &device) {
             activated[feature] = gate_up[feature] / (1.0 + std::exp(-gate_up[feature])) * gate_up[ffn + feature];
         for (std::size_t channel = 0; channel != hidden; ++channel) {
             f64_t const wanted = branch[channel] + dot(down_weights.row(channel), activated);
-            worst_output = std::max(worst_output, std::fabs(wanted - outputs[token, channel]));
-            largest_output = std::max(largest_output, std::fabs(wanted));
+            worst_output = fu::max_of(worst_output, std::fabs(wanted - outputs[token, channel]));
+            largest_output = fu::max_of(largest_output, std::fabs(wanted));
         }
     }
     // BFloat16 activations hold about three decimal digits, so two percent of the largest value
@@ -1452,7 +1453,7 @@ static void spectrum_replay(test_suite_t &suite, device_t &device) {
             f64_t const radial = dot(unit, solve);
             for (std::size_t channel = 0; channel != hidden; ++channel) {
                 forces[row, channel] = (solve[channel] - unit[channel] * radial) * inverse_norms[row];
-                largest = std::max(largest, std::fabs(forces[row, channel]));
+                largest = fu::max_of(largest, std::fabs(forces[row, channel]));
             }
         }
         return largest;
@@ -1519,8 +1520,8 @@ static void spectrum_replay(test_suite_t &suite, device_t &device) {
         f64_t worst = 0.0, empty = 0.0;
         for (std::size_t row = 0; row != rows; ++row)
             for (std::size_t channel = 0; channel != hidden; ++channel) {
-                worst = std::max(worst, std::fabs(gradient_rows[row, channel] - scale * forces[row, channel]));
-                if (row == empty_row) empty = std::max(empty, std::fabs(gradient_rows[row, channel]));
+                worst = fu::max_of(worst, std::fabs(gradient_rows[row, channel] - scale * forces[row, channel]));
+                if (row == empty_row) empty = fu::max_of(empty, std::fabs(gradient_rows[row, channel]));
             }
         // One BFloat16 rounding per call over Float32 solves of a condition number near 200.
         suite.check(worst <= 0x1.0p-7 * scale * largest_force,

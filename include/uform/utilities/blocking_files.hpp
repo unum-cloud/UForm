@@ -18,13 +18,16 @@
 #include <cstdlib> // `std::malloc`, `std::free` - the copy WASI maps a file into
 #include <cstring> // `std::memcpy`
 
-#include <algorithm> // `std::min`
-#include <span>      // `std::span` - the buffer a path is terminated in
-#include <utility>   // `std::exchange`, `std::swap`, `std::move`
+#include <span>    // `std::span` - the buffer a path is terminated in
+#include <utility> // `std::exchange`, `std::swap`, `std::move`
 
 #include "uform/utilities/types.hpp" // `expected`, `expected_t`, `status_t`, `bytes_view_t`, `sz::string_view_t`
 
 #if UFORM_OS_WINDOWS_
+/*  Winsock 2 first keeps Winsock 1.1 out, unless a user's earlier `<windows.h>` brought it in. */
+#if !defined(_WINSOCKAPI_)
+#include <winsock2.h>
+#endif
 #include <windows.h> // `CreateFileW`, `ReadFile`, `WriteFile`, `FlushFileBuffers`, `MapViewOfFile`, `MoveFileExW`
 #else
 #include <fcntl.h>    // `open`, `fcntl`, `O_DIRECTORY`, `F_FULLFSYNC`
@@ -125,7 +128,7 @@ using path_character_t = wchar_t;
                                                             bytes_span_t buffer) noexcept {
     std::size_t moved = 0;
     while (moved != buffer.size()) {
-        bytes_span_t const asked = buffer.subspan(moved, std::min(buffer.size() - moved, native_transfer_bytes_k));
+        bytes_span_t const asked = buffer.subspan(moved, fu::min_of(buffer.size() - moved, native_transfer_bytes_k));
         OVERLAPPED position {};
         position.Offset = static_cast<DWORD>((offset + moved) & 0xFFFFFFFFull);
         position.OffsetHigh = static_cast<DWORD>((offset + moved) >> 32);
@@ -148,7 +151,7 @@ using path_character_t = wchar_t;
                                                              bytes_view_t buffer) noexcept {
     std::size_t moved = 0;
     while (moved != buffer.size()) {
-        bytes_view_t const asked = buffer.subspan(moved, std::min(buffer.size() - moved, native_transfer_bytes_k));
+        bytes_view_t const asked = buffer.subspan(moved, fu::min_of(buffer.size() - moved, native_transfer_bytes_k));
         OVERLAPPED position {};
         position.Offset = static_cast<DWORD>((offset + moved) & 0xFFFFFFFFull);
         position.OffsetHigh = static_cast<DWORD>((offset + moved) >> 32);
@@ -235,7 +238,7 @@ using path_character_t = char;
                                                             bytes_span_t buffer) noexcept {
     std::size_t moved = 0;
     while (moved != buffer.size()) {
-        bytes_span_t const asked = buffer.subspan(moved, std::min(buffer.size() - moved, native_transfer_bytes_k));
+        bytes_span_t const asked = buffer.subspan(moved, fu::min_of(buffer.size() - moved, native_transfer_bytes_k));
         ssize_t const arrived = ::pread(file, asked.data(), asked.size(), static_cast<off_t>(offset + moved));
         if (arrived < 0 && errno == EINTR) continue;
         if (arrived < 0) {
@@ -255,7 +258,7 @@ using path_character_t = char;
                                                              bytes_view_t buffer) noexcept {
     std::size_t moved = 0;
     while (moved != buffer.size()) {
-        bytes_view_t const asked = buffer.subspan(moved, std::min(buffer.size() - moved, native_transfer_bytes_k));
+        bytes_view_t const asked = buffer.subspan(moved, fu::min_of(buffer.size() - moved, native_transfer_bytes_k));
         ssize_t const landed = ::pwrite(file, asked.data(), asked.size(), static_cast<off_t>(offset + moved));
         if (landed < 0 && errno == EINTR) continue;
         if (landed < 0 && (errno == ENOSPC || errno == EDQUOT)) break;

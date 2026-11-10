@@ -8,8 +8,7 @@
  */
 #include <cmath> // `std::fmax` — the row maxima and the floored counts
 
-#include <algorithm> // `std::max` — the head product scratch sizing
-#include <limits>    // `std::numeric_limits` — the softmax's row-maximum identity
+#include <limits> // `std::numeric_limits` — the softmax's row-maximum identity
 
 #include "uform/train/multimodal_masking.hpp"
 
@@ -218,7 +217,7 @@ static __global__ void choices_gather_kernel_(bf16r2_view_t normalized, multimod
         live_segments += chooses_(batch, index) ? 1.0f : 0.0f;
     f32_t const total = block_reduce_broadcast<kernel_block_size_default_k>(live_segments);
     if (threadIdx.x != 0u) return;
-    scale_and_count[0] = weight / std::max(total, 1.0f);
+    scale_and_count[0] = weight / fu::max_of(total, 1.0f);
     scale_and_count[1] = total;
 }
 
@@ -250,7 +249,7 @@ static __global__ void choices_cross_entropy_kernel_(f32r2_view_t logits, multim
 
     f32_t thread_max = -std::numeric_limits<f32_t>::infinity();
     for (u32_t choice = threadIdx.x; choice < width; choice += blockDim.x)
-        if (choices[row, choice] != byte_pad_k) thread_max = std::max(thread_max, logits[row, choices[row, choice]]);
+        if (choices[row, choice] != byte_pad_k) thread_max = fu::max_of(thread_max, logits[row, choices[row, choice]]);
     f32_t const row_max = block_reduce_max_broadcast_<kernel_block_size_default_k>(thread_max);
 
     f32_t thread_sum = 0.0f;
@@ -323,8 +322,8 @@ static expected_t allocate_head_products_(gpu_arena_t &arena, gpu_numerics_t con
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     transposed_grad = bf16r1_tensor_arena_t::uninitialized({outputs * padded_rows}, bf16_alloc).value;
     transposed_input =
-        bf16r1_tensor_arena_t::uninitialized({hidden * std::max(padded_rows, padded_outputs)}, bf16_alloc).value;
-    products = f32r1_tensor_arena_t::uninitialized({std::max(rows, outputs) * std::max(outputs, hidden)},
+        bf16r1_tensor_arena_t::uninitialized({hidden * fu::max_of(padded_rows, padded_outputs)}, bf16_alloc).value;
+    products = f32r1_tensor_arena_t::uninitialized({fu::max_of(rows, outputs) * fu::max_of(outputs, hidden)},
                                                    gpu_arena_alloc<f32_t> {arena})
                    .value;
     if (!transposed_grad || !transposed_input || !products)

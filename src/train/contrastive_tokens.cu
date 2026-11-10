@@ -7,8 +7,7 @@
  */
 #include <cmath> // `std::fmax`
 
-#include <algorithm> // `std::max` — the document rows cover at least one band
-#include <limits>    // `std::numeric_limits` — the empty maximum
+#include <limits> // `std::numeric_limits` — the empty maximum
 
 #include <cub/block/block_scan.cuh>     // `cub::BlockScan` — the tile layouts
 #include <cub/thread/thread_search.cuh> // `cub::UpperBound` — a tile row's segment
@@ -65,7 +64,7 @@ static __global__ void contrastive_tokens_layout_kernel_( //
         bool const live = segment < segments;
         u32_t const span = live ? token_offsets[segment + 1u] - token_offsets[segment] : 0u;
         late_interaction_side_t const side = live ? batch.segment_side[segment] : late_interaction_side_t::none_k;
-        u32_t const query_span = contrastive_tokens_queries_(side) ? min(span, query_span_tokens) : 0u;
+        u32_t const query_span = contrastive_tokens_queries_(side) ? fu::min_of(span, query_span_tokens) : 0u;
         u32_t const is_document = contrastive_tokens_documents_(side) && span != 0u ? 1u : 0u;
         u32_t const document_span = is_document ? span : 0u;
         u32_t query_row = 0, document = 0, is_query = 0, totals[3] = {};
@@ -94,7 +93,7 @@ static __global__ void contrastive_tokens_layout_kernel_( //
         document_segments[ordinal] = ~0u;
     __syncthreads();
     if (threadIdx.x != 0u) return;
-    u32_t cursor = 0, placed = min(documents, documents_capacity);
+    u32_t cursor = 0, placed = fu::min_of(documents, documents_capacity);
     bool oversized = false;
     for (u32_t ordinal = 0; ordinal != placed; ++ordinal) {
         u32_t const span = document_lengths[document_segments[ordinal]];
@@ -174,7 +173,7 @@ struct contrastive_tokens_lane_t {
     u32_t run_begin_lane = lane == 0u || previous != document ? lane : 0u;
     for (u32_t delta = 1u; delta != warp_size_k; delta *= 2u) {
         u32_t const earlier = __shfl_up_sync(0xffffffffu, run_begin_lane, delta);
-        if (lane >= delta) run_begin_lane = max(run_begin_lane, earlier);
+        if (lane >= delta) run_begin_lane = fu::max_of(run_begin_lane, earlier);
     }
     return {document, run_begin_lane, document != ~0u && (lane + 1u == warp_size_k || next != document)};
 }
@@ -355,8 +354,7 @@ static __global__ void contrastive_tokens_band_grad_kernel_(f32r2_view_t band_pr
         f32_t const value = products[chunk + lane];
         if (__all_sync(0xffffffffu, document == open_document)) {
             u32_t const matching_lanes = __ballot_sync(0xffffffffu, document != ~0u && value == open_maximum);
-            bool const claims = !open_claimed && matching_lanes != 0u &&
-                                lane == static_cast<u32_t>(__ffs(static_cast<int>(matching_lanes)) - 1);
+            bool const claims = !open_claimed && matching_lanes != 0u && lane == cuda_warp_t::first(matching_lanes);
             open_claimed = open_claimed || matching_lanes != 0u;
             gradients[chunk + lane] = __float2bfloat16(claims ? open_gradient : 0.0f);
             return;
@@ -387,8 +385,7 @@ static __global__ void contrastive_tokens_band_grad_kernel_(f32r2_view_t band_pr
             for (u32_t index = 8u; index != 0u; --index)
                 if (values[index - 1u] == open_maximum) first = index - 1u;
             u32_t const matching_lanes = __ballot_sync(0xffffffffu, first != 8u);
-            bool const claims = !open_claimed && matching_lanes != 0u &&
-                                lane == static_cast<u32_t>(__ffs(static_cast<int>(matching_lanes)) - 1);
+            bool const claims = !open_claimed && matching_lanes != 0u && lane == cuda_warp_t::first(matching_lanes);
             open_claimed = open_claimed || matching_lanes != 0u;
             auto const credit = [&](u32_t index) noexcept { return claims && first == index ? open_gradient : 0.0f; };
             contrastive_tokens_store_(gradients, step + 8u * lane, float4 {credit(0), credit(1), credit(2), credit(3)},
@@ -477,7 +474,7 @@ expected<contrastive_tokens_t> contrastive_tokens_t::make(gpu_arena_t &arena, co
             "width and query rows must be multiples of 8 and the band of {} (width={} queries={} " "band={})",
             warp_size_k, config.width, config.query_tokens_per_gpu, config.band_tokens);
     config.document_tokens_per_gpu = static_cast<u32_t>(
-        round_up_to_multiple(std::max(config.document_tokens_per_gpu, config.band_tokens), config.band_tokens));
+        round_up_to_multiple(fu::max_of(config.document_tokens_per_gpu, config.band_tokens), config.band_tokens));
 
     contrastive_tokens_t loss;
     loss.config_ = config;

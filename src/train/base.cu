@@ -30,7 +30,7 @@
 
 #include <unistd.h> // `::write`, `STDOUT_FILENO` — the host diagnostic channel
 
-#include <algorithm> // `std::max`, `std::min`, `std::clamp`, `std::find_if`
+#include <algorithm> // `std::clamp`, `std::find_if`
 #include <iterator>  // `std::begin`, `std::end`
 #include <charconv>  // `std::from_chars` — the command line's numbers
 #include <limits>    // `std::numeric_limits` — the i16 coordinate ceiling
@@ -104,7 +104,7 @@ static __global__ void synthetic_segments_kernel_(u32r1_span_t segment_offsets, 
     for (u32_t index = 0; index != per_row; ++index) {
         // The last live slice takes the row's remainder; PAD repeats the row's end with no length.
         u32_t const begin = index < live ? index * slice : columns;
-        u32_t const end = index + 1u == live ? columns : std::min(begin + slice, columns);
+        u32_t const end = index + 1u == live ? columns : fu::min_of(begin + slice, columns);
         segment_offsets[first + index] = row * columns + begin;
         segment_lengths[first + index] = index < live ? end - begin : 0u;
         segment_modality[first + index] = index < live ? modality : modality_t::text_k;
@@ -260,12 +260,12 @@ expected_t ut::seed_weights(st::basic_vector<differentiable_weights_t> const &we
 }
 
 f32_t trainer_config_t::learning_rate_for(optimizer_step_t optimizer_step) const noexcept {
-    u32_t const warmup = warmup_steps ? warmup_steps : std::min(400u, steps / 10u);
+    u32_t const warmup = warmup_steps ? warmup_steps : fu::min_of(400u, steps / 10u);
     if (optimizer_step.ordinal < warmup)
         return learning_rate * static_cast<f32_t>(optimizer_step.ordinal + 1u) / static_cast<f32_t>(warmup);
     u32_t const decay_steps = steps > warmup ? steps - warmup : 1u;
     f32_t const progress = static_cast<f32_t>(optimizer_step.ordinal - warmup) / static_cast<f32_t>(decay_steps);
-    f32_t const cosine = 0.5f * (1.0f + std::cos(std::numbers::pi_v<f32_t> * std::min(progress, 1.0f)));
+    f32_t const cosine = 0.5f * (1.0f + std::cos(std::numbers::pi_v<f32_t> * fu::min_of(progress, 1.0f)));
     return min_learning_rate + (learning_rate - min_learning_rate) * cosine;
 }
 
@@ -342,7 +342,7 @@ struct row_partition_t {
         tower.image_channels = batch.image.channels;
     }
     if (batch.contains(modality_t::video_k)) {
-        u32_t const frame_stride = std::max(batch.video.frame_stride, 1u);
+        u32_t const frame_stride = fu::max_of(batch.video.frame_stride, 1u);
         tower.video_tube_frames = batch.video.tube_frames;
         tower.video_frame_stride = frame_stride;
         tower.video_patch_height = batch.video.patch_side;
@@ -350,10 +350,10 @@ struct row_partition_t {
         tower.video_channels = batch.video.channels;
         u64_t const last_tube =
             static_cast<u64_t>(batch.max_columns_per_row - 1u) * batch.video.tube_frames * frame_stride + 1u;
-        positions = std::max(positions, last_tube);
+        positions = fu::max_of(positions, last_tube);
     }
     if (batch.contains(modality_t::audio_k)) tower.audio_chunk_samples = batch.audio.chunk_samples;
-    tower.rope_max_positions = static_cast<u32_t>(std::min<u64_t>(positions, std::numeric_limits<u32_t>::max()));
+    tower.rope_max_positions = static_cast<u32_t>(fu::min_of<u64_t>(positions, (std::numeric_limits<u32_t>::max)()));
     tower.token_width = config.late_interacts() ? config.late_interaction.width : 0u;
     return tower;
 }
@@ -549,7 +549,7 @@ expected<trainer_config_t> trainer_config_t::parse(int argc, char **argv) noexce
     config.hidden = tier.hidden, config.depth = tier.depth;
     config.learning_rate = learning_rate != 0.0f ? learning_rate : tier.learning_rate;
     // Every tier trains the nested prefixes 64…1024 that fit its width, then the full width.
-    for (u32_t width = 64u; width <= std::min(1024u, tier.hidden) && width != tier.hidden; width *= 2u)
+    for (u32_t width = 64u; width <= fu::min_of(1024u, tier.hidden) && width != tier.hidden; width *= 2u)
         config.contrastive.matryoshka_dimensions[config.contrastive.matryoshka_count++] = width;
     config.contrastive.matryoshka_dimensions[config.contrastive.matryoshka_count++] = tier.hidden;
     return result_t {std::move(config)};
@@ -561,12 +561,12 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config
     multimodal_batch_shape_t const &shape = config.batch;
     u32_t const max_tokens = shape.max_rows_per_gpu * shape.max_columns_per_row;
     encoder_tower_config_t const tower_config = tower_config_(config);
-    if (tower_config.rope_max_positions > static_cast<u32_t>(std::numeric_limits<i16_t>::max()))
+    if (tower_config.rope_max_positions > static_cast<u32_t>((std::numeric_limits<i16_t>::max)()))
         return result_t::fail(
             status_t::unsupported_k,
             "coordinates reach {} positions, past the i16 ceiling of {} (columns={} tube_frames={} " //
             "frame_stride={})",
-            tower_config.rope_max_positions, std::numeric_limits<i16_t>::max(), shape.max_columns_per_row,
+            tower_config.rope_max_positions, (std::numeric_limits<i16_t>::max)(), shape.max_columns_per_row,
             shape.video.tube_frames, shape.video.frame_stride);
 
     base_replica_t replica;
@@ -667,7 +667,7 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config
 
     if (config.contrasts()) {
         u32_t const segments = shape.max_segments_per_gpu;
-        u32_t const groups = std::max(config.contrastive.temperature_groups, 1u);
+        u32_t const groups = fu::max_of(config.contrastive.temperature_groups, 1u);
         u32_t const edges = config.contrastive.max_edges_per_gpu
                                 ? config.contrastive.max_edges_per_gpu
                                 : relation_edges_capacity(segments, shape.max_bag_segments);
@@ -690,7 +690,7 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config
     if (config.late_interacts()) {
         if (!config.contrasts())
             return result_t::fail(status_t::invalid_argument_k, "late interaction reads the contrastive relations");
-        u32_t const groups = std::max(config.contrastive.temperature_groups, 1u);
+        u32_t const groups = fu::max_of(config.contrastive.temperature_groups, 1u);
         replica.token_vectors_grad =
             bf16r2_tensor_arena_t::uninitialized({max_tokens, config.late_interaction.width}, bf16_alloc).value;
         replica.token_inverse_temperatures = f32r1_tensor_arena_t::uninitialized({groups}, f32_alloc).value;

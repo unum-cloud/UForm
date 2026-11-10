@@ -22,6 +22,7 @@
 #include <format>          // `std::vformat_to`, `std::make_format_args`, `std::formatter`
 #include <source_location> // `std::source_location`
 
+#include <forkunion/types.hpp>         // `ashvardanian::forkunion`, which `fu` names
 #include <numkong/tensor.hpp>          // `nk::tensor_span`, `nk::tensor_view` — the rank-tagged borrows
 #include <stringzilla/stringzilla.hpp> // `sz::string_t` — the exception-free diagnostics carrier
 #include <smashtable/basic_vector.hpp> // `st::basic_vector` — the exception-free growable array
@@ -47,6 +48,7 @@ struct std::formatter<ashvardanian::stringzilla::string_t> : std::formatter<std:
 
 namespace unum::uform::utilities {
 
+namespace fu = ashvardanian::forkunion;
 namespace sz = ashvardanian::stringzilla;
 namespace nk = ashvardanian::numkong;
 namespace st = ashvardanian::smashtable;

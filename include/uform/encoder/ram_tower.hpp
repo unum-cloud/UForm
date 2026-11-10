@@ -14,8 +14,7 @@
 
 #include <cstring> // `std::memcpy`, `std::memset`
 
-#include <algorithm> // `std::max`, `std::min`
-#include <span>      // `std::span` — the scratch a call borrows
+#include <span> // `std::span` — the scratch a call borrows
 
 #include "uform/encoder/ram_kits.hpp"     // the host entries
 #include "uform/encoder/tower.hpp"        // `tower_weights_t`, `pack_weights`, `encode_steps`
@@ -41,7 +40,8 @@ struct entries_rows_t {
 [[nodiscard]] inline static entries_rows_t reserve_entries(scratch_cursor_t &cursor, geometry_t const &geometry,
                                                            std::size_t threads) noexcept {
     std::size_t const patch = patch_scalars(geometry);
-    std::size_t const width = std::max<std::size_t>({3 * geometry.hidden, 2 * geometry.ffn(), patch});
+    std::size_t const width = fu::max_of<std::size_t>(fu::max_of<std::size_t>(3 * geometry.hidden, 2 * geometry.ffn()),
+                                                      patch);
     return {cursor.take<f32_t>(threads, width), cursor.take<f32_t>(2 * patch)};
 }
 
@@ -82,7 +82,7 @@ struct ram_steps {
 
     /** The tile that gives every thread one equal share of @p tasks . */
     [[nodiscard]] std::size_t share(std::size_t tasks) noexcept {
-        return std::max<std::size_t>(uu::divide_round_up(tasks, std::max<std::size_t>(pool.threads_count(), 1)), 1);
+        return fu::max_of<std::size_t>(uu::divide_round_up(tasks, fu::max_of<std::size_t>(pool.threads_count(), 1)), 1);
     }
 
     /** Run @p body once per task of @p tasks , each with its thread's row of
@@ -107,7 +107,7 @@ struct ram_steps {
                                    body_type_ const &body) noexcept {
         return each(uu::divide_round_up(tasks, tile), what, [&](std::size_t index, f32r1_span_t) noexcept {
             std::size_t const first = index * tile;
-            return body(first, std::min(tile, tasks - first));
+            return body(first, fu::min_of(tile, tasks - first));
         });
     }
 

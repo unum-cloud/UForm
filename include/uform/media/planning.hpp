@@ -18,6 +18,7 @@ namespace unum::uform::media {
 
 namespace ue = unum::uform::encoder;
 namespace uu = unum::uform::utilities;
+namespace fu = ashvardanian::forkunion;
 namespace nk = ashvardanian::numkong;
 namespace st = ashvardanian::smashtable;
 

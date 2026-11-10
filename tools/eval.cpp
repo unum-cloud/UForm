@@ -38,7 +38,6 @@
 #include <cstdlib> // `std::strtoull`
 #include <cstring> // `std::memcpy`, `std::strcmp`
 
-#include <algorithm>        // `std::min`, `std::max`
 #include <initializer_list> // `std::initializer_list`
 #include <limits>           // `std::numeric_limits` — the peak a softmax starts below
 #include <span>             // `std::span` — the fixed-size hit and recall tables
@@ -287,7 +286,7 @@ enum class encoded_t { ok_k, skipped_k, failed_k };
     for (std::size_t caption = 0; caption != split.captions.count(); ++caption)
         if (!framed.append({encoder.query_prefix, split.captions[caption]})) return encoded_t::failed_k;
     for (std::size_t first = 0; first < framed.count(); first += encoder.batch) {
-        std::size_t const count = std::min(encoder.batch, framed.count() - first);
+        std::size_t const count = fu::min_of(encoder.batch, framed.count() - first);
         uform_outcome_t outcome {};
         uform_rows_view_t embeddings {};
         uform_text_encode_t arguments {.model = encoder.model,
@@ -308,7 +307,7 @@ enum class encoded_t { ok_k, skipped_k, failed_k };
 [[nodiscard]] static encoded_t embed_media_(encoder_t &encoder, split_t const &split,
                                             st::basic_vector<float> &rows) noexcept {
     for (std::size_t first = 0; first < split.files.count(); first += encoder.batch) {
-        std::size_t const count = std::min(encoder.batch, split.files.count() - first);
+        std::size_t const count = fu::min_of(encoder.batch, split.files.count() - first);
         st::basic_vector<std::uint8_t> bytes;
         st::basic_vector<std::size_t> offsets;
         if (st::failed(offsets.push_back(std::size_t {0}))) return encoded_t::failed_k;
@@ -400,7 +399,7 @@ static constexpr std::size_t score_block_rows_k = 64;
     uu::status_t const dispatched = pool.for_n_dynamic(blocks_count, [&](std::size_t block,
                                                                          std::size_t thread) noexcept {
         std::size_t const first = block * score_block_rows_k;
-        std::size_t const count = std::min(score_block_rows_k, queries_count - first);
+        std::size_t const count = fu::min_of(score_block_rows_k, queries_count - first);
         nk_f64_t *const scores = blocks.data() + thread * score_block_rows_k * items_count;
         if (nk_dots_packed_f32_best(queries.data() + first * dimensions, packed.data(), scores, count, items_count,
                                     dimensions, dimensions * sizeof(float), items_count * sizeof(nk_f64_t), nullptr, 0,
@@ -411,7 +410,7 @@ static constexpr std::size_t score_block_rows_k = 64;
             nk_f64_t const *row = scores + (query - first) * items_count;
             nk_f64_t best = -2;
             for (std::size_t position = offsets[query]; position != offsets[query + 1]; ++position)
-                best = std::max(best, row[targets[position]]);
+                best = fu::max_of(best, row[targets[position]]);
             std::size_t rank = 0;
             for (std::size_t item = 0; item != items_count; ++item) rank += row[item] > best;
             for (std::size_t k = 0; k != 3; ++k) block_hits[k] += rank < recall_depths_k[k];
@@ -526,9 +525,9 @@ struct choices_t {
     if (!read_file_(path, bytes)) return false;
     std::string_view text {reinterpret_cast<char const *>(bytes.data()), bytes.size()};
     for (std::size_t line_number = 1; !text.empty(); ++line_number) {
-        std::size_t const end = std::min(text.find('\n'), text.size());
+        std::size_t const end = fu::min_of(text.find('\n'), text.size());
         std::string_view const line = text.substr(0, end);
-        text.remove_prefix(std::min(end + 1, text.size()));
+        text.remove_prefix(fu::min_of(end + 1, text.size()));
         if (line.find_first_not_of(" \t\r") == std::string_view::npos) continue;
         yyjson_doc *document = yyjson_read(line.data(), line.size(), 0);
         yyjson_val *root = yyjson_doc_get_root(document);
@@ -557,7 +556,7 @@ struct choices_t {
         if (held_out.groups[item] != group) continue;
         std::size_t const begin = held_out.choices.offsets[item], end = held_out.choices.offsets[item + 1];
         double peak = -std::numeric_limits<double>::infinity(), sum = 0, expected = 0;
-        for (std::size_t choice = begin; choice != end; ++choice) peak = std::max(peak, beta * logits[choice]);
+        for (std::size_t choice = begin; choice != end; ++choice) peak = fu::max_of(peak, beta * logits[choice]);
         for (std::size_t choice = begin; choice != end; ++choice) sum += std::exp(beta * logits[choice] - peak);
         for (std::size_t choice = begin; choice != end; ++choice)
             expected += held_out.targets[choice] * (beta * logits[choice] - peak - std::log(sum));
@@ -602,7 +601,7 @@ struct choices_t {
         for (std::size_t choice = begin; choice != end; ++choice)
             sum += std::exp(beta * (logits[choice] - logits[top]));
         double const confidence = 1 / sum;
-        std::size_t const bin = std::min<std::size_t>(std::size_t(confidence * 15), 14);
+        std::size_t const bin = fu::min_of<std::size_t>(std::size_t(confidence * 15), 14);
         confidence_sums[bin] += confidence, correct_sums[bin] += top == wanted;
     }
     double error = 0;
@@ -625,7 +624,7 @@ struct choices_t {
     if (!load_choices_(choices_path, held_out)) return false;
     std::size_t const items = held_out.states.count(), offered = held_out.targets.size();
     std::uint32_t groups = 1;
-    for (std::uint32_t const group : held_out.groups) groups = std::max(groups, group + 1);
+    for (std::uint32_t const group : held_out.groups) groups = fu::max_of(groups, group + 1);
     uu::expected<uu::checkpoint_to_load_t> source = uu::checkpoint_to_load_t::make(checkpoint_path);
     if (!source) return fmt::println(stderr, "uform_eval: {}", std::string_view {source.description_}), false;
     uu::f32r2_view_t const stored = source->float32("choices.inverse_temperatures");
@@ -638,7 +637,7 @@ struct choices_t {
         st::failed(betas.resize(st::assume_uninitialized, groups)))
         return fmt::println(stderr, "uform_eval: calibration staging failed"), false;
     for (std::size_t first = 0; first < items; first += encoder.batch) {
-        std::size_t const count = std::min(encoder.batch, items - first);
+        std::size_t const count = fu::min_of(encoder.batch, items - first);
         uform_outcome_t outcome {};
         uform_tape_view_t chosen {};
         uform_text_choose_t arguments {
@@ -662,7 +661,7 @@ struct choices_t {
             return fmt::println(stderr, "uform_eval: copying the probabilities failed"), false;
     }
     for (std::size_t choice = 0; choice != offered; ++choice)
-        logits[choice] = std::log(std::max(double(probabilities[choice]), 1e-30)) / scoring_beta;
+        logits[choice] = std::log(fu::max_of(double(probabilities[choice]), 1e-30)) / scoring_beta;
 
     for (std::uint32_t group = 0; group != groups; ++group) {
         double low = std::log(1e-2), high = std::log(1e2);

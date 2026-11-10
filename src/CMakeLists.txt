@@ -73,12 +73,10 @@ endfunction ()
 # The encoder's RAM variants compile per CPU class. A variant inlines its class's kits and host entries and runs on
 # nothing older, so its unit takes the class's instruction set outright. A class is its parent plus a delta, the NumKong
 # capabilities `numkong_capabilities_of` adds over `parent_class_of`, restated here row for row, and after `FORKUNION`
-# the ForkUnion capabilities its waiter or atomic reference adds: it inherits its parent's flags, adds the flags of each
-# NumKong delta, and exists only when its parent does and every delta is enabled, the switches after the probes
-# included. Each NumKong capability it holds also reaches the unit as `NUMKONG_TARGET_<CAPABILITY>=1`, so its kits never
-# depend on which macros a flag set implies; capabilities follow `OVER` as `name MACRO` pairs. An Arm or RISC-V compiler
-# keeps only the last `-march=`, so those rows spell the union of their lineage after `MARCH`, which lands last. The
-# `serial` class is the floor every CPU runs.
+# the ForkUnion capabilities its waiter or atomic reference adds, and exists only when its parent does and every delta is
+# enabled, the switches after the probes included. Its unit compiles at the floor, as NumKong's kernels carry their own
+# targets; each NumKong capability it holds reaches the unit as `NUMKONG_TARGET_<CAPABILITY>=1`, which picks its kits.
+# Capabilities follow `OVER` as `name MACRO` pairs. The `serial` class is the floor every CPU runs.
 #
 # A multiversioned build keeps every class that exists. A monoversioned one keeps none of them, `serial` included, and
 # compiles the `monoversioned` class instead. `uform_host` and the variant units read each declared class as
@@ -103,8 +101,7 @@ endif ()
 
 # Declares the CPU class @p class_, gated as `UFORM_TARGET_<target_macro>`, over the class named after `OVER`.
 function (uform_cpu_class class_ target_macro_)
-    cmake_parse_arguments(PARSE_ARGV 2 arg "" "OVER;MARCH" "FORKUNION")
-    set(flags_ ${uform_class_${arg_OVER}_flags_})
+    cmake_parse_arguments(PARSE_ARGV 2 arg "" "OVER" "FORKUNION")
     set(definitions_ ${uform_class_${arg_OVER}_definitions_})
     set(exists_ ${uform_class_${arg_OVER}_exists_})
     list(LENGTH arg_UNPARSED_ARGUMENTS entries_)
@@ -115,7 +112,6 @@ function (uform_cpu_class class_ target_macro_)
             list(GET arg_UNPARSED_ARGUMENTS ${index_} capability_)
             list(GET arg_UNPARSED_ARGUMENTS ${macro_index_} capability_macro_)
             if (numkong_target_${capability_}_enabled OR uform_target_${capability_}_compiles_)
-                list(APPEND flags_ ${numkong_target_${capability_}_flags})
                 list(APPEND definitions_ NUMKONG_TARGET_${capability_macro_}=1)
             else ()
                 set(exists_ FALSE)
@@ -128,17 +124,10 @@ function (uform_cpu_class class_ target_macro_)
             set(exists_ FALSE)
         endif ()
     endforeach ()
-    if (arg_MARCH)
-        list(APPEND flags_ -march=${arg_MARCH})
-    endif ()
     set(kept_ FALSE)
     if (UFORM_MULTIVERSIONED)
         set(kept_ ${exists_})
     endif ()
-    set(uform_class_${class_}_flags_
-        "${flags_}"
-        PARENT_SCOPE
-    )
     set(uform_class_${class_}_definitions_
         "${definitions_}"
         PARENT_SCOPE
@@ -204,8 +193,6 @@ uform_cpu_class(
     APPLE_M2
     OVER
     aws_g2
-    MARCH
-    armv8.6-a+simd+dotprod+bf16+fp16+fp16fml
     neonsdot
     NEONSDOT
     neonbfdot
@@ -218,8 +205,6 @@ uform_cpu_class(
     APPLE_M4
     OVER
     apple_m2
-    MARCH
-    armv8.6-a+simd+dotprod+bf16+fp16+fp16fml+sme+sme2
     sme
     SME
     smebi32
@@ -230,8 +215,6 @@ uform_cpu_class(
     NVIDIA_VERA
     OVER
     apple_m2
-    MARCH
-    armv8.6-a+simd+dotprod+bf16+fp16+fp16fml+fp8dot4
     neonfp8
     NEONFP8
 )
@@ -240,8 +223,6 @@ uform_cpu_class(
     ALIBABA_C930
     OVER
     serial
-    MARCH
-    rv64gcv_zvbb
     rvv
     RVV
     rvvbb
@@ -251,8 +232,7 @@ uform_cpu_class(wasm32_v128 WASM32_V128 OVER serial v128 V128)
 uform_cpu_class(wasm64_extended WASM64_EXTENDED OVER wasm32_v128 v128relaxed V128RELAXED)
 
 # A monoversioned build compiles one class: every CPU capability NumKong and ForkUnion enabled, which is what
-# `UFORM_MARCH` implies plus what a preset vouches for, with NumKong's verdicts as its definitions and the flags of the
-# vouched ones alone, as the floor holds the rest and a later `-march` would lower an Arm `-mcpu` floor.
+# `UFORM_MARCH` implies plus what a preset vouches for, with NumKong's verdicts as its definitions.
 set(uform_class_monoversioned_macro_ MONOVERSIONED)
 list(APPEND uform_cpu_rows_ monoversioned)
 if (NOT UFORM_MULTIVERSIONED)
@@ -263,13 +243,6 @@ if (NOT UFORM_MULTIVERSIONED)
     set(uform_class_monoversioned_definitions_
         "$<TARGET_PROPERTY:numkong::cpu_capabilities_compiled,INTERFACE_COMPILE_DEFINITIONS>"
     )
-    set(uform_capabilities_summary_)
-    foreach (capability_ IN LISTS uform_capabilities_enabled_)
-        string(APPEND uform_capabilities_summary_ " ${capability_}")
-        if (DEFINED numkong_target_${capability_}_flags AND NOT numkong_target_${capability_}_implied)
-            list(APPEND uform_class_monoversioned_flags_ ${numkong_target_${capability_}_flags})
-        endif ()
-    endforeach ()
 endif ()
 
 set(uform_cpu_classes_)
@@ -347,7 +320,7 @@ endif ()
 if (UFORM_MULTIVERSIONED)
     message(STATUS "UForm: multiversioned above ${uform_floor_}")
 else ()
-    message(STATUS "UForm: monoversioned for ${uform_floor_}:${uform_capabilities_summary_}")
+    message(STATUS "UForm: monoversioned for ${uform_floor_}: ${uform_capabilities_enabled_}")
 endif ()
 
 # Declares the @p modality_ variants resident in @p residency_ on @p backend_, over the kept classes after it, as
@@ -365,10 +338,7 @@ function (uform_variants modality_ residency_ backend_)
         if (uform_class_${class_}_kept_)
             set(unit_ ${modality_}/${residency_}_variants_${class_}.cpp)
             target_sources(${library_} PRIVATE ${unit_})
-            set_source_files_properties(
-                ${unit_} PROPERTIES COMPILE_OPTIONS "${uform_class_${class_}_flags_}"
-                                    COMPILE_DEFINITIONS "${uform_class_${class_}_definitions_}"
-            )
+            set_source_files_properties(${unit_} PROPERTIES COMPILE_DEFINITIONS "${uform_class_${class_}_definitions_}")
         endif ()
     endforeach ()
     target_include_directories(
@@ -442,6 +412,10 @@ target_link_libraries(
 # Every unit naming a class's waiter or atomic reference reads ForkUnion's probe verdicts rather than its own flags, so
 # the class units and the dispatch unit name the same rungs, and the dispatch unit admits them at run time.
 target_link_libraries(uform_host PUBLIC $<BUILD_INTERFACE:forkunion::cpu_capabilities_compiled>)
+# A monoversioned dispatch unit reads NumKong's verdicts too, so its one class asks for what the class unit compiled.
+if (NOT UFORM_MULTIVERSIONED)
+    target_link_libraries(uform_host PUBLIC $<BUILD_INTERFACE:numkong::cpu_capabilities_compiled>)
+endif ()
 
 # The host decoders and the verbs over encoded files, over the codecs the top-level file discovers; without
 # UFORM_WITH_CODECS a build takes already-decoded media instead, and its verbs over files report themselves unsupported.

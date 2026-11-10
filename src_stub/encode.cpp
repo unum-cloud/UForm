@@ -18,7 +18,6 @@
  *
  *  An item spanning more than 512 tokens keeps its first 512 and counts as truncated.
  */
-#include <algorithm>        // `std::min`
 #include <array>            // `std::array` - a token's position as bytes
 #include <bit>              // `std::bit_cast`
 #include <initializer_list> // `std::initializer_list`
@@ -95,7 +94,7 @@ static void encode(arguments_ &arguments, std::initializer_list<void const *> in
     for (std::size_t item = 0; item != count; ++item) {
         std::size_t const spanned = item_at(item).tokens;
         truncated += spanned > context_k;
-        tokens += std::min(spanned, context_k);
+        tokens += fu::min_of(spanned, context_k);
     }
 
     uform_scalar_t const scalar = arguments.outputs_scalar;
@@ -116,7 +115,7 @@ static void encode(arguments_ &arguments, std::initializer_list<void const *> in
         for (; item != ticks.end_of(slice); ++item) {
             item_t const entry = item_at(item);
             std::uint64_t const seed = fnv1a(entry.data, entry.length);
-            std::size_t const kept = std::min(entry.tokens, context_k);
+            std::size_t const kept = fu::min_of(entry.tokens, context_k);
             if (arguments.embeddings) write_row(embeddings + item * row_bytes, scalar, seed);
             if (offsets) {
                 for (std::size_t token = 0; token != kept; ++token) {

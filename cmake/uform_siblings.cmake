@@ -28,29 +28,27 @@ endfunction ()
 # library's GPU code runs in UForm. Every library compiles at the floor and build kind UForm names.
 set(NUMKONG_CUDA_ARCH "${UFORM_CUDA_ARCH}")
 set(NUMKONG_ROCM_ARCH "${UFORM_ROCM_ARCH}")
-if (UFORM_MARCH)
-    set(NUMKONG_MARCH "${UFORM_MARCH}")
-    set(STRINGZILLA_MARCH "${UFORM_MARCH}")
-    set(FORKUNION_MARCH "${UFORM_MARCH}")
-endif ()
+set(NUMKONG_MARCH "${UFORM_MARCH}")
+set(STRINGZILLA_MARCH "${UFORM_MARCH}")
+set(FORKUNION_MARCH "${UFORM_MARCH}")
 set(NUMKONG_MULTIVERSIONED ${UFORM_MULTIVERSIONED})
 set(STRINGZILLA_MULTIVERSIONED ${UFORM_MULTIVERSIONED})
 set(FORKUNION_MULTIVERSIONED ${UFORM_MULTIVERSIONED})
 uform_sibling(
     numkong FETCHCONTENT_SOURCE_DIR_NUMKONG https://github.com/ashvardanian/NumKong
-    8b3df749915fdcc01e563df8ff119c3e09c04789
+    0a027dc6ab79fed17f08e20a7cd3bdc94e59f655
 )
 uform_sibling(
     stringzilla FETCHCONTENT_SOURCE_DIR_STRINGZILLA https://github.com/ashvardanian/StringZilla
-    cff25ca8f55aa223dd6ab437b8665009e928e493
+    8b16eea7891d5df9f44706972112d739917b5bf3
 )
 uform_sibling(
     forkunion FETCHCONTENT_SOURCE_DIR_FORKUNION https://github.com/ashvardanian/ForkUnion
-    1bd5eaeee9588d9c6df33206cc7627377f18fb1c
+    9a69946aa5e9a8cbe56b51dab1dfae7f2281537d
 )
 
 # SmashTable's containers, header-only
 uform_sibling(
     smashtable FETCHCONTENT_SOURCE_DIR_SMASHTABLE https://github.com/ashvardanian/SmashTable
-    7bc9e00713929c4273099dce3d1e4e6d61bea4af
+    788a94f7baef9eae8923009a444fb6b3dae5f8c4
 )

@@ -1,9 +1,9 @@
 /**
- *  @brief The video loader's bodies: the multi-engine NVDEC decoder plus the draw → stage → demux →
- *      decode → tile batch path — see the header for the contract.
  *  @file src/loaders/video_loader.cu
  *  @author Ash Vardanian
  *  @date July 5, 2026
+ *  @brief The video loader's bodies: the multi-engine NVDEC decoder plus the draw → stage → demux →
+ *      decode → tile batch path — see the header for the contract.
  *
  *  Two firewalls live here. The NVDEC path ( libnvcuvid via the FFmpeg @c nv-codec-headers dynamic
  *  loader ) and the host demux ( libavformat ) are C APIs that never throw across this boundary:
@@ -19,7 +19,7 @@
 
 #include <unistd.h> // `::write`, `STDERR_FILENO`
 
-#include <algorithm> // `std::min`, `std::max`, `std::find`, `std::upper_bound`
+#include <algorithm> // `std::find`, `std::upper_bound`
 #include <memory>    // `std::unique_ptr` — the session's pimpl (`nvdec_state_t`)
 
 #include <cuda.h> // vendor-boundary: the Driver API types (`CUstream`, `CUresult`) the NVDEC headers build on
@@ -369,8 +369,8 @@ extern "C" int CUDAAPI on_video_sequence(void *user_data, CUVIDEOFORMAT *format)
     bool const resizable = context->codec == video_codec_t::h264_k || context->codec == video_codec_t::h265_k ||
                            context->codec == video_codec_t::vp9_k || context->codec == video_codec_t::av1_k;
     unsigned long const max_side = resizable ? engine->max_side : 0ul;
-    unsigned long decoder_max_width = std::max<unsigned long>(max_side, format->coded_width);
-    unsigned long decoder_max_height = std::max<unsigned long>(max_side, format->coded_height);
+    unsigned long decoder_max_width = fu::max_of<unsigned long>(max_side, format->coded_width);
+    unsigned long decoder_max_height = fu::max_of<unsigned long>(max_side, format->coded_height);
     // The engine's bound follows the grid's width, which can pass what NVDEC decodes, and a decoder
     // asked for more than its codec's maximum fails to create.
     CUVIDDECODECAPS caps {};
@@ -382,13 +382,13 @@ extern "C" int CUDAAPI on_video_sequence(void *user_data, CUVIDEOFORMAT *format)
         context->status = status_t::unsupported_k;
         return 0;
     }
-    decoder_max_width = std::min<unsigned long>(decoder_max_width, caps.nMaxWidth);
-    decoder_max_height = std::min<unsigned long>(decoder_max_height, caps.nMaxHeight);
+    decoder_max_width = fu::min_of<unsigned long>(decoder_max_width, caps.nMaxWidth);
+    decoder_max_height = fu::min_of<unsigned long>(decoder_max_height, caps.nMaxHeight);
     // Honor the stream's minimum DPB depth — high-reference HEVC / AV1 needs more surfaces than the
     // baseline, and a decoder built below `min_num_decode_surfaces` faults. Cap at the ceiling the
     // engine's parser was built to index so decoder and parser never disagree.
-    int decode_surfaces = std::max<int>(default_decode_surface_count_k,
-                                        static_cast<int>(format->min_num_decode_surfaces));
+    int decode_surfaces = fu::max_of<int>(default_decode_surface_count_k,
+                                          static_cast<int>(format->min_num_decode_surfaces));
     if (decode_surfaces > nvdec_max_decode_surfaces_k) decode_surfaces = nvdec_max_decode_surfaces_k;
     CUVIDDECODECREATEINFO create_info = make_decoder_create_info(
         to_nvdec_codec(context->codec), format->chroma_format, engine->context_lock, format->coded_width,
@@ -801,7 +801,7 @@ struct cursor_plan_t {
                 }
                 else {
                     decode_group_t &existing = plan.groups[found];
-                    existing.frames_to_decode = std::max(existing.frames_to_decode, reach);
+                    existing.frames_to_decode = fu::max_of(existing.frames_to_decode, reach);
                 }
                 group_index = static_cast<u32_t>(found);
             }
@@ -1011,7 +1011,7 @@ struct engine_cursor_t {
             engine_cursor_t &cursor = cursors[e];
             if (cursor.pending.empty()) continue; // this engine drained its queue
             nvdec_engine_t &engine = state->engines[e];
-            std::size_t const take = std::min(nvdec_feed_chunk_bytes_k, cursor.pending.size());
+            std::size_t const take = fu::min_of(nvdec_feed_chunk_bytes_k, cursor.pending.size());
             CUVIDSOURCEDATAPACKET packet {};
             packet.payload = cuvid_payload_(cursor.pending.data());
             packet.payload_size = static_cast<unsigned long>(take);
@@ -1279,8 +1279,8 @@ expected_t video_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvdec_session_
     // a production-tuning knob, not a correctness one).
     std::span<video_batch_shape_t const> const representations {&video_, 1};
     std::size_t const per_clip_estimate = representations.size() * columns_per_row; // worst case: each rep fills a row
-    std::size_t const clips_per_batch = std::min(max_segments / representations.size(),
-                                                 (rows * columns_per_row) / per_clip_estimate);
+    std::size_t const clips_per_batch = fu::min_of(max_segments / representations.size(),
+                                                   (rows * columns_per_row) / per_clip_estimate);
     if (clips_per_batch == 0)
         return expected_t::fail(status_t::unsupported_k,
                                 "the batch's {} segments / {} cells cannot hold one clip's {} representations",
@@ -1288,7 +1288,7 @@ expected_t video_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvdec_session_
     std::size_t const total_clips = unroll * clips_per_batch;
 
     std::size_t const shard_count = absolute_paths_.size();
-    std::size_t const floor_files = std::min<std::size_t>(2, shard_count);
+    std::size_t const floor_files = fu::min_of<std::size_t>(2, shard_count);
     std::size_t const total_rows = row_prefix_[shard_count];
     constexpr splitmix64_hash_t hash {};
 
