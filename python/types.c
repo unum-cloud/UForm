@@ -160,15 +160,17 @@ uform_py_enum_t uform_py_mood = {.name = "Mood",
                                  .first = uform_mood_parked_k,
                                  .last = uform_mood_spinning_k,
                                  .spell = spell_mood};
+
+/** Classes fit a byte, and the registry values this build lacks spell no member. */
 uform_py_enum_t uform_py_cpu_class = {.name = "CPUClass",
                                       .base = "IntEnum",
                                       .first = uform_cpu_class_serial_k,
-                                      .last = uform_cpu_class_monoversioned_k,
+                                      .last = UINT8_MAX,
                                       .spell = spell_cpu_class};
 uform_py_enum_t uform_py_gpu_class = {.name = "GPUClass",
                                       .base = "IntEnum",
                                       .first = uform_gpu_class_nvidia_ampere_k,
-                                      .last = uform_gpu_class_apple_metal10_k,
+                                      .last = UINT8_MAX,
                                       .spell = spell_gpu_class};
 uform_py_enum_t uform_py_gpu_vendor = {.name = "GPUVendor",
                                        .base = "IntEnum",

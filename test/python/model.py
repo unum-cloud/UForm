@@ -58,10 +58,10 @@ def test_enum_values_follow_the_header():
 
 
 def test_classes_are_spelled_by_the_library():
-    """Class members take the library's own spellings and ordinals, and the unknown class is no member."""
-    assert uform.CPUClass.INTEL_HASWELL == 2 and uform.CPUClass.WASM64_EXTENDED == 17
+    """Class members take the library's own spellings and fixed values, and the unknown class is no member."""
+    assert uform.CPUClass.SERIAL == 1 and uform.CPUClass.MONOVERSIONED == 2 and uform.CPUClass.IBM_POWER10 == 18
+    assert uform.CPUClass.INTEL_HASWELL == 3 and uform.CPUClass.WASM64_EXTENDED == 20
     assert uform.GPUClass.NVIDIA_HOPPER == 3 and uform.GPUClass.APPLE_METAL10 == 12
-    assert len(uform.CPUClass) == 18 and len(uform.GPUClass) == 12
     assert "UNKNOWN" not in uform.CPUClass.__members__ and "UNKNOWN" not in uform.GPUClass.__members__
 
 

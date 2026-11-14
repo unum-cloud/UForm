@@ -504,110 +504,136 @@ typedef enum uform_completion_t {
 } uform_completion_t;
 
 /** The CPU families UForm ships tuned variants for - dispatch reports its pick in this vocabulary,
- *  and callers may pin one. The enumerators and their ordinals are USearch's. */
+ *  and callers may pin one. The enumerators and their values are USearch's, fixed per family. */
 typedef enum uform_cpu_class_t {
+
+    /** No class: dispatch picks one, and a value no class takes reads as this. */
     uform_cpu_class_unknown_k = 0,
 
+    // Portable
+
     /** The portable floor: no SIMD assumptions. */
-    uform_cpu_class_serial_k,
-
-    /** Haswell-class x86: AVX2 & FMA, the 256-bit floor. */
-    uform_cpu_class_intel_haswell_k,
-
-    /** Sierra Forest-class x86 - the E-core Xeons: AVX-VNNI and its successors without AVX-512. */
-    uform_cpu_class_intel_sierra_k,
-
-    /** Skylake-class x86: the AVX-512 foundation tier. */
-    uform_cpu_class_intel_skylake_k,
-
-    /** Icelake-class x86: AVX-512 VNNI & VPOPCNT. */
-    uform_cpu_class_intel_icelake_k,
-
-    /** Genoa-class x86 - Zen 4 and newer: native bf16 dot products over AVX-512. */
-    uform_cpu_class_amd_genoa_k,
-
-    /** Sapphire Rapids-class x86: the Genoa bundle plus AVX-512 FP16 and the AMX-BF16
-     *  & AMX-INT8 tiles. */
-    uform_cpu_class_intel_sapphire_k,
-
-    /** Granite Rapids-class x86: the Sapphire Rapids bundle plus the AMX-FP16 tiles. */
-    uform_cpu_class_intel_granite_k,
-
-    /** Diamond Rapids-class x86: the Granite Rapids bundle plus AVX10.2's FP8 conversions. */
-    uform_cpu_class_intel_diamond_k,
-
-    /** Graviton2-class Arm - Neoverse N1, the bare NEON floor; phones predating Armv8.6
-     *  land here too. */
-    uform_cpu_class_aws_g2_k,
-
-    /** Armv8.6+ NEON: dot products, bf16 & f16 fused multiplies - Apple M2, Cortex-A710 &
-     *  X2 class silicon. */
-    uform_cpu_class_apple_m2_k,
-
-    /** Apple M4-class Arm: the Armv8.6 NEON bundle plus the SME outer-product tiles. */
-    uform_cpu_class_apple_m4_k,
-
-    /** Graviton5-class Arm - Neoverse V3, Armv9.2; reserved, as its kits equal @c apple_m2's. */
-    uform_cpu_class_aws_g5_k,
-
-    /** Vera-class Arm - NVIDIA's Armv9.2-generation cores with FP8 dot products. */
-    uform_cpu_class_nvidia_vera_k,
-
-    /** Alibaba C930-class RISC-V - T-Head's XuanTie core, RVA23 vectors. */
-    uform_cpu_class_alibaba_c930_k,
-
-    /** WebAssembly every engine loads: 32-bit, single-threaded, the fixed-width simd128 tier. */
-    uform_cpu_class_wasm32_v128_k,
-
-    /** WebAssembly with relaxed SIMD, shared memory for real thread pools,
-     *  and 64-bit addressing. */
-    uform_cpu_class_wasm64_extended_k,
+    uform_cpu_class_serial_k = 1,
 
     /** The one class of a monoversioned build: every capability its floor implies or its preset
      *  vouches for, as the kernel libraries compiled them. */
-    uform_cpu_class_monoversioned_k,
+    uform_cpu_class_monoversioned_k = 2,
+
+    // x86
+
+    /** Haswell-class x86: AVX2 & FMA, the 256-bit floor. */
+    uform_cpu_class_intel_haswell_k = 3,
+
+    /** Sierra Forest-class x86 - the E-core Xeons: AVX-VNNI and its successors without AVX-512. */
+    uform_cpu_class_intel_sierra_k = 4,
+
+    /** Skylake-class x86: the AVX-512 foundation tier. */
+    uform_cpu_class_intel_skylake_k = 5,
+
+    /** Icelake-class x86: AVX-512 VNNI & VPOPCNT. */
+    uform_cpu_class_intel_icelake_k = 6,
+
+    /** Genoa-class x86 - Zen 4 and newer: native bf16 dot products over AVX-512. */
+    uform_cpu_class_amd_genoa_k = 7,
+
+    /** Sapphire Rapids-class x86: the Genoa bundle plus AVX-512 FP16 and the AMX-BF16
+     *  & AMX-INT8 tiles. */
+    uform_cpu_class_intel_sapphire_k = 8,
+
+    /** Granite Rapids-class x86: the Sapphire Rapids bundle plus the AMX-FP16 tiles. */
+    uform_cpu_class_intel_granite_k = 9,
+
+    /** Diamond Rapids-class x86: the Granite Rapids bundle plus AVX10.2's FP8 conversions. */
+    uform_cpu_class_intel_diamond_k = 10,
+
+    // Arm
+
+    /** Graviton2-class Arm - Neoverse N1, the bare NEON floor; phones predating Armv8.6
+     *  land here too. */
+    uform_cpu_class_aws_g2_k = 12,
+
+    /** Armv8.6+ NEON: dot products, bf16 & f16 fused multiplies - Apple M2, Cortex-A710 &
+     *  X2 class silicon. */
+    uform_cpu_class_apple_m2_k = 13,
+
+    /** Apple M4-class Arm: the Armv8.6 NEON bundle plus the SME outer-product tiles. */
+    uform_cpu_class_apple_m4_k = 14,
+
+    /** Graviton5-class Arm - Neoverse V3, Armv9.2; reserved, as its kits equal @c apple_m2's. */
+    uform_cpu_class_aws_g5_k = 15,
+
+    /** Vera-class Arm - NVIDIA's Armv9.2-generation cores with FP8 dot products. */
+    uform_cpu_class_nvidia_vera_k = 16,
+
+    // RISC-V
+
+    /** Alibaba C930-class RISC-V - T-Head's XuanTie core, RVA23 vectors. */
+    uform_cpu_class_alibaba_c930_k = 17,
+
+    // Power
+
+    /** IBM POWER10-class Power, ISA 3.1: VSX vectors, the MMA outer-product accumulators and
+     *  pause_short waits. */
+    uform_cpu_class_ibm_power10_k = 18,
+
+    // WebAssembly
+
+    /** WebAssembly every engine loads: 32-bit, single-threaded, the fixed-width simd128 tier. */
+    uform_cpu_class_wasm32_v128_k = 19,
+
+    /** WebAssembly with relaxed SIMD, shared memory for real thread pools,
+     *  and 64-bit addressing. */
+    uform_cpu_class_wasm64_extended_k = 20,
 } uform_cpu_class_t;
 
 /** The GPU families UForm ships tuned variants for, the device twin of @c uform_cpu_class_t:
- *  one class per generation of kernel kits. The enumerators and their ordinals are USearch's. */
+ *  one class per generation of kernel kits. The enumerators and their values are USearch's. */
 typedef enum uform_gpu_class_t {
+
+    /** No class: dispatch picks one, and a value no class takes reads as this. */
     uform_gpu_class_unknown_k = 0,
 
+    // NVIDIA
+
     /** Ampere-class NVIDIA and every GPU without a class of its own - A100, A10 & RTX 30. */
-    uform_gpu_class_nvidia_ampere_k,
+    uform_gpu_class_nvidia_ampere_k = 1,
 
     /** Ada-class NVIDIA - L4, L40S & RTX 40: the fp8 conversions. */
-    uform_gpu_class_nvidia_ada_k,
+    uform_gpu_class_nvidia_ada_k = 2,
 
     /** Hopper-class NVIDIA - H100 & H200. */
-    uform_gpu_class_nvidia_hopper_k,
+    uform_gpu_class_nvidia_hopper_k = 3,
 
     /** Blackwell-class NVIDIA - B200, B300 & GB300. */
-    uform_gpu_class_nvidia_blackwell_k,
+    uform_gpu_class_nvidia_blackwell_k = 4,
 
     /** Consumer Blackwell NVIDIA - RTX 50, RTX PRO 6000 & DGX Spark. */
-    uform_gpu_class_nvidia_blackwellrtx_k,
+    uform_gpu_class_nvidia_blackwellrtx_k = 5,
 
     /** Rubin-class NVIDIA - the Vera-Rubin platform's device half. */
-    uform_gpu_class_nvidia_rubin_k,
+    uform_gpu_class_nvidia_rubin_k = 6,
+
+    // AMD
 
     /** CDNA3 AMD - MI300X & MI325X: gfx942, FNUZ fp8. */
-    uform_gpu_class_amd_cdna3_k,
+    uform_gpu_class_amd_cdna3_k = 7,
 
     /** CDNA4 AMD - MI350X & MI355X: gfx950, OCP fp8. */
-    uform_gpu_class_amd_cdna4_k,
+    uform_gpu_class_amd_cdna4_k = 8,
 
     /** CDNA5 AMD - MI400: gfx1250. */
-    uform_gpu_class_amd_cdna5_k,
+    uform_gpu_class_amd_cdna5_k = 9,
+
+    // Apple
 
     /** Apple7-family GPUs and every Apple GPU without a class of its own - M1 & M2. */
-    uform_gpu_class_apple_metal7_k,
+    uform_gpu_class_apple_metal7_k = 10,
 
     /** Apple9-family GPUs - M3 & M4. */
-    uform_gpu_class_apple_metal9_k,
+    uform_gpu_class_apple_metal9_k = 11,
 
     /** Apple10-family GPUs - M5. */
-    uform_gpu_class_apple_metal10_k,
+    uform_gpu_class_apple_metal10_k = 12,
 } uform_gpu_class_t;
 
 /** The GPU vendors one binary drives at once. */

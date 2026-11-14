@@ -105,10 +105,11 @@ template <typename element_type_>
 
 #pragma region Classes
 
-/** The CPU classes of @c uform_cpu_class_t as the engine names them, with the same ordinals. */
+/** The CPU classes of @c uform_cpu_class_t as the engine names them, with the same values. */
 enum class cpu_class_t : u32_t {
     unknown_k = uform_cpu_class_unknown_k,
     serial_k = uform_cpu_class_serial_k,
+    monoversioned_k = uform_cpu_class_monoversioned_k,
     intel_haswell_k = uform_cpu_class_intel_haswell_k,
     intel_sierra_k = uform_cpu_class_intel_sierra_k,
     intel_skylake_k = uform_cpu_class_intel_skylake_k,
@@ -123,12 +124,15 @@ enum class cpu_class_t : u32_t {
     aws_g5_k = uform_cpu_class_aws_g5_k,
     nvidia_vera_k = uform_cpu_class_nvidia_vera_k,
     alibaba_c930_k = uform_cpu_class_alibaba_c930_k,
+    ibm_power10_k = uform_cpu_class_ibm_power10_k,
     wasm32_v128_k = uform_cpu_class_wasm32_v128_k,
     wasm64_extended_k = uform_cpu_class_wasm64_extended_k,
-    monoversioned_k = uform_cpu_class_monoversioned_k,
 };
 
-/** The GPU classes of @c uform_gpu_class_t as the engine names them, with the same ordinals. */
+static_assert(uform_cpu_class_serial_k == 1 && uform_cpu_class_monoversioned_k == 2 &&
+              uform_cpu_class_ibm_power10_k == 18);
+
+/** The GPU classes of @c uform_gpu_class_t as the engine names them, with the same values. */
 enum class gpu_class_t : u32_t {
     unknown_k = uform_gpu_class_unknown_k,
     nvidia_ampere_k = uform_gpu_class_nvidia_ampere_k,
@@ -144,6 +148,34 @@ enum class gpu_class_t : u32_t {
     apple_metal9_k = uform_gpu_class_apple_metal9_k,
     apple_metal10_k = uform_gpu_class_apple_metal10_k,
 };
+
+/** Every CPU class the C enum names, in value order - the one table pins and walks check against,
+ *  so a value naming no class this build has is never one. */
+inline constexpr uform_cpu_class_t cpu_classes_k[] {
+    uform_cpu_class_serial_k,          uform_cpu_class_monoversioned_k,  uform_cpu_class_intel_haswell_k,
+    uform_cpu_class_intel_sierra_k,    uform_cpu_class_intel_skylake_k,  uform_cpu_class_intel_icelake_k,
+    uform_cpu_class_amd_genoa_k,       uform_cpu_class_intel_sapphire_k, uform_cpu_class_intel_granite_k,
+    uform_cpu_class_intel_diamond_k,   uform_cpu_class_aws_g2_k,         uform_cpu_class_apple_m2_k,
+    uform_cpu_class_apple_m4_k,        uform_cpu_class_aws_g5_k,         uform_cpu_class_nvidia_vera_k,
+    uform_cpu_class_alibaba_c930_k,    uform_cpu_class_ibm_power10_k,    uform_cpu_class_wasm32_v128_k,
+    uform_cpu_class_wasm64_extended_k,
+};
+
+/** Every GPU class the C enum names, in value order. */
+inline constexpr uform_gpu_class_t gpu_classes_k[] {
+    uform_gpu_class_nvidia_ampere_k,    uform_gpu_class_nvidia_ada_k,          uform_gpu_class_nvidia_hopper_k,
+    uform_gpu_class_nvidia_blackwell_k, uform_gpu_class_nvidia_blackwellrtx_k, uform_gpu_class_nvidia_rubin_k,
+    uform_gpu_class_amd_cdna3_k,        uform_gpu_class_amd_cdna4_k,           uform_gpu_class_amd_cdna5_k,
+    uform_gpu_class_apple_metal7_k,     uform_gpu_class_apple_metal9_k,        uform_gpu_class_apple_metal10_k,
+};
+
+/** Whether @p table lists @p value. */
+template <typename value_type_, std::size_t count_>
+constexpr bool listed_in(value_type_ const (&table)[count_], value_type_ value) noexcept {
+    for (value_type_ const listed : table)
+        if (listed == value) return true;
+    return false;
+}
 
 /** Lowers one CPU class onto NumKong's compute mask - cumulative within a platform, so the chains
  *  pick their best row under it. */
@@ -171,6 +203,7 @@ constexpr nk_capability_t numkong_capabilities_of(cpu_class_t cpu_class) noexcep
         return numkong_capabilities_of(cpu_class_t::apple_m2_k) | nk_cap_sme_k | nk_cap_smebi32_k;
     case cpu_class_t::nvidia_vera_k: return numkong_capabilities_of(cpu_class_t::apple_m2_k) | nk_cap_neonfp8_k;
     case cpu_class_t::alibaba_c930_k: return nk_cap_serial_k | nk_cap_rvv_k | nk_cap_rvvbb_k;
+    case cpu_class_t::ibm_power10_k: return nk_cap_serial_k | nk_cap_powervsx_k | nk_cap_powermma_k;
     case cpu_class_t::wasm32_v128_k: return nk_cap_serial_k | nk_cap_v128_k;
     case cpu_class_t::wasm64_extended_k:
         return numkong_capabilities_of(cpu_class_t::wasm32_v128_k) | nk_cap_v128relaxed_k;
@@ -319,6 +352,12 @@ struct waiter_for_cpu_class<cpu_class_t::alibaba_c930_k> {
     using type = fu::riscv64_wrs_t;
 };
 #endif
+#if FORKUNION_TARGET_PPC64_PAUSE
+template <>
+struct waiter_for_cpu_class<cpu_class_t::ibm_power10_k> {
+    using type = fu::ppc64_pause_t;
+};
+#endif
 #if FORKUNION_TARGET_WASM_WAIT
 template <>
 struct waiter_for_cpu_class<cpu_class_t::wasm32_v128_k> {
@@ -406,6 +445,13 @@ struct atomic_ref_for_cpu_class<cpu_class_t::alibaba_c930_k> {
     using type = fu::riscv64_zacas_atomic_ref<value_type_>;
 };
 #endif
+#if FORKUNION_TARGET_PPC64_AMO
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::ibm_power10_k> {
+    template <typename value_type_>
+    using type = fu::ppc64_amo_atomic_ref<value_type_>;
+};
+#endif
 #if FORKUNION_TARGET_WASM_WAIT
 template <>
 struct atomic_ref_for_cpu_class<cpu_class_t::wasm32_v128_k> {
@@ -430,10 +476,11 @@ struct atomic_ref_for_cpu_class<cpu_class_t::monoversioned_k> {
 };
 #endif
 
-/** The spin hints every core of an architecture carries - PAUSE, YIELD, Zihintpause: the runtime
- *  confirms nothing about them, and a class differing by one alone earns no rung. */
+/** The spin hints every core of an architecture carries - PAUSE, YIELD, Zihintpause and Power's
+ *  priority nops: the runtime confirms nothing about them, and a class that differs from another by
+ *  one of them alone earns no rung. */
 inline constexpr fu::capabilities_t baseline_hints_k = fu::capability_x86_pause_k | fu::capability_arm64_yield_k |
-                                                       fu::capability_riscv64_pause_k;
+                                                       fu::capability_riscv64_pause_k | fu::capability_ppc64_yield_k;
 
 /** Lowers one CPU class onto ForkUnion's mask - the bits the runtime must confirm before the
  *  class's waiter and atomic reference are trusted, read off the two types themselves. */
@@ -461,6 +508,7 @@ constexpr fu::capabilities_t forkunion_capabilities_of(cpu_class_t cpu_class) no
     case cpu_class_t::aws_g5_k: return forkunion_capabilities_of<cpu_class_t::aws_g5_k>();
     case cpu_class_t::nvidia_vera_k: return forkunion_capabilities_of<cpu_class_t::nvidia_vera_k>();
     case cpu_class_t::alibaba_c930_k: return forkunion_capabilities_of<cpu_class_t::alibaba_c930_k>();
+    case cpu_class_t::ibm_power10_k: return forkunion_capabilities_of<cpu_class_t::ibm_power10_k>();
     case cpu_class_t::wasm32_v128_k: return forkunion_capabilities_of<cpu_class_t::wasm32_v128_k>();
     case cpu_class_t::wasm64_extended_k: return forkunion_capabilities_of<cpu_class_t::wasm64_extended_k>();
     case cpu_class_t::monoversioned_k: return forkunion_capabilities_of<cpu_class_t::monoversioned_k>();
@@ -471,8 +519,7 @@ constexpr fu::capabilities_t forkunion_capabilities_of(cpu_class_t cpu_class) no
 /** The C enum's class as the engine names it; @c uform_cpu_class_unknown_k derives nothing, so it
  *  names the serial floor. */
 constexpr cpu_class_t cpu_class_of(uform_cpu_class_t cpu_class) noexcept {
-    if (cpu_class == uform_cpu_class_unknown_k || cpu_class > uform_cpu_class_monoversioned_k)
-        return cpu_class_t::serial_k;
+    if (!listed_in(cpu_classes_k, cpu_class)) return cpu_class_t::serial_k;
     return static_cast<cpu_class_t>(cpu_class);
 }
 
@@ -494,7 +541,7 @@ constexpr bool cpu_rung_fits(cpu_class_t rung, cpu_ceiling_t ceiling) noexcept {
 constexpr nk_capability_t gpu_pin_capabilities(gpu_class_t device_class, uform_gpu_class_t pinned) noexcept {
     nk_capability_t const device = numkong_capabilities_of(device_class);
     if (pinned == uform_gpu_class_unknown_k) return device;
-    if (pinned > uform_gpu_class_apple_metal10_k) return 0;
+    if (!listed_in(gpu_classes_k, pinned)) return 0;
     nk_capability_t const wanted = numkong_capabilities_of(static_cast<gpu_class_t>(pinned));
     return (device & wanted) == wanted ? wanted : 0;
 }
@@ -520,6 +567,8 @@ using cpu_ladder_t = cpu_ladder<cpu_class_t::nvidia_vera_k, cpu_class_t::apple_m
                                 cpu_class_t::apple_m2_k, cpu_class_t::aws_g2_k, cpu_class_t::serial_k>;
 #elif NUMKONG_ARCH_RISCV64_
 using cpu_ladder_t = cpu_ladder<cpu_class_t::alibaba_c930_k, cpu_class_t::serial_k>;
+#elif NUMKONG_ARCH_PPC64_
+using cpu_ladder_t = cpu_ladder<cpu_class_t::ibm_power10_k, cpu_class_t::serial_k>;
 #elif NUMKONG_ARCH_WASM_
 using cpu_ladder_t = cpu_ladder<cpu_class_t::wasm64_extended_k, cpu_class_t::wasm32_v128_k, cpu_class_t::serial_k>;
 #else
@@ -601,6 +650,9 @@ constexpr bool cpu_class_compiled(cpu_class_t cpu_class) noexcept {
 #if UFORM_TARGET_ALIBABA_C930
     case cpu_class_t::alibaba_c930_k: return true;
 #endif
+#if UFORM_TARGET_IBM_POWER10
+    case cpu_class_t::ibm_power10_k: return true;
+#endif
 #if UFORM_TARGET_WASM32_V128
     case cpu_class_t::wasm32_v128_k: return true;
 #endif
@@ -615,23 +667,22 @@ constexpr bool cpu_class_compiled(cpu_class_t cpu_class) noexcept {
 }
 
 /** The ceiling @p pinned sets, the one caller of NumKong's and ForkUnion's CPU detection; a class
- *  this machine does not run, one past the enum, and a ceiling no compiled class fits, like one
- *  below a monoversioned build's masks, are refused as unsupported. */
+ *  this machine does not run, a value no class takes, and a ceiling no compiled class fits, like
+ *  one below a monoversioned build's masks, are refused as unsupported. */
 inline expected<cpu_ceiling_t> pick_cpu_ceiling(uform_cpu_class_t pinned) noexcept {
     cpu_ceiling_t picked;
     if (nk_cpu_capabilities_enabled(&picked.compute) != nk_success_k) picked.compute = nk_cap_serial_k;
     picked.sync = fu::cpu_capabilities();
     if (pinned != uform_cpu_class_unknown_k) {
-        if (pinned > uform_cpu_class_monoversioned_k)
-            return expected<cpu_ceiling_t>::fail(status_t::unsupported_k, "no CPU class has that ordinal");
+        if (!listed_in(cpu_classes_k, pinned))
+            return expected<cpu_ceiling_t>::fail(status_t::unsupported_k, "no CPU class has that value");
         cpu_class_t const pinned_class = cpu_class_of(pinned);
         cpu_ceiling_t const wanted {numkong_capabilities_of(pinned_class), forkunion_capabilities_of(pinned_class)};
         if ((picked.compute & wanted.compute) != wanted.compute || (picked.sync & wanted.sync) != wanted.sync)
             return expected<cpu_ceiling_t>::fail(status_t::unsupported_k, "the CPU does not run the pinned class");
         picked = wanted;
     }
-    for (auto rung = uform_cpu_class_serial_k; rung <= uform_cpu_class_monoversioned_k;
-         rung = static_cast<uform_cpu_class_t>(rung + 1))
+    for (uform_cpu_class_t const rung : cpu_classes_k)
         if (cpu_class_compiled(cpu_class_of(rung)) && cpu_rung_fits(cpu_class_of(rung), picked)) return picked;
     return expected<cpu_ceiling_t>::fail(status_t::unsupported_k, "the build compiled no class under that ceiling");
 }

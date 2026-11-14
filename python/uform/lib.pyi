@@ -97,23 +97,24 @@ class CPUClass(IntEnum):
     """The CPU families dispatch picks from, valued as `uform_cpu_class_t`; a RAM placement may pin one."""
 
     SERIAL = 1
-    INTEL_HASWELL = 2
-    INTEL_SIERRA = 3
-    INTEL_SKYLAKE = 4
-    INTEL_ICELAKE = 5
-    AMD_GENOA = 6
-    INTEL_SAPPHIRE = 7
-    INTEL_GRANITE = 8
-    INTEL_DIAMOND = 9
-    AWS_G2 = 10
-    APPLE_M2 = 11
-    APPLE_M4 = 12
-    AWS_G5 = 13
-    NVIDIA_VERA = 14
-    ALIBABA_C930 = 15
-    WASM32_V128 = 16
-    WASM64_EXTENDED = 17
-    MONOVERSIONED = 18
+    MONOVERSIONED = 2
+    INTEL_HASWELL = 3
+    INTEL_SIERRA = 4
+    INTEL_SKYLAKE = 5
+    INTEL_ICELAKE = 6
+    AMD_GENOA = 7
+    INTEL_SAPPHIRE = 8
+    INTEL_GRANITE = 9
+    INTEL_DIAMOND = 10
+    AWS_G2 = 12
+    APPLE_M2 = 13
+    APPLE_M4 = 14
+    AWS_G5 = 15
+    NVIDIA_VERA = 16
+    ALIBABA_C930 = 17
+    IBM_POWER10 = 18
+    WASM32_V128 = 19
+    WASM64_EXTENDED = 20
 
 class GPUClass(IntEnum):
     """The GPU families dispatch picks from, valued as `uform_gpu_class_t`; a VRAM placement may pin one."""

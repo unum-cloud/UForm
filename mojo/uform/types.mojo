@@ -333,40 +333,42 @@ struct CPUClass(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     """Derives the CPU's own class."""
     comptime SERIAL = Self(1)
     """The portable floor: no SIMD assumptions."""
-    comptime INTEL_HASWELL = Self(2)
-    """Haswell-class x86: AVX2 and FMA."""
-    comptime INTEL_SIERRA = Self(3)
-    """Sierra Forest-class x86: AVX-VNNI without AVX-512."""
-    comptime INTEL_SKYLAKE = Self(4)
-    """Skylake-class x86: the AVX-512 foundation tier."""
-    comptime INTEL_ICELAKE = Self(5)
-    """Icelake-class x86: AVX-512 VNNI and VPOPCNT."""
-    comptime AMD_GENOA = Self(6)
-    """Genoa-class x86: native bf16 dot products over AVX-512."""
-    comptime INTEL_SAPPHIRE = Self(7)
-    """Sapphire Rapids-class x86: AVX-512 FP16 and the AMX-BF16 and AMX-INT8 tiles."""
-    comptime INTEL_GRANITE = Self(8)
-    """Granite Rapids-class x86: the Sapphire Rapids bundle plus the AMX-FP16 tiles."""
-    comptime INTEL_DIAMOND = Self(9)
-    """Diamond Rapids-class x86: the Granite Rapids bundle plus AVX10.2's FP8 conversions."""
-    comptime AWS_G2 = Self(10)
-    """Graviton2-class Arm, the bare NEON floor."""
-    comptime APPLE_M2 = Self(11)
-    """Armv8.6+ NEON: dot products, bf16 and f16 fused multiplies."""
-    comptime APPLE_M4 = Self(12)
-    """Apple M4-class Arm: the Armv8.6 NEON bundle plus the SME outer-product tiles."""
-    comptime AWS_G5 = Self(13)
-    """Graviton5-class Arm, Neoverse V3."""
-    comptime NVIDIA_VERA = Self(14)
-    """Vera-class Arm with FP8 dot products."""
-    comptime ALIBABA_C930 = Self(15)
-    """Alibaba C930-class RISC-V with RVA23 vectors."""
-    comptime WASM32_V128 = Self(16)
-    """WebAssembly every engine loads: 32-bit, single-threaded, simd128."""
-    comptime WASM64_EXTENDED = Self(17)
-    """WebAssembly with relaxed SIMD, shared memory, and 64-bit addressing."""
-    comptime MONOVERSIONED = Self(18)
+    comptime MONOVERSIONED = Self(2)
     """The one class of a monoversioned build."""
+    comptime INTEL_HASWELL = Self(3)
+    """Haswell-class x86: AVX2 and FMA."""
+    comptime INTEL_SIERRA = Self(4)
+    """Sierra Forest-class x86: AVX-VNNI without AVX-512."""
+    comptime INTEL_SKYLAKE = Self(5)
+    """Skylake-class x86: the AVX-512 foundation tier."""
+    comptime INTEL_ICELAKE = Self(6)
+    """Icelake-class x86: AVX-512 VNNI and VPOPCNT."""
+    comptime AMD_GENOA = Self(7)
+    """Genoa-class x86: native bf16 dot products over AVX-512."""
+    comptime INTEL_SAPPHIRE = Self(8)
+    """Sapphire Rapids-class x86: AVX-512 FP16 and the AMX-BF16 and AMX-INT8 tiles."""
+    comptime INTEL_GRANITE = Self(9)
+    """Granite Rapids-class x86: the Sapphire Rapids bundle plus the AMX-FP16 tiles."""
+    comptime INTEL_DIAMOND = Self(10)
+    """Diamond Rapids-class x86: the Granite Rapids bundle plus AVX10.2's FP8 conversions."""
+    comptime AWS_G2 = Self(12)
+    """Graviton2-class Arm, the bare NEON floor."""
+    comptime APPLE_M2 = Self(13)
+    """Armv8.6+ NEON: dot products, bf16 and f16 fused multiplies."""
+    comptime APPLE_M4 = Self(14)
+    """Apple M4-class Arm: the Armv8.6 NEON bundle plus the SME outer-product tiles."""
+    comptime AWS_G5 = Self(15)
+    """Graviton5-class Arm, Neoverse V3."""
+    comptime NVIDIA_VERA = Self(16)
+    """Vera-class Arm with FP8 dot products."""
+    comptime ALIBABA_C930 = Self(17)
+    """Alibaba C930-class RISC-V with RVA23 vectors."""
+    comptime IBM_POWER10 = Self(18)
+    """IBM POWER10-class Power: VSX vectors and MMA accumulators."""
+    comptime WASM32_V128 = Self(19)
+    """WebAssembly every engine loads: 32-bit, single-threaded, simd128."""
+    comptime WASM64_EXTENDED = Self(20)
+    """WebAssembly with relaxed SIMD, shared memory, and 64-bit addressing."""
 
 
 @fieldwise_init

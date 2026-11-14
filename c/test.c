@@ -221,18 +221,27 @@ static void test_library_probes(void) {
                tier == uform_multimem_tier_peer_read_k,
            "An unrecognized multimem tier fails rather than reading as switch-reduced");
 
-    for (uform_cpu_class_t code = uform_cpu_class_serial_k; code <= uform_cpu_class_wasm64_extended_k; ++code) {
+    // Classes fit a byte, so walking every byte meets each class and every gap between blocks.
+    for (int value = 1; value != 256; ++value) {
+        uform_cpu_class_t const code = (uform_cpu_class_t)value;
+        char const *const spelled = uform_cpu_class_name(code);
         uform_cpu_class_t read = uform_cpu_class_unknown_k;
-        expect(uform_cpu_class_from_name(view_of(uform_cpu_class_name(code)), &read) == uform_status_success_k &&
-                   read == code,
-               "Every CPU class reads back from its name");
+        uform_status_t const status = uform_cpu_class_from_name(view_of(spelled), &read);
+        expect(strcmp(spelled, "unrecognized") == 0 ? status == uform_status_invalid_argument_k
+                                                    : status == uform_status_success_k && read == code,
+               "Every CPU class reads back from its name, and a gap spells none");
     }
-    for (uform_gpu_class_t code = uform_gpu_class_nvidia_ampere_k; code <= uform_gpu_class_apple_metal10_k; ++code) {
+    for (int value = 1; value != 256; ++value) {
+        uform_gpu_class_t const code = (uform_gpu_class_t)value;
+        char const *const spelled = uform_gpu_class_name(code);
         uform_gpu_class_t read = uform_gpu_class_unknown_k;
-        expect(uform_gpu_class_from_name(view_of(uform_gpu_class_name(code)), &read) == uform_status_success_k &&
-                   read == code,
-               "Every GPU class reads back from its name");
+        uform_status_t const status = uform_gpu_class_from_name(view_of(spelled), &read);
+        expect(strcmp(spelled, "unrecognized") == 0 ? status == uform_status_invalid_argument_k
+                                                    : status == uform_status_success_k && read == code,
+               "Every GPU class reads back from its name, and a gap spells none");
     }
+    expect(strcmp(uform_cpu_class_name(uform_cpu_class_ibm_power10_k), "ibm-power10") == 0,
+           "The Power class spells its name as USearch does");
     expect(strcmp(uform_cpu_class_name(uform_cpu_class_intel_haswell_k), "intel-haswell") == 0,
            "A CPU class spells its name as USearch does");
     uform_gpu_class_t untouched_gpu_class = uform_gpu_class_nvidia_ada_k;

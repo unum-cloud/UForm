@@ -228,6 +228,16 @@ uform_cpu_class(
     rvvbb
     RVVBB
 )
+uform_cpu_class(
+    ibm_power10
+    IBM_POWER10
+    OVER
+    serial
+    powervsx
+    POWERVSX
+    powermma
+    POWERMMA
+)
 uform_cpu_class(wasm32_v128 WASM32_V128 OVER serial v128 V128)
 uform_cpu_class(wasm64_extended WASM64_EXTENDED OVER wasm32_v128 v128relaxed V128RELAXED)
 

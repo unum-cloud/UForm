@@ -297,8 +297,8 @@ static bool named(uform_bytes_view_t name, sz::string_view_t spelling) noexcept 
 
 /** Writes to @p output the one of @p values that @p spell spells as @p name, or fails with
  *  @c uform_status_invalid_argument_k and writes nothing. */
-template <typename value_type_>
-static uform_status_t read_name(uform_bytes_view_t name, std::initializer_list<value_type_> values,
+template <typename value_type_, std::size_t count_>
+static uform_status_t read_name(uform_bytes_view_t name, value_type_ const (&values)[count_],
                                 char const *(*spell)(value_type_), value_type_ *output) noexcept {
     if (!output) return uform_status_invalid_argument_k;
     for (value_type_ const value : values)
@@ -601,6 +601,7 @@ UFORM_EXPORT char const *uform_cpu_class_name(uform_cpu_class_t cpu_class) {
     case uform_cpu_class_aws_g5_k: return "aws-g5";
     case uform_cpu_class_nvidia_vera_k: return "nvidia-vera";
     case uform_cpu_class_alibaba_c930_k: return "alibaba-c930";
+    case uform_cpu_class_ibm_power10_k: return "ibm-power10";
     case uform_cpu_class_wasm32_v128_k: return "wasm32-v128";
     case uform_cpu_class_wasm64_extended_k: return "wasm64-extended";
     case uform_cpu_class_monoversioned_k: return "monoversioned";
@@ -609,15 +610,7 @@ UFORM_EXPORT char const *uform_cpu_class_name(uform_cpu_class_t cpu_class) {
 }
 
 UFORM_EXPORT uform_status_t uform_cpu_class_from_name(uform_bytes_view_t name, uform_cpu_class_t *cpu_class) {
-    return read_name<uform_cpu_class_t>(
-        name,
-        {uform_cpu_class_serial_k, uform_cpu_class_intel_haswell_k, uform_cpu_class_intel_sierra_k,
-         uform_cpu_class_intel_skylake_k, uform_cpu_class_intel_icelake_k, uform_cpu_class_amd_genoa_k,
-         uform_cpu_class_intel_sapphire_k, uform_cpu_class_intel_granite_k, uform_cpu_class_intel_diamond_k,
-         uform_cpu_class_aws_g2_k, uform_cpu_class_apple_m2_k, uform_cpu_class_apple_m4_k, uform_cpu_class_aws_g5_k,
-         uform_cpu_class_nvidia_vera_k, uform_cpu_class_alibaba_c930_k, uform_cpu_class_wasm32_v128_k,
-         uform_cpu_class_wasm64_extended_k, uform_cpu_class_monoversioned_k},
-        uform_cpu_class_name, cpu_class);
+    return read_name<uform_cpu_class_t>(name, cpu_classes_k, uform_cpu_class_name, cpu_class);
 }
 
 UFORM_EXPORT char const *uform_gpu_class_name(uform_gpu_class_t gpu_class) {
@@ -640,13 +633,7 @@ UFORM_EXPORT char const *uform_gpu_class_name(uform_gpu_class_t gpu_class) {
 }
 
 UFORM_EXPORT uform_status_t uform_gpu_class_from_name(uform_bytes_view_t name, uform_gpu_class_t *gpu_class) {
-    return read_name<uform_gpu_class_t>(
-        name,
-        {uform_gpu_class_nvidia_ampere_k, uform_gpu_class_nvidia_ada_k, uform_gpu_class_nvidia_hopper_k,
-         uform_gpu_class_nvidia_blackwell_k, uform_gpu_class_nvidia_blackwellrtx_k, uform_gpu_class_nvidia_rubin_k,
-         uform_gpu_class_amd_cdna3_k, uform_gpu_class_amd_cdna4_k, uform_gpu_class_amd_cdna5_k,
-         uform_gpu_class_apple_metal7_k, uform_gpu_class_apple_metal9_k, uform_gpu_class_apple_metal10_k},
-        uform_gpu_class_name, gpu_class);
+    return read_name<uform_gpu_class_t>(name, gpu_classes_k, uform_gpu_class_name, gpu_class);
 }
 
 UFORM_EXPORT char const *uform_modality_name(uform_modality_t modality) {

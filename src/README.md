@@ -43,7 +43,7 @@ A CPU class is its parent plus a delta.
 
 - x86: `intel_diamond` → `intel_granite` → `intel_sapphire` → `amd_genoa` → `intel_icelake` → `intel_skylake` → `intel_sierra` → `intel_haswell`.
 - Arm: `nvidia_vera` → `apple_m4` → `apple_m2` → `aws_g2`, with `aws_g5` declared but compiled by no build.
-- RISC-V: `alibaba_c930`, and WebAssembly: `wasm64_extended` → `wasm32_v128`.
+- RISC-V: `alibaba_c930`, Power: `ibm_power10`, and WebAssembly: `wasm64_extended` → `wasm32_v128`.
 
 `nvidia_ladder_t` reads `nvidia_blackwellrtx` → `nvidia_blackwell` → `nvidia_hopper` → `nvidia_ada` → `nvidia_ampere`, and `amd_ladder_t` reads `amd_cdna5` → `amd_cdna4` → `amd_cdna3`.
 Each ends on its vendor floor, `gpu_class_t::unknown_k`, which runs NumKong's generic kits on any device of the vendor without a class of its own.

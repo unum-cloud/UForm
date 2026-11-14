@@ -28,8 +28,9 @@ elseif (UFORM_MARCH AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^wasm")
         message(FATAL_ERROR "MSVC takes UFORM_MARCH=native only; pass an /arch: value such as AVX2, AVX512 or AVX10.2 "
                             "through CMAKE_CXX_FLAGS instead of `${UFORM_MARCH}`"
         )
-    elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|AARCH64|arm64|ARM64)$")
-        # AArch64 names CPUs through `-mcpu`, like `neoverse-v2`, as `-march` takes only architecture versions.
+    elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|AARCH64|arm64|ARM64|ppc64|ppc64le|powerpc64|powerpc64le)$")
+        # AArch64 names CPUs through `-mcpu`, like `neoverse-v2`, as `-march` takes only architecture versions, and
+        # Power compilers have no `-march`.
         target_compile_options(uform_warnings INTERFACE "$<$<COMPILE_LANGUAGE:C,CXX>:-mcpu=${UFORM_MARCH}>")
     else ()
         target_compile_options(uform_warnings INTERFACE "$<$<COMPILE_LANGUAGE:C,CXX>:-march=${UFORM_MARCH}>")
@@ -42,4 +43,6 @@ elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
     target_compile_options(uform_warnings INTERFACE "$<$<COMPILE_LANGUAGE:C,CXX>:-march=x86-64>")
 elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^riscv64$")
     target_compile_options(uform_warnings INTERFACE "$<$<COMPILE_LANGUAGE:C,CXX>:-march=rv64gc>")
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(ppc64|ppc64le|powerpc64|powerpc64le)$")
+    target_compile_options(uform_warnings INTERFACE "$<$<COMPILE_LANGUAGE:C,CXX>:-mcpu=power8>")
 endif ()

@@ -737,67 +737,71 @@ impl FromStr for Scalar {
 pub enum CPUClass {
     /// The portable floor: no SIMD assumptions.
     Serial = 1,
-    /// Haswell-class x86: AVX2 & FMA, the 256-bit floor.
-    IntelHaswell = 2,
-    /// Sierra Forest-class x86 - the E-core Xeons: AVX-VNNI and its successors without AVX-512.
-    IntelSierra = 3,
-    /// Skylake-class x86: the AVX-512 foundation tier.
-    IntelSkylake = 4,
-    /// Icelake-class x86: AVX-512 VNNI & VPOPCNT.
-    IntelIcelake = 5,
-    /// Genoa-class x86 - Zen 4 and newer: native bf16 dot products over AVX-512.
-    AmdGenoa = 6,
-    /// Sapphire Rapids-class x86: the Genoa bundle plus AVX-512 FP16 and the AMX-BF16
-    /// & AMX-INT8 tiles.
-    IntelSapphire = 7,
-    /// Granite Rapids-class x86: the Sapphire Rapids bundle plus the AMX-FP16 tiles.
-    IntelGranite = 8,
-    /// Diamond Rapids-class x86: the Granite Rapids bundle plus AVX10.2's FP8 conversions.
-    IntelDiamond = 9,
-    /// Graviton2-class Arm - Neoverse N1, the bare NEON floor; phones predating Armv8.6
-    /// land here too.
-    AwsG2 = 10,
-    /// Armv8.6+ NEON: dot products, bf16 & f16 fused multiplies - Apple M2, Cortex-A710 &
-    /// X2 class silicon.
-    AppleM2 = 11,
-    /// Apple M4-class Arm: the Armv8.6 NEON bundle plus the SME outer-product tiles.
-    AppleM4 = 12,
-    /// Graviton5-class Arm - Neoverse V3, Armv9.2.
-    AwsG5 = 13,
-    /// Vera-class Arm - NVIDIA's Armv9.2-generation cores with FP8 dot products.
-    NvidiaVera = 14,
-    /// Alibaba C930-class RISC-V - T-Head's XuanTie core, RVA23 vectors.
-    AlibabaC930 = 15,
-    /// WebAssembly every engine loads: 32-bit, single-threaded, the fixed-width simd128 tier.
-    Wasm32V128 = 16,
-    /// WebAssembly with relaxed SIMD, shared memory for real thread pools, and 64-bit addressing.
-    Wasm64Extended = 17,
     /// The one class of a monoversioned build: every capability its floor implies or its preset
     /// vouches for, as the kernel libraries compiled them.
-    Monoversioned = 18,
+    Monoversioned = 2,
+    /// Haswell-class x86: AVX2 & FMA, the 256-bit floor.
+    IntelHaswell = 3,
+    /// Sierra Forest-class x86 - the E-core Xeons: AVX-VNNI and its successors without AVX-512.
+    IntelSierra = 4,
+    /// Skylake-class x86: the AVX-512 foundation tier.
+    IntelSkylake = 5,
+    /// Icelake-class x86: AVX-512 VNNI & VPOPCNT.
+    IntelIcelake = 6,
+    /// Genoa-class x86 - Zen 4 and newer: native bf16 dot products over AVX-512.
+    AMDGenoa = 7,
+    /// Sapphire Rapids-class x86: the Genoa bundle plus AVX-512 FP16 and the AMX-BF16
+    /// & AMX-INT8 tiles.
+    IntelSapphire = 8,
+    /// Granite Rapids-class x86: the Sapphire Rapids bundle plus the AMX-FP16 tiles.
+    IntelGranite = 9,
+    /// Diamond Rapids-class x86: the Granite Rapids bundle plus AVX10.2's FP8 conversions.
+    IntelDiamond = 10,
+    /// Graviton2-class Arm - Neoverse N1, the bare NEON floor; phones predating Armv8.6
+    /// land here too.
+    AWSG2 = 12,
+    /// Armv8.6+ NEON: dot products, bf16 & f16 fused multiplies - Apple M2, Cortex-A710 &
+    /// X2 class silicon.
+    AppleM2 = 13,
+    /// Apple M4-class Arm: the Armv8.6 NEON bundle plus the SME outer-product tiles.
+    AppleM4 = 14,
+    /// Graviton5-class Arm - Neoverse V3, Armv9.2.
+    AWSG5 = 15,
+    /// Vera-class Arm - NVIDIA's Armv9.2-generation cores with FP8 dot products.
+    NVIDIAVera = 16,
+    /// Alibaba C930-class RISC-V - T-Head's XuanTie core, RVA23 vectors.
+    AlibabaC930 = 17,
+    /// IBM POWER10-class Power, ISA 3.1: VSX vectors, the MMA outer-product accumulators and
+    /// `pause_short` waits.
+    IBMPower10 = 18,
+    /// WebAssembly every engine loads: 32-bit, single-threaded, the fixed-width simd128 tier.
+    Wasm32V128 = 19,
+    /// WebAssembly with relaxed SIMD, shared memory for real thread pools, and 64-bit addressing.
+    Wasm64Extended = 20,
 }
 
 impl CPUClass {
     pub(crate) fn from_raw(value: uform_cpu_class_t) -> Option<Self> {
         let cpu_class = match value {
             1 => CPUClass::Serial,
-            2 => CPUClass::IntelHaswell,
-            3 => CPUClass::IntelSierra,
-            4 => CPUClass::IntelSkylake,
-            5 => CPUClass::IntelIcelake,
-            6 => CPUClass::AmdGenoa,
-            7 => CPUClass::IntelSapphire,
-            8 => CPUClass::IntelGranite,
-            9 => CPUClass::IntelDiamond,
-            10 => CPUClass::AwsG2,
-            11 => CPUClass::AppleM2,
-            12 => CPUClass::AppleM4,
-            13 => CPUClass::AwsG5,
-            14 => CPUClass::NvidiaVera,
-            15 => CPUClass::AlibabaC930,
-            16 => CPUClass::Wasm32V128,
-            17 => CPUClass::Wasm64Extended,
-            18 => CPUClass::Monoversioned,
+            2 => CPUClass::Monoversioned,
+            3 => CPUClass::IntelHaswell,
+            4 => CPUClass::IntelSierra,
+            5 => CPUClass::IntelSkylake,
+            6 => CPUClass::IntelIcelake,
+            7 => CPUClass::AMDGenoa,
+            8 => CPUClass::IntelSapphire,
+            9 => CPUClass::IntelGranite,
+            10 => CPUClass::IntelDiamond,
+            12 => CPUClass::AWSG2,
+            13 => CPUClass::AppleM2,
+            14 => CPUClass::AppleM4,
+            15 => CPUClass::AWSG5,
+            16 => CPUClass::NVIDIAVera,
+            17 => CPUClass::AlibabaC930,
+            18 => CPUClass::IBMPower10,
+            19 => CPUClass::Wasm32V128,
+            20 => CPUClass::Wasm64Extended,
             _ => return None,
         };
         Some(cpu_class)
@@ -827,23 +831,23 @@ impl FromStr for CPUClass {
 #[non_exhaustive]
 pub enum GPUClass {
     /// Ampere-class NVIDIA and every GPU without a class of its own - A100, A10 & RTX 30.
-    NvidiaAmpere = 1,
+    NVIDIAAmpere = 1,
     /// Ada-class NVIDIA - L4, L40S & RTX 40: the fp8 conversions.
-    NvidiaAda = 2,
+    NVIDIAAda = 2,
     /// Hopper-class NVIDIA - H100 & H200.
-    NvidiaHopper = 3,
+    NVIDIAHopper = 3,
     /// Blackwell-class NVIDIA - B200, B300 & GB300.
-    NvidiaBlackwell = 4,
+    NVIDIABlackwell = 4,
     /// Consumer Blackwell NVIDIA - RTX 50, RTX PRO 6000 & DGX Spark.
-    NvidiaBlackwellRtx = 5,
+    NVIDIABlackwellRTX = 5,
     /// Rubin-class NVIDIA - the Vera-Rubin platform's device half.
-    NvidiaRubin = 6,
+    NVIDIARubin = 6,
     /// CDNA3 AMD - MI300X & MI325X: gfx942, FNUZ fp8.
-    AmdCdna3 = 7,
+    AMDCDNA3 = 7,
     /// CDNA4 AMD - MI350X & MI355X: gfx950, OCP fp8.
-    AmdCdna4 = 8,
+    AMDCDNA4 = 8,
     /// CDNA5 AMD - MI400: gfx1250.
-    AmdCdna5 = 9,
+    AMDCDNA5 = 9,
     /// Apple7-family GPUs and every Apple GPU without a class of its own - M1 & M2.
     AppleMetal7 = 10,
     /// Apple9-family GPUs - M3 & M4.
@@ -855,15 +859,15 @@ pub enum GPUClass {
 impl GPUClass {
     pub(crate) fn from_raw(value: uform_gpu_class_t) -> Option<Self> {
         let gpu_class = match value {
-            1 => GPUClass::NvidiaAmpere,
-            2 => GPUClass::NvidiaAda,
-            3 => GPUClass::NvidiaHopper,
-            4 => GPUClass::NvidiaBlackwell,
-            5 => GPUClass::NvidiaBlackwellRtx,
-            6 => GPUClass::NvidiaRubin,
-            7 => GPUClass::AmdCdna3,
-            8 => GPUClass::AmdCdna4,
-            9 => GPUClass::AmdCdna5,
+            1 => GPUClass::NVIDIAAmpere,
+            2 => GPUClass::NVIDIAAda,
+            3 => GPUClass::NVIDIAHopper,
+            4 => GPUClass::NVIDIABlackwell,
+            5 => GPUClass::NVIDIABlackwellRTX,
+            6 => GPUClass::NVIDIARubin,
+            7 => GPUClass::AMDCDNA3,
+            8 => GPUClass::AMDCDNA4,
+            9 => GPUClass::AMDCDNA5,
             10 => GPUClass::AppleMetal7,
             11 => GPUClass::AppleMetal9,
             12 => GPUClass::AppleMetal10,
@@ -1996,12 +2000,15 @@ mod tests {
     fn classes_round_trip_through_the_library() {
         assert_eq!(CPUClass::IntelHaswell.to_string(), "intel-haswell");
         assert_eq!("wasm64-extended".parse(), Ok(CPUClass::Wasm64Extended));
-        assert_eq!(GPUClass::NvidiaHopper.to_string(), "nvidia-hopper");
+        assert_eq!(GPUClass::NVIDIAHopper.to_string(), "nvidia-hopper");
         assert_eq!("apple-metal10".parse(), Ok(GPUClass::AppleMetal10));
         assert!("unknown".parse::<CPUClass>().is_err());
         assert!("intel".parse::<GPUClass>().is_err());
         assert_eq!(CPUClass::from_raw(0), None);
         assert_eq!(GPUClass::from_raw(13), None);
+        assert_eq!(CPUClass::Serial as i32, 1);
+        assert_eq!(CPUClass::Monoversioned as i32, 2);
+        assert_eq!(CPUClass::IBMPower10 as i32, 128);
     }
 
     /// A machine without GPUs, or a build without their vendors, lists none and still succeeds.

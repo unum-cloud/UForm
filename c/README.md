@@ -140,7 +140,7 @@ A `NULL` executor runs the call on the calling thread, final when it returns.
 
 ### Classes and Devices
 
-Dispatch picks one tuned variant per CPU or GPU family, named by `uform_cpu_class_t` and `uform_gpu_class_t`, whose enumerators and ordinals are USearch's.
+Dispatch picks one tuned variant per CPU or GPU family, named by `uform_cpu_class_t` and `uform_gpu_class_t`, whose enumerators and fixed values are USearch's.
 `uform_ram_options_t::cpu_class` and `uform_vram_options_t::gpu_class` pin one, and the `unknown` zero derives the hardware's own:
 
 - A CPU pin dispatches as if the CPU were of that class, taking every rung whose features it holds, and a class the CPU cannot run reports `uform_status_unsupported_k`.
