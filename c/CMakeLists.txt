@@ -47,6 +47,8 @@ add_library(uform::header ALIAS uform_header)
 set_target_properties(uform_static PROPERTIES EXPORT_NAME static)
 set_target_properties(uform_shared PROPERTIES EXPORT_NAME shared)
 set_target_properties(uform_header PROPERTIES EXPORT_NAME header)
+# MSVC reads BOM-less UTF-8 in the system code page, so consumers of these Unicode-commented headers need `/utf-8`.
+target_compile_options(uform_header INTERFACE "$<$<OR:$<COMPILE_LANG_AND_ID:C,MSVC>,$<COMPILE_LANG_AND_ID:CXX,MSVC>>:/utf-8>")
 target_include_directories(
     uform_header INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
                            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
