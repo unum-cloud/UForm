@@ -476,7 +476,7 @@ else ()
     target_sources(uform_host PRIVATE encode_media_absent.cpp)
 endif ()
 target_compile_features(uform_host PUBLIC cxx_std_23)
-target_compile_definitions(uform_host PRIVATE UFORM_EXPORTING=1)
+target_compile_definitions(uform_host PRIVATE UFORM_EXPORTING=1 UFORM_VERSION_NAME="${uform_version_name_}")
 set_target_properties(
     uform_host
     PROPERTIES C_VISIBILITY_PRESET hidden

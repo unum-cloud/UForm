@@ -19,10 +19,23 @@
  *  @c --choices-weight trains calibrated choices through the byte decoder over the mixture's
  *  @c choices entries, and @c --brier-weight sets the Brier term's weight beside their soft
  *  cross-entropy, 0.5 unless given.
+ *
+ *  Every flag reads its default from @c UFORM_<FLAG> , so @c UFORM_TIER=tiny stands for @c --tier
+ *  @c tiny . Each step prints, at most once a second, the steps done of the run. On one host the
+ *  first SIGINT or SIGTERM stops the run before its next step: it writes the checkpoint at the
+ *  steps completed, prints the phase it stopped in, and exits with 130. Across hosts a signal ends
+ *  the process at once, since one host leaving the step loop alone would leave its peers waiting
+ *  in their next collective forever.
  */
+#include <cmath>   // `std::isfinite`
+#include <csignal> // `std::signal`, `SIGINT`, `SIGTERM`
 #include <cstdlib> // `::setenv`, `std::getenv` — the launcher-contract boundary
 #include <cstring> // `std::strlen`
 #include <cstdio>  // `std::setvbuf`, `stdout`
+
+#include <array>       // `std::array` - the flag table
+#include <limits>      // `std::numeric_limits` - the bounds of the 32-bit counts
+#include <string_view> // `std::string_view`
 
 #include <cuda.h>       // `cuInit`, `cuDeviceGetCount`
 #include <fmt/format.h> // `fmt::println`
@@ -30,6 +43,8 @@
 #include "uform/train/datasets.hpp" // `mixture_t`, `dataset_source_t`, and the trainer
 
 #include "train/numerics.hpp" // `gpu_numerics_of`
+
+#include "arguments.hpp" // `flag_t`, `parse_or_exit`, `stop_requested`, `verb_phase_t`
 
 /** Prints a StringZilla view as the text it spans. */
 template <>
@@ -39,15 +54,9 @@ struct fmt::formatter<ashvardanian::stringzilla::string_view_t> : fmt::formatter
     }
 };
 
-/** Prints an owning StringZilla string as the text it holds. */
-template <>
-struct fmt::formatter<ashvardanian::stringzilla::string_t> : fmt::formatter<std::string_view> {
-    auto format(std::string_view text, fmt::format_context& context) const {
-        return fmt::formatter<std::string_view>::format(text, context);
-    }
-};
-
+namespace ue = unum::uform::encoder;
 namespace ul = unum::uform::loaders;
+namespace tools = unum::uform::tools;
 using namespace unum::uform::train;
 
 /** Tag @p message with the binary name, write it to standard error, and hand back
@@ -59,7 +68,7 @@ using namespace unum::uform::train;
 
 /** Step @p trainer from its completed steps to @c config.steps over @p source , with
  *  telemetry, checkpoints and held-out evaluations over @p held_out on cadence, and a
- *  checkpoint at the end. */
+ *  checkpoint at the end, or at the step a signal stopped the run before. */
 [[nodiscard]] static int step_(trainer_t& trainer, trainer_config_t const& config, batch_source_t source,
                                batch_source_t held_out) noexcept {
     auto checkpoint = [&]() noexcept {
@@ -69,12 +78,16 @@ using namespace unum::uform::train;
         return saved;
     };
     step_report_t report;
+    tools::verb_phase_t phase {.name = "train", .unit = "steps"};
     for (u32_t ordinal = trainer.completed_steps; ordinal < config.steps; ++ordinal) {
+        if (tools::stop_requested) break;
         if (expected_t stepped = trainer.step(source, optimizer_step_t {ordinal}, report); !stepped) {
             fmt::println(stderr, "uform_base: step {} failed: {}", ordinal, stepped.description_);
             return 1;
         }
         u32_t const completed = ordinal + 1u;
+        // The loop polls the flag itself, so the answer the handler gives the library goes unread.
+        [[maybe_unused]] uform_continuation_t const reported = tools::verb_progress(completed, config.steps, &phase);
         if (config.report_every && completed % config.report_every == 0u)
             trainer.telemetry(optimizer_step_t {ordinal}).report();
         if (config.eval_every && completed % config.eval_every == 0u) {
@@ -88,6 +101,7 @@ using namespace unum::uform::train;
             completed != config.steps)
             if (expected_t saved = checkpoint(); !saved) return fail_out_(saved.description_.view());
     }
+    if (tools::stop_requested) tools::verb_stopped(phase);
     if (!config.checkpoint.empty())
         if (expected_t saved = checkpoint(); !saved) return fail_out_(saved.description_.view());
     if (expected_t drained = trainer.synchronize(); !drained) return fail_out_(drained.description_.view());
@@ -96,6 +110,7 @@ using namespace unum::uform::train;
         if (expected_t reported = trainer.ledger.report(trainer.streams[0]); !reported)
             fmt::println(stderr, "uform_base: {}", reported.description_);
     }
+    if (tools::stop_requested) return tools::exit_stopped_k;
     fmt::println("uform_base: done");
     return 0;
 }
@@ -173,11 +188,156 @@ using namespace unum::uform::train;
     else if (expected_t made = dataset_source_t::make(datasets, trainer, config.batches_per_fill); !made)
         return fail_out_(made.description_.view());
     else stepped = step_(trainer, config, batch_source_of(datasets), evaluated);
-    // No host tears its queue pairs down while a peer still awaits its last acknowledgement.
+    // No host tears its queue pairs down while a peer still awaits its last acknowledgement; a
+    // stopped run is a single host's, so it has no peer to wait for.
     if (stepped == 0)
         if (expected_t finished = mesh.topology.barrier("finish", mesh.timeout_seconds); !finished)
             return fail_out_(finished.description_.view());
     return stepped;
+}
+
+/** Exits with status 1 after printing that @p flag 's @p value does not parse as @p expected ,
+ *  the line every flag table prints. */
+template <typename value_type_>
+[[noreturn]] static void exit_unparsed_(std::string_view flag, value_type_ const& value,
+                                        std::string_view expected) noexcept {
+    fmt::println(stderr, "{}=\"{}\" does not parse, expected {}", flag, value, expected);
+    std::exit(1);
+}
+
+/** The finite non-negative real @p value , or the exit naming @p flag ; a @p positive one
+ *  also refuses zero. */
+static f32_t weight_or_exit_(std::string_view flag, double value, bool positive = false) noexcept {
+    if (!std::isfinite(value) || (positive && value == 0))
+        exit_unparsed_(flag, value, positive ? "a positive real" : "a non-negative real");
+    return static_cast<f32_t>(value);
+}
+
+/** Parse @p argv and its @c UFORM_ variables into a run description, or exit: with status 0 after
+ *  the usage on @c --help , with status 1 after one line on a value that does not parse. */
+[[nodiscard]] static trainer_config_t parse_config_(int argc, char const* const* argv) noexcept {
+    using tools::count_t, tools::flag_t, tools::switch_t;
+    trainer_config_t config;
+    std::size_t constexpr u32_max_k = (std::numeric_limits<u32_t>::max)();
+    std::string_view tier_name, mixture, eval_mixture, checkpoint, resume, telemetry;
+    count_t steps {config.steps, 0, u32_max_k}, rows {0, 0, u32_max_k},
+        warmup_steps {config.warmup_steps, 0, u32_max_k}, nvdec_engines {config.nvdec_engines, 0, u32_max_k},
+        batches_per_fill {config.batches_per_fill}, checkpoint_every {config.checkpoint_every, 0, u32_max_k},
+        report_every {config.report_every, 0, u32_max_k}, eval_every {config.eval_every, 0, u32_max_k};
+    // A negative rate is no value a flag parses to, so it stands for the tier's own.
+    double learning_rate = -1, late_interaction_weight = config.late_interaction.weight,
+           choices_weight = config.choices.weight, brier_weight = config.choices.brier_weight,
+           tcr_lambda = config.tcr_lambda, tcr_epsilon_squared = config.tcr_epsilon_squared,
+           lipschitz_lambda = config.lipschitz_lambda, grad_spike_threshold = config.grad_spike_threshold;
+    std::uint32_t seed = static_cast<std::uint32_t>(config.seed);
+    uform_objective_t objective = uform_objective_masked_k;
+    uform_pair_loss_form_t pair_loss = uform_pair_loss_form_derived_k;
+    switch_t eager = switch_t::absent_k;
+    std::array<flag_t, 26> const flags {{
+        {"--tier", "name", "tiny, small, medium, large or xl: the width, depth, rows and learning rate", &tier_name},
+        {"--mixture", "path", "a mixture JSON, or the synthetic tokens or omni draw", &mixture},
+        {"--objective", "name", "masked, contrastive or joint: which losses a step relaxes", &objective},
+        {"--steps", "count", "the run's length in optimizer steps, counted across resumes", &steps},
+        {"--rows", "count", "rows per GPU, zero to measure them from free memory", &rows},
+        {"--learning-rate", "real", "the peak learning rate, the tier's unless given", &learning_rate},
+        {"--warmup-steps", "count", "linear warmup steps, zero for a tenth of the run up to 400", &warmup_steps},
+        {"--seed", "seed", "the run's base seed, which every draw derives from", &seed},
+        {"--nvdec-engines", "count", "the NVDEC engines a GPU carries, which a video mixture needs", &nvdec_engines},
+        {"--batches-per-fill", "count", "steps' batches one data fill packs per GPU", &batches_per_fill},
+        {"--pair-loss", "name", "the contrastive pair loss, each starting at its own logit scale", &pair_loss},
+        {"--late-interaction-weight", "real", "the late-interaction loss's weight, zero for none",
+         &late_interaction_weight},
+        {"--choices-weight", "real", "the calibrated choices' weight, zero for none", &choices_weight},
+        {"--brier-weight", "real", "the Brier term's weight beside the choices' cross-entropy", &brier_weight},
+        {"--tcr-lambda", "real", "the Total Coding Rate's weight, zero for none", &tcr_lambda},
+        {"--tcr-epsilon-squared", "real", "the Total Coding Rate's positive distortion target", &tcr_epsilon_squared},
+        {"--lipschitz-lambda", "real", "the Lipschitz penalty's weight, zero for none", &lipschitz_lambda},
+        {"--grad-spike-threshold", "real", "the gradient-norm spike that fails a step, zero for none",
+         &grad_spike_threshold},
+        {"--checkpoint", "path", "where the checkpoint is written, none unless given", &checkpoint},
+        {"--checkpoint-every", "count", "steps between checkpoints, zero for the last alone", &checkpoint_every},
+        {"--report-every", "count", "steps between telemetry lines, zero for none", &report_every},
+        {"--eval-every", "count", "steps between held-out evaluations, zero for none", &eval_every},
+        {"--eval-mixture", "path", "the mixture JSON the held-out evaluations draw from", &eval_mixture},
+        {"--resume", "path", "a checkpoint to continue from, at its saved step", &resume},
+        {"--telemetry", "names", "signals or timings, comma-separated: the extra ledger channels", &telemetry},
+        {"--eager", "", "run every step eagerly, without capturing the model region", &eager},
+    }};
+    tools::parse_or_exit(argc, argv, "uform_base --tier <name> [flags]", flags);
+
+    trainer_tier_t const* tier = nullptr;
+    for (trainer_tier_t const& known : trainer_tiers_k)
+        if (tier_name == known.name) tier = &known;
+    if (tier_name.empty())
+        fmt::println(stderr, "uform_base: pass --tier tiny, small, medium, large or xl"), std::exit(1);
+    if (!tier) exit_unparsed_("--tier", tier_name, "tiny, small, medium, large or xl");
+    config.tier = *tier;
+    config.hidden = tier->hidden, config.depth = tier->depth;
+    config.learning_rate = learning_rate < 0 ? tier->learning_rate
+                                             : weight_or_exit_("--learning-rate", learning_rate, true);
+    // Every tier trains the nested prefixes 64…1024 that fit its width, then the full width.
+    for (u32_t width = 64u; width <= (tier->hidden < 1024u ? tier->hidden : 1024u) && width != tier->hidden;
+         width *= 2u)
+        config.contrastive.matryoshka_dimensions[config.contrastive.matryoshka_count++] = width;
+    config.contrastive.matryoshka_dimensions[config.contrastive.matryoshka_count++] = tier->hidden;
+
+    if (mixture.ends_with(".json")) config.mixture = mixture;
+    else if (mixture == "omni") {
+        // The omni preset: 8-pixel RGB patches, 2-frame RGB tubes, 320-sample audio frames.
+        config.batch.image = ue::image_batch_shape_t {8u, 3u};
+        config.batch.video = ue::video_batch_shape_t {8u, 3u, 2u, 1u};
+        config.batch.audio = ue::audio_batch_shape_t {320u, 16000u};
+    }
+    else if (!mixture.empty() && mixture != "tokens")
+        exit_unparsed_("--mixture", mixture, "a path ending in .json, tokens or omni");
+    if (!eval_mixture.empty() && !eval_mixture.ends_with(".json"))
+        exit_unparsed_("--eval-mixture", eval_mixture, "a path ending in .json");
+    config.eval_mixture = eval_mixture;
+    config.checkpoint = checkpoint;
+    config.resume = resume;
+    for (std::string_view names = telemetry; !names.empty();) {
+        std::size_t const comma = names.find(',');
+        std::string_view const name = names.substr(0, comma);
+        if (name == "signals") config.telemetry_channels |= telemetry_signals_k;
+        else if (name == "timings") config.telemetry_channels |= telemetry_timings_k;
+        else exit_unparsed_("--telemetry", telemetry, "signals or timings, comma-separated");
+        names = comma == std::string_view::npos ? std::string_view {} : names.substr(comma + 1);
+    }
+
+    switch (objective) {
+    case uform_objective_masked_k: config.objective = objective_t::masked_k; break;
+    case uform_objective_contrastive_k: config.objective = objective_t::contrastive_k; break;
+    case uform_objective_joint_k: config.objective = objective_t::joint_k; break;
+    }
+    if (pair_loss != uform_pair_loss_form_derived_k) {
+        config.contrastive.pair_loss = pair_loss == uform_pair_loss_form_balanced_k
+                                           ? contrastive_pair_loss_form_t::balanced_k
+                                       : pair_loss == uform_pair_loss_form_ranked_k
+                                           ? contrastive_pair_loss_form_t::ranked_k
+                                           : contrastive_pair_loss_form_t::sigmoid_k;
+        // Each form starts at its own logit scale: the sigmoid sum at SigLIP's β=10, b=−10.
+        bool const sigmoid = pair_loss == uform_pair_loss_form_sigmoid_k;
+        config.contrastive.inverse_temperature = sigmoid ? 10.0f : 1.0f;
+        config.contrastive.bias = sigmoid ? -10.0f : 0.0f;
+    }
+    config.steps = static_cast<u32_t>(steps.value);
+    config.batch.max_rows_per_gpu = static_cast<u32_t>(rows.value);
+    config.warmup_steps = static_cast<u32_t>(warmup_steps.value);
+    config.seed = seed;
+    config.nvdec_engines = static_cast<u32_t>(nvdec_engines.value);
+    config.batches_per_fill = batches_per_fill.value;
+    config.checkpoint_every = static_cast<u32_t>(checkpoint_every.value);
+    config.report_every = static_cast<u32_t>(report_every.value);
+    config.eval_every = static_cast<u32_t>(eval_every.value);
+    config.late_interaction.weight = weight_or_exit_("--late-interaction-weight", late_interaction_weight);
+    config.choices.weight = weight_or_exit_("--choices-weight", choices_weight);
+    config.choices.brier_weight = weight_or_exit_("--brier-weight", brier_weight);
+    config.tcr_lambda = weight_or_exit_("--tcr-lambda", tcr_lambda);
+    config.tcr_epsilon_squared = weight_or_exit_("--tcr-epsilon-squared", tcr_epsilon_squared, true);
+    config.lipschitz_lambda = weight_or_exit_("--lipschitz-lambda", lipschitz_lambda);
+    config.grad_spike_threshold = weight_or_exit_("--grad-spike-threshold", grad_spike_threshold);
+    if (eager == switch_t::present_k) config.capture = eager_k;
+    return config;
 }
 
 int main(int argc, char** argv) {
@@ -186,9 +346,7 @@ int main(int argc, char** argv) {
     ::setenv("CUDA_MODULE_LOADING", "EAGER", 1);
     // The trainer's telemetry writes the descriptor directly, so every line here flushes at once.
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
-    expected<trainer_config_t> parsed = trainer_config_t::parse(argc, argv);
-    if (!parsed) return fail_out_(parsed.description_.view());
-    trainer_config_t config = std::move(parsed.value_);
+    trainer_config_t config = parse_config_(argc, argv);
     mixture_t mixture;
     if (!config.mixture.empty()) {
         expected<mixture_t> read = mixture_t::read(config.mixture);
@@ -226,5 +384,10 @@ int main(int argc, char** argv) {
         options.directory = sz::string_view_t {directory, std::strlen(directory)};
     if (char const* job = std::getenv("UFORM_JOB_ID"); job != nullptr)
         options.job = sz::string_view_t {job, std::strlen(job)};
+    // Hosts step in lockstep, so only a lone host may leave the loop at a step of its own choosing.
+    if (options.host_domain_count == 1) {
+        std::signal(SIGINT, tools::request_stop);
+        std::signal(SIGTERM, tools::request_stop);
+    }
     return train_(config, options, std::move(mixture));
 }

@@ -227,7 +227,7 @@ struct trainer_config_t {
      *  parity test drives both over identical seeds. */
     capture_t capture = replayed_k;
 
-    /** Checkpoint path; empty writes none. Borrows the argv storage it was parsed from. */
+    /** Checkpoint path; empty writes none. Borrows the storage the tool parsed it from. */
     sz::string_view_t checkpoint {};
 
     /** Steps between checkpoints, beside the one at the run's end; zero writes only that one. */
@@ -271,19 +271,6 @@ struct trainer_config_t {
     /** How many segments a row of the mixture's densest entry holds, charged by the source from
      *  its footers like the reservoir; @ref batch_capacity multiplies the rows by it. */
     f64_t segments_per_row = 1.0;
-
-    /**
-     *  @brief Fold the @c --flag value pairs into a config, each flag adjusting one knob.
-     *
-     *  @c --mixture takes a @c .json path, or the synthetic @c tokens|omni preset, where omni fills
-     *  the media slices of @ref batch with 8-pixel RGB image patches, 2-frame video tubes and
-     *  256-sample audio frames.
-     *
-     *  @par Statuses:
-     *  - @c status_t::invalid_argument_k An unknown flag, a flag without its value, or a value
-     *    it does not take.
-     */
-    [[nodiscard]] static expected<trainer_config_t> parse(int argc, char** argv) noexcept;
 
     /** Step @p optimizer_step 's scheduled learning rate: the linear warmup to @ref learning_rate
      *  over @ref warmup_steps , then the cosine decay to @ref min_learning_rate over the rest of

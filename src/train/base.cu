@@ -25,14 +25,11 @@
  *  is eager): a linear ramp from zero to the peak over @c warmup_steps , then a cosine decay to
  *  @c min_learning_rate over the run's remainder — the validated draft envelope's shape.
  */
-#include <cmath>   // `std::cos`, `std::sqrt`, `std::ceil`, `std::isfinite`
-#include <cstring> // `std::strlen`
+#include <cmath> // `std::cos`, `std::sqrt`, `std::ceil`
 
 #include <unistd.h> // `::write`, `STDOUT_FILENO` — the host diagnostic channel
 
-#include <algorithm> // `std::clamp`, `std::find_if`
-#include <iterator>  // `std::begin`, `std::end`
-#include <charconv>  // `std::from_chars` — the command line's numbers
+#include <algorithm> // `std::clamp`
 #include <limits>    // `std::numeric_limits` — the i16 coordinate ceiling
 #include <numbers>   // `std::numbers::pi_v` — the decay's half-period
 
@@ -448,111 +445,6 @@ expected_t ut::save_weights(checkpoint_to_save_t& checkpoint, trainer_config_t c
         record("audio_sample_rate", config.batch.audio.sample_rate);
     if (!recorded) return expected_t::fail(status_t::bad_alloc_k, "checkpoint metadata staging failed");
     return {};
-}
-
-expected<trainer_config_t> trainer_config_t::parse(int argc, char** argv) noexcept {
-    using result_t = expected<trainer_config_t>;
-    trainer_config_t config;
-    trainer_tier_t& tier = config.tier;
-    f32_t learning_rate = 0.0f;
-    for (int arg = 1; arg < argc; ++arg) {
-        sz::string_view_t const flag {argv[arg], std::strlen(argv[arg])};
-        if (flag == "--eager") {
-            config.capture = eager_k;
-            continue;
-        }
-        if (arg + 1 == argc) return result_t::fail(status_t::invalid_argument_k, "{} takes a value", flag);
-        ++arg;
-        sz::string_view_t const value {argv[arg], std::strlen(argv[arg])};
-        auto number = [&](auto& into) noexcept {
-            std::from_chars_result const read = std::from_chars(value.data(), value.data() + value.size(), into);
-            return read.ec == std::errc {} && read.ptr == value.data() + value.size();
-        };
-        bool taken = true;
-        if (flag == "--steps") taken = number(config.steps);
-        else if (flag == "--tier") {
-            trainer_tier_t const* found = std::find_if(
-                std::begin(trainer_tiers_k), std::end(trainer_tiers_k),
-                [&](trainer_tier_t const& known) { return value == known.name; });
-            taken = found != std::end(trainer_tiers_k);
-            if (taken) tier = *found;
-        }
-        else if (flag == "--rows") taken = number(config.batch.max_rows_per_gpu);
-        else if (flag == "--learning-rate") taken = number(learning_rate) && learning_rate > 0.0f;
-        else if (flag == "--warmup-steps") taken = number(config.warmup_steps);
-        else if (flag == "--seed") taken = number(config.seed);
-        else if (flag == "--nvdec-engines") taken = number(config.nvdec_engines);
-        else if (flag == "--batches-per-fill") taken = number(config.batches_per_fill) && config.batches_per_fill > 0;
-        else if (flag == "--pair-loss") {
-            if (value == "balanced") config.contrastive.pair_loss = contrastive_pair_loss_form_t::balanced_k;
-            else if (value == "ranked") config.contrastive.pair_loss = contrastive_pair_loss_form_t::ranked_k;
-            else if (value == "sigmoid") config.contrastive.pair_loss = contrastive_pair_loss_form_t::sigmoid_k;
-            else taken = false;
-            // Each form starts at its own logit scale: the sigmoid sum at SigLIP's β=10, b=−10.
-            bool const sigmoid = config.contrastive.pair_loss == contrastive_pair_loss_form_t::sigmoid_k;
-            config.contrastive.inverse_temperature = sigmoid ? 10.0f : 1.0f;
-            config.contrastive.bias = sigmoid ? -10.0f : 0.0f;
-        }
-        else if (flag == "--late-interaction-weight")
-            taken = number(config.late_interaction.weight) && std::isfinite(config.late_interaction.weight) &&
-                    config.late_interaction.weight >= 0.0f;
-        else if (flag == "--choices-weight")
-            taken = number(config.choices.weight) && std::isfinite(config.choices.weight) &&
-                    config.choices.weight >= 0.0f;
-        else if (flag == "--brier-weight")
-            taken = number(config.choices.brier_weight) && std::isfinite(config.choices.brier_weight) &&
-                    config.choices.brier_weight >= 0.0f;
-        else if (flag == "--tcr-lambda")
-            taken = number(config.tcr_lambda) && std::isfinite(config.tcr_lambda) && config.tcr_lambda >= 0.0f;
-        else if (flag == "--tcr-epsilon-squared")
-            taken = number(config.tcr_epsilon_squared) && std::isfinite(config.tcr_epsilon_squared) &&
-                    config.tcr_epsilon_squared > 0.0f;
-        else if (flag == "--lipschitz-lambda")
-            taken = number(config.lipschitz_lambda) && std::isfinite(config.lipschitz_lambda) &&
-                    config.lipschitz_lambda >= 0.0f;
-        else if (flag == "--grad-spike-threshold")
-            taken = number(config.grad_spike_threshold) && std::isfinite(config.grad_spike_threshold) &&
-                    config.grad_spike_threshold >= 0.0f;
-        else if (flag == "--objective") {
-            if (value == "masked") config.objective = objective_t::masked_k;
-            else if (value == "contrastive") config.objective = objective_t::contrastive_k;
-            else if (value == "joint") config.objective = objective_t::joint_k;
-            else taken = false;
-        }
-        else if (flag == "--mixture") {
-            if (value.ends_with(".json")) config.mixture = value;
-            else if (value == "omni") {
-                // The omni preset: 8-pixel RGB image patches, 2-frame RGB video tubes,
-                // 320-sample audio frames.
-                config.batch.image = image_batch_shape_t {8u, 3u};
-                config.batch.video = video_batch_shape_t {8u, 3u, 2u, 1u};
-                config.batch.audio = audio_batch_shape_t {320u, 16000u};
-            }
-            else taken = value == "tokens";
-        }
-        else if (flag == "--checkpoint") config.checkpoint = value;
-        else if (flag == "--checkpoint-every") taken = number(config.checkpoint_every);
-        else if (flag == "--report-every") taken = number(config.report_every);
-        else if (flag == "--eval-every") taken = number(config.eval_every);
-        else if (flag == "--eval-mixture") taken = value.ends_with(".json"), config.eval_mixture = value;
-        else if (flag == "--resume") config.resume = value;
-        else if (flag == "--telemetry") {
-            if (value == "signals") config.telemetry_channels |= telemetry_signals_k;
-            else if (value == "timings") config.telemetry_channels |= telemetry_timings_k;
-            else taken = false;
-        }
-        else return result_t::fail(status_t::invalid_argument_k, "unknown flag {}", flag);
-        if (!taken) return result_t::fail(status_t::invalid_argument_k, "{} does not take {}", flag, value);
-    }
-    if (!tier.hidden)
-        return result_t::fail(status_t::invalid_argument_k, "pass --tier tiny, small, medium, large or xl");
-    config.hidden = tier.hidden, config.depth = tier.depth;
-    config.learning_rate = learning_rate != 0.0f ? learning_rate : tier.learning_rate;
-    // Every tier trains the nested prefixes 64…1024 that fit its width, then the full width.
-    for (u32_t width = 64u; width <= fu::min_of(1024u, tier.hidden) && width != tier.hidden; width *= 2u)
-        config.contrastive.matryoshka_dimensions[config.contrastive.matryoshka_count++] = width;
-    config.contrastive.matryoshka_dimensions[config.contrastive.matryoshka_count++] = tier.hidden;
-    return result_t {std::move(config)};
 }
 
 expected<base_replica_t> base_replica_t::make(gpu_arena_t& arena, trainer_config_t const& config,

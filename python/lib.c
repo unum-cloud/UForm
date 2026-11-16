@@ -6,8 +6,8 @@
  *      registration, and `PyInit_lib`.
  *
  *  Each header's file contributes its verbs as one table, and this file merges them into the
- *  methods of the model, the trainer and both receivers, so a verb is written once and every
- *  receiver offers it.
+ *  methods of the model and the trainer, while both receivers bind them by the type of the target
+ *  they hold, so a verb is written once and every receiver offers it.
  */
 #include "lib.h"
 
@@ -34,10 +34,10 @@ static struct {
     {"Deferred", &DeferredType, NULL},
     {"On", &OnType, NULL},
     {"DeferredOn", &DeferredOnType, NULL},
-    {"GPUDevice", &GPUDeviceType, &uform_py_gpu_device_desc},
+    {"GPUDevice", &GPUDeviceType, NULL},
 
     {"Model", &ModelType, NULL},
-    {"ModelDescription", &ModelDescriptionType, &uform_py_model_description_desc},
+    {"ModelDescription", &ModelDescriptionType, NULL},
 
     {"Encoded", &EncodedType, &uform_py_encoded_desc},
     {"TextEncodeStats", &TextEncodeStatsType, NULL},
@@ -46,7 +46,7 @@ static struct {
     {"AudioEncodeStats", &AudioEncodeStatsType, NULL},
 
     {"Mesh", &MeshType, NULL},
-    {"MeshDescription", &MeshDescriptionType, &uform_py_mesh_description_desc},
+    {"MeshDescription", &MeshDescriptionType, NULL},
     {"Trainer", &TrainerType, NULL},
     {"TrainerStepStats", &TrainerStepStatsType, NULL},
 };
@@ -58,17 +58,10 @@ static uform_py_fields_t* const module_fields[] = {
     &LateInteractionType, &ChoicesType,    &ScheduleType,   &MeshOptionsType, &EdgesType,   &RelationsType,
 };
 
-/** Rows of the merged tables: a receiver offers ten verbs, a model fourteen, a trainer five. */
+/** Rows of the merged tables: a model offers fourteen methods, a trainer five. */
 enum { merged_methods_max_k = 16 };
 
-static PyMethodDef model_methods[merged_methods_max_k], trainer_methods[merged_methods_max_k],
-    receiver_methods[merged_methods_max_k];
-
-static PyMethodDef const receiver_class_getitem[] = {
-    {"__class_getitem__", Py_GenericAlias, METH_O | METH_CLASS,
-     "Names the target the receiver addresses, as `On[Model]` or `DeferredOn[Trainer]`."},
-    {NULL, NULL, 0, NULL},
-};
+static PyMethodDef model_methods[merged_methods_max_k], trainer_methods[merged_methods_max_k];
 
 /** Copies the rows of the @p count NULL-terminated @p tables into @p merged, ending it
  *  with a sentinel. */
@@ -97,15 +90,10 @@ static PyModuleDef module_definition = {
 PyMODINIT_FUNC PyInit_lib(void) {
     PyMethodDef const* const model_tables[] = {uform_py_model_methods, uform_py_model_verbs, uform_py_encode_verbs};
     PyMethodDef const* const trainer_tables[] = {uform_py_trainer_methods, uform_py_trainer_verbs};
-    PyMethodDef const* const receiver_tables[] = {uform_py_model_verbs, uform_py_encode_verbs, uform_py_trainer_verbs,
-                                                  receiver_class_getitem};
     methods_merge(model_methods, model_tables, sizeof(model_tables) / sizeof(*model_tables));
     methods_merge(trainer_methods, trainer_tables, sizeof(trainer_tables) / sizeof(*trainer_tables));
-    methods_merge(receiver_methods, receiver_tables, sizeof(receiver_tables) / sizeof(*receiver_tables));
     ModelType.tp_methods = model_methods;
     TrainerType.tp_methods = trainer_methods;
-    OnType.tp_methods = receiver_methods;
-    DeferredOnType.tp_methods = receiver_methods;
 
     size_t const types_count = sizeof(module_types) / sizeof(*module_types);
     for (size_t type_index = 0; type_index != types_count; ++type_index) {
@@ -113,6 +101,7 @@ PyMODINIT_FUNC PyInit_lib(void) {
         PyStructSequence_Desc* const layout = module_types[type_index].layout;
         if ((layout ? PyStructSequence_InitType2(type, layout) : PyType_Ready(type)) < 0) return NULL;
     }
+    if (PyType_Ready(&AwaitingType) < 0) return NULL; // driven by `await`, never named
     size_t const fields_count = sizeof(module_fields) / sizeof(*module_fields);
     for (size_t fields_index = 0; fields_index != fields_count; ++fields_index)
         if (uform_py_fields_ready(module_fields[fields_index]) < 0) return NULL;

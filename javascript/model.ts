@@ -6,8 +6,35 @@
  *      encode verb runs through.
  */
 import type { CompiledDescription, CompiledModel } from "./library.js";
-import { EncodeVerbs } from "./encode.js";
-import { Answer, Executor, Scalar, Status, backend, fail, scalarCode } from "./types.js";
+import {
+  type ChooseConfig,
+  type Chosen,
+  type EncodeConfig,
+  type Encoded,
+  type Pixels,
+  type Tape,
+  modelAudioEncode,
+  modelAudioEncodeSamples,
+  modelImageEncode,
+  modelImageEncodePixels,
+  modelTextChoose,
+  modelTextEncode,
+  modelVideoEncode,
+} from "./encode.js";
+import {
+  type Arena,
+  type Call,
+  type Deferred,
+  Executor,
+  Scalar,
+  Status,
+  backend,
+  block,
+  callOf,
+  defer,
+  fail,
+  scalarCode,
+} from "./types.js";
 
 /** Where a checkpoint loaded into host memory lands. Mirrors `uform_model_load_ram_t`. */
 export interface ModelLoadRamConfig {
@@ -15,9 +42,9 @@ export interface ModelLoadRamConfig {
   executor?: Executor;
   /** NUMA node IDs to place the weights in; absent derives every node. */
   memoryDomains?: number[];
-  /** The CPU class to pack the tower for, spelled like "intel-haswell"; absent derives
-   *  the CPU's own. */
-  cpuClass?: string;
+  /** The newest CPU class to pack the tower for, spelled like "intel-haswell": the load runs
+   *  the newest compiled class the CPU runs at or under it; absent sets no ceiling. */
+  cpuClassCeiling?: string;
   /** The scalar the transformer blocks run in: `bf16` as the checkpoint stores it, the
    *  default, or `e4m3`. */
   quantization?: Scalar;
@@ -31,9 +58,9 @@ export interface ModelLoadVramConfig {
   /** Device ordinals, positions in `gpuDevices()`, to replicate the weights on; absent takes
    *  one free device. */
   devices?: number[];
-  /** The GPU class every replica runs as, spelled like "nvidia-hopper"; absent derives
-   *  the devices' own. */
-  gpuClass?: string;
+  /** The newest GPU class every replica runs as, spelled like "nvidia-hopper"; absent sets no
+   *  ceiling. */
+  gpuClassCeiling?: string;
   /** The scalar the transformer blocks run in: `bf16` as the checkpoint stores it, the
    *  default, or `e4m3`. */
   quantization?: Scalar;
@@ -62,25 +89,76 @@ export interface ModelDescription {
   choiceTemperatureGroups: number;
 }
 
-/** The verbs every receiver of a model shares: the encode verbs and the description. */
-abstract class ModelVerbs<Receiving extends "blocking" | "deferred"> extends EncodeVerbs<Receiving> {
-  /** Reports the model's geometry and placement in one call. Calls `uform_model_describe`. */
-  describe(): Answer<Receiving, ModelDescription> {
-    const executor = this.executor?.compiled;
-    return this.submit(
-      (completion) => this.compiled.describe(executor, completion),
-      (described: CompiledDescription) => ({ ...described, quantization: described.quantization as Scalar }),
-    );
-  }
+/** The body of every receiver's `describe`. */
+function modelDescribe(model: CompiledModel, executor: Executor | undefined): Call<ModelDescription> {
+  return callOf(
+    (completion) => model.describe(executor?.compiled, completion),
+    (described: CompiledDescription) => ({ ...described, quantization: described.quantization as Scalar }),
+  );
 }
 
 /** The verbs of one model, blocking on one executor: `model.on(executor)`. Every call returns
  *  with its outputs written, and one that finds another call holding the executor throws
  *  `contended` without running. */
-export class ModelOn extends ModelVerbs<"blocking"> {
+export class ModelOn {
+  readonly #model: CompiledModel;
+  /** The executor every verb runs on. */
+  readonly executor: Executor;
+
   /** Made by `model.on(executor)`, never directly. */
-  constructor(compiled: CompiledModel, executor: Executor | undefined) {
-    super(compiled, executor, "blocking");
+  constructor(model: CompiledModel, executor: Executor) {
+    this.#model = model;
+    this.executor = executor;
+  }
+
+  /** {@inheritDoc Model.describe} */
+  describe(): ModelDescription {
+    return block(modelDescribe(this.#model, this.executor));
+  }
+
+  /** {@inheritDoc Model.textEncode} */
+  textEncode(texts: readonly (string | Uint8Array)[] | Tape<Uint8Array>, arena: Arena, config: EncodeConfig = {}): Encoded {
+    return block(modelTextEncode(this.#model, this.executor, texts, arena, config));
+  }
+
+  /** {@inheritDoc Model.textChoose} */
+  textChoose(
+    texts: readonly (string | Uint8Array)[] | Tape<Uint8Array>,
+    choices: readonly (string | Uint8Array)[] | Tape<Uint8Array>,
+    arena: Arena,
+    config: ChooseConfig = {},
+  ): Chosen {
+    return block(modelTextChoose(this.#model, this.executor, texts, choices, arena, config));
+  }
+
+  /** {@inheritDoc Model.imageEncode} */
+  imageEncode(images: readonly Uint8Array[] | Tape<Uint8Array>, arena: Arena, config: EncodeConfig = {}): Encoded {
+    return block(modelImageEncode(this.#model, this.executor, images, arena, config));
+  }
+
+  /** {@inheritDoc Model.imageEncodePixels} */
+  imageEncodePixels(images: readonly Pixels[], arena: Arena, config: EncodeConfig = {}): Encoded {
+    return block(modelImageEncodePixels(this.#model, this.executor, images, arena, config));
+  }
+
+  /** {@inheritDoc Model.videoEncode} */
+  videoEncode(videos: readonly Uint8Array[] | Tape<Uint8Array>, arena: Arena, config: EncodeConfig = {}): Encoded {
+    return block(modelVideoEncode(this.#model, this.executor, videos, arena, config));
+  }
+
+  /** {@inheritDoc Model.audioEncode} */
+  audioEncode(recordings: readonly Uint8Array[] | Tape<Uint8Array>, arena: Arena, config: EncodeConfig = {}): Encoded {
+    return block(modelAudioEncode(this.#model, this.executor, recordings, arena, config));
+  }
+
+  /** {@inheritDoc Model.audioEncodeSamples} */
+  audioEncodeSamples(
+    recordings: readonly Float32Array[] | Tape<Float32Array>,
+    sampleRate: number,
+    arena: Arena,
+    config: EncodeConfig = {},
+  ): Encoded {
+    return block(modelAudioEncodeSamples(this.#model, this.executor, recordings, sampleRate, arena, config));
   }
 }
 
@@ -89,10 +167,81 @@ export class ModelOn extends ModelVerbs<"blocking"> {
  *  `model.deferred(executor)`. A verb borrows its arena until final, and waits into the same views
  *  a blocking call answers.
  */
-export class ModelDeferredOn extends ModelVerbs<"deferred"> {
+export class ModelDeferredOn {
+  readonly #model: CompiledModel;
+  /** The executor every verb is submitted to. */
+  readonly executor: Executor;
+
   /** Made by `model.deferred(executor)`, never directly. */
-  constructor(compiled: CompiledModel, executor: Executor) {
-    super(compiled, executor, "deferred");
+  constructor(model: CompiledModel, executor: Executor) {
+    this.#model = model;
+    this.executor = executor;
+  }
+
+  /** {@inheritDoc Model.describe} */
+  describe(): Deferred<ModelDescription> {
+    return defer(modelDescribe(this.#model, this.executor));
+  }
+
+  /** {@inheritDoc Model.textEncode} */
+  textEncode(
+    texts: readonly (string | Uint8Array)[] | Tape<Uint8Array>,
+    arena: Arena,
+    config: EncodeConfig = {},
+  ): Deferred<Encoded> {
+    return defer(modelTextEncode(this.#model, this.executor, texts, arena, config));
+  }
+
+  /** {@inheritDoc Model.textChoose} */
+  textChoose(
+    texts: readonly (string | Uint8Array)[] | Tape<Uint8Array>,
+    choices: readonly (string | Uint8Array)[] | Tape<Uint8Array>,
+    arena: Arena,
+    config: ChooseConfig = {},
+  ): Deferred<Chosen> {
+    return defer(modelTextChoose(this.#model, this.executor, texts, choices, arena, config));
+  }
+
+  /** {@inheritDoc Model.imageEncode} */
+  imageEncode(
+    images: readonly Uint8Array[] | Tape<Uint8Array>,
+    arena: Arena,
+    config: EncodeConfig = {},
+  ): Deferred<Encoded> {
+    return defer(modelImageEncode(this.#model, this.executor, images, arena, config));
+  }
+
+  /** {@inheritDoc Model.imageEncodePixels} */
+  imageEncodePixels(images: readonly Pixels[], arena: Arena, config: EncodeConfig = {}): Deferred<Encoded> {
+    return defer(modelImageEncodePixels(this.#model, this.executor, images, arena, config));
+  }
+
+  /** {@inheritDoc Model.videoEncode} */
+  videoEncode(
+    videos: readonly Uint8Array[] | Tape<Uint8Array>,
+    arena: Arena,
+    config: EncodeConfig = {},
+  ): Deferred<Encoded> {
+    return defer(modelVideoEncode(this.#model, this.executor, videos, arena, config));
+  }
+
+  /** {@inheritDoc Model.audioEncode} */
+  audioEncode(
+    recordings: readonly Uint8Array[] | Tape<Uint8Array>,
+    arena: Arena,
+    config: EncodeConfig = {},
+  ): Deferred<Encoded> {
+    return defer(modelAudioEncode(this.#model, this.executor, recordings, arena, config));
+  }
+
+  /** {@inheritDoc Model.audioEncodeSamples} */
+  audioEncodeSamples(
+    recordings: readonly Float32Array[] | Tape<Float32Array>,
+    sampleRate: number,
+    arena: Arena,
+    config: EncodeConfig = {},
+  ): Deferred<Encoded> {
+    return defer(modelAudioEncodeSamples(this.#model, this.executor, recordings, sampleRate, arena, config));
   }
 }
 
@@ -111,12 +260,14 @@ function bufferOf(buffer: ArrayBuffer | ArrayBufferView): ArrayBufferView {
  *  `deferred(executor)` reach the same verbs on an executor. One model serves every modality it
  *  was trained on.
  */
-export class Model extends ModelOn implements Disposable {
+export class Model implements Disposable {
+  readonly #model: CompiledModel;
+
   /** Reached through the loads. */
   private constructor(seal: symbol, compiledModel: CompiledModel) {
     if (seal !== modelSeal)
       throw fail(Status.InvalidArgument, "A Model is opened by Model.loadRam, loadRamBuffer, loadVram or loadVramBuffer.");
-    super(compiledModel, undefined);
+    this.#model = compiledModel;
   }
 
   /**
@@ -125,7 +276,7 @@ export class Model extends ModelOn implements Disposable {
    *  @param executor - The threads or streams to run on; its residency must match the model's.
    */
   on(executor: Executor): ModelOn {
-    return new ModelOn(this.compiled, executor);
+    return new ModelOn(this.#model, executor);
   }
 
   /**
@@ -134,13 +285,115 @@ export class Model extends ModelOn implements Disposable {
    */
   deferred(executor: Executor): ModelDeferredOn {
     if (!(executor instanceof Executor)) throw fail(Status.InvalidArgument, "A deferred receiver needs an Executor.");
-    return new ModelDeferredOn(this.compiled, executor);
+    return new ModelDeferredOn(this.#model, executor);
+  }
+
+  /** Reports the model's geometry and placement in one call. Calls `uform_model_describe`. */
+  describe(): ModelDescription {
+    return block(modelDescribe(this.#model, undefined));
+  }
+
+  /**
+   *  Encodes texts through one forward; every UTF-8 byte is a token. Calls `uform_text_encode`.
+   *
+   *  @param texts - Strings, UTF-8 bytes already encoded, or a tape of them.
+   *  @param arena - The memory the outputs land in, rewound by the call.
+   *  @param config - The surfaces, their scalar, and a progress handler.
+   *  @returns The outputs, viewed inside `arena`.
+   */
+  textEncode(texts: readonly (string | Uint8Array)[] | Tape<Uint8Array>, arena: Arena, config: EncodeConfig = {}): Encoded {
+    return block(modelTextEncode(this.#model, undefined, texts, arena, config));
+  }
+
+  /**
+   *  Scores each item's legal choices through one forward, a softmax over them alone at the item's
+   *  group's calibrated inverse temperature; a model without the byte decoder reports
+   *  `unsupported`. Calls `uform_text_choose`.
+   *
+   *  @param texts - The states, each ending where its choice goes.
+   *  @param choices - Each item's legal choices, one byte each, like "yn".
+   *  @param arena - The memory the probabilities land in, rewound by the call.
+   *  @param config - The question types and a progress handler.
+   *  @returns The probabilities, viewed inside `arena`.
+   */
+  textChoose(
+    texts: readonly (string | Uint8Array)[] | Tape<Uint8Array>,
+    choices: readonly (string | Uint8Array)[] | Tape<Uint8Array>,
+    arena: Arena,
+    config: ChooseConfig = {},
+  ): Chosen {
+    return block(modelTextChoose(this.#model, undefined, texts, choices, arena, config));
+  }
+
+  /**
+   *  Decodes and encodes JPEG, PNG or WebP files; the browser build reports
+   *  `unsupported`. Calls `uform_image_encode`.
+   *
+   *  @param images - One encoded file per item, or a tape of them.
+   *  @param arena - The memory the outputs land in, rewound by the call.
+   *  @param config - The surfaces, their scalar, and a progress handler.
+   */
+  imageEncode(images: readonly Uint8Array[] | Tape<Uint8Array>, arena: Arena, config: EncodeConfig = {}): Encoded {
+    return block(modelImageEncode(this.#model, undefined, images, arena, config));
+  }
+
+  /**
+   *  Encodes decoded images, resized on the executor's side. Calls `uform_image_encode_pixels`.
+   *
+   *  @param images - `ImageData`, or RGB or RGBA bytes with their width and height.
+   *  @param arena - The memory the outputs land in, rewound by the call.
+   *  @param config - The surfaces, their scalar, and a progress handler.
+   */
+  imageEncodePixels(images: readonly Pixels[], arena: Arena, config: EncodeConfig = {}): Encoded {
+    return block(modelImageEncodePixels(this.#model, undefined, images, arena, config));
+  }
+
+  /**
+   *  Decodes and encodes MP4 or WebM clips; the browser build reports
+   *  `unsupported`. Calls `uform_video_encode`.
+   *
+   *  @param videos - One encoded file per item, or a tape of them.
+   *  @param arena - The memory the outputs land in, rewound by the call.
+   *  @param config - The surfaces, their scalar, and a progress handler.
+   */
+  videoEncode(videos: readonly Uint8Array[] | Tape<Uint8Array>, arena: Arena, config: EncodeConfig = {}): Encoded {
+    return block(modelVideoEncode(this.#model, undefined, videos, arena, config));
+  }
+
+  /**
+   *  Decodes and encodes WAV, FLAC, MP3 or Opus files; the browser build reports
+   *  `unsupported`. Calls `uform_audio_encode`.
+   *
+   *  @param recordings - One encoded file per item, or a tape of them.
+   *  @param arena - The memory the outputs land in, rewound by the call.
+   *  @param config - The surfaces, their scalar, and a progress handler.
+   */
+  audioEncode(recordings: readonly Uint8Array[] | Tape<Uint8Array>, arena: Arena, config: EncodeConfig = {}): Encoded {
+    return block(modelAudioEncode(this.#model, undefined, recordings, arena, config));
+  }
+
+  /**
+   *  Encodes decoded mono recordings, resampled to the model's rate where `sampleRate`
+   *  differs. Calls `uform_audio_encode_samples`.
+   *
+   *  @param recordings - One run of samples per item, or a tape of them.
+   *  @param sampleRate - Samples per second shared by every recording.
+   *  @param arena - The memory the outputs land in, rewound by the call.
+   *  @param config - The surfaces, their scalar, and a progress handler.
+   */
+  audioEncodeSamples(
+    recordings: readonly Float32Array[] | Tape<Float32Array>,
+    sampleRate: number,
+    arena: Arena,
+    config: EncodeConfig = {},
+  ): Encoded {
+    return block(modelAudioEncodeSamples(this.#model, undefined, recordings, sampleRate, arena, config));
   }
 
   /** Releases the weights now, waiting for every deferred call naming the model; a second `free`
    *  does nothing. Calls `uform_model_free`. */
   free(): void {
-    this.compiled.free();
+    this.#model.free();
   }
 
   [Symbol.dispose](): void {
@@ -161,7 +414,7 @@ export class Model extends ModelOn implements Disposable {
         config.executor?.compiled,
         config.memoryDomains,
         scalarCode(config.quantization ?? Scalar.BF16),
-        config.cpuClass,
+        config.cpuClassCeiling,
       ),
     );
   }
@@ -180,7 +433,7 @@ export class Model extends ModelOn implements Disposable {
         config.executor?.compiled,
         config.memoryDomains,
         scalarCode(config.quantization ?? Scalar.BF16),
-        config.cpuClass,
+        config.cpuClassCeiling,
       ),
     );
   }
@@ -199,7 +452,7 @@ export class Model extends ModelOn implements Disposable {
         config.executor?.compiled,
         config.devices,
         scalarCode(config.quantization ?? Scalar.BF16),
-        config.gpuClass,
+        config.gpuClassCeiling,
       ),
     );
   }
@@ -217,7 +470,7 @@ export class Model extends ModelOn implements Disposable {
         config.executor?.compiled,
         config.devices,
         scalarCode(config.quantization ?? Scalar.BF16),
-        config.gpuClass,
+        config.gpuClassCeiling,
       ),
     );
   }

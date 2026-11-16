@@ -711,43 +711,46 @@ struct composed_norms {
     static nk_status_t normalize_(input_type_ const* x, nk_dtype_t dtype, nk_f32_t const* gamma, nk_bf16_t* y,
                                   nk_size_t rows, nk_size_t groups, nk_size_t columns, nk_size_t x_stride,
                                   nk_size_t y_stride, nk_f32_t epsilon, nk_stream_t stream) noexcept {
-        nk_f32_t chunk[chunk_k];
-        nk_f32_t const zero = 0.0f;
         std::array<std::size_t, 2> const extents {rows, groups * columns};
         nk::tensor_view<input_type_, 2> const x_rows {x, extents, {static_cast<std::ptrdiff_t>(x_stride), sizeof(*x)}};
         nk::tensor_span<nk_bf16_t, 2> const y_rows {y, extents, {static_cast<std::ptrdiff_t>(y_stride), sizeof(*y)}};
         for (nk_size_t row = 0; row != rows; ++row) {
             input_type_ const* const x_row = x_rows[row, nk::slice].data();
             nk_bf16_t* const y_row = y_rows[row, nk::slice].data();
-            for (nk_size_t group = 0; group != groups; ++group) {
-                input_type_ const* const source = x_row + group * columns;
-                nk_bf16_t* const target = y_row + group * columns;
-                nk_f64_t sum_of_squares = 0;
-                for (nk_size_t first = 0; first < columns; first += chunk_k) {
-                    nk_size_t const count = columns - first < chunk_k ? columns - first : chunk_k;
-                    nk_f64_t squares = 0;
-                    if (nk_status_t const status = cast_(source + first, dtype, chunk, nk_f32_k, count, stream);
-                        status != nk_success_k)
-                        return status;
-                    if (nk_status_t const status = dot_f32_(chunk, chunk, count, &squares, stream);
-                        status != nk_success_k)
-                        return status;
-                    sum_of_squares += squares;
-                }
-                nk_f32_t const inverse_rms = 1.0f /
-                                             std::sqrt(static_cast<nk_f32_t>(sum_of_squares / columns) + epsilon);
-                for (nk_size_t first = 0; first < columns; first += chunk_k) {
-                    nk_size_t const count = columns - first < chunk_k ? columns - first : chunk_k;
-                    nk_status_t status = cast_(source + first, dtype, chunk, nk_f32_k, count, stream);
-                    if (status == nk_success_k)
-                        status = gamma
-                                     ? fma_f32_(chunk, gamma + first, chunk, count, &inverse_rms, &zero, chunk, stream)
-                                     : scale_f32_(chunk, count, &inverse_rms, &zero, chunk, stream);
-                    if (status == nk_success_k)
-                        status = cast_(chunk, nk_f32_k, target + first, nk_bf16_k, count, stream);
-                    if (status != nk_success_k) return status;
-                }
-            }
+            for (nk_size_t group = 0; group != groups; ++group)
+                if (nk_status_t const status = normalize_group_(x_row + group * columns, dtype, gamma,
+                                                                y_row + group * columns, columns, epsilon, stream);
+                    status != nk_success_k)
+                    return status;
+        }
+        return nk_success_k;
+    }
+
+    /** Normalizes one group of @p columns from @p source into @p target , a chunk at a time. */
+    template <typename input_type_>
+    static nk_status_t normalize_group_(input_type_ const* source, nk_dtype_t dtype, nk_f32_t const* gamma,
+                                        nk_bf16_t* target, nk_size_t columns, nk_f32_t epsilon,
+                                        nk_stream_t stream) noexcept {
+        nk_f32_t chunk[chunk_k];
+        nk_f32_t const zero = 0.0f;
+        nk_f64_t sum_of_squares = 0;
+        for (nk_size_t first = 0; first < columns; first += chunk_k) {
+            nk_size_t const count = columns - first < chunk_k ? columns - first : chunk_k;
+            nk_f64_t squares = 0;
+            nk_status_t status = cast_(source + first, dtype, chunk, nk_f32_k, count, stream);
+            if (status == nk_success_k) status = dot_f32_(chunk, chunk, count, &squares, stream);
+            if (status != nk_success_k) return status;
+            sum_of_squares += squares;
+        }
+        nk_f32_t const inverse_rms = 1.0f / std::sqrt(static_cast<nk_f32_t>(sum_of_squares / columns) + epsilon);
+        for (nk_size_t first = 0; first < columns; first += chunk_k) {
+            nk_size_t const count = columns - first < chunk_k ? columns - first : chunk_k;
+            nk_status_t status = cast_(source + first, dtype, chunk, nk_f32_k, count, stream);
+            if (status == nk_success_k)
+                status = gamma ? fma_f32_(chunk, gamma + first, chunk, count, &inverse_rms, &zero, chunk, stream)
+                               : scale_f32_(chunk, count, &inverse_rms, &zero, chunk, stream);
+            if (status == nk_success_k) status = cast_(chunk, nk_f32_k, target + first, nk_bf16_k, count, stream);
+            if (status != nk_success_k) return status;
         }
         return nk_success_k;
     }

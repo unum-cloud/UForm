@@ -11,9 +11,8 @@
 // The C mirror keeps the C spelling of every name.
 #![allow(non_camel_case_types, non_upper_case_globals)]
 
-use core::any::Any;
-use core::cell::Cell;
-use core::ffi::{c_char, c_int, c_void, CStr};
+use core::borrow::BorrowMut;
+use core::ffi::{CStr, c_char, c_int, c_void};
 use core::fmt;
 use core::future::{Future, IntoFuture};
 use core::marker::PhantomData;
@@ -23,9 +22,8 @@ use core::pin::Pin;
 use core::ptr::{self, NonNull};
 use core::str::FromStr;
 use core::task::{Context, Poll};
-use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 // region: Raw Declarations
 
@@ -40,19 +38,13 @@ pub struct uform_bytes_view_t {
 impl From<&[u8]> for uform_bytes_view_t {
     /// Borrows the bytes as the view the C interface accepts; it must not outlive them.
     fn from(bytes: &[u8]) -> Self {
-        uform_bytes_view_t {
-            data: bytes.as_ptr(),
-            length: bytes.len(),
-        }
+        uform_bytes_view_t { data: bytes.as_ptr(), length: bytes.len() }
     }
 }
 
 impl Default for uform_bytes_view_t {
     fn default() -> Self {
-        uform_bytes_view_t {
-            data: ptr::null(),
-            length: 0,
-        }
+        uform_bytes_view_t { data: ptr::null(), length: 0 }
     }
 }
 
@@ -71,10 +63,7 @@ pub struct uform_outcome_t {
 
 impl Default for uform_outcome_t {
     fn default() -> Self {
-        uform_outcome_t {
-            status: uform_status_success_k,
-            message: ptr::null(),
-        }
+        uform_outcome_t { status: uform_status_success_k, message: ptr::null() }
     }
 }
 
@@ -92,12 +81,7 @@ pub struct uform_rows_view_t {
 
 impl Default for uform_rows_view_t {
     fn default() -> Self {
-        uform_rows_view_t {
-            data: ptr::null(),
-            stride: 0,
-            columns: 0,
-            scalar: 0,
-        }
+        uform_rows_view_t { data: ptr::null(), stride: 0, columns: 0, scalar: 0 }
     }
 }
 
@@ -112,11 +96,7 @@ pub struct uform_tape_view_t {
 
 impl Default for uform_tape_view_t {
     fn default() -> Self {
-        uform_tape_view_t {
-            data: ptr::null(),
-            offsets: ptr::null(),
-            scalar: 0,
-        }
+        uform_tape_view_t { data: ptr::null(), offsets: ptr::null(), scalar: 0 }
     }
 }
 
@@ -130,10 +110,7 @@ pub struct uform_rows_tape_view_t {
 
 impl Default for uform_rows_tape_view_t {
     fn default() -> Self {
-        uform_rows_tape_view_t {
-            rows: uform_rows_view_t::default(),
-            offsets: ptr::null(),
-        }
+        uform_rows_tape_view_t { rows: uform_rows_view_t::default(), offsets: ptr::null() }
     }
 }
 
@@ -182,7 +159,7 @@ pub struct uform_gpu_devices_t {
 pub struct uform_ram_options_t {
     pub memory_domains: *const i32,
     pub memory_domains_count: usize,
-    pub cpu_class: uform_cpu_class_t,
+    pub cpu_class_ceiling: uform_cpu_class_t,
 }
 
 #[repr(C)]
@@ -190,7 +167,7 @@ pub struct uform_ram_options_t {
 pub struct uform_vram_options_t {
     pub devices: *const i32,
     pub devices_count: usize,
-    pub gpu_class: uform_gpu_class_t,
+    pub gpu_class_ceiling: uform_gpu_class_t,
 }
 
 pub type uform_executor_t = *mut c_void;
@@ -254,7 +231,7 @@ pub struct uform_arena_describe_t {
     pub description: *mut uform_arena_description_t,
 }
 
-extern "C" {
+unsafe extern "C" {
     pub fn uform_outcome_wait(outcome: *mut uform_outcome_t) -> uform_status_t;
     pub fn uform_outcome_status(outcome: *mut uform_outcome_t) -> uform_status_t;
 
@@ -278,6 +255,8 @@ extern "C" {
     pub fn uform_cpu_class_from_name(name: uform_bytes_view_t, cpu_class: *mut uform_cpu_class_t) -> uform_status_t;
     pub fn uform_gpu_class_name(gpu_class: uform_gpu_class_t) -> *const c_char;
     pub fn uform_gpu_class_from_name(name: uform_bytes_view_t, gpu_class: *mut uform_gpu_class_t) -> uform_status_t;
+    pub fn uform_gpu_vendor_name(vendor: uform_gpu_vendor_t) -> *const c_char;
+    pub fn uform_gpu_vendor_from_name(name: uform_bytes_view_t, vendor: *mut uform_gpu_vendor_t) -> uform_status_t;
 
     pub fn uform_gpu_devices(arguments: *mut uform_gpu_devices_t);
 
@@ -309,15 +288,12 @@ pub trait Calling: Sized {
     type Arguments;
     /// What a successful call hands back.
     type Output;
+    /// The inputs the verb took, in argument order, handed back once the call is final.
+    type Inputs;
 
     /// The arguments over the inputs and outputs this verb holds, which stays in place until the
-    /// call they feed is final, lending its handlers through `callbacks`.
-    fn arguments(
-        &mut self,
-        outcome: *mut uform_outcome_t,
-        completion: uform_completion_t,
-        callbacks: &Callbacks,
-    ) -> Result<Self::Arguments>;
+    /// call they feed is final.
+    fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments>;
 
     /// Passes `arguments` to the verb's C entry point.
     ///
@@ -325,8 +301,8 @@ pub trait Calling: Sized {
     /// outcome is final.
     unsafe fn call(arguments: *mut Self::Arguments);
 
-    /// What the verb hands back once its outcome is a success.
-    fn finish(self) -> Result<Self::Output>;
+    /// What the verb hands back once its outcome is `status`, beside the inputs it took.
+    fn finish(self, status: Result<()>) -> (Result<Self::Output>, Self::Inputs);
 }
 
 /// How the verbs of a receiver complete, which decides what each of them answers.
@@ -347,7 +323,8 @@ pub trait Completion: Sized {
     message = "a deferred receiver needs owned inputs",
     label = "the library would still read this borrow after the verb returns",
     note = "pass texts, files and samples in a `Vec` or an array of owned or `'static` items, a tape as \
-            `(Vec<_>, Vec<usize>)`, a `PathBuf`, `String` or `'static` path, and `'static` configs and handlers"
+            `(Vec<_>, Vec<usize>)`, a `PathBuf`, `String` or `'static` path, and a config owning its handler \
+            and stats"
 )]
 pub trait Accepts<Input> {}
 
@@ -400,10 +377,7 @@ pub struct Gathered<Value> {
 
 impl<Value> Default for Gathered<Value> {
     fn default() -> Self {
-        Gathered {
-            data: Vec::new(),
-            offsets: Vec::new(),
-        }
+        Gathered { data: Vec::new(), offsets: Vec::new() }
     }
 }
 
@@ -437,11 +411,15 @@ impl<Value: Element, Item: AsRef<[Value]>> TapeView<Value> for [Item] {
 }
 
 impl<Value: Element, Item: AsRef<[Value]>> TapeView<Value> for Vec<Item> {
-    fn tape(&self, gathered: &mut Gathered<Value>) -> Result<Batch> { self.as_slice().tape(gathered) }
+    fn tape(&self, gathered: &mut Gathered<Value>) -> Result<Batch> {
+        self.as_slice().tape(gathered)
+    }
 }
 
 impl<Value: Element, Item: AsRef<[Value]>, const COUNT: usize> TapeView<Value> for [Item; COUNT] {
-    fn tape(&self, gathered: &mut Gathered<Value>) -> Result<Batch> { self.as_slice().tape(gathered) }
+    fn tape(&self, gathered: &mut Gathered<Value>) -> Result<Batch> {
+        self.as_slice().tape(gathered)
+    }
 }
 
 impl<Value: Element, Data: AsRef<[Value]>, Offsets: AsRef<[usize]>> TapeView<Value> for (Data, Offsets) {
@@ -468,7 +446,9 @@ impl<Value: Element, Data: AsRef<[Value]>, Offsets: AsRef<[usize]>> TapeView<Val
 }
 
 impl<Value: Element, Tape: TapeView<Value> + ?Sized> TapeView<Value> for &Tape {
-    fn tape(&self, gathered: &mut Gathered<Value>) -> Result<Batch> { (**self).tape(gathered) }
+    fn tape(&self, gathered: &mut Gathered<Value>) -> Result<Batch> {
+        (**self).tape(gathered)
+    }
 }
 
 // endregion: Sealed Traits
@@ -504,6 +484,8 @@ pub enum Status {
     Malformed = 9,
     /// The library reported neither success nor a failure.
     Internal = 10,
+    /// The handle the call operates on is missing, refused before any other check.
+    Uninitialized = 12,
     /// The request contradicts a frozen configuration, like resuming a checkpoint
     /// of another geometry.
     ConfigMismatch = 13,
@@ -530,6 +512,7 @@ impl Status {
             7 => Status::Io,
             8 => Status::Device,
             9 => Status::Malformed,
+            12 => Status::Uninitialized,
             13 => Status::ConfigMismatch,
             14 => Status::Contended,
             15 => Status::Cancelled,
@@ -572,7 +555,9 @@ pub struct Error {
 }
 
 impl fmt::Display for Error {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result { formatter.write_str(self.message) }
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.message)
+    }
 }
 
 impl std::error::Error for Error {}
@@ -585,25 +570,26 @@ pub(crate) fn check(outcome: uform_outcome_t) -> Result<()> {
     match Status::from_raw(outcome.status) {
         Ok(()) => Ok(()),
         Err(Status::Deferred) => Err(fail(Status::Internal, "the outcome was read before it was final")),
-        Err(status) => Err(Error {
-            status,
-            message: unsafe { static_string(outcome.message) },
-        }),
+        Err(status) => Err(Error { status, message: unsafe { static_string(outcome.message) } }),
     }
 }
 
 /// Reports a failure the binding caught before the call crossed the boundary, under the same
 /// status the library would have used had the ABI let it see the same thing.
-pub(crate) fn fail(status: Status, message: &'static str) -> Error { Error { status, message } }
+pub(crate) fn fail(status: Status, message: &'static str) -> Error {
+    Error { status, message }
+}
 
 /// Borrows a static null-terminated string the library owns.
 ///
 /// Every such string is ASCII by construction, so its bytes are read as UTF-8 unchecked.
 pub(crate) unsafe fn static_string(raw: *const c_char) -> &'static str {
-    if raw.is_null() {
-        return "";
+    unsafe {
+        if raw.is_null() {
+            return "";
+        }
+        core::str::from_utf8_unchecked(CStr::from_ptr(raw).to_bytes())
     }
-    core::str::from_utf8_unchecked(CStr::from_ptr(raw).to_bytes())
 }
 
 /// Spells an enumerator through its C `uform_*_name`.
@@ -626,17 +612,23 @@ pub(crate) fn read_spelling<Value>(
 /// The version of the linked library.
 ///
 /// Calls `uform_version_name`.
-pub fn version() -> &'static str { unsafe { static_string(uform_version_name()) } }
+pub fn version() -> &'static str {
+    unsafe { static_string(uform_version_name()) }
+}
 
 /// Comma-separated hardware capabilities the library was compiled with.
 ///
 /// Calls `uform_capabilities_compiled`.
-pub fn capabilities_compiled() -> &'static str { unsafe { static_string(uform_capabilities_compiled()) } }
+pub fn capabilities_compiled() -> &'static str {
+    unsafe { static_string(uform_capabilities_compiled()) }
+}
 
 /// Comma-separated hardware capabilities this machine offers at runtime.
 ///
 /// Calls `uform_capabilities_available`.
-pub fn capabilities_available() -> &'static str { unsafe { static_string(uform_capabilities_available()) } }
+pub fn capabilities_available() -> &'static str {
+    unsafe { static_string(uform_capabilities_available()) }
+}
 
 // endregion: Errors and Introspection
 
@@ -720,7 +712,9 @@ impl FromStr for Scalar {
     type Err = Error;
 
     /// Calls `uform_scalar_from_name`.
-    fn from_str(text: &str) -> Result<Self> { read_spelling(text, uform_scalar_from_name, Scalar::from_raw) }
+    fn from_str(text: &str) -> Result<Self> {
+        read_spelling(text, uform_scalar_from_name, Scalar::from_raw)
+    }
 }
 
 // endregion: Scalars
@@ -819,7 +813,9 @@ impl FromStr for CPUClass {
     type Err = Error;
 
     /// Calls `uform_cpu_class_from_name`.
-    fn from_str(text: &str) -> Result<Self> { read_spelling(text, uform_cpu_class_from_name, CPUClass::from_raw) }
+    fn from_str(text: &str) -> Result<Self> {
+        read_spelling(text, uform_cpu_class_from_name, CPUClass::from_raw)
+    }
 }
 
 /// The GPU families UForm ships tuned variants for, the device twin of [`CPUClass`]: dispatch
@@ -888,7 +884,9 @@ impl FromStr for GPUClass {
     type Err = Error;
 
     /// Calls `uform_gpu_class_from_name`.
-    fn from_str(text: &str) -> Result<Self> { read_spelling(text, uform_gpu_class_from_name, GPUClass::from_raw) }
+    fn from_str(text: &str) -> Result<Self> {
+        read_spelling(text, uform_gpu_class_from_name, GPUClass::from_raw)
+    }
 }
 
 /// The GPU vendors one binary drives at once.
@@ -917,6 +915,22 @@ impl GPUVendor {
     }
 }
 
+impl fmt::Display for GPUVendor {
+    /// Calls `uform_gpu_vendor_name`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(spelling(uform_gpu_vendor_name, *self as c_int))
+    }
+}
+
+impl FromStr for GPUVendor {
+    type Err = Error;
+
+    /// Calls `uform_gpu_vendor_from_name`, refusing "unknown", which names no vendor.
+    fn from_str(text: &str) -> Result<Self> {
+        read_spelling(text, uform_gpu_vendor_from_name, GPUVendor::from_raw)
+    }
+}
+
 /// One GPU as UForm numbers it: its position in what [`gpu_devices`] lists is the ordinal every
 /// VRAM placement names it by.
 ///
@@ -940,19 +954,29 @@ impl Default for GPUDevice {
 
 impl GPUDevice {
     /// The vendor whose runtime drives the device.
-    pub fn vendor(&self) -> Option<GPUVendor> { GPUVendor::from_raw(self.0.vendor) }
+    pub fn vendor(&self) -> Option<GPUVendor> {
+        GPUVendor::from_raw(self.0.vendor)
+    }
 
     /// The device's ordinal in its vendor's runtime, as `nvidia-smi` or `rocm-smi` list it.
-    pub fn vendor_ordinal(&self) -> u32 { self.0.vendor_ordinal }
+    pub fn vendor_ordinal(&self) -> u32 {
+        self.0.vendor_ordinal
+    }
 
     /// The class whose kernels run on it.
-    pub fn gpu_class(&self) -> Option<GPUClass> { GPUClass::from_raw(self.0.gpu_class) }
+    pub fn gpu_class(&self) -> Option<GPUClass> {
+        GPUClass::from_raw(self.0.gpu_class)
+    }
 
     /// Streaming multiprocessors or compute units.
-    pub fn compute_units(&self) -> u32 { self.0.compute_units }
+    pub fn compute_units(&self) -> u32 {
+        self.0.compute_units
+    }
 
     /// Device memory in bytes.
-    pub fn memory_bytes(&self) -> u64 { self.0.memory_bytes }
+    pub fn memory_bytes(&self) -> u64 {
+        self.0.memory_bytes
+    }
 
     /// The vendor's own name for the device, cut before a character the truncation split.
     pub fn name(&self) -> &str {
@@ -1027,19 +1051,29 @@ pub struct Rows<'arena> {
 
 impl<'arena> Rows<'arena> {
     /// Rows the call wrote.
-    pub fn count(&self) -> usize { self.count }
+    pub fn count(&self) -> usize {
+        self.count
+    }
 
     /// Values per row, the model's embedding dimensions.
-    pub fn columns(&self) -> usize { self.view.0.columns }
+    pub fn columns(&self) -> usize {
+        self.view.0.columns
+    }
 
     /// Bytes between the starts of consecutive rows.
-    pub fn stride(&self) -> usize { self.view.0.stride }
+    pub fn stride(&self) -> usize {
+        self.view.0.stride
+    }
 
     /// The scalar type the rows hold.
-    pub fn scalar(&self) -> Option<Scalar> { Scalar::from_raw(self.view.0.scalar) }
+    pub fn scalar(&self) -> Option<Scalar> {
+        Scalar::from_raw(self.view.0.scalar)
+    }
 
     /// The first row, in host or device memory, for handing to another library as it is.
-    pub fn as_ptr(&self) -> *const c_void { self.view.0.data }
+    pub fn as_ptr(&self) -> *const c_void {
+        self.view.0.data
+    }
 
     /// Every row's bytes end to end, refused with [`Status::Device`] over device memory.
     pub fn as_bytes(&self) -> Result<&'arena [u8]> {
@@ -1074,7 +1108,9 @@ pub struct RowsTape<'arena> {
 
 impl<'arena> RowsTape<'arena> {
     /// Items the call encoded.
-    pub fn count(&self) -> usize { self.count }
+    pub fn count(&self) -> usize {
+        self.count
+    }
 
     /// The call's count plus one non-decreasing offsets, in rows, refused with [`Status::Device`]
     /// over device memory.
@@ -1086,11 +1122,7 @@ impl<'arena> RowsTape<'arena> {
     /// Every item's rows end to end, refused with [`Status::Device`] over device memory.
     pub fn rows(&self) -> Result<Rows<'arena>> {
         let offsets = self.offsets()?;
-        Ok(Rows {
-            arena: self.arena,
-            view: Exported(self.view.0.rows),
-            count: offsets.last().copied().unwrap_or(0),
-        })
+        Ok(Rows { arena: self.arena, view: Exported(self.view.0.rows), count: offsets.last().copied().unwrap_or(0) })
     }
 
     /// The rows of one item, refused with [`Status::InvalidArgument`] when `item` is not below
@@ -1124,10 +1156,14 @@ pub struct Tape<'arena> {
 
 impl<'arena> Tape<'arena> {
     /// Items the call wrote.
-    pub fn count(&self) -> usize { self.count }
+    pub fn count(&self) -> usize {
+        self.count
+    }
 
     /// The scalar type the values are.
-    pub fn scalar(&self) -> Option<Scalar> { Scalar::from_raw(self.view.0.scalar) }
+    pub fn scalar(&self) -> Option<Scalar> {
+        Scalar::from_raw(self.view.0.scalar)
+    }
 
     /// The call's count plus one non-decreasing offsets, in values, refused with [`Status::Device`]
     /// over device memory.
@@ -1154,9 +1190,7 @@ impl<'arena> Tape<'arena> {
         let (Some(&start), Some(&end)) = (offsets.get(item), offsets.get(item + 1)) else {
             return Err(fail(Status::InvalidArgument, "the item is not below the call's count"));
         };
-        self.values()?
-            .get(start..end)
-            .ok_or(fail(Status::Internal, "the library exported offsets past its values"))
+        self.values()?.get(start..end).ok_or(fail(Status::Internal, "the library exported offsets past its values"))
     }
 }
 
@@ -1164,23 +1198,23 @@ impl<'arena> Tape<'arena> {
 
 // region: Placements
 
-/// The memory domains a RAM placement or executor names, and the class it pins; `None` derives
-/// the CPU's own.
-pub(crate) fn ram_options(memory_domains: &[i32], cpu_class: Option<CPUClass>) -> uform_ram_options_t {
+/// The memory domains a RAM placement or executor names, and the class it caps dispatch at;
+/// `None` sets no ceiling.
+pub(crate) fn ram_options(memory_domains: &[i32], cpu_class_ceiling: Option<CPUClass>) -> uform_ram_options_t {
     uform_ram_options_t {
         memory_domains: memory_domains.as_ptr(),
         memory_domains_count: memory_domains.len(),
-        cpu_class: cpu_class.map_or(0, |cpu_class| cpu_class as uform_cpu_class_t),
+        cpu_class_ceiling: cpu_class_ceiling.map_or(0, |ceiling| ceiling as uform_cpu_class_t),
     }
 }
 
-/// The devices a VRAM placement or executor names, and the class it pins; `None` derives
-/// the devices' own.
-pub(crate) fn vram_options(devices: &[i32], gpu_class: Option<GPUClass>) -> uform_vram_options_t {
+/// The devices a VRAM placement or executor names, and the class it caps dispatch at; `None`
+/// sets no ceiling.
+pub(crate) fn vram_options(devices: &[i32], gpu_class_ceiling: Option<GPUClass>) -> uform_vram_options_t {
     uform_vram_options_t {
         devices: devices.as_ptr(),
         devices_count: devices.len(),
-        gpu_class: gpu_class.map_or(0, |gpu_class| gpu_class as uform_gpu_class_t),
+        gpu_class_ceiling: gpu_class_ceiling.map_or(0, |ceiling| ceiling as uform_gpu_class_t),
     }
 }
 
@@ -1195,9 +1229,7 @@ pub(crate) fn path_view(path: &Path) -> Result<uform_bytes_view_t> {
     }
     #[cfg(not(unix))]
     {
-        let path = path
-            .to_str()
-            .ok_or(fail(Status::InvalidArgument, "the path is not valid UTF-8"))?;
+        let path = path.to_str().ok_or(fail(Status::InvalidArgument, "the path is not valid UTF-8"))?;
         Ok(path.as_bytes().into())
     }
 }
@@ -1206,86 +1238,50 @@ pub(crate) fn path_view(path: &Path) -> Result<uform_bytes_view_t> {
 
 // region: Callbacks
 
-/// The handlers one call lends the library, reached by every trampoline through one state pointer,
-/// and the first panic any of them raised, re-raised once the call is final since unwinding out of
-/// an `extern "C"` frame aborts.
-#[doc(hidden)]
-pub struct Callbacks {
-    pub(crate) progress: Cell<*mut c_void>,
-    panic: Mutex<Option<Box<dyn Any + Send>>>,
-}
-
-impl Default for Callbacks {
-    fn default() -> Self {
-        Callbacks {
-            progress: Cell::new(ptr::null_mut()),
-            panic: Mutex::new(None),
-        }
-    }
-}
-
-impl Callbacks {
-    /// The state every trampoline of this call receives.
-    pub(crate) fn state(&self) -> *mut c_void { ptr::from_ref(self).cast_mut().cast() }
-
-    /// Runs a handler, answering `fallback` in place of a panic and latching the first one.
-    pub(crate) fn guard<Answer>(&self, fallback: Answer, handler: impl FnOnce() -> Answer) -> Answer {
-        std::panic::catch_unwind(AssertUnwindSafe(handler)).unwrap_or_else(|panic| {
-            self.panic
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .get_or_insert(panic);
-            fallback
-        })
-    }
-
-    /// Re-raises the first panic a handler raised; called once the call is final.
-    pub(crate) fn raise(self) {
-        if let Some(panic) = self.panic.into_inner().unwrap_or_else(PoisonError::into_inner) {
-            std::panic::resume_unwind(panic)
-        }
-    }
-}
-
 /// A periodic report of finished and total units; `Break` stops the call at the next slice.
 ///
-/// It runs on whichever thread advanced the work, never on two at once, so it owes `Send` and
-/// may be `FnMut`. A panic inside it stops the call like a `Break` and is re-raised once the
-/// call is final.
+/// It runs on whichever thread advanced the work, never on two at once, so it owes `Send` and may
+/// be `FnMut`. A panic inside it aborts the process, as it cannot unwind through the library.
+///
+/// A config's progress slot takes any such handler: a blocking call lends `&mut` one, and a
+/// deferred call owns one, boxed or not, and hands it back from
+/// [`Deferred::wait_with_inputs`].
 ///
 /// Mirrors `uform_progress_callback_t`.
 pub type ProgressCallback<'a> = dyn FnMut(usize, usize) -> ControlFlow<()> + Send + 'a;
 
-/// # Safety `state` must address the live [`Callbacks`] of the call the callback was passed to,
-/// lending a `&mut ProgressCallback`.
-unsafe extern "C" fn progress_trampoline(completed: usize, total: usize, state: *mut c_void) -> c_int {
-    let callbacks = &*state.cast::<Callbacks>();
-    let handler = &mut **callbacks.progress.get().cast::<&mut ProgressCallback>();
-    callbacks.guard(1, || c_int::from(handler(completed, total).is_break()))
+/// # Safety `state` must address the `Handler` lent to the call.
+unsafe extern "C" fn progress_trampoline<Handler: FnMut(usize, usize) -> ControlFlow<()>>(
+    completed: usize,
+    total: usize,
+    state: *mut c_void,
+) -> c_int {
+    unsafe {
+        let handler = &mut *state.cast::<Handler>();
+        c_int::from(handler(completed, total).is_break())
+    }
 }
 
-/// Lends an optional handler and its step count as the progress every reporting verb takes, so the
-/// trampoline is never paired with the wrong state; `None` lends nulls.
-pub(crate) fn lower_progress(
-    handler: &mut Option<&mut ProgressCallback>,
+/// Lends an optional handler and its step count as the progress every reporting verb takes, the
+/// state pointing at the handler itself; `None` lends nulls.
+pub(crate) fn lower_progress<Handler: FnMut(usize, usize) -> ControlFlow<()>>(
+    handler: &mut Option<Handler>,
     steps: usize,
-    callbacks: &Callbacks,
 ) -> uform_progress_t {
     match handler {
-        Some(handler) => {
-            callbacks.progress.set(ptr::from_mut(handler).cast());
-            uform_progress_t {
-                callback: Some(progress_trampoline),
-                state: callbacks.state(),
-                steps,
-            }
-        }
-        None => uform_progress_t {
-            callback: None,
-            state: ptr::null_mut(),
+        Some(handler) => uform_progress_t {
+            callback: Some(progress_trampoline::<Handler>),
+            state: ptr::from_mut(handler).cast(),
             steps,
         },
+        None => uform_progress_t { callback: None, state: ptr::null_mut(), steps },
     }
+}
+
+/// Lends an optional output slot, borrowed or owned, as the pointer the library overwrites; `None`
+/// lends null.
+pub(crate) fn output_slot<Value, Slot: BorrowMut<Value>>(slot: &mut Option<Slot>) -> *mut Value {
+    slot.as_mut().map_or(ptr::null_mut(), |slot| ptr::from_mut(slot.borrow_mut()))
 }
 
 // endregion: Callbacks
@@ -1326,7 +1322,9 @@ impl FromStr for Mood {
     type Err = Error;
 
     /// Calls `uform_mood_from_name`.
-    fn from_str(text: &str) -> Result<Self> { read_spelling(text, uform_mood_from_name, Mood::from_raw) }
+    fn from_str(text: &str) -> Result<Self> {
+        read_spelling(text, uform_mood_from_name, Mood::from_raw)
+    }
 }
 
 /// Where an executor computes, and with it where the arenas it makes keep their memory.
@@ -1379,33 +1377,32 @@ pub struct Executor {
 unsafe impl Send for Executor {}
 
 impl Default for Executor {
-    fn default() -> Self { Executor::adopt(ptr::null_mut()) }
+    fn default() -> Self {
+        Executor::adopt(ptr::null_mut())
+    }
 }
 
 impl Executor {
     /// Owns the handle a constructor filled, which is null for the executor that owns nothing.
     fn adopt(handle: uform_executor_t) -> Self {
-        Executor {
-            handle,
-            share: Arc::new(ExecutorShare(handle)),
-        }
+        Executor { handle, share: Arc::new(ExecutorShare(handle)) }
     }
 
     /// Creates an executor of host threads for RAM-resident models, interleaved across the compute
     /// domains local to `memory_domains`, which is the same list the models were loaded with.
     ///
-    /// Zero `threads` takes 7/8 of the cores those domains carry, and `cpu_class` pins the class
-    /// its calls dispatch as, where `None` derives the CPU's own.
+    /// Zero `threads` takes 7/8 of the cores those domains carry, and its calls dispatch as the
+    /// newest class the CPU runs at or under `cpu_class_ceiling`, where `None` sets no ceiling.
     ///
     /// Calls `uform_executor_for_ram`.
-    pub fn for_ram(memory_domains: &[i32], cpu_class: Option<CPUClass>, threads: usize) -> Result<Self> {
+    pub fn for_ram(memory_domains: &[i32], cpu_class_ceiling: Option<CPUClass>, threads: usize) -> Result<Self> {
         let mut handle = ptr::null_mut();
         let mut outcome = uform_outcome_t::default();
         unsafe {
             uform_executor_for_ram(&mut uform_executor_for_ram_t {
                 executor: &mut handle,
                 outcome: &mut outcome,
-                ram: ram_options(memory_domains, cpu_class),
+                ram: ram_options(memory_domains, cpu_class_ceiling),
                 threads,
             })
         };
@@ -1419,26 +1416,33 @@ impl Executor {
     /// Calls `uform_executor_on_pool`.
     ///
     /// # Safety `pool` must address a live ForkUnion `fu_pool_t` that outlives the executor.
-    pub unsafe fn on_pool(memory_domains: &[i32], cpu_class: Option<CPUClass>, pool: *mut c_void) -> Result<Self> {
-        let mut handle = ptr::null_mut();
-        let mut outcome = uform_outcome_t::default();
-        uform_executor_on_pool(&mut uform_executor_on_pool_t {
-            executor: &mut handle,
-            outcome: &mut outcome,
-            ram: ram_options(memory_domains, cpu_class),
-            pool,
-        });
-        let executor = Executor::adopt(handle);
-        check(outcome).map(|()| executor)
+    pub unsafe fn on_pool(
+        memory_domains: &[i32],
+        cpu_class_ceiling: Option<CPUClass>,
+        pool: *mut c_void,
+    ) -> Result<Self> {
+        unsafe {
+            let mut handle = ptr::null_mut();
+            let mut outcome = uform_outcome_t::default();
+            uform_executor_on_pool(&mut uform_executor_on_pool_t {
+                executor: &mut handle,
+                outcome: &mut outcome,
+                ram: ram_options(memory_domains, cpu_class_ceiling),
+                pool,
+            });
+            let executor = Executor::adopt(handle);
+            check(outcome).map(|()| executor)
+        }
     }
 
-    /// Opens one submission stream on every named device, or borrows the caller's, all of them
-    /// driven by the host thread running the call - which is why this takes no thread count.
+    /// Opens one submission stream on every named device, all of them driven by the host thread
+    /// running the call - which is why this takes no thread count.
     ///
-    /// `devices` are positions in what [`gpu_devices`] lists, and `gpu_class` pins the class every
-    /// one of them dispatches as, where `None` derives theirs. The host decoders take 7/8 of the
-    /// cores local to `memory_domains` and dispatch as `cpu_class`, where `None` derives the CPU's
-    /// own. `streams` is empty, or holds one CUDA stream per device in `devices` order. Zero
+    /// `devices` are positions in what [`gpu_devices`] lists, and all of them dispatch as the best
+    /// class they all load at or under `gpu_class_ceiling`, where `None` sets no ceiling. The host
+    /// decoders take 7/8 of the cores local to `memory_domains` and dispatch under
+    /// `cpu_class_ceiling` likewise. `streams` is empty, or holds one CUDA stream per device in
+    /// `devices` order, which the library refuses with [`Status::Unsupported`]. Zero
     /// `scratch_limit` lets scratch grow as batches ask.
     ///
     /// Calls `uform_executor_for_vram`.
@@ -1446,31 +1450,33 @@ impl Executor {
     /// # Safety Every stream must be a live CUDA stream on its device that outlives the executor.
     pub unsafe fn for_vram(
         devices: &[i32],
-        gpu_class: Option<GPUClass>,
+        gpu_class_ceiling: Option<GPUClass>,
         memory_domains: &[i32],
-        cpu_class: Option<CPUClass>,
+        cpu_class_ceiling: Option<CPUClass>,
         streams: &[*mut c_void],
         scratch_limit: usize,
     ) -> Result<Self> {
-        if !streams.is_empty() && streams.len() != devices.len() {
-            return Err(fail(Status::ShapeMismatch, "pass no streams or one per device"));
+        unsafe {
+            if !streams.is_empty() && streams.len() != devices.len() {
+                return Err(fail(Status::ShapeMismatch, "pass no streams or one per device"));
+            }
+            let mut handle = ptr::null_mut();
+            let mut outcome = uform_outcome_t::default();
+            uform_executor_for_vram(&mut uform_executor_for_vram_t {
+                executor: &mut handle,
+                outcome: &mut outcome,
+                vram: vram_options(devices, gpu_class_ceiling),
+                ram: ram_options(memory_domains, cpu_class_ceiling),
+                // The C side reads one stream per device from any non-null pointer.
+                streams: match streams.is_empty() {
+                    true => ptr::null(),
+                    false => streams.as_ptr(),
+                },
+                scratch_limit,
+            });
+            let executor = Executor::adopt(handle);
+            check(outcome).map(|()| executor)
         }
-        let mut handle = ptr::null_mut();
-        let mut outcome = uform_outcome_t::default();
-        uform_executor_for_vram(&mut uform_executor_for_vram_t {
-            executor: &mut handle,
-            outcome: &mut outcome,
-            vram: vram_options(devices, gpu_class),
-            ram: ram_options(memory_domains, cpu_class),
-            // The C side reads one stream per device from any non-null pointer.
-            streams: match streams.is_empty() {
-                true => ptr::null(),
-                false => streams.as_ptr(),
-            },
-            scratch_limit,
-        });
-        let executor = Executor::adopt(handle);
-        check(outcome).map(|()| executor)
     }
 
     /// Waits until no call holds this executor and its devices finished their work, then applies
@@ -1500,7 +1506,9 @@ unsafe impl Send for ExecutorShare {}
 unsafe impl Sync for ExecutorShare {}
 
 impl Drop for ExecutorShare {
-    fn drop(&mut self) { unsafe { uform_executor_free(self.0) } }
+    fn drop(&mut self) {
+        unsafe { uform_executor_free(self.0) }
+    }
 }
 
 // endregion: Executors
@@ -1536,17 +1544,16 @@ impl Arena {
     /// Makes an arena of host pages for calls on the calling thread.
     ///
     /// Calls `uform_arena_init`.
-    pub fn new() -> Result<Self> { Arena::new_in(&Executor::default()) }
+    pub fn new() -> Result<Self> {
+        Arena::new_in(&Executor::default())
+    }
 
     /// Makes an arena where `executor` computes, serving the calls of its residency, or only those
     /// on `executor` itself for a GPU arena.
     ///
     /// Calls `uform_arena_init`.
     pub fn new_in(executor: &Executor) -> Result<Self> {
-        let mut arena = Arena {
-            handle: ptr::null_mut(),
-            _executor: None,
-        };
+        let mut arena = Arena { handle: ptr::null_mut(), _executor: None };
         let mut outcome = uform_outcome_t::default();
         unsafe {
             uform_arena_init(&mut uform_arena_init_t {
@@ -1603,7 +1610,9 @@ pub struct ArenaDescription {
 }
 
 impl Drop for Arena {
-    fn drop(&mut self) { unsafe { uform_arena_free(self.handle) } }
+    fn drop(&mut self) {
+        unsafe { uform_arena_free(self.handle) }
+    }
 }
 
 /// A view the library wrote into an arena the verb or result borrows.
@@ -1630,7 +1639,9 @@ pub struct On<'handle, Handle, Completion = Blocking> {
 }
 
 impl<Handle, Completion> Clone for On<'_, Handle, Completion> {
-    fn clone(&self) -> Self { *self }
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 impl<Handle, Completion> Copy for On<'_, Handle, Completion> {}
@@ -1647,14 +1658,11 @@ impl Completion for Blocking {
 
     fn answer<'handle, Verb: Calling>(mut verb: Verb) -> Self::Answer<'handle, Verb> {
         let mut outcome = uform_outcome_t::default();
-        let callbacks = Callbacks::default();
-        let mut arguments = verb.arguments(&mut outcome, uform_completion_blocking_k, &callbacks)?;
-        // Safety: the arguments point into `verb`, `outcome` and `callbacks`, which stay in place
-        // until the call returns, and a blocking call is final on return.
+        let mut arguments = verb.arguments(&mut outcome, uform_completion_blocking_k)?;
+        // Safety: the arguments point into `verb` and `outcome`, which stay in place until the
+        // call returns, and a blocking call is final on return.
         unsafe { Verb::call(&mut arguments) };
-        callbacks.raise();
-        check(outcome)?;
-        verb.finish()
+        verb.finish(check(outcome)).0
     }
 }
 
@@ -1671,28 +1679,19 @@ impl Completion for Deferring {
     type Answer<'handle, Verb: Calling> = Result<Deferred<'handle, Verb>>;
 
     fn answer<'handle, Verb: Calling>(verb: Verb) -> Self::Answer<'handle, Verb> {
-        let lent = Box::into_raw(Box::new(Lent {
-            outcome: uform_outcome_t::default(),
-            callbacks: Callbacks::default(),
-            arguments: None,
-            verb,
-        }));
+        let lent = Box::into_raw(Box::new(Lent { outcome: uform_outcome_t::default(), arguments: None, verb }));
         // Safety: the box is fresh and reached through `lent` alone, and the arguments point into
         // its fields, where they stay until the box is freed.
         unsafe {
             let outcome = ptr::addr_of_mut!((*lent).outcome);
-            let (callbacks, verb) = (&(*lent).callbacks, &mut (*lent).verb);
-            match verb.arguments(outcome, uform_completion_deferred_k, callbacks) {
+            match (*lent).verb.arguments(outcome, uform_completion_deferred_k) {
                 Ok(arguments) => Verb::call((*lent).arguments.insert(arguments)),
                 Err(refusal) => {
                     drop(Box::from_raw(lent));
                     return Err(refusal);
                 }
             }
-            Ok(Deferred {
-                lent: NonNull::new_unchecked(lent),
-                receiver: PhantomData,
-            })
+            Ok(Deferred { lent: NonNull::new_unchecked(lent), receiver: PhantomData })
         }
     }
 }
@@ -1709,8 +1708,6 @@ impl Accepts<&'static Path> for Deferring {}
 struct Lent<Verb: Calling> {
     /// The outcome the library finishes.
     outcome: uform_outcome_t,
-    /// The handlers the call lends, and the first panic they raised.
-    callbacks: Callbacks,
     /// The argument struct, pointing into `outcome` and `verb`, filled once the box is in place.
     arguments: Option<Verb::Arguments>,
     /// The inputs, the outputs and the arena borrow.
@@ -1722,9 +1719,8 @@ struct Lent<Verb: Calling> {
 ///
 /// [`Deferred::status`] polls without blocking, and [`Deferred::wait`] blocks until the call is
 /// final and hands back what it produced, while `.await` polls it from async code. Dropping an
-/// unfinished one waits for it, then frees the box.
-/// A panic a handler raised resurfaces from `wait`, `.await`, or a drop outside unwinding.
-/// `'handle` is the borrow of the [`On`] that submitted it.
+/// unfinished one waits for it, then frees the box. `'handle` is the borrow of the [`On`] that
+/// submitted it.
 ///
 /// Rust-only; waiting and dropping call `uform_outcome_wait`.
 #[must_use = "a deferred call's outcome is seen only through `status` or `wait`"]
@@ -1747,21 +1743,22 @@ impl<Verb: Calling> Deferred<'_, Verb> {
     ///
     /// Calls `uform_outcome_wait`.
     pub fn wait(self) -> Result<Verb::Output> {
+        self.wait_with_inputs().0
+    }
+
+    /// Blocks until the call is final, then hands back what it produced beside the inputs it owned,
+    /// such as a config's handler and stats.
+    ///
+    /// Calls `uform_outcome_wait`.
+    pub fn wait_with_inputs(self) -> (Result<Verb::Output>, Verb::Inputs) {
         let lent = ManuallyDrop::new(self).lent.as_ptr();
         // Safety: once the outcome is final the library touches the box no more, so it
         // is freed here.
-        let Lent {
-            outcome,
-            callbacks,
-            verb,
-            ..
-        } = unsafe {
+        let Lent { outcome, verb, .. } = unsafe {
             uform_outcome_wait(ptr::addr_of_mut!((*lent).outcome));
             *Box::from_raw(lent)
         };
-        callbacks.raise();
-        check(outcome)?;
-        verb.finish()
+        verb.finish(check(outcome))
     }
 }
 
@@ -1769,13 +1766,9 @@ impl<Verb: Calling> Drop for Deferred<'_, Verb> {
     fn drop(&mut self) {
         let lent = self.lent.as_ptr();
         // Safety: once the outcome is final the library touches the box no more, and this owned it.
-        let Lent { callbacks, .. } = unsafe {
+        unsafe {
             uform_outcome_wait(ptr::addr_of_mut!((*lent).outcome));
-            *Box::from_raw(lent)
-        };
-        // A second panic while unwinding would abort, so only a drop outside one re-raises.
-        if !std::thread::panicking() {
-            callbacks.raise();
+            drop(Box::from_raw(lent));
         }
     }
 }
@@ -1794,14 +1787,16 @@ impl<'handle, Verb: Calling> IntoFuture for Deferred<'handle, Verb> {
     type Output = Result<Verb::Output>;
     type IntoFuture = Wait<'handle, Verb>;
 
-    fn into_future(self) -> Wait<'handle, Verb> { Wait(Some(self)) }
+    fn into_future(self) -> Wait<'handle, Verb> {
+        Wait(Some(self))
+    }
 }
 
-/// A [`Deferred`] being awaited: every poll reads its status, and one not yet final asks to
-/// be polled again.
+/// A [`Deferred`] being awaited: every poll reads its status through `uform_outcome_status`, and
+/// one not yet final asks to be polled again.
 ///
-/// The C library has no wake-up, so an executor re-polls it while other tasks run, spinning only
-/// when nothing else is ready; [`Deferred::wait`] blocks without spinning.
+/// The C library has no wake-up, so an executor re-polls it while other tasks run, yielding
+/// between polls and never sleeping inside one; [`Deferred::wait`] blocks without spinning.
 ///
 /// Rust-only; the final poll calls `uform_outcome_wait`, which returns at once.
 #[must_use = "an awaited call does nothing unless polled"]
@@ -1866,6 +1861,7 @@ mod tests {
         assert_eq!(Status::ShapeMismatch.to_string(), "shape-mismatch");
         assert_eq!("cancelled".parse(), Ok(Status::Cancelled));
         assert_eq!("invalid-argument".parse(), Ok(Status::InvalidArgument));
+        assert_eq!("uninitialized".parse(), Ok(Status::Uninitialized));
         assert_eq!(Mood::Spinning.to_string(), "spinning");
         assert_eq!("parked".parse(), Ok(Mood::Parked));
 
@@ -1886,6 +1882,7 @@ mod tests {
             Status::Device,
             Status::Malformed,
             Status::Internal,
+            Status::Uninitialized,
             Status::ConfigMismatch,
             Status::Contended,
             Status::Cancelled,
@@ -1893,21 +1890,15 @@ mod tests {
             Status::InvalidArgument,
         ];
         for status in failures {
-            let raw = uform_outcome_t {
-                status: status as i32,
-                message: ptr::null(),
-            };
+            let raw = uform_outcome_t { status: status as i32, message: ptr::null() };
             assert_eq!(check(raw).unwrap_err().status, status);
             assert_eq!(status.to_string().parse(), Ok(status));
         }
         // A final outcome is never deferred, and a status this build has no name for is not
-        // success either, so both read as the contract violation they are; USearch's 6, 11 and
-        // 12 stay unused.
-        for status in [Status::Deferred as i32, 6, 11, 12, 4242] {
-            let raw = uform_outcome_t {
-                status,
-                message: ptr::null(),
-            };
+        // success either, so both read as the contract violation they are; USearch's 6 and 11
+        // stay unused.
+        for status in [Status::Deferred as i32, 6, 11, 4242] {
+            let raw = uform_outcome_t { status, message: ptr::null() };
             assert_eq!(check(raw).unwrap_err().status, Status::Internal);
         }
     }
@@ -1943,9 +1934,7 @@ mod tests {
             ([].as_slice(), Status::InvalidArgument),
         ];
         for (offsets, status) in refusals {
-            let refusal = TapeView::<u8>::tape(&(data, offsets), &mut gathered)
-                .err()
-                .map(|error| error.status);
+            let refusal = TapeView::<u8>::tape(&(data, offsets), &mut gathered).err().map(|error| error.status);
             assert_eq!(refusal, Some(status), "{offsets:?}");
         }
     }
@@ -1954,10 +1943,7 @@ mod tests {
     #[test]
     fn arenas_live_where_their_executor_computes() -> Result<()> {
         let local = Arena::new()?;
-        let host = ArenaDescription {
-            residency: Residency::Ram,
-            device: None,
-        };
+        let host = ArenaDescription { residency: Residency::Ram, device: None };
         assert_eq!(local.describe()?, host);
         assert!(local.host().is_ok());
 
@@ -1971,13 +1957,7 @@ mod tests {
             return Ok(());
         };
         let device = Arena::new_in(&gpu)?;
-        assert_eq!(
-            device.describe()?,
-            ArenaDescription {
-                residency: Residency::Vram,
-                device: Some(0)
-            }
-        );
+        assert_eq!(device.describe()?, ArenaDescription { residency: Residency::Vram, device: Some(0) });
         let share = Arc::downgrade(&gpu.share);
         drop(gpu);
         assert!(share.upgrade().is_some(), "a GPU arena holds its executor");
@@ -2006,16 +1986,17 @@ mod tests {
         assert!("intel".parse::<GPUClass>().is_err());
         assert_eq!(CPUClass::from_raw(0), None);
         assert_eq!(GPUClass::from_raw(13), None);
-        assert_eq!(CPUClass::Serial as i32, 1);
-        assert_eq!(CPUClass::Monoversioned as i32, 2);
-        assert_eq!(CPUClass::IBMPower10 as i32, 128);
+        for vendor in [GPUVendor::Nvidia, GPUVendor::Amd, GPUVendor::Apple] {
+            assert_eq!(vendor.to_string().parse(), Ok(vendor));
+        }
+        assert_eq!(GPUVendor::Nvidia.to_string(), "nvidia");
+        assert!("unknown".parse::<GPUVendor>().is_err());
+        assert!("intel".parse::<GPUVendor>().is_err());
     }
 
     /// A machine without GPUs, or a build without their vendors, lists none and still succeeds.
     #[test]
     fn listed_devices_never_outnumber_their_count() -> Result<()> {
-        assert_eq!(core::mem::offset_of!(uform_gpu_device_t, name), 24);
-        assert_eq!(core::mem::size_of::<GPUDevice>(), 88);
         let mut devices = [GPUDevice::default(); 4];
         let count = gpu_devices(&mut devices)?;
         assert_eq!(gpu_devices(&mut [])?, count);

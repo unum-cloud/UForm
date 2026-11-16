@@ -40,18 +40,13 @@ jobs:
         env:
           version: ${{ inputs.version }}
         run: |
-          export core=${version%%-*}
           echo "$version" > VERSION
-          perl -pi -e 's/^(    VERSION )[0-9.]+$/$1$ENV{core}/' CMakeLists.txt
-          perl -pi -e 's/(uform_version_name\(void\) \{ return ")[^"]+/$1$ENV{version}/' src/types.cpp
       - name: Upload Bumped Files
         uses: actions/upload-artifact@v7
         with:
           name: swift-version
           path: |
             VERSION
-            CMakeLists.txt
-            src/types.cpp
           if-no-files-found: error
           retention-days: 1
 

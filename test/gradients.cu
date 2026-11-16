@@ -115,12 +115,12 @@ inline constexpr std::size_t case_arena_bytes_k = 1ull << 30;
  *  15% Jacobian error. */
 inline constexpr f64_t finite_difference_tolerance_k = 0x1.0p-4;
 
-/** A two-block, two-head tower over four rows of 64 columns, scoring the masked objective; @p omni
- *  lights every media slice, so the keyed partition holds one row of each modality. */
-[[nodiscard]] static trainer_config_t test_geometry_(bool omni) noexcept {
+/** A two-block, two-head tower over four rows of 64 columns, scoring the masked objective;
+ *  @p is_omni lights every media slice, so the keyed partition holds one row of each modality. */
+[[nodiscard]] static trainer_config_t test_geometry_(bool is_omni) noexcept {
     trainer_config_t config;
     config.batch = multimodal_batch_shape_t {4u, 4u, 64u};
-    if (omni) {
+    if (is_omni) {
         config.batch.image = image_batch_shape_t {8u, 3u};
         config.batch.video = video_batch_shape_t {8u, 3u, 2u, 1u};
         config.batch.audio = audio_batch_shape_t {256u, 16000u};
@@ -1494,7 +1494,8 @@ static void spectrum_replay(test_suite_t& suite, device_t& device) {
     i32_t const devices[1] = {0};
     std::span<gpu_stream_t> const streams {&device.stream, 1};
     expected<multimem_domain_t> domain = multimem_domain_t::make(
-        topology.value_, devices, distributed_pooled_spectrum_t::payload_scalars_needed(config), streams, 120.0);
+        topology.value_, devices, distributed_pooled_spectrum_t::payload_scalars_needed(config), streams,
+        wait_limit_seconds_k);
     if (!domain) return suite.check(false, "multimem domain: {}", domain.description_);
     expected<colocated_domain_t> colocated = colocated_domain_t::make(topology.value_);
     if (!colocated) return suite.check(false, "colocated domain: {}", colocated.description_);

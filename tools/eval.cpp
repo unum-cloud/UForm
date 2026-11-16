@@ -31,13 +31,18 @@
  *  held-out choices that JSON-lines file lists, prints each group's negative log-likelihood and the
  *  top-choice calibration error before and after, and writes the checkpoint again at @c --output
  *  with them as @c choices.inverse_temperatures .
+ *
+ *  Every encoding prints, at most once a second, the items it has encoded of its split. The first
+ *  SIGINT or SIGTERM stops it between batches: it prints the phase it stopped in, writes no
+ *  calibrated checkpoint, and exits with 130.
  */
 #include <cmath>   // `std::sqrt`
+#include <csignal> // `std::signal`, `SIGINT`, `SIGTERM`
 #include <cstdint> // `std::uint32_t`
 #include <cstdio>  // `std::fopen`, `std::fread`
-#include <cstdlib> // `std::strtoull`
-#include <cstring> // `std::memcpy`, `std::strcmp`
+#include <cstring> // `std::memcpy`
 
+#include <array>            // `std::array` - the flag table
 #include <initializer_list> // `std::initializer_list`
 #include <limits>           // `std::numeric_limits` — the peak a softmax starts below
 #include <span>             // `std::span` — the fixed-size hit and recall tables
@@ -61,6 +66,8 @@
 #include "uform/utilities/types.hpp"              // `divide_round_up`
 #include "uform/utilities/ram_device.hpp"         // `executor_t`, `pool_view_t`, `topology_t`
 
+#include "arguments.hpp" // `flag_t`, `parse_or_exit`, `stop_requested`, `verb_phase_t`
+
 namespace fu = ashvardanian::forkunion;
 namespace st = ashvardanian::smashtable;
 namespace uu = unum::uform::utilities;
@@ -69,6 +76,7 @@ using uu::executor_t;
 using uu::expected;
 using uu::pool_view_t;
 using uu::topology_t;
+using namespace unum::uform::tools;
 
 /** Append @p count trivially copyable @p items onto @p values , or report the refusal. */
 template <typename value_type_>
@@ -123,7 +131,17 @@ struct encoder_t {
 };
 
 /** How one split's encoding ended. */
-enum class encoded_t { ok_k, skipped_k, failed_k };
+enum class encoded_t { ok_k, skipped_k, failed_k, stopped_k };
+
+/** What a split's media count in, as its progress lines print them. */
+[[nodiscard]] static std::string_view media_unit_(media_t media) noexcept {
+    switch (media) {
+    case media_t::image_k: return "images";
+    case media_t::video_k: return "videos";
+    case media_t::audio_k: return "recordings";
+    }
+    return "items";
+}
 
 /** Read @p path whole onto the end of @p bytes . */
 [[nodiscard]] static bool read_file_(std::string_view path, st::basic_vector<std::uint8_t>& bytes) noexcept {
@@ -273,6 +291,7 @@ enum class encoded_t { ok_k, skipped_k, failed_k };
 /** Map the outcome of one batch onto how its split's encoding goes on. */
 [[nodiscard]] static encoded_t judge_(uform_outcome_t const& outcome, split_t const& split) noexcept {
     if (outcome.status == uform_status_success_k) return encoded_t::ok_k;
+    if (outcome.status == uform_status_cancelled_k) return encoded_t::stopped_k;
     if (outcome.status == uform_status_unsupported_k)
         return fmt::println("skip {}: {}", split.name, outcome.message ? outcome.message : "unsupported"),
                encoded_t::skipped_k;
@@ -280,13 +299,18 @@ enum class encoded_t { ok_k, skipped_k, failed_k };
     return encoded_t::failed_k;
 }
 
-[[nodiscard]] static encoded_t embed_captions_(encoder_t& encoder, split_t const& split,
+/** Append the embeddings of every caption of @p split onto @p rows , batch by batch, reporting into
+ *  @p phase and stopping between batches once a signal asks. */
+[[nodiscard]] static encoded_t embed_captions_(encoder_t& encoder, split_t const& split, verb_phase_t& phase,
                                                st::basic_vector<float>& rows) noexcept {
     strings_t framed;
     for (std::size_t caption = 0; caption != split.captions.count(); ++caption)
         if (!framed.append({encoder.query_prefix, split.captions[caption]})) return encoded_t::failed_k;
+    phase.unit = "captions", phase.total = framed.count();
     for (std::size_t first = 0; first < framed.count(); first += encoder.batch) {
+        if (stop_requested) return encoded_t::stopped_k;
         std::size_t const count = fu::min_of(encoder.batch, framed.count() - first);
+        phase.first = first;
         uform_outcome_t outcome {};
         uform_rows_view_t embeddings {};
         uform_text_encode_t arguments {.model = encoder.model,
@@ -296,7 +320,8 @@ enum class encoded_t { ok_k, skipped_k, failed_k };
                                        .texts = {framed.bytes.data(), framed.offsets.data() + first, uform_scalar_u8_k},
                                        .embeddings = &embeddings,
                                        .arena = encoder.arena,
-                                       .outputs_scalar = uform_scalar_f32_k};
+                                       .outputs_scalar = uform_scalar_f32_k,
+                                       .progress = verb_progress_of(phase)};
         uform_text_encode(&arguments);
         if (encoded_t const judged = judge_(outcome, split); judged != encoded_t::ok_k) return judged;
         if (!keep_rows_(encoder, embeddings, count, rows)) return encoded_t::failed_k;
@@ -304,10 +329,15 @@ enum class encoded_t { ok_k, skipped_k, failed_k };
     return encoded_t::ok_k;
 }
 
-[[nodiscard]] static encoded_t embed_media_(encoder_t& encoder, split_t const& split,
+/** Append the embeddings of every medium of @p split onto @p rows , batch by batch, reporting into
+ *  @p phase and stopping between batches once a signal asks. */
+[[nodiscard]] static encoded_t embed_media_(encoder_t& encoder, split_t const& split, verb_phase_t& phase,
                                             st::basic_vector<float>& rows) noexcept {
+    phase.unit = media_unit_(split.media), phase.total = split.files.count();
     for (std::size_t first = 0; first < split.files.count(); first += encoder.batch) {
+        if (stop_requested) return encoded_t::stopped_k;
         std::size_t const count = fu::min_of(encoder.batch, split.files.count() - first);
+        phase.first = first;
         st::basic_vector<std::uint8_t> bytes;
         st::basic_vector<std::size_t> offsets;
         if (st::failed(offsets.push_back(std::size_t {0}))) return encoded_t::failed_k;
@@ -326,7 +356,8 @@ enum class encoded_t { ok_k, skipped_k, failed_k };
                                             .images = tape,
                                             .embeddings = &embeddings,
                                             .arena = encoder.arena,
-                                            .outputs_scalar = uform_scalar_f32_k};
+                                            .outputs_scalar = uform_scalar_f32_k,
+                                            .progress = verb_progress_of(phase)};
             uform_image_encode(&arguments);
         } break;
         case media_t::video_k: {
@@ -337,7 +368,8 @@ enum class encoded_t { ok_k, skipped_k, failed_k };
                                             .videos = tape,
                                             .embeddings = &embeddings,
                                             .arena = encoder.arena,
-                                            .outputs_scalar = uform_scalar_f32_k};
+                                            .outputs_scalar = uform_scalar_f32_k,
+                                            .progress = verb_progress_of(phase)};
             uform_video_encode(&arguments);
         } break;
         case media_t::audio_k: {
@@ -348,7 +380,8 @@ enum class encoded_t { ok_k, skipped_k, failed_k };
                                             .recordings = tape,
                                             .embeddings = &embeddings,
                                             .arena = encoder.arena,
-                                            .outputs_scalar = uform_scalar_f32_k};
+                                            .outputs_scalar = uform_scalar_f32_k,
+                                            .progress = verb_progress_of(phase)};
             uform_audio_encode(&arguments);
         } break;
         }
@@ -465,19 +498,21 @@ static constexpr std::size_t score_block_rows_k = 64;
     return true;
 }
 
-[[nodiscard]] static bool evaluate_(encoder_t& encoder, split_t const& split) noexcept {
+/** Encode and score @p split , reporting into @p phase ; a stop scores nothing. */
+[[nodiscard]] static bool evaluate_(encoder_t& encoder, split_t const& split, verb_phase_t& phase) noexcept {
     st::basic_vector<float> captions, media;
-    encoded_t encoded = embed_media_(encoder, split, media);
-    if (encoded == encoded_t::ok_k) encoded = embed_captions_(encoder, split, captions);
+    encoded_t encoded = embed_media_(encoder, split, phase, media);
+    if (encoded == encoded_t::ok_k) encoded = embed_captions_(encoder, split, phase, captions);
     if (encoded == encoded_t::skipped_k) return true;
     double recalls_at[2][3];
     return encoded == encoded_t::ok_k && score_(encoder, split, captions, media, recalls_at);
 }
 
 /** Evaluate COCO-SM: encode its images once, score every translator's every language against them,
- *  and report each translator's mean over its languages. */
-[[nodiscard]] static bool evaluate_coco_sm_(encoder_t& encoder, std::string_view directory,
-                                            std::string_view images) noexcept {
+ *  and report each translator's mean over its languages, reporting into @p phase and stopping
+ *  between languages once a signal asks. */
+[[nodiscard]] static bool evaluate_coco_sm_(encoder_t& encoder, std::string_view directory, std::string_view images,
+                                            verb_phase_t& phase) noexcept {
     split_t split;
     split.media_name = "image", split.media = media_t::image_k;
     st::basic_vector<float> media;
@@ -492,11 +527,11 @@ static constexpr std::size_t score_block_rows_k = 64;
         yyjson_obj_foreach(yyjson_doc_get_root(document), index, count, language, entries) {
             *fmt::format_to_n(name, sizeof(name) - 1, "coco-sm {} {}", translator, yyjson_get_str(language)).out = '\0';
             split.name = name;
-            if (!load_coco_sm_(images, entries, split)) return yyjson_doc_free(document), false;
+            if (stop_requested || !load_coco_sm_(images, entries, split)) return yyjson_doc_free(document), false;
             st::basic_vector<float> captions;
             double recalls_at[2][3];
-            encoded_t encoded = media.empty() ? embed_media_(encoder, split, media) : encoded_t::ok_k;
-            if (encoded == encoded_t::ok_k) encoded = embed_captions_(encoder, split, captions);
+            encoded_t encoded = media.empty() ? embed_media_(encoder, split, phase, media) : encoded_t::ok_k;
+            if (encoded == encoded_t::ok_k) encoded = embed_captions_(encoder, split, phase, captions);
             if (encoded != encoded_t::ok_k || !score_(encoder, split, captions, media, recalls_at))
                 return yyjson_doc_free(document), encoded == encoded_t::skipped_k;
             for (std::size_t direction = 0; direction != 2; ++direction)
@@ -619,7 +654,8 @@ struct choices_t {
  *  its logarithm in Float64.
  */
 [[nodiscard]] static bool calibrate_(encoder_t& encoder, std::string_view checkpoint_path,
-                                     std::string_view choices_path, char const* output_path) noexcept {
+                                     std::string_view choices_path, std::string_view output_path,
+                                     verb_phase_t& phase) noexcept {
     choices_t held_out;
     if (!load_choices_(choices_path, held_out)) return false;
     std::size_t const items = held_out.states.count(), offered = held_out.targets.size();
@@ -636,8 +672,11 @@ struct choices_t {
         st::failed(probabilities.resize(st::assume_uninitialized, offered)) ||
         st::failed(betas.resize(st::assume_uninitialized, groups)))
         return fmt::println(stderr, "uform_eval: calibration staging failed"), false;
+    phase.total = items;
     for (std::size_t first = 0; first < items; first += encoder.batch) {
+        if (stop_requested) return false;
         std::size_t const count = fu::min_of(encoder.batch, items - first);
+        phase.first = first;
         uform_outcome_t outcome {};
         uform_tape_view_t chosen {};
         uform_text_choose_t arguments {
@@ -648,8 +687,10 @@ struct choices_t {
             .texts = {held_out.states.bytes.data(), held_out.states.offsets.data() + first, uform_scalar_u8_k},
             .choices = {held_out.choices.bytes.data(), held_out.choices.offsets.data() + first, uform_scalar_u8_k},
             .probabilities = &chosen,
-            .arena = encoder.arena};
+            .arena = encoder.arena,
+            .progress = verb_progress_of(phase)};
         uform_text_choose(&arguments);
+        if (outcome.status == uform_status_cancelled_k) return false;
         if (outcome.status != uform_status_success_k)
             return fmt::println(stderr, "uform_eval: choosing failed: {}", outcome.message), false;
         std::size_t const begin = held_out.choices.offsets[first],
@@ -705,6 +746,8 @@ struct choices_t {
             written = calibrated.insert(entry.name.view(), weights[entry.name.view()]);
     for (uu::checkpoint_metadata_t const& pair : weights.metadata())
         if (written) written = calibrated.metadata(pair.key.view(), pair.value.view());
+    // A stop arriving while the temperatures fit still writes nothing.
+    if (stop_requested) return false;
     if (written) written = calibrated.save(output_path);
     if (!written) return fmt::println(stderr, "uform_eval: {}", std::string_view {written.description_}), false;
     fmt::println("calibrate: wrote {}", output_path);
@@ -712,40 +755,42 @@ struct choices_t {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 2) {
-        fmt::println(stderr, "Usage: uform_eval <checkpoint> [--coco <dir>] [--msrvtt <dir>] [--clotho <dir>] " //
-                             "[--coco-sm <dir> --coco-sm-images <dir>] [--gpu <ordinal>] "                      //
-                             "[--batch <items>] [--threads <count>] [--query-prefix <text>] "                   //
-                             "[--calibrate <choices.jsonl> --output <calibrated.safetensors>]");
-        return 1;
-    }
+    // Progress lines reach a redirected log as they are printed.
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
     encoder_t encoder;
-    char const *coco = nullptr, *msrvtt = nullptr, *clotho = nullptr, *coco_sm = nullptr, *coco_sm_images = nullptr,
-               *gpu = nullptr, *calibrate = nullptr, *output = nullptr;
-    for (int index = 2; index + 1 < argc; index += 2) {
-        char const *flag = argv[index], *value = argv[index + 1];
-        if (!std::strcmp(flag, "--coco")) coco = value;
-        else if (!std::strcmp(flag, "--msrvtt")) msrvtt = value;
-        else if (!std::strcmp(flag, "--clotho")) clotho = value;
-        else if (!std::strcmp(flag, "--coco-sm")) coco_sm = value;
-        else if (!std::strcmp(flag, "--coco-sm-images")) coco_sm_images = value;
-        else if (!std::strcmp(flag, "--gpu")) gpu = value;
-        else if (!std::strcmp(flag, "--batch")) encoder.batch = std::strtoull(value, nullptr, 10);
-        else if (!std::strcmp(flag, "--threads")) encoder.threads = std::strtoull(value, nullptr, 10);
-        else if (!std::strcmp(flag, "--query-prefix")) encoder.query_prefix = value;
-        else if (!std::strcmp(flag, "--calibrate")) calibrate = value;
-        else if (!std::strcmp(flag, "--output")) output = value;
-        else return fmt::println(stderr, "uform_eval: unknown flag {}", flag), 1;
-    }
-    if (!encoder.batch) return fmt::println(stderr, "uform_eval: --batch takes a positive count"), 1;
-    if (!coco_sm != !coco_sm_images)
+    std::string_view coco, msrvtt, clotho, coco_sm, coco_sm_images, query_prefix, calibrate, output;
+    // An ordinal past every `int32_t` never parses, so the largest count marks the flag absent.
+    std::size_t constexpr host_k = (std::numeric_limits<std::size_t>::max)();
+    count_t batch {256}, threads {0, 0}, gpu {host_k, 0, (std::numeric_limits<std::int32_t>::max)()};
+    std::array<flag_t, 11> const flags {{
+        {"--coco", "directory", "COCO 2017 val, its annotations/ and val2017/", &coco},
+        {"--msrvtt", "directory", "the MSR-VTT 1K-A test, its msrvtt_test_1k.json and videos/", &msrvtt},
+        {"--clotho", "directory", "the Clotho evaluation set, its manifest.json and audio/", &clotho},
+        {"--coco-sm", "directory", "COCO-SM, its meta/<translator>.json files", &coco_sm},
+        {"--coco-sm-images", "directory", "the Karpathy test images COCO-SM captions", &coco_sm_images},
+        {"--gpu", "ordinal", "encode in the VRAM of this GPU instead of on host threads", &gpu},
+        {"--batch", "items", "items one encoding call takes", &batch},
+        {"--threads", "count", "host threads encoding and scoring, zero for every core", &threads},
+        {"--query-prefix", "text", "the bytes every caption starts with", &query_prefix},
+        {"--calibrate", "choices.jsonl", "fit the choice head's temperatures on these held-out choices", &calibrate},
+        {"--output", "calibrated.safetensors", "where --calibrate writes the checkpoint again", &output},
+    }};
+    std::array<std::string_view, 1> checkpoints;
+    std::size_t const given = parse_or_exit(argc, argv, "uform_eval <checkpoint> [flags]", flags, checkpoints);
+    if (given != 1) return fmt::println(stderr, "uform_eval: pass the checkpoint, see --help"), 1;
+    if (coco_sm.empty() != coco_sm_images.empty())
         return fmt::println(stderr, "uform_eval: --coco-sm and --coco-sm-images come together"), 1;
-    if (!calibrate != !output) return fmt::println(stderr, "uform_eval: --calibrate and --output come together"), 1;
+    if (calibrate.empty() != output.empty())
+        return fmt::println(stderr, "uform_eval: --calibrate and --output come together"), 1;
+    encoder.batch = batch.value, encoder.threads = threads.value, encoder.query_prefix = query_prefix;
+    std::signal(SIGINT, request_stop);
+    std::signal(SIGTERM, request_stop);
 
     uform_outcome_t outcome {};
-    std::int32_t const device = gpu ? std::int32_t(std::strtol(gpu, nullptr, 10)) : 0;
+    bool const on_gpu = gpu.value != host_k;
+    std::int32_t const device = static_cast<std::int32_t>(gpu.value);
     CUdevice handle = 0;
-    if (gpu) {
+    if (on_gpu) {
         uform_executor_for_vram_t executor_arguments {.executor = &encoder.executor,
                                                       .outcome = &outcome,
                                                       .vram = {&device, 1}};
@@ -768,57 +813,76 @@ int main(int argc, char** argv) {
     uform_arena_init_t arena_arguments {.arena = &encoder.arena, .executor = encoder.executor, .outcome = &outcome};
     uform_arena_init(&arena_arguments);
     if (outcome.status != uform_status_success_k) return fmt::println(stderr, "uform_eval: {}", outcome.message), 1;
-    std::string_view const checkpoint = argv[1];
-    uform_bytes_view_t const path = {reinterpret_cast<std::uint8_t const*>(checkpoint.data()), checkpoint.size()};
-    if (gpu) {
+    std::string_view const checkpoint = checkpoints[0];
+    verb_phase_t phase {.name = "load", .unit = "tensors"};
+    if (on_gpu) {
         uform_model_load_vram_t load_arguments {.model = &encoder.model,
                                                 .executor = encoder.executor,
                                                 .outcome = &outcome,
-                                                .path = path,
+                                                .path = bytes_view(checkpoint),
                                                 .vram = {&device, 1},
-                                                .quantization = uform_scalar_bf16_k};
+                                                .quantization = uform_scalar_bf16_k,
+                                                .progress = verb_progress_of(phase)};
         uform_model_load_vram(&load_arguments);
     }
     else {
         uform_model_load_ram_t load_arguments {.model = &encoder.model,
                                                .executor = encoder.executor,
                                                .outcome = &outcome,
-                                               .path = path,
-                                               .quantization = uform_scalar_bf16_k};
+                                               .path = bytes_view(checkpoint),
+                                               .quantization = uform_scalar_bf16_k,
+                                               .progress = verb_progress_of(phase)};
         uform_model_load_ram(&load_arguments);
     }
-    if (outcome.status != uform_status_success_k) return fmt::println(stderr, "uform_eval: {}", outcome.message), 1;
-    uform_model_description_t description {};
-    uform_model_describe_t describe_arguments {.model = encoder.model,
-                                               .executor = encoder.executor,
-                                               .outcome = &outcome,
-                                               .description = &description};
-    uform_model_describe(&describe_arguments);
-    encoder.dimensions = description.dimensions;
-    fmt::println("uform_eval: {} ({} dimensions, context {}, {})", checkpoint, description.dimensions,
-                 description.context,
-                 description.cpu_class != uform_cpu_class_unknown_k ? uform_cpu_class_name(description.cpu_class)
-                                                                    : uform_gpu_class_name(description.gpu_class));
+    if (outcome.status != uform_status_success_k) {
+        uform_arena_free(encoder.arena);
+        uform_executor_free(encoder.executor);
+        if (encoder.context) cuDevicePrimaryCtxRelease(handle);
+        if (stop_requested) return verb_stopped(phase), exit_stopped_k;
+        return fmt::println(stderr, "uform_eval: {}", outcome.message), 1;
+    }
+    {
+        uform_model_description_t description {};
+        uform_model_describe_t describe_arguments {.model = encoder.model,
+                                                   .executor = encoder.executor,
+                                                   .outcome = &outcome,
+                                                   .description = &description};
+        uform_model_describe(&describe_arguments);
+        encoder.dimensions = description.dimensions;
+        fmt::println("uform_eval: {} ({} dimensions, context {}, {})", checkpoint, description.dimensions,
+                     description.context,
+                     description.cpu_class != uform_cpu_class_unknown_k ? uform_cpu_class_name(description.cpu_class)
+                                                                        : uform_gpu_class_name(description.gpu_class));
+    }
 
     bool evaluated = true;
+    // Each phase is named after its flag, and the last one started is the one a stop names.
     struct named_t {
-        char const* directory;
+        std::string_view flag, directory;
         bool (*load)(std::string_view, split_t&) noexcept;
-    } const splits[] = {{coco, load_coco_}, {msrvtt, load_msrvtt_}, {clotho, load_clotho_}};
+    } const splits[] = {{"coco", coco, load_coco_}, {"msrvtt", msrvtt, load_msrvtt_}, {"clotho", clotho, load_clotho_}};
     for (named_t const& named : splits) {
-        if (!named.directory) continue;
+        if (named.directory.empty() || stop_requested) continue;
+        phase = {.name = named.flag};
         split_t split;
         if (!named.load(named.directory, split)) {
             evaluated = false;
             continue;
         }
-        evaluated = evaluate_(encoder, split) && evaluated;
+        evaluated = evaluate_(encoder, split, phase) && evaluated;
     }
-    if (coco_sm) evaluated = evaluate_coco_sm_(encoder, coco_sm, coco_sm_images) && evaluated;
-    if (calibrate) evaluated = calibrate_(encoder, checkpoint, calibrate, output) && evaluated;
+    if (!coco_sm.empty() && !stop_requested) {
+        phase = {.name = "coco-sm"};
+        evaluated = evaluate_coco_sm_(encoder, coco_sm, coco_sm_images, phase) && evaluated;
+    }
+    if (!calibrate.empty() && !stop_requested) {
+        phase = {.name = "calibrate", .unit = "choices"};
+        evaluated = calibrate_(encoder, checkpoint, calibrate, output, phase) && evaluated;
+    }
     uform_model_free(encoder.model);
     uform_arena_free(encoder.arena);
     uform_executor_free(encoder.executor);
     if (encoder.context) cuDevicePrimaryCtxRelease(handle);
+    if (stop_requested) return verb_stopped(phase), exit_stopped_k;
     return evaluated ? 0 : 1;
 }

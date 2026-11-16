@@ -19,6 +19,8 @@ using namespace unum::uform;
 template <typename arguments_type_>
 static void refuse_files(arguments_type_& arguments, call_outcome_t& outcome) noexcept {
     clear_outputs(arguments);
+    if (!arguments.model)
+        return propagate_error(uform_status_uninitialized_k, outcome, "The model must not be null"), void();
     propagate_error(uform_status_unsupported_k, outcome, "This build decodes no files; pass decoded pixels or samples");
 }
 

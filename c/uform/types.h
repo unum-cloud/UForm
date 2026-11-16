@@ -236,15 +236,15 @@ typedef struct uform_bytes_view_t {
  *  @brief What went wrong, numbered as USearch numbers it, so one failure carries one identity
  *      across the two libraries and every binding that validates before calling them.
  *
- *  Values USearch spends on index states UForm has no counterpart for - a read-only handle, an
- *  exhausted ID space, an uninitialized reservation - stay unused here rather than renumbered.
+ *  Values USearch spends on index states UForm has no counterpart for - a read-only handle and an
+ *  exhausted ID space - stay unused here rather than renumbered.
  *
  *  Statuses fall into five categories: resources, for memory, I/O and devices; input, for shapes,
- *  layouts, kinds, malformed data and invalid arguments; state, for frozen configurations, held
- *  executors and arenas, and unsupported verbs; interruptions, for cancellation and deferral; and
- *  defects. Any verb that allocates, binds a device or touches a file may also return a resources
- *  status, and any verb taking a progress callback may be cancelled. A verb's own block lists only
- *  what its contract adds.
+ *  layouts, kinds, malformed data and invalid arguments; state, for missing handles, frozen
+ *  configurations, held executors and arenas, and unsupported verbs; interruptions, for
+ *  cancellation and deferral; and defects. Any verb that allocates, binds a device or touches a
+ *  file may also return a resources status, and any verb taking a progress callback may be
+ *  cancelled. A verb's own block lists only what its contract adds.
  */
 typedef enum uform_status_t {
 
@@ -280,6 +280,9 @@ typedef enum uform_status_t {
     /** The library reported neither success nor a failure - a contract violation, so it
      *  names a defect. */
     uform_status_internal_k = 10,
+
+    /** The handle the call operates on is @c NULL, refused before any other check. */
+    uform_status_uninitialized_k = 12,
 
     /** The request contradicts a frozen configuration, like resuming a checkpoint
      *  of another geometry. */
@@ -710,11 +713,12 @@ typedef struct uform_ram_options_t {
     /** Number of entries in @c memory_domains; zero derives. */
     size_t memory_domains_count;
 
-    /** The class to dispatch as if the CPU were of it, admitting every rung whose features it
-     *  holds; @c uform_cpu_class_unknown_k derives the CPU's own. A value no class takes reports
-     *  @c uform_status_invalid_argument_k, and a class this CPU cannot run
-     *  @c uform_status_unsupported_k. */
-    uform_cpu_class_t cpu_class;
+    /** The newest class to dispatch as, intersected with what this CPU runs: the newest compiled
+     *  class whose features both hold runs, so a ceiling above this CPU runs as the CPU's own;
+     *  @c uform_cpu_class_unknown_k sets no ceiling. A value no class takes reports
+     *  @c uform_status_invalid_argument_k, and a ceiling no compiled class fits, like one below a
+     *  monoversioned build's class, @c uform_status_unsupported_k. */
+    uform_cpu_class_t cpu_class_ceiling;
 } uform_ram_options_t;
 
 /** The devices a VRAM-resident model, trainer and executor place their bytes in. */
@@ -727,11 +731,11 @@ typedef struct uform_vram_options_t {
     /** Number of entries in @c devices; zero derives. */
     size_t devices_count;
 
-    /** The class every named device dispatches as; @c uform_gpu_class_unknown_k derives the
-     *  devices' own, which must agree, or the call reports @c uform_status_config_mismatch_k. A
-     *  class a named device cannot run, or no compiled variant takes, reports
-     *  @c uform_status_unsupported_k. */
-    uform_gpu_class_t gpu_class;
+    /** The newest class every named device dispatches as: the best class all of them load, never
+     *  above it; @c uform_gpu_class_unknown_k sets no ceiling. Devices of different vendors report
+     *  @c uform_status_config_mismatch_k, and devices sharing no compiled class at or under the
+     *  ceiling @c uform_status_unsupported_k. */
+    uform_gpu_class_t gpu_class_ceiling;
 } uform_vram_options_t;
 
 /**
@@ -815,7 +819,7 @@ typedef struct uform_executor_for_vram_t {
     uform_ram_options_t ram;
 
     /** The @b optional borrowed CUDA streams, one per device in @c vram order; @c NULL creates its
-     *  own. Borrowing is not wired yet, so any non-null value reports
+     *  own, and the executor drives only streams it creates, so any other value reports
      *  @c uform_status_unsupported_k. */
     void* const* streams;
 
@@ -826,12 +830,12 @@ typedef struct uform_executor_for_vram_t {
 
 /**
  *  @brief Opens one submission stream on every named device, all driven by the host thread running
- *      the call; borrowing the caller's streams reports @c uform_status_unsupported_k for now.
+ *      the call; borrowing the caller's streams reports @c uform_status_unsupported_k.
  *
  *  Text and JPEG images never leave the device; the rest of decoding - container demux, PNG and
  *  WebP, audio, and every modality on AMD - runs on host threads the executor spawns beside its
- *  streams, 7/8 of the cores local to the memory domains @c ram names, dispatching as its
- *  @c cpu_class . Their thread 0 runs a deferred call, and a GPU executor never changes any
+ *  streams, 7/8 of the cores local to the memory domains @c ram names, dispatching under its
+ *  @c cpu_class_ceiling . Their thread 0 runs a deferred call, and a GPU executor never changes any
  *  device flag that spans the process.
  */
 UFORM_EXPORT void uform_executor_for_vram(uform_executor_for_vram_t* arguments);
@@ -969,7 +973,8 @@ typedef struct uform_arena_describe_t {
  *      reads them as host memory or hands them to device code without remembering that executor.
  *
  *  @par Statuses:
- *  - @c uform_status_invalid_argument_k A @c NULL arena or description.
+ *  - @c uform_status_uninitialized_k A @c NULL arena.
+ *  - @c uform_status_invalid_argument_k A @c NULL description.
  */
 UFORM_EXPORT void uform_arena_describe(uform_arena_describe_t* arguments);
 
@@ -1015,6 +1020,13 @@ UFORM_EXPORT char const* uform_gpu_class_name(uform_gpu_class_t gpu_class);
 /** Reads a GPU class back from its spelling into @p gpu_class, or fails with
  *  @c uform_status_invalid_argument_k. */
 UFORM_EXPORT uform_status_t uform_gpu_class_from_name(uform_bytes_view_t name, uform_gpu_class_t* gpu_class);
+
+/** The canonical spelling of a GPU vendor, as @c uform_gpu_vendor_nvidia_k spells "nvidia". */
+UFORM_EXPORT char const* uform_gpu_vendor_name(uform_gpu_vendor_t vendor);
+
+/** Reads a GPU vendor back from its spelling into @p vendor, or fails with
+ *  @c uform_status_invalid_argument_k. */
+UFORM_EXPORT uform_status_t uform_gpu_vendor_from_name(uform_bytes_view_t name, uform_gpu_vendor_t* vendor);
 
 /**
  *  @brief Reports the version of the library this process linked, which may differ from the

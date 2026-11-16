@@ -94,6 +94,15 @@ inline constexpr std::size_t idle_cores_denominator_k = 8;
     return {nk::as_values<char>(std::as_bytes(std::span<u8_t const> {bytes.data, bytes.length})).data(), bytes.length};
 }
 
+/** Whether the @p count + 1 offsets of a caller's tape or edge list never step back, since an
+ *  entry whose end precedes its start would wrap its length; null offsets name no entries. */
+template <typename view_type_>
+[[nodiscard]] bool offsets_ascend(view_type_ const& view, std::size_t count) noexcept {
+    for (std::size_t item = 0; view.offsets && item != count; ++item)
+        if (view.offsets[item + 1] < view.offsets[item]) return false;
+    return true;
+}
+
 /** The @p count entries of a C tape as the engine's typed tape, whose elements reach the last
  *  offset; null offsets make an empty tape, and null data no elements. */
 template <typename element_type_>
@@ -503,8 +512,7 @@ constexpr cpu_class_t cpu_class_of(uform_cpu_class_t cpu_class) noexcept {
     return static_cast<cpu_class_t>(cpu_class);
 }
 
-/** What one handle may use: the masks this machine runs when nothing is pinned, the pinned class's
- *  masks when it runs them. */
+/** What one handle may use: the masks this machine runs, intersected with its ceiling class's. */
 struct cpu_ceiling_t {
     nk_capability_t compute = nk_cap_serial_k;
     fu::capabilities_t sync = fu::capabilities_unknown_k;
@@ -630,24 +638,23 @@ constexpr bool cpu_class_compiled(cpu_class_t cpu_class) noexcept {
     }
 }
 
-/** The ceiling @p pinned sets, the one caller of NumKong's and ForkUnion's CPU detection, which
- *  grants the AMX tiles the CPU offers and drops them where the kernel refuses; a value no class
- *  takes is an invalid argument, while a class this machine does not run and a ceiling no compiled
- *  class fits, like one below a monoversioned build's masks, are unsupported. */
-inline expected<cpu_ceiling_t> pick_cpu_ceiling(uform_cpu_class_t pinned) noexcept {
-    if (pinned != uform_cpu_class_unknown_k && !listed_in(cpu_classes_k, pinned))
+/** The masks this machine runs intersected with those of the class @p ceiling names, from the one
+ *  caller of NumKong's and ForkUnion's CPU detection, which grants the AMX tiles the CPU offers
+ *  and drops them where the kernel refuses. A value no class takes is an invalid argument, and a
+ *  ceiling no compiled class fits, like one below a monoversioned build's masks, is unsupported,
+ *  while one above the machine answers the machine's own masks. */
+inline expected<cpu_ceiling_t> pick_cpu_ceiling(uform_cpu_class_t ceiling) noexcept {
+    if (ceiling != uform_cpu_class_unknown_k && !listed_in(cpu_classes_k, ceiling))
         return expected<cpu_ceiling_t>::fail(status_t::invalid_argument_k, "no CPU class has that value");
     cpu_ceiling_t picked;
     if (nk_capabilities_detected_cpu(&picked.compute) != nk_success_k) picked.compute = nk_cap_serial_k;
     picked.sync = fu::cpu_capabilities();
     nk_capability_t const tiles = picked.compute & (nk_cap_sapphireamx_k | nk_cap_graniteamx_k | nk_cap_diamondamx_k);
     if (tiles && nk_configure_thread_cpu(tiles) != nk_success_k) picked.compute &= ~tiles;
-    if (pinned != uform_cpu_class_unknown_k) {
-        cpu_class_t const pinned_class = cpu_class_of(pinned);
-        cpu_ceiling_t const wanted {numkong_capabilities_of(pinned_class), forkunion_capabilities_of(pinned_class)};
-        if ((picked.compute & wanted.compute) != wanted.compute || (picked.sync & wanted.sync) != wanted.sync)
-            return expected<cpu_ceiling_t>::fail(status_t::unsupported_k, "the CPU does not run the pinned class");
-        picked = wanted;
+    if (ceiling != uform_cpu_class_unknown_k) {
+        cpu_class_t const ceiling_class = cpu_class_of(ceiling);
+        picked.compute &= numkong_capabilities_of(ceiling_class);
+        picked.sync = static_cast<fu::capabilities_t>(picked.sync & forkunion_capabilities_of(ceiling_class));
     }
     for (uform_cpu_class_t const rung : cpu_classes_k)
         if (cpu_class_compiled(cpu_class_of(rung)) && cpu_rung_fits(cpu_class_of(rung), picked)) return picked;
@@ -755,23 +762,24 @@ inline bool gpu_class_serves(gpu_class_t gpu_class, gpu_device_t const& device) 
            (device.compiled & kits) == kits;
 }
 
-/** Whether @p gpu_class sits at or under @p pinned on its lineage, as every class does when nothing
- *  is pinned. */
-constexpr bool gpu_class_under_pin(gpu_class_t gpu_class, uform_gpu_class_t pinned) noexcept {
-    if (pinned == uform_gpu_class_unknown_k) return true;
-    for (gpu_class_t rung = static_cast<gpu_class_t>(pinned);; rung = parent_class_of(rung)) {
+/** Whether @p gpu_class sits at or under @p ceiling on its lineage, as every class does under no
+ *  ceiling. */
+constexpr bool gpu_class_under_ceiling(gpu_class_t gpu_class, uform_gpu_class_t ceiling) noexcept {
+    if (ceiling == uform_gpu_class_unknown_k) return true;
+    for (gpu_class_t rung = static_cast<gpu_class_t>(ceiling);; rung = parent_class_of(rung)) {
         if (rung == gpu_class) return true;
         if (rung == gpu_class_t::unknown_k) return false;
     }
 }
 
-/** The newest class of @p ladder serving @p device at or under @p pinned, or @c unknown_k where
+/** The newest class of @p ladder serving @p device at or under @p ceiling, or @c unknown_k where
  *  none serves. */
 template <gpu_class_t... classes_>
-gpu_class_t pick_gpu_class(gpu_ladder<classes_...>, gpu_device_t const& device, uform_gpu_class_t pinned) noexcept {
+gpu_class_t pick_gpu_class(gpu_ladder<classes_...>, gpu_device_t const& device, uform_gpu_class_t ceiling) noexcept {
     gpu_class_t picked = gpu_class_t::unknown_k;
     auto rung = [&]<gpu_class_t class_>() noexcept {
-        if (picked == gpu_class_t::unknown_k && gpu_class_under_pin(class_, pinned) && gpu_class_serves(class_, device))
+        if (picked == gpu_class_t::unknown_k && gpu_class_under_ceiling(class_, ceiling) &&
+            gpu_class_serves(class_, device))
             picked = class_;
     };
     (rung.template operator()<classes_>(), ...);
@@ -983,12 +991,12 @@ class chunked_arena_t {
     [[nodiscard]] void* allocate(std::size_t bytes) noexcept {
         std::size_t const aligned = round_up_to_multiple(bytes, nk_default_alignment_k);
         if (aligned < bytes) return nullptr; // saturated within an alignment of the address space
-        for (; current_ != chunks_.size(); ++current_, used_ = 0)
-            if (chunks_[current_].size() - used_ >= aligned) {
-                b8_t* const landed = chunks_[current_].data() + used_;
-                used_ += aligned;
-                return landed;
-            }
+        while (current_ != chunks_.size() && chunks_[current_].size() - used_ < aligned) ++current_, used_ = 0;
+        if (current_ != chunks_.size()) {
+            b8_t* const landed = chunks_[current_].data() + used_;
+            used_ += aligned;
+            return landed;
+        }
         std::size_t held = 0;
         for (bytes_span_t const chunk : chunks_) held += chunk.size();
         std::size_t const capacity = held > aligned ? held : aligned;
@@ -1061,7 +1069,7 @@ using owned_stream_t = nk::stream_t;
 struct ram_executor_t {
     std::variant<executor_t, lent_pool_t> pool;
 
-    /** What the threads may run: the machine's masks, or the pinned class's. */
+    /** What the threads may run: the machine's masks under the executor's ceiling class. */
     cpu_ceiling_t ceiling;
 
     /** The NUMA nodes the executor's models place their bytes in. */
@@ -1081,7 +1089,8 @@ struct vram_device_t {
     /** What the device runs, whose group names the vendor every NumKong call dispatches on. */
     nk_capability_t capabilities = 0;
 
-    /** The class the device dispatches as: its driver's report, or the pinned class it holds. */
+    /** The class the device dispatches as: the best class all the executor's devices load
+     *  under its ceiling. */
     gpu_class_t gpu_class = gpu_class_t::unknown_k;
 
     /** Declared before the scratch, so the scratch returns its chunks while the
@@ -1222,6 +1231,21 @@ void end_call(uform_executor_handle_t& executor) noexcept;
 /** Returns once no executor call names the handle whose count is @p named_calls . */
 void wait_named_calls(u64_t& named_calls) noexcept;
 
+/** A handle whose frees wait for the calls naming it; outputs for handles a call creates, and
+ *  handles this build never defines, hold no count. */
+template <typename handle_type_>
+concept counted_handle = requires(handle_type_ handle) { handle->named_calls; };
+
+/** Arguments naming a model, an arena, a mesh or a trainer, each a handle the call may count. */
+template <typename arguments_type_>
+concept names_model = requires(arguments_type_& arguments) { arguments.model; };
+template <typename arguments_type_>
+concept names_arena = requires(arguments_type_& arguments) { arguments.arena; };
+template <typename arguments_type_>
+concept names_mesh = requires(arguments_type_& arguments) { arguments.mesh; };
+template <typename arguments_type_>
+concept names_trainer = requires(arguments_type_& arguments) { arguments.trainer; };
+
 /** Whether the calling thread runs the body of the call holding @p executor . */
 bool runs_holding_call(uform_executor_handle_t& executor) noexcept;
 
@@ -1249,17 +1273,16 @@ bool submitted(arguments_type_* arguments) noexcept {
     call.recorded = {uform_status_internal_k, "The call finished without reporting a status"};
     std::size_t named = 0;
     auto const name = [&](auto handle) noexcept {
-        // Outputs for handles the call creates, and handles this build never defines, hold no count
-        if constexpr (requires { handle->named_calls; })
+        if constexpr (counted_handle<decltype(handle)>)
             if (handle) {
                 fu::standard_atomic_ref<u64_t> {handle->named_calls}.fetch_add(1, std::memory_order_relaxed);
                 call.named_calls[named++] = &handle->named_calls;
             }
     };
-    if constexpr (requires { arguments->model; }) name(arguments->model);
-    if constexpr (requires { arguments->arena; }) name(arguments->arena);
-    if constexpr (requires { arguments->mesh; }) name(arguments->mesh);
-    if constexpr (requires { arguments->trainer; }) name(arguments->trainer);
+    if constexpr (names_model<arguments_type_>) name(arguments->model);
+    if constexpr (names_arena<arguments_type_>) name(arguments->arena);
+    if constexpr (names_mesh<arguments_type_>) name(arguments->mesh);
+    if constexpr (names_trainer<arguments_type_>) name(arguments->trainer);
     propagate_pending(arguments->outcome); // before the body or the dispatch, never after
     if (arguments->completion != uform_completion_deferred_k || !delegates(*executor)) {
         call.arguments = arguments;
@@ -1297,7 +1320,7 @@ class call_outcome_t {
     template <typename arguments_type_>
     explicit call_outcome_t(arguments_type_ const& arguments) noexcept
         : published_(arguments.outcome), executor_(arguments.executor) {
-        if constexpr (requires { arguments.arena; }) arena_ = arguments.arena;
+        if constexpr (names_arena<arguments_type_>) arena_ = arguments.arena;
         if (!executor_) propagate_pending(published_);
     }
 

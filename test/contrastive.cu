@@ -796,7 +796,8 @@ static void run_distributed_case(test_suite_t& suite) {
     if (!topology) return suite.check(false, "single-domain bootstrap: {}", topology.description_);
     auto domain = multimem_domain_t::make(
         topology.value_, {devices, gpus},
-        distributed_contrastive_segments_t::payload_scalars_needed(config, topology.value_.shape), streams, 120.0);
+        distributed_contrastive_segments_t::payload_scalars_needed(config, topology.value_.shape), streams,
+        wait_limit_seconds_k);
     if (!domain) return suite.check(false, "multimem domain make: {}", domain.description_);
     auto colocated = colocated_domain_t::make(topology.value_);
     if (!colocated) return suite.check(false, "colocated domain make: {}", colocated.description_);
@@ -919,7 +920,8 @@ static void run_cross_domain_case(test_suite_t& suite) {
     // The composition roots, in main-order: the ONE multimem domain, the ONE colocated domain.
     auto multimem = multimem_domain_t::make(
         topology, {devices.data(), gpus},
-        distributed_contrastive_segments_t::payload_scalars_needed(config, topology.shape), streams, 120.0);
+        distributed_contrastive_segments_t::payload_scalars_needed(config, topology.shape), streams,
+        wait_limit_seconds_k);
     if (!multimem) return suite.check(false, "multimem domain make: {}", multimem.description_);
     auto colocated = colocated_domain_t::make(topology);
     if (!colocated) return suite.check(false, "colocated domain make: {}", colocated.description_);
@@ -959,7 +961,7 @@ static void run_cross_domain_case(test_suite_t& suite) {
     if (expected_t published = topology.publish_text("loss", loss_text.view()); !published)
         return suite.check(false, "loss publish: {}", published.description_);
     sz::string_t peer_text;
-    if (expected_t awaited = topology.await_text(1u - domain, "loss", peer_text, 60.0); !awaited)
+    if (expected_t awaited = topology.await_text(1u - domain, "loss", peer_text, wait_limit_seconds_k); !awaited)
         return suite.check(false, "peer loss await: {}", awaited.description_);
     f64_t const global_loss = domain_loss + std::atof(peer_text.c_str());
 
@@ -992,7 +994,7 @@ static void run_cross_domain_case(test_suite_t& suite) {
     suite.check(std::fabs(numeric - analytic) < 5.0e-2 * fu::max_of(std::fabs(numeric), 0.05),
                 "cross-domain force matches the global finite difference: numeric {:.5f} distributed {:.5f}", numeric,
                 analytic);
-    expected_t closed = topology.barrier("done", 60.0);
+    expected_t closed = topology.barrier("done", wait_limit_seconds_k);
     suite.check(static_cast<bool>(closed), "the closing barrier should complete: {}", closed.description_);
 #endif
 }
@@ -1685,7 +1687,7 @@ static void run_tokens_distributed_case(test_suite_t& suite) {
     if (!topology) return suite.check(false, "single-domain bootstrap: {}", topology.description_);
     auto domain = multimem_domain_t::make(topology.value_, {devices, gpus},
                                           distributed_contrastive_tokens_t::payload_scalars_needed(config), streams,
-                                          120.0);
+                                          wait_limit_seconds_k);
     if (!domain) return suite.check(false, "multimem domain make: {}", domain.description_);
     auto colocated = colocated_domain_t::make(topology.value_);
     if (!colocated) return suite.check(false, "colocated domain make: {}", colocated.description_);
@@ -1819,8 +1821,9 @@ static void run_tokens_cross_domain_case(test_suite_t& suite) {
         cuCtxPopCurrent(nullptr);
     }
     contrastive_tokens_config_t const config = tokens_config_(1, world_gpus);
-    auto multimem = multimem_domain_t::make(
-        topology, {devices, gpus}, distributed_contrastive_tokens_t::payload_scalars_needed(config), streams, 120.0);
+    auto multimem = multimem_domain_t::make(topology, {devices, gpus},
+                                            distributed_contrastive_tokens_t::payload_scalars_needed(config), streams,
+                                            wait_limit_seconds_k);
     if (!multimem) return suite.check(false, "multimem domain make: {}", multimem.description_);
     auto colocated = colocated_domain_t::make(topology);
     if (!colocated) return suite.check(false, "colocated domain make: {}", colocated.description_);
@@ -1874,7 +1877,7 @@ static void run_tokens_cross_domain_case(test_suite_t& suite) {
                     "step {}: 2-domain token forces match the single-GPU: worst {:.3g} of {:.3g}", step, worst,
                     largest);
     }
-    expected_t closed = topology.barrier("tokens_done", 60.0);
+    expected_t closed = topology.barrier("tokens_done", wait_limit_seconds_k);
     suite.check(static_cast<bool>(closed), "the closing barrier should complete: {}", closed.description_);
 #endif
 }

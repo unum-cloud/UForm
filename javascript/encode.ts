@@ -3,8 +3,8 @@
  *  @author Ash Vardanian
  *  @date October 18, 2026
  *  @brief The forward passes: text, images, video and audio in, pooled embeddings, per-token
- *      states and token vectors out, one verb per input form, and the text choices, written once
- *      for every receiver.
+ *      states and token vectors out, one verb per input form, and the text choices, each body
+ *      written once for every receiver.
  */
 import type {
   CompiledChosen,
@@ -16,7 +16,7 @@ import type {
   Offsets,
   ProgressCallback,
 } from "./library.js";
-import { Answer, Arena, ArenaView, Executor, Scalar, Status, fail, scalarCode, submitAs } from "./types.js";
+import { Arena, ArenaView, type Call, Executor, Scalar, Status, callOf, fail, scalarCode } from "./types.js";
 
 /**
  *  The surfaces an encode call keeps, combined with `|`. The C verb fills whichever of
@@ -311,231 +311,154 @@ export function samplesTape(recordings: readonly Float32Array[] | Tape<Float32Ar
   );
 }
 
-/**
- *  The encode verbs every receiver of a model shares, written once.
- *
- *  The receiver chooses where a verb runs and how it completes, and the verb stays the same: a
- *  `Model` runs it on the calling thread, `model.on(executor)` blocks on an executor, and
- *  `model.deferred(executor)` submits it there and answers a {@link Deferred}. Every verb lands its
- *  outputs in `arena` and answers views into it.
- */
-export abstract class EncodeVerbs<Receiving extends "blocking" | "deferred"> {
-  /** The backend handle every verb is called on; shared by every receiver of one model. */
-  protected readonly compiled: CompiledModel;
-  /** The executor the verbs run on; absent runs them on the calling thread. */
-  readonly executor: Executor | undefined;
-  /** How this receiver completes its calls. */
-  protected readonly receiving: Receiving;
+/** Lands one encode call's surfaces in `arena`, the tape already laid out by the verb. */
+function encodeCall(
+  run: (completion: Completion, ...landing: [Arena["compiled"], number, number, ProgressCallback | undefined]) => unknown,
+  arena: Arena,
+  config: EncodeConfig,
+): Call<Encoded> {
+  if (!(arena instanceof Arena)) throw fail(Status.InvalidArgument, "The 'arena' argument must be an Arena.");
+  const outputs = config.outputs ?? Outputs.Embeddings;
+  const scalar = scalarCode(config.outputsScalar ?? Scalar.F32);
+  return callOf((completion) => run(completion, arena.compiled, outputs, scalar, config.progress), encodedOf);
+}
 
-  protected constructor(compiled: CompiledModel, executor: Executor | undefined, receiving: Receiving) {
-    this.compiled = compiled;
-    this.executor = executor;
-    this.receiving = receiving;
-  }
+/** The body of every receiver's `textEncode`. */
+export function modelTextEncode(
+  model: CompiledModel,
+  executor: Executor | undefined,
+  texts: readonly (string | Uint8Array)[] | Tape<Uint8Array>,
+  arena: Arena,
+  config: EncodeConfig,
+): Call<Encoded> {
+  const tape = bytesTape(texts);
+  const on = executor?.compiled;
+  return encodeCall(
+    (completion, ...landing) => model.textEncode(on, completion, tape.data, tape.offsets, ...landing),
+    arena,
+    config,
+  );
+}
 
-  /** Submits one call with this receiver's completion, and hands its answer back as
-   *  this receiver does. */
-  protected submit<Raw, Answered>(
-    call: (completion: Completion) => unknown,
-    answer: (raw: Raw) => Answered,
-  ): Answer<Receiving, Answered> {
-    return submitAs(this.receiving, call, answer);
-  }
+/** The body of every receiver's `textChoose`. */
+export function modelTextChoose(
+  model: CompiledModel,
+  executor: Executor | undefined,
+  texts: readonly (string | Uint8Array)[] | Tape<Uint8Array>,
+  choices: readonly (string | Uint8Array)[] | Tape<Uint8Array>,
+  arena: Arena,
+  config: ChooseConfig,
+): Call<Chosen> {
+  if (!(arena instanceof Arena)) throw fail(Status.InvalidArgument, "The 'arena' argument must be an Arena.");
+  const states = bytesTape(texts);
+  const legal = bytesTape(choices);
+  const groups = config.temperatureGroups;
+  const temperatureGroups = groups === undefined || groups instanceof Uint32Array ? groups : Uint32Array.from(groups);
+  const on = executor?.compiled;
+  return callOf(
+    (completion) =>
+      model.textChoose(
+        on,
+        completion,
+        states.data,
+        states.offsets,
+        legal.data,
+        legal.offsets,
+        temperatureGroups,
+        arena.compiled,
+        config.progress,
+      ),
+    (landed: CompiledChosen) => ({
+      probabilities: new Probabilities(landed),
+      stats: { truncated: landed.stats.truncated, tokens: landed.stats.tokens },
+    }),
+  );
+}
 
-  /** Submits one encode call, the tape already laid out by the verb. */
-  #encode(
-    call: (completion: Completion, ...landing: [Arena["compiled"], number, number, ProgressCallback | undefined]) => unknown,
-    arena: Arena,
-    config: EncodeConfig,
-  ): Answer<Receiving, Encoded> {
-    if (!(arena instanceof Arena)) throw fail(Status.InvalidArgument, "The 'arena' argument must be an Arena.");
-    const outputs = config.outputs ?? Outputs.Embeddings;
-    const scalar = scalarCode(config.outputsScalar ?? Scalar.F32);
-    return this.submit(
-      (completion) => call(completion, arena.compiled, outputs, scalar, config.progress),
-      (landed: CompiledEncoded) => encodedOf(landed),
-    );
-  }
+/** The body of every receiver's `imageEncode`. */
+export function modelImageEncode(
+  model: CompiledModel,
+  executor: Executor | undefined,
+  images: readonly Uint8Array[] | Tape<Uint8Array>,
+  arena: Arena,
+  config: EncodeConfig,
+): Call<Encoded> {
+  const tape = bytesTape(images);
+  const on = executor?.compiled;
+  return encodeCall(
+    (completion, ...landing) => model.imageEncode(on, completion, tape.data, tape.offsets, ...landing),
+    arena,
+    config,
+  );
+}
 
-  /**
-   *  Encodes texts through one forward; every UTF-8 byte is a token. Calls `uform_text_encode`.
-   *
-   *  @param texts - Strings, UTF-8 bytes already encoded, or a tape of them.
-   *  @param arena - The memory the outputs land in, rewound by the call.
-   *  @param config - The surfaces, their scalar, and a progress handler.
-   *  @returns The outputs, viewed inside `arena`.
-   */
-  textEncode(
-    texts: readonly (string | Uint8Array)[] | Tape<Uint8Array>,
-    arena: Arena,
-    config: EncodeConfig = {},
-  ): Answer<Receiving, Encoded> {
-    const tape = bytesTape(texts);
-    const executor = this.executor?.compiled;
-    return this.#encode(
-      (completion, ...landing) => this.compiled.textEncode(executor, completion, tape.data, tape.offsets, ...landing),
-      arena,
-      config,
-    );
-  }
+/** The body of every receiver's `imageEncodePixels`. */
+export function modelImageEncodePixels(
+  model: CompiledModel,
+  executor: Executor | undefined,
+  images: readonly Pixels[],
+  arena: Arena,
+  config: EncodeConfig,
+): Call<Encoded> {
+  const tape = pixelsTape(images);
+  const on = executor?.compiled;
+  return encodeCall(
+    (completion, ...landing) =>
+      model.imageEncodePixels(on, completion, tape.data, tape.offsets, tape.heights, tape.widths, ...landing),
+    arena,
+    config,
+  );
+}
 
-  /**
-   *  Scores each item's legal choices through one forward, a softmax over them alone at the item's
-   *  group's calibrated inverse temperature; a model without the byte decoder reports
-   *  `unsupported`. Calls `uform_text_choose`.
-   *
-   *  @param texts - The states, each ending where its choice goes.
-   *  @param choices - Each item's legal choices, one byte each, like "yn".
-   *  @param arena - The memory the probabilities land in, rewound by the call.
-   *  @param config - The question types and a progress handler.
-   *  @returns The probabilities, viewed inside `arena`.
-   */
-  textChoose(
-    texts: readonly (string | Uint8Array)[] | Tape<Uint8Array>,
-    choices: readonly (string | Uint8Array)[] | Tape<Uint8Array>,
-    arena: Arena,
-    config: ChooseConfig = {},
-  ): Answer<Receiving, Chosen> {
-    if (!(arena instanceof Arena)) throw fail(Status.InvalidArgument, "The 'arena' argument must be an Arena.");
-    const states = bytesTape(texts);
-    const legal = bytesTape(choices);
-    const groups = config.temperatureGroups;
-    const temperatureGroups = groups === undefined || groups instanceof Uint32Array ? groups : Uint32Array.from(groups);
-    const executor = this.executor?.compiled;
-    return this.submit(
-      (completion) =>
-        this.compiled.textChoose(
-          executor,
-          completion,
-          states.data,
-          states.offsets,
-          legal.data,
-          legal.offsets,
-          temperatureGroups,
-          arena.compiled,
-          config.progress,
-        ),
-      (landed: CompiledChosen) => ({
-        probabilities: new Probabilities(landed),
-        stats: { truncated: landed.stats.truncated, tokens: landed.stats.tokens },
-      }),
-    );
-  }
+/** The body of every receiver's `videoEncode`. */
+export function modelVideoEncode(
+  model: CompiledModel,
+  executor: Executor | undefined,
+  videos: readonly Uint8Array[] | Tape<Uint8Array>,
+  arena: Arena,
+  config: EncodeConfig,
+): Call<Encoded> {
+  const tape = bytesTape(videos);
+  const on = executor?.compiled;
+  return encodeCall(
+    (completion, ...landing) => model.videoEncode(on, completion, tape.data, tape.offsets, ...landing),
+    arena,
+    config,
+  );
+}
 
-  /**
-   *  Decodes and encodes JPEG, PNG or WebP files; the browser build reports
-   *  `unsupported`. Calls `uform_image_encode`.
-   *
-   *  @param images - One encoded file per item, or a tape of them.
-   *  @param arena - The memory the outputs land in, rewound by the call.
-   *  @param config - The surfaces, their scalar, and a progress handler.
-   */
-  imageEncode(
-    images: readonly Uint8Array[] | Tape<Uint8Array>,
-    arena: Arena,
-    config: EncodeConfig = {},
-  ): Answer<Receiving, Encoded> {
-    const tape = bytesTape(images);
-    const executor = this.executor?.compiled;
-    return this.#encode(
-      (completion, ...landing) => this.compiled.imageEncode(executor, completion, tape.data, tape.offsets, ...landing),
-      arena,
-      config,
-    );
-  }
+/** The body of every receiver's `audioEncode`. */
+export function modelAudioEncode(
+  model: CompiledModel,
+  executor: Executor | undefined,
+  recordings: readonly Uint8Array[] | Tape<Uint8Array>,
+  arena: Arena,
+  config: EncodeConfig,
+): Call<Encoded> {
+  const tape = bytesTape(recordings);
+  const on = executor?.compiled;
+  return encodeCall(
+    (completion, ...landing) => model.audioEncode(on, completion, tape.data, tape.offsets, ...landing),
+    arena,
+    config,
+  );
+}
 
-  /**
-   *  Encodes decoded images, resized on the executor's side. Calls `uform_image_encode_pixels`.
-   *
-   *  @param images - `ImageData`, or RGB or RGBA bytes with their width and height.
-   *  @param arena - The memory the outputs land in, rewound by the call.
-   *  @param config - The surfaces, their scalar, and a progress handler.
-   */
-  imageEncodePixels(images: readonly Pixels[], arena: Arena, config: EncodeConfig = {}): Answer<Receiving, Encoded> {
-    const tape = pixelsTape(images);
-    const executor = this.executor?.compiled;
-    return this.#encode(
-      (completion, ...landing) =>
-        this.compiled.imageEncodePixels(
-          executor,
-          completion,
-          tape.data,
-          tape.offsets,
-          tape.heights,
-          tape.widths,
-          ...landing,
-        ),
-      arena,
-      config,
-    );
-  }
-
-  /**
-   *  Decodes and encodes MP4 or WebM clips; the browser build reports
-   *  `unsupported`. Calls `uform_video_encode`.
-   *
-   *  @param videos - One encoded file per item, or a tape of them.
-   *  @param arena - The memory the outputs land in, rewound by the call.
-   *  @param config - The surfaces, their scalar, and a progress handler.
-   */
-  videoEncode(
-    videos: readonly Uint8Array[] | Tape<Uint8Array>,
-    arena: Arena,
-    config: EncodeConfig = {},
-  ): Answer<Receiving, Encoded> {
-    const tape = bytesTape(videos);
-    const executor = this.executor?.compiled;
-    return this.#encode(
-      (completion, ...landing) => this.compiled.videoEncode(executor, completion, tape.data, tape.offsets, ...landing),
-      arena,
-      config,
-    );
-  }
-
-  /**
-   *  Decodes and encodes WAV, FLAC, MP3 or Opus files; the browser build reports
-   *  `unsupported`. Calls `uform_audio_encode`.
-   *
-   *  @param recordings - One encoded file per item, or a tape of them.
-   *  @param arena - The memory the outputs land in, rewound by the call.
-   *  @param config - The surfaces, their scalar, and a progress handler.
-   */
-  audioEncode(
-    recordings: readonly Uint8Array[] | Tape<Uint8Array>,
-    arena: Arena,
-    config: EncodeConfig = {},
-  ): Answer<Receiving, Encoded> {
-    const tape = bytesTape(recordings);
-    const executor = this.executor?.compiled;
-    return this.#encode(
-      (completion, ...landing) => this.compiled.audioEncode(executor, completion, tape.data, tape.offsets, ...landing),
-      arena,
-      config,
-    );
-  }
-
-  /**
-   *  Encodes decoded mono recordings, resampled to the model's rate where `sampleRate`
-   *  differs. Calls `uform_audio_encode_samples`.
-   *
-   *  @param recordings - One run of samples per item, or a tape of them.
-   *  @param sampleRate - Samples per second shared by every recording.
-   *  @param arena - The memory the outputs land in, rewound by the call.
-   *  @param config - The surfaces, their scalar, and a progress handler.
-   */
-  audioEncodeSamples(
-    recordings: readonly Float32Array[] | Tape<Float32Array>,
-    sampleRate: number,
-    arena: Arena,
-    config: EncodeConfig = {},
-  ): Answer<Receiving, Encoded> {
-    const tape = samplesTape(recordings);
-    const executor = this.executor?.compiled;
-    return this.#encode(
-      (completion, ...landing) =>
-        this.compiled.audioEncodeSamples(executor, completion, tape.data, tape.offsets, sampleRate, ...landing),
-      arena,
-      config,
-    );
-  }
+/** The body of every receiver's `audioEncodeSamples`. */
+export function modelAudioEncodeSamples(
+  model: CompiledModel,
+  executor: Executor | undefined,
+  recordings: readonly Float32Array[] | Tape<Float32Array>,
+  sampleRate: number,
+  arena: Arena,
+  config: EncodeConfig,
+): Call<Encoded> {
+  const tape = samplesTape(recordings);
+  const on = executor?.compiled;
+  return encodeCall(
+    (completion, ...landing) =>
+      model.audioEncodeSamples(on, completion, tape.data, tape.offsets, sampleRate, ...landing),
+    arena,
+    config,
+  );
 }

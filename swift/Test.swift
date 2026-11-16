@@ -116,6 +116,7 @@ struct VocabularyTests {
     @Test func namesAreTheLibrarys() {
         #expect(UForm.Status.invalidArgument.description == "invalid-argument")
         #expect(UForm.Status(name: "contended") == .contended)
+        #expect(UForm.Status(name: "uninitialized") == .uninitialized)
         #expect(UForm.Status(name: "not-a-status") == nil)
         #expect(Scalar.bf16.description == "bf16")
         #expect(Scalar(name: "u1x8") == .u1x8)
@@ -133,9 +134,21 @@ struct VocabularyTests {
         #expect(MultimemTier.peerRead.description == "peer-read")
         #expect(MultimemTier(name: "switch-reduced") == .switchReduced)
         #expect(MultimemTier(name: "ring") == nil)
+        for form in [PairLossForm.derived, .balanced, .ranked, .sigmoid] {
+            #expect(PairLossForm(name: form.description) == form)
+        }
+        #expect(PairLossForm(name: "steep") == nil)
+        for side in [LateInteractionSide.none, .query, .document, .queryAndDocument] {
+            #expect(LateInteractionSide(name: side.description) == side)
+        }
+        #expect(LateInteractionSide.queryAndDocument.description == "query-and-document")
+        for vendor in [GPUVendor.unknown, .nvidia, .amd, .apple] {
+            #expect(GPUVendor(name: vendor.description) == vendor)
+        }
+        #expect(GPUVendor(name: "intel") == nil)
         #expect(CPUClass.intelHaswell.description == "intel-haswell")
         #expect(CPUClass(name: "wasm64-extended") == .wasm64Extended)
-        #expect(CPUClass(name: "unknown") == nil)
+        #expect(CPUClass(name: "pentium") == nil)
         #expect(GPUClass.nvidiaBlackwellRTX.description == "nvidia-blackwellrtx")
         #expect(GPUClass(name: "amd-cdna4") == .amdCDNA4)
     }
@@ -192,11 +205,14 @@ struct ModelTests {
         #expect(try Model.loadRamBuffer(bytes.span.bytes).describe().dimensions == description.dimensions)
     }
 
-    /// Serial is every build's floor, so a pin to it loads and is described, and a RAM model names
-    /// no GPU class.
-    @Test func aSerialPinIsDescribed() throws {
-        let description = try Model.loadRam(path: try checkpoint(), cpuClass: .serial).describe()
-        #expect(description.cpuClass == .serial && description.gpuClass == nil)
+    /// Serial is every build's floor, so a serial ceiling loads it, a ceiling of a family this CPU
+    /// does not run falls to it, and a RAM model names no GPU class.
+    @Test func aCeilingLoadsTheBestClassUnderIt() throws {
+        let path = try checkpoint()
+        for ceiling in [CPUClass.serial, .wasm64Extended] {
+            let description = try Model.loadRam(path: path, cpuClassCeiling: ceiling).describe()
+            #expect(description.cpuClass == .serial && description.gpuClass == nil)
+        }
     }
 
     @Test func refusalsArriveAsStatuses() throws {
@@ -546,5 +562,51 @@ struct TrainTests {
             )
         )
         #expect(refused == .device)
+    }
+
+    /// The receivers carry the trainer's own verbs, blocking or deferred; without a GPU no trainer
+    /// exists, so only their shapes are checked here.
+    @Test func receiversCarryTheTrainersVerbs() {
+        let blocking: (Trainer, Executor) throws(UFormError) -> TrainerStep = { trainer, executor throws(UFormError) in
+            try trainer.on(executor).step(modalities: [.text], contents: [[1]])
+        }
+        let deferred: (Trainer, Executor) throws(UFormError) -> Deferred<TrainerStep> = {
+            trainer,
+            executor throws(UFormError) in
+            try trainer.deferred(executor).step(modalities: [.text], contents: (data: [1], offsets: [0, 1]))
+        }
+        let saved: (Trainer, Executor) throws(UFormError) -> Deferred<Void> = { trainer, executor throws(UFormError) in
+            try trainer.deferred(executor).save(path: "checkpoint.safetensors")
+        }
+        _ = (blocking, deferred, saved)
+    }
+}
+
+/// The Quickstart of `swift/README.md`, line for line. It reads the checkpoint and the photo from
+/// the paths the suite owns rather than `model.safetensors` and `cat.png` in the working directory,
+/// since suites run in parallel and share one, and it returns the caption it would print.
+@Suite("Quickstart")
+struct QuickstartTests {
+    @Test func theCaptionClosestToThePhotoIsNamed() throws {
+        let photoPath = FileManager.default.temporaryDirectory.appendingPathComponent("cat-\(UUID().uuidString).png")
+        try Data(png()).write(to: photoPath)
+
+        let executor = try Executor.forRam()
+        let textsArena = try Arena(on: executor)
+        let imagesArena = try Arena(on: executor)
+        let model = try Model.loadRam(path: try checkpoint())
+
+        let captions = ["a cat on a mat", "a sunrise over the bay"]
+        let photo = [UInt8](try Data(contentsOf: photoPath))
+        let texts = try model.on(executor).textEncode(captions, arena: textsArena).embeddings!
+        let image = Array(try model.on(executor).imageEncode([photo], arena: imagesArena).embeddings![0])
+
+        func cosine(_ text: Rows.Row) -> Float {
+            let dot = zip(text, image).reduce(Float(0)) { $0 + $1.0 * $1.1 }
+            return dot / (text.reduce(Float(0)) { $0 + $1 * $1 } * image.reduce(Float(0)) { $0 + $1 * $1 }).squareRoot()
+        }
+        let best = cosine(texts[1]) > cosine(texts[0]) ? 1 : 0
+        #expect(captions.contains(captions[best]))
+        #expect(!cosine(texts[best]).isNaN)
     }
 }

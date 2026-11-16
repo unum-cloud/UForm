@@ -66,6 +66,34 @@ struct lanczos_tap_t {
     return status_t::success_k;
 }
 
+using staged_rows_t = nk::tensor_span<f32_t, 3>;
+
+/** Resamples row @p y of @p crop to the width of @p staged_rows through the horizontal @p taps. */
+static void resample_row_(pixel_image_view_t source, crop_t const& crop, u32_t y, lanczos_tap_t const* taps,
+                          staged_rows_t staged_rows) noexcept {
+    u32_t const width = static_cast<u32_t>(staged_rows.extent(1));
+    for (u32_t x = 0; x != width; ++x)
+        for (u32_t channel = 0; channel != image_channels_k; ++channel) {
+            f32_t sum = 0.0f;
+            for (u32_t k = 0; k != lanczos_taps_k; ++k)
+                sum += taps[x].weight[k] * source[crop.y + y, crop.x + taps[x].index[k], channel];
+            staged_rows[y, x, channel] = sum;
+        }
+}
+
+/** Resamples output row @p y from @p staged_rows through its vertical @p tap into the patches. */
+static void resample_column_(staged_rows_t staged_rows, u32_t y, lanczos_tap_t const& tap, u32_t patch_side,
+                             pixel_patches_span_t out) noexcept {
+    u32_t const width = static_cast<u32_t>(staged_rows.extent(1));
+    for (u32_t x = 0; x != width; ++x)
+        for (u32_t channel = 0; channel != image_channels_k; ++channel) {
+            f32_t sum = 0.0f;
+            for (u32_t k = 0; k != lanczos_taps_k; ++k) sum += tap.weight[k] * staged_rows[tap.index[k], x, channel];
+            out[y / patch_side, x / patch_side, y % patch_side, x % patch_side, channel] = static_cast<pixel_t>(
+                std::lround(std::clamp(sum, 0.0f, 255.0f)));
+        }
+}
+
 expected_t um::resize_image(pixel_image_view_t source, pixel_patches_span_t out) noexcept {
     u32_t const height = static_cast<u32_t>(source.extent(0)), width = static_cast<u32_t>(source.extent(1));
     u32_t const rows = static_cast<u32_t>(out.extent(0)), columns = static_cast<u32_t>(out.extent(1));
@@ -90,26 +118,8 @@ expected_t um::resize_image(pixel_image_view_t source, pixel_patches_span_t out)
         return expected_t::fail(status_t::bad_alloc_k, "resize scratch allocation failed ({}x{})", target.width,
                                 crop.height);
 
-    nk::tensor_span<f32_t, 3> const staged_rows {staged.data(), {crop.height, target.width, image_channels_k}};
-    for (u32_t y = 0; y != crop.height; ++y)
-        for (u32_t x = 0; x != target.width; ++x) {
-            lanczos_tap_t const& tap = horizontal[x];
-            for (u32_t channel = 0; channel != image_channels_k; ++channel) staged_rows[y, x, channel] = 0.0f;
-            for (u32_t k = 0; k != lanczos_taps_k; ++k)
-                for (u32_t channel = 0; channel != image_channels_k; ++channel)
-                    staged_rows[y, x, channel] += tap.weight[k] * source[crop.y + y, crop.x + tap.index[k], channel];
-        }
-
-    for (u32_t y = 0; y != target.height; ++y) {
-        lanczos_tap_t const& tap = vertical[y];
-        for (u32_t x = 0; x != target.width; ++x)
-            for (u32_t channel = 0; channel != image_channels_k; ++channel) {
-                f32_t sum = 0.0f;
-                for (u32_t k = 0; k != lanczos_taps_k; ++k)
-                    sum += tap.weight[k] * staged_rows[tap.index[k], x, channel];
-                out[y / patch_side, x / patch_side, y % patch_side, x % patch_side, channel] = static_cast<pixel_t>(
-                    std::lround(std::clamp(sum, 0.0f, 255.0f)));
-            }
-    }
+    staged_rows_t const staged_rows {staged.data(), {crop.height, target.width, image_channels_k}};
+    for (u32_t y = 0; y != crop.height; ++y) resample_row_(source, crop, y, horizontal.data(), staged_rows);
+    for (u32_t y = 0; y != target.height; ++y) resample_column_(staged_rows, y, vertical[y], patch_side, out);
     return {};
 }

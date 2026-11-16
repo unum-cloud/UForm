@@ -79,6 +79,8 @@ struct Status(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     """Supplied bytes could not be decoded: a checkpoint, an image, a clip or a recording."""
     comptime INTERNAL = Self(10)
     """The library reported neither success nor a failure, which names a defect rather than a state."""
+    comptime UNINITIALIZED = Self(12)
+    """The handle the call operates on is missing, refused before any other check."""
     comptime CONFIG_MISMATCH = Self(13)
     """The request contradicts a frozen configuration, like resuming a checkpoint of another geometry."""
     comptime CONTENDED = Self(14)
@@ -325,7 +327,7 @@ struct Residency(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
 
 @fieldwise_init
 struct CPUClass(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
-    """The CPU family dispatch picks, or a placement pins, `uform_cpu_class_t`."""
+    """The CPU family dispatch picks, or a placement caps it at, `uform_cpu_class_t`."""
 
     var code: c_int
     """The raw `uform_cpu_class_t` value the ABI exchanges."""
@@ -373,7 +375,7 @@ struct CPUClass(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
 
 @fieldwise_init
 struct GPUClass(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
-    """The GPU family dispatch picks, or a placement pins, `uform_gpu_class_t`."""
+    """The GPU family dispatch picks, or a placement caps it at, `uform_gpu_class_t`."""
 
     var code: c_int
     """The raw `uform_gpu_class_t` value the ABI exchanges."""
@@ -919,7 +921,7 @@ struct RamOptionsArguments(ImplicitlyCopyable):
 
     var memory_domains: Optional[Pointer[Int32, ImmUntrackedOrigin]]
     var memory_domains_count: c_size_t
-    var cpu_class: CPUClass
+    var cpu_class_ceiling: CPUClass
 
 
 @fieldwise_init
@@ -934,24 +936,26 @@ struct RamOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
     """NUMA node IDs; absent derives every node the process may allocate on."""
     var memory_domains_count: Int
     """Entries in `memory_domains`; zero derives."""
-    var cpu_class: CPUClass
-    """The class to dispatch as; `UNKNOWN` derives the CPU's own."""
+    var cpu_class_ceiling: CPUClass
+    """The newest class to dispatch as, capped by what the CPU runs; `UNKNOWN` sets no ceiling."""
 
-    def __init__(out self, *, cpu_class: CPUClass = CPUClass.UNKNOWN):
+    def __init__(out self, *, cpu_class_ceiling: CPUClass = CPUClass.UNKNOWN):
         """Derives every memory domain the process may allocate on."""
         self.memory_domains = None
         self.memory_domains_count = 0
-        self.cpu_class = cpu_class
+        self.cpu_class_ceiling = cpu_class_ceiling
 
     @staticmethod
     def on[
         domains_origin: ImmOrigin, //
-    ](memory_domains: Span[Int32, domains_origin], cpu_class: CPUClass = CPUClass.UNKNOWN) -> RamOptions[domains_origin]:
+    ](memory_domains: Span[Int32, domains_origin], cpu_class_ceiling: CPUClass = CPUClass.UNKNOWN) -> RamOptions[
+        domains_origin
+    ]:
         """Names the NUMA nodes explicitly, borrowing the caller's array for the call."""
         return RamOptions[domains_origin](
             Pointer[Int32, domains_origin](unsafe_from_address=Int(memory_domains.unsafe_ptr())),
             len(memory_domains),
-            cpu_class,
+            cpu_class_ceiling,
         )
 
     def arguments(self) -> RamOptionsArguments:
@@ -959,7 +963,7 @@ struct RamOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
         var domains: Optional[Pointer[Int32, ImmUntrackedOrigin]] = None
         if case .Some(named) = self.memory_domains:
             domains = named.unsafe_origin_cast[ImmUntrackedOrigin]()
-        return RamOptionsArguments(domains, c_size_t(self.memory_domains_count), self.cpu_class)
+        return RamOptionsArguments(domains, c_size_t(self.memory_domains_count), self.cpu_class_ceiling)
 
 
 @fieldwise_init
@@ -968,7 +972,7 @@ struct VramOptionsArguments(ImplicitlyCopyable):
 
     var devices: Optional[Pointer[Int32, ImmUntrackedOrigin]]
     var devices_count: c_size_t
-    var gpu_class: GPUClass
+    var gpu_class_ceiling: GPUClass
 
 
 @fieldwise_init
@@ -983,22 +987,26 @@ struct VramOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
     """UForm device ordinals, positions in `Library.gpu_devices`; absent derives one free device."""
     var devices_count: Int
     """Entries in `devices`; zero derives."""
-    var gpu_class: GPUClass
-    """The class every named device dispatches as; `UNKNOWN` derives the devices' own."""
+    var gpu_class_ceiling: GPUClass
+    """The newest class every named device dispatches as, the best all of them load; `UNKNOWN` sets no ceiling."""
 
-    def __init__(out self, *, gpu_class: GPUClass = GPUClass.UNKNOWN):
+    def __init__(out self, *, gpu_class_ceiling: GPUClass = GPUClass.UNKNOWN):
         """Derives one free device."""
         self.devices = None
         self.devices_count = 0
-        self.gpu_class = gpu_class
+        self.gpu_class_ceiling = gpu_class_ceiling
 
     @staticmethod
     def on[
         devices_origin: ImmOrigin, //
-    ](devices: Span[Int32, devices_origin], gpu_class: GPUClass = GPUClass.UNKNOWN) -> VramOptions[devices_origin]:
+    ](devices: Span[Int32, devices_origin], gpu_class_ceiling: GPUClass = GPUClass.UNKNOWN) -> VramOptions[
+        devices_origin
+    ]:
         """Names the device ordinals explicitly, borrowing the caller's array for the call."""
         return VramOptions[devices_origin](
-            Pointer[Int32, devices_origin](unsafe_from_address=Int(devices.unsafe_ptr())), len(devices), gpu_class
+            Pointer[Int32, devices_origin](unsafe_from_address=Int(devices.unsafe_ptr())),
+            len(devices),
+            gpu_class_ceiling,
         )
 
     def arguments(self) -> VramOptionsArguments:
@@ -1006,7 +1014,7 @@ struct VramOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
         var devices: Optional[Pointer[Int32, ImmUntrackedOrigin]] = None
         if case .Some(named) = self.devices:
             devices = named.unsafe_origin_cast[ImmUntrackedOrigin]()
-        return VramOptionsArguments(devices, c_size_t(self.devices_count), self.gpu_class)
+        return VramOptionsArguments(devices, c_size_t(self.devices_count), self.gpu_class_ceiling)
 
 
 # endregion Placement
@@ -1198,8 +1206,7 @@ struct Executor:
             library: The loaded engine, kept so the shared object stays mapped.
             vram: The devices of the models it will drive; copied, not borrowed.
             ram: The memory domains and CPU class of its host decoders; copied, not borrowed.
-            streams: Borrowed CUDA streams, one per device; any but `NULL_ADDRESS` reports `UNSUPPORTED`
-                until borrowing is wired.
+            streams: Borrowed CUDA streams, one per device; any but `NULL_ADDRESS` reports `UNSUPPORTED`.
             scratch_limit: Ceiling on scratch bytes per device; zero lets scratch grow as batches ask.
 
         Raises:

@@ -646,15 +646,11 @@ struct mesh_topology_t {
         auto const deadline = std::chrono::steady_clock::now() + std::chrono::duration<f64_t>(timeout_seconds);
         while (true) {
             if (std::FILE* file = std::fopen(path.value_.c_str(), "r"); file != nullptr) {
-                char buffer[512];
-                out.clear();
-                for (std::size_t read_count = 0; (read_count = std::fread(buffer, 1, sizeof(buffer), file)) != 0;)
-                    if (sz::failed(out.append(sz::string_view_t {buffer, read_count}))) {
-                        std::fclose(file);
-                        return expected_t::fail(status_t::bad_alloc_k, "reading \"{}\" exhausted the host heap",
-                                                path.value_);
-                    }
+                bool const read = read_whole_(file, out);
                 std::fclose(file);
+                if (!read)
+                    return expected_t::fail(status_t::bad_alloc_k, "reading \"{}\" exhausted the host heap",
+                                            path.value_);
                 return {};
             }
             if (std::chrono::steady_clock::now() >= deadline)
@@ -989,10 +985,9 @@ struct mesh_topology_t {
                             sizeof(claimed[index].uuid.bytes)) == 0) {
                 sz::string_t uuid_hex;
                 (void)format_uuid_(uuid_hex, claimed[index].uuid);
-                return expected_t::fail( //
+                return expected_t::fail(
                     status_t::unsupported_k,
-                    "GPU {} is claimed by both host_domain {} and host_domain {} — the launcher did not partition " //
-                    "CUDA_VISIBLE_DEVICES across co-located processes",
+                    "GPU {} is claimed by host_domain {} and {}; the launcher left CUDA_VISIBLE_DEVICES unpartitioned",
                     uuid_hex, claimed[index - 1u].owner, claimed[index].owner);
             }
 
@@ -1017,6 +1012,15 @@ struct mesh_topology_t {
                 "the manifest disagrees with the local probe (host_domain={}): manifest says {}×{}, probed {}×{}",
                 host_domain_index, self().device_count, self().device_name, probed.device_count, probed.device_name);
         return {};
+    }
+
+    /** Reads @p file from where it stands to its end into @p out; false once the heap runs out. */
+    [[nodiscard]] static bool read_whole_(std::FILE* file, sz::string_t& out) noexcept {
+        char buffer[512];
+        out.clear();
+        for (std::size_t read_count = 0; (read_count = std::fread(buffer, 1, sizeof(buffer), file)) != 0;)
+            if (sz::failed(out.append(sz::string_view_t {buffer, read_count}))) return false;
+        return true;
     }
 
     /** The path of one host_domain's payload, named by its index and key inside the exchange

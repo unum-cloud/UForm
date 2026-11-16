@@ -105,6 +105,7 @@ using path_character_t = wchar_t;
     if (expected_t converted = terminate_path_(path, terminated); !converted)
         return expected<native_file_t>::fail(std::move(converted));
     DWORD const rights = access == file_access_t::read_only_k ? GENERIC_READ : GENERIC_READ | GENERIC_WRITE;
+    // A symbolic link takes a privilege or Developer Mode to plant, so nothing mirrors `O_NOFOLLOW`
     DWORD const creation = access == file_access_t::read_only_k ? OPEN_EXISTING : CREATE_ALWAYS;
     native_file_t const file = ::CreateFileW(terminated, rights, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                              nullptr, creation, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -133,12 +134,12 @@ using path_character_t = wchar_t;
         position.Offset = static_cast<DWORD>((offset + moved) & 0xFFFFFFFFull);
         position.OffsetHigh = static_cast<DWORD>((offset + moved) >> 32);
         DWORD arrived = 0;
-        if (!::ReadFile(file, asked.data(), static_cast<DWORD>(asked.size()), &arrived, &position)) {
-            DWORD const reason = ::GetLastError();
-            if (reason == ERROR_HANDLE_EOF) break;
+        BOOL const read = ::ReadFile(file, asked.data(), static_cast<DWORD>(asked.size()), &arrived, &position);
+        DWORD const reason = read ? ERROR_SUCCESS : ::GetLastError();
+        if (reason == ERROR_HANDLE_EOF) break;
+        if (!read)
             return expected<std::size_t>::fail(native_file_status(reason), "reading at {} failed (error={})",
                                                offset + moved, reason);
-        }
         if (arrived == 0) break;
         moved += arrived;
     }
@@ -156,12 +157,12 @@ using path_character_t = wchar_t;
         position.Offset = static_cast<DWORD>((offset + moved) & 0xFFFFFFFFull);
         position.OffsetHigh = static_cast<DWORD>((offset + moved) >> 32);
         DWORD landed = 0;
-        if (!::WriteFile(file, asked.data(), static_cast<DWORD>(asked.size()), &landed, &position)) {
-            DWORD const reason = ::GetLastError();
-            if (reason == ERROR_DISK_FULL || reason == ERROR_HANDLE_DISK_FULL) break;
+        BOOL const written = ::WriteFile(file, asked.data(), static_cast<DWORD>(asked.size()), &landed, &position);
+        DWORD const reason = written ? ERROR_SUCCESS : ::GetLastError();
+        if (reason == ERROR_DISK_FULL || reason == ERROR_HANDLE_DISK_FULL) break;
+        if (!written)
             return expected<std::size_t>::fail(native_file_status(reason), "writing at {} failed (error={})",
                                                offset + moved, reason);
-        }
         if (landed == 0) break;
         moved += landed;
     }
@@ -215,8 +216,9 @@ using path_character_t = char;
     path_character_t terminated[path_capacity_k];
     if (expected_t converted = terminate_path_(path, terminated); !converted)
         return expected<native_file_t>::fail(std::move(converted));
+    // Only temporaries are truncated, and a link planted in their place must empty no file
     int const flags = access == file_access_t::read_only_k ? O_RDONLY | O_CLOEXEC
-                                                           : O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC;
+                                                           : O_RDWR | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC;
     native_file_t const file = ::open(terminated, flags, 0644);
     if (file == invalid_native_file_k) {
         int const reason = errno;

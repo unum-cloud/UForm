@@ -18,6 +18,7 @@
 #include <cstdint> // `std::uint64_t`
 #include <cstring> // `std::memcpy`
 
+#include <array>            // `std::array` - a token's position as bytes
 #include <bit>              // `std::bit_cast`
 #include <initializer_list> // `std::initializer_list`
 #include <memory>           // `std::unique_ptr`
@@ -191,6 +192,16 @@ void wait_for_calls_using(void const* handle);
  *  A null arena holds nothing, left for the verb to refuse. */
 bool hold_arena(uform_arena_t arena, uform_outcome_t const* call);
 
+/** Arguments naming a model, an arena, a mesh or a trainer, each a handle the call may hold. */
+template <typename arguments_type_>
+concept names_model = requires(arguments_type_ const& arguments) { arguments.model; };
+template <typename arguments_type_>
+concept names_arena = requires(arguments_type_ const& arguments) { arguments.arena; };
+template <typename arguments_type_>
+concept names_mesh = requires(arguments_type_ const& arguments) { arguments.mesh; };
+template <typename arguments_type_>
+concept names_trainer = requires(arguments_type_ const& arguments) { arguments.trainer; };
+
 /** Collects @c call_t::handles from a verb's @p arguments, skipping the outputs, which name
  *  no handle yet. */
 template <typename arguments_>
@@ -199,10 +210,10 @@ std::vector<void const*> handles_used_by(arguments_ const& arguments) {
     auto const add = [&](auto handle) {
         if constexpr (!std::is_pointer_v<std::remove_pointer_t<decltype(handle)>>) handles.push_back(handle);
     };
-    if constexpr (requires { arguments.model; }) add(arguments.model);
-    if constexpr (requires { arguments.arena; }) add(arguments.arena);
-    if constexpr (requires { arguments.mesh; }) add(arguments.mesh);
-    if constexpr (requires { arguments.trainer; }) add(arguments.trainer);
+    if constexpr (names_model<arguments_>) add(arguments.model);
+    if constexpr (names_arena<arguments_>) add(arguments.arena);
+    if constexpr (names_mesh<arguments_>) add(arguments.mesh);
+    if constexpr (names_trainer<arguments_>) add(arguments.trainer);
     return handles;
 }
 
@@ -310,6 +321,17 @@ inline void write_row(std::byte* row, uform_scalar_t scalar, std::uint64_t seed)
         state ^= state << 13, state ^= state >> 7, state ^= state << 17;
         float const unit = static_cast<float>(state >> 40) * (1.0f / 16777216.0f);
         write_value(row, scalar, position, unit * 2.0f - 1.0f);
+    }
+}
+
+/** Fills @p tokens consecutive rows of @p row_bytes from @p rows, one per token position, each
+ *  seeded by the position hashed on from the item's @p seed. */
+inline void write_token_rows(std::byte* rows, std::size_t row_bytes, std::size_t tokens, uform_scalar_t scalar,
+                             std::uint64_t seed) {
+    for (std::size_t token = 0; token != tokens; ++token) {
+        std::array<std::byte, sizeof(std::uint64_t)> const position =
+            std::bit_cast<std::array<std::byte, sizeof(std::uint64_t)>>(std::uint64_t {token});
+        write_row(rows + token * row_bytes, scalar, fnv1a(position.data(), position.size(), seed));
     }
 }
 

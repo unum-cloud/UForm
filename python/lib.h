@@ -22,21 +22,23 @@
  *  model runs it on the calling thread, a trainer blocks on the executor it was created on, an
  *  @c On blocks on its executor, and a @c DeferredOn submits it there and answers a @c Deferred. A
  *  verb fills one call structure, kept on the stack while it blocks and inside its @c Deferred once
- *  submitted, so one body serves every receiver and nothing the library borrows ever moves. The
- *  binding starts no threads and keeps two counts: an arena's @c exports, since a buffer it
- *  exported cannot be revoked before C rewinds the memory under it, to which a call adds one until
- *  it is waited on or dropped, and an executor's GPU @c arenas, since each frees on the executor's
- *  stream, so a close leaves its handle to the last of them. Dropping a @c Deferred waits on its
- *  outcome, and every other wait belongs to the C library.
+ *  submitted, so one body serves every receiver and nothing the library borrows ever moves. A
+ *  report or description is the output slot the library writes into, so a deferred call answers it
+ *  as a blocking one does. The binding starts no threads, takes no locks and re-checks nothing the
+ *  library refuses, an arena serving two calls included; it counts only the GPU arenas an executor
+ *  made, since each frees on the executor's stream, so a close leaves its handle to the last of
+ *  them. Callbacks never raise into the library: an exception escaping one goes to
+ *  @c sys.unraisablehook and the callback answers cancel. Dropping a @c Deferred waits on its
+ *  outcome, and @c await polls it through the running event loop; any other wait is the C library's
+ *  own, inside @c uform_outcome_wait .
  *
  *  @section python_buffers Buffer Protocol
  *
  *  Every input arrives through PEP 3118, so NumPy is never a build-time or a runtime dependency. A
  *  batch of separate objects is gathered into one tape the call owns, and a @c (data, offsets) pair
  *  of buffers is lent to the library as a tape without a copy. Every output whose length scales
- *  with the call lands in the @c Arena the caller passes and leaves as zero-copy results over it.
- *  An arena exporting a buffer refuses to rewind, as a @c bytearray refuses to resize, and a result
- *  whose arena a later call rewound raises @c InvalidArgumentError when read.
+ *  with the call lands in the @c Arena the caller passes and leaves as zero-copy results over it. A
+ *  result views its arena until the next call on that arena rewinds it, as a C view does.
  *
  *  @section python_naming Naming
  *
@@ -108,6 +110,7 @@ extern PyTypeObject ArenaType;
 extern PyTypeObject ArenaBufferType;
 extern PyTypeObject RowsTapeType;
 extern PyTypeObject DeferredType;
+extern PyTypeObject AwaitingType;
 extern PyTypeObject OnType;
 extern PyTypeObject DeferredOnType;
 
@@ -127,11 +130,8 @@ extern PyTypeObject MeshDescriptionType;
 extern PyTypeObject TrainerType;
 extern PyTypeObject TrainerStepStatsType;
 
-/** The layouts of the struct sequences, which `lib.c` readies through their own initializer. */
-extern PyStructSequence_Desc uform_py_gpu_device_desc;
-extern PyStructSequence_Desc uform_py_model_description_desc;
+/** The layout of the one struct sequence, which @c lib.c readies through its own initializer. */
 extern PyStructSequence_Desc uform_py_encoded_desc;
-extern PyStructSequence_Desc uform_py_mesh_description_desc;
 
 /** The base of the one exception class per failing status, subclassing @c RuntimeError. */
 extern PyObject* ErrorType;
@@ -141,33 +141,22 @@ extern PyObject* ErrorType;
 typedef struct Executor {
     PyObject ob_base;
 
-    /** The library's executor, NULL once a `with` block closed it. */
-    uform_executor_t handle;
+    /** The library's executor as verbs read it, @c NULL once a @c with block closed it. */
+    _Atomic(uform_executor_t) handle;
 
-    /** The GPU arenas it made that are still alive, each holding it, since they free on
-     *  its first stream. */
-    Py_ssize_t arenas;
+    /** The library's executor, freed once nothing holds it. */
+    uform_executor_t owned;
 
-    /** The handle a close left to those arenas, freed with the last of them. */
-    uform_executor_t retained;
+    /** One while it is open, plus one per GPU arena it made that is still alive, since each frees
+     *  on its first stream. */
+    atomic_size_t holds;
 } Executor;
 
-/**
- *  @brief The memory every output whose length scales with a call lands in, rewound by the next
- *      call handed it.
- *
- *  A call is refused while a buffer over the previous outputs is still exported, and every result
- *  over them refuses to be read once a later call rewound it.
- */
+/** The memory every output whose length scales with a call lands in, rewound by the next call
+ *  handed it. */
 typedef struct Arena {
     PyObject ob_base;
     uform_arena_t handle;
-
-    /** Buffers exported over its outputs, plus one while a call holds it. */
-    Py_ssize_t exports;
-
-    /** Calls that claimed it so far, which a result compares against the one it was written by. */
-    size_t generation;
 
     /** The @c Executor a GPU arena serves alone, held until the arena is freed; NULL
      *  for host pages. */
@@ -325,8 +314,8 @@ typedef struct uform_py_receiver_t {
     uform_completion_t completion;
 } uform_py_receiver_t;
 
-/** The verbs a model or trainer shares with its receivers, which `lib.c` merges into
- *  each type's methods. */
+/** The verbs a model or trainer shares with its receivers, which @c lib.c merges into the target
+ *  type's methods and @c On and @c DeferredOn bind by the type of the target they hold. */
 extern PyMethodDef uform_py_model_verbs[];
 extern PyMethodDef uform_py_encode_verbs[];
 extern PyMethodDef uform_py_trainer_verbs[];
@@ -354,24 +343,13 @@ typedef struct uform_py_call_t {
     /** The outcome the library finishes. */
     uform_outcome_t outcome;
 
-    /** The first exception a callback raised, which outranks the outcome it turned into; NULL
-     *  while none has. */
-    PyObject* raised;
-
-    /** The claimed @c Arena the call's outputs land in, or NULL for a verb with none. */
+    /** The @c Arena the call's outputs land in, held, or NULL for a verb with none. */
     PyObject* arena;
+
+    /** The report the library writes into and the call answers, held, or NULL for a verb whose
+     *  answer is built over its arena. */
+    PyObject* result;
 } uform_py_call_t;
-
-/** One Python callable a call re-enters from library threads, and the call its first
- *  failure lands in. */
-typedef struct uform_py_callback_t {
-
-    /** The callable, held, or NULL when the caller passed none. */
-    PyObject* callable;
-
-    /** The call whose @c raised field latches the first exception. */
-    uform_py_call_t* call;
-} uform_py_callback_t;
 
 /** How a verb runs a call it filled: the bytes of its call, how it reaches the library, answers
  *  and lets go. */
@@ -383,7 +361,7 @@ typedef struct uform_py_verb_t {
     /** Hands the call to the library, with the thread state detached around it. */
     void (*submit)(void* call);
 
-    /** Builds the answer of a call whose outcome succeeded, over the arena it claimed. */
+    /** Builds the answer of a call whose outcome succeeded, over the arena it holds. */
     PyObject* (*answer)(void* call);
 
     /** Lets go of whatever the fill gathered and the answer did not take. */
@@ -401,17 +379,20 @@ typedef struct Deferred {
     /** The object header, sized in bytes of the verb's call. */
     PyVarObject ob_base;
 
-    /** How the call answers and lets go; NULL once it let go of its inputs. */
+    /** How the call answers and lets go. */
     uform_py_verb_t const* verb;
 
     /** The receiver the call was made through, held so its handle and executor outlive the call. */
     PyObject* origin;
 
+    /** Nonzero once a thread took the call to answer it, and let go of its inputs. */
+    atomic_int answering;
+
     /** The answer, once the call finished without raising. */
-    PyObject* answer;
+    _Atomic(PyObject*) answer;
 
     /** The exception, once the call finished raising it. */
-    PyObject* raised;
+    _Atomic(PyObject*) raised;
 
     /** The verb's call, led by a @c uform_py_call_t, which the outcome lives in. */
     uint64_t call[];
@@ -431,22 +412,25 @@ PyObject* uform_py_call_run(uform_py_receiver_t const* receiver, uform_py_verb_t
 /** Lets go of a call whose fill failed, keeping the exception set; always returns NULL. */
 PyObject* uform_py_call_discard(uform_py_receiver_t const* receiver, uform_py_verb_t const* verb, void* call);
 
-/** Lets go of the arena claim and the latched exception every call header holds. */
+/** Lets go of the arena and the report every call header holds. */
 void uform_py_call_release(void* call);
 
-/** The answer of a verb with nothing to report. */
-PyObject* uform_py_call_answer_none(void* call);
+/** A new zeroed report of @p type, held by @p call as the slot the library writes into; NULL with
+ *  an exception set. */
+void* uform_py_call_result(uform_py_call_t* call, PyTypeObject* type);
+
+/** The answer of a verb whose answer is its report, or None when it has none. */
+PyObject* uform_py_call_answer_result(void* call);
 
 /**
- *  @brief Reads an optional callable into @p callback, latching its failures into @p call.
+ *  @brief Reads an optional callable into @p callable, held; NULL or None leaves it NULL.
  *  @return 0 on success, -1 with a @c TypeError set when @p object is neither callable nor None.
  */
-int uform_py_callback_from_object(PyObject* object, char const* field, uform_py_call_t* call,
-                                  uform_py_callback_t* callback);
+int uform_py_callable_from_object(PyObject* object, char const* field, PyObject** callable);
 
-/** The progress to register for @p callback and @p steps; its trampoline is NULL when the caller
- *  passed no handler. */
-uform_progress_t uform_py_progress_registered(uform_py_callback_t* callback, size_t steps);
+/** The progress to register for @p callable and @p steps; its trampoline is NULL when the caller
+ *  passed no handler. An exception the handler raises goes to @c sys.unraisablehook and cancels. */
+uform_progress_t uform_py_progress_registered(PyObject* callable, size_t steps);
 
 #pragma endregion Calls
 
@@ -476,6 +460,10 @@ int uform_py_dict_steal_item(PyObject* dict, char const* key, PyObject* value);
 /** A new struct sequence of @p type taking every one of @p fields, or NULL dropping them all when
  *  any is NULL. */
 PyObject* uform_py_struct_sequence_steal(PyTypeObject* type, PyObject** fields, Py_ssize_t count);
+
+/** A getter reading the @c size_t at the byte offset @p closure names inside the object @p self,
+ *  for a report's @c PyGetSetDef table. */
+PyObject* uform_py_size_getter(PyObject* self, void* closure);
 
 /**
  *  @brief Reads a @c Scalar member, leaving @p kind alone when @p object is NULL.
@@ -576,20 +564,15 @@ int uform_py_words_from_object(PyObject* object, char const* field, size_t count
 void uform_py_words_release(uform_py_words_t* words);
 
 /**
- *  @brief Claims the @c Arena @p object for one call, rewinding it: every result over its previous
- *      outputs goes stale.
- *  @param[out] arena A new reference to the claimed @c Arena; hand it to @c uform_py_arena_unclaim.
- *  @return 0 on success, -1 with an exception set when @p object is no @c Arena, serves a call,
- *      or still exports.
+ *  @brief Holds the @c Arena @p object as the one @p call writes into; the library refuses an
+ *      arena another call holds with @c uform_status_contended_k.
+ *  @return 0 on success, -1 with a @c TypeError set when @p object is no @c Arena.
  */
-int uform_py_arena_claim(PyObject* object, PyObject** arena);
-
-/** Ends the claim @c uform_py_arena_claim took, and drops its reference. */
-void uform_py_arena_unclaim(PyObject* arena);
+int uform_py_call_hold_arena(uform_py_call_t* call, PyObject* object);
 
 /**
  *  @brief An @c ArenaBuffer over the @p count rows a call wrote packed into the @c Arena
- *      @p arena it claimed.
+ *      @p arena it holds.
  *
  *  Scalars a @c memoryview can format leave as a @c (count, columns) matrix, and the rest - @c bf16
  *  and the mini-floats among them - as a @c (count, stride) run of @c 'B'.

@@ -49,13 +49,12 @@ class stack_array {
         other.clear();
     }
     stack_array& operator=(stack_array&& other) noexcept {
-        if (this != &other) {
-            clear();
-            for (size_type index = 0; index != other.size_; ++index)
-                new (pointer_at(index)) value_type(std::move(other[index]));
-            size_ = other.size_;
-            other.clear();
-        }
+        if (this == &other) return *this;
+        clear();
+        for (size_type index = 0; index != other.size_; ++index)
+            new (pointer_at(index)) value_type(std::move(other[index]));
+        size_ = other.size_;
+        other.clear();
         return *this;
     }
     ~stack_array() noexcept { clear(); }

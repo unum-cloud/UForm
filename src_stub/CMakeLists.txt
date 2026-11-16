@@ -23,7 +23,7 @@ foreach (target_ uform_shared_stub uform_static_stub)
     )
     target_link_libraries(${target_} PRIVATE Threads::Threads forkunion::header)
     target_compile_features(${target_} PRIVATE cxx_std_23)
-    target_compile_definitions(${target_} PRIVATE UFORM_EXPORTING=1)
+    target_compile_definitions(${target_} PRIVATE UFORM_EXPORTING=1 UFORM_VERSION_NAME="${uform_version_name_}")
     set_target_properties(
         ${target_}
         PROPERTIES PREFIX "lib"

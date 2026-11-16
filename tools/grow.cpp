@@ -28,13 +28,19 @@
  *  with @c --images , the first 16 files of that directory, and requires every grown embedding's
  *  prefix as wide as the source's to meet it at a cosine of 0.9999. On a miss it prints the worst
  *  item, deletes the output, and exits with 1.
+ *
+ *  The first SIGINT or SIGTERM stops it between blocks while it grows, writing nothing, or between
+ *  the loads and encodings of the check, deleting the output; either way it prints the phase it
+ *  stopped in and exits with 130.
  */
 #include <cmath>   // `std::sqrt`
+#include <csignal> // `std::signal`, `SIGINT`, `SIGTERM`
 #include <cstdio>  // `std::fopen`, `std::fread`, `std::remove`
-#include <cstring> // `std::memset`, `std::memcpy`, `std::strcmp`
+#include <cstring> // `std::memset`, `std::memcpy`
 
 #include <dirent.h> // `opendir`, `readdir` — the image directory
 
+#include <array>            // `std::array` - the flag table
 #include <initializer_list> // `std::initializer_list`
 #include <string_view>      // `std::string_view`
 
@@ -52,12 +58,15 @@
 #include "uform/utilities/safetensors_format.hpp"
 #include "uform/encoder/geometry.hpp"
 
+#include "arguments.hpp" // `flag_t`, `parse_or_exit`, `stop_requested`, `verb_phase_t`
+
 namespace nk = ashvardanian::numkong;
 namespace st = ashvardanian::smashtable;
 namespace sz = ashvardanian::stringzilla;
 namespace ue = unum::uform::encoder;
 
 using namespace unum::uform::utilities;
+using namespace unum::uform::tools;
 
 /** The cosine every grown embedding's prefix must reach against the source's. */
 static constexpr float cosine_floor_k = 0.9999f;
@@ -159,10 +168,11 @@ static constexpr char const* kept_metadata_k[] = {
     return grown.insert(name, nk::tensor_view<nk_bf16_t, 2> {staging.data(), rows, cols});
 }
 
-/** Fill @p grown with the weights and geometry of @p source taken one @p step up, refusing a source
- *  tensor this neither grows, carries nor leaves behind. */
+/** Fill @p grown with the weights and geometry of @p source taken one @p step up, refusing a
+ *  source tensor this neither grows, carries nor leaves behind, and reporting each block into
+ *  @p phase . */
 [[nodiscard]] static expected_t grow_(checkpoint_to_load_t const& source, ue::geometry_t const& geometry, step_t step,
-                                      checkpoint_to_save_t& grown) noexcept {
+                                      verb_phase_t& phase, checkpoint_to_save_t& grown) noexcept {
     std::size_t accounted = 0;
     // The Float32 state goes first, as the payload packs it ahead of the BFloat16 weights.
     for (char const* carried : {"contrastive.inverse_temperatures", "contrastive.biases",
@@ -203,7 +213,9 @@ static constexpr char const* kept_metadata_k[] = {
             return inserted;
     }
     sz::string_t grown_name;
-    for (std::size_t block = 0; block != geometry.depth; ++block)
+    for (std::size_t block = 0; block != geometry.depth; ++block) {
+        if (verb_progress(block, geometry.depth, &phase) == uform_cancel_k)
+            return expected_t::fail(status_t::internal_k, "stopped at block {}", block);
         for (growth_t const& growth : block_growths_k) {
             suffix.clear();
             if (!format_into(suffix, "blocks.{}.{}", block, growth.name))
@@ -229,6 +241,7 @@ static constexpr char const* kept_metadata_k[] = {
                 if (!inserted) return inserted;
             }
         }
+    }
     if (accounted != source.size())
         return expected_t::fail(status_t::invalid_argument_k, "{} of the source's {} tensors have no growth rule",
                                 source.size() - accounted, source.size());
@@ -348,20 +361,22 @@ struct session_t {
 }
 
 /** Load @p checkpoint into VRAM and append the embeddings of @p captions , then of @p images , onto
- *  @p rows , @p dimensions wide; or print why not. */
+ *  @p rows , @p dimensions wide, reporting into @p phase ; or print why not, unless a signal
+ *  stopped the encoding. */
 [[nodiscard]] static bool encode_(session_t const& session, std::string_view checkpoint, strings_t const& captions,
-                                  strings_t const& images, std::size_t& dimensions,
+                                  strings_t const& images, verb_phase_t& phase, std::size_t& dimensions,
                                   st::basic_vector<float>& rows) noexcept {
     uform_outcome_t outcome {};
     uform_model_t model = nullptr;
     std::int32_t const device = 0;
-    uform_model_load_vram_t load_arguments {
-        .model = &model,
-        .executor = session.executor,
-        .outcome = &outcome,
-        .path = {reinterpret_cast<std::uint8_t const*>(checkpoint.data()), checkpoint.size()},
-        .vram = {&device, 1},
-        .quantization = uform_scalar_bf16_k};
+    phase.unit = "tensors";
+    uform_model_load_vram_t load_arguments {.model = &model,
+                                            .executor = session.executor,
+                                            .outcome = &outcome,
+                                            .path = bytes_view(checkpoint),
+                                            .vram = {&device, 1},
+                                            .quantization = uform_scalar_bf16_k,
+                                            .progress = verb_progress_of(phase)};
     uform_model_load_vram(&load_arguments);
     uform_model_description_t description {};
     if (outcome.status == uform_status_success_k) {
@@ -373,7 +388,8 @@ struct session_t {
         dimensions = description.dimensions;
     }
     uform_rows_view_t embeddings {};
-    if (outcome.status == uform_status_success_k) {
+    if (outcome.status == uform_status_success_k && !stop_requested) {
+        phase.unit = "captions";
         uform_text_encode_t arguments {.model = model,
                                        .executor = session.executor,
                                        .outcome = &outcome,
@@ -381,11 +397,14 @@ struct session_t {
                                        .texts = captions.tape(),
                                        .embeddings = &embeddings,
                                        .arena = session.arena,
-                                       .outputs_scalar = uform_scalar_f32_k};
+                                       .outputs_scalar = uform_scalar_f32_k,
+                                       .progress = verb_progress_of(phase)};
         uform_text_encode(&arguments);
     }
-    bool kept = outcome.status == uform_status_success_k && keep_rows_(embeddings, captions.count(), rows);
+    bool kept = outcome.status == uform_status_success_k && !stop_requested &&
+                keep_rows_(embeddings, captions.count(), rows);
     if (kept && images.count()) {
+        phase.unit = "images";
         uform_image_encode_t arguments {.model = model,
                                         .executor = session.executor,
                                         .outcome = &outcome,
@@ -393,11 +412,12 @@ struct session_t {
                                         .images = images.tape(),
                                         .embeddings = &embeddings,
                                         .arena = session.arena,
-                                        .outputs_scalar = uform_scalar_f32_k};
+                                        .outputs_scalar = uform_scalar_f32_k,
+                                        .progress = verb_progress_of(phase)};
         uform_image_encode(&arguments);
         kept = outcome.status == uform_status_success_k && keep_rows_(embeddings, images.count(), rows);
     }
-    if (!kept)
+    if (!kept && !stop_requested)
         fmt::println(stderr, "uform_grow: {}: {}", checkpoint,
                      outcome.status == uform_status_success_k ? "copying embeddings off the GPU failed"
                      : outcome.message                        ? outcome.message
@@ -434,31 +454,39 @@ struct worst_t {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 4) {
-        fmt::println(stderr, "Usage: uform_grow <in.safetensors> <out.safetensors> --deepen | --widen " //
-                             "[--images <dir>]");
-        return 1;
-    }
-    char const *source_path = argv[1], *grown_path = argv[2];
-    step_t step = step_t::deepen_k;
-    std::size_t steps = 0;
-    char const* images_directory = nullptr;
-    for (int index = 3; index != argc; ++index) {
-        char const* flag = argv[index];
-        if (!std::strcmp(flag, "--deepen")) step = step_t::deepen_k, ++steps;
-        else if (!std::strcmp(flag, "--widen")) step = step_t::widen_k, ++steps;
-        else if (!std::strcmp(flag, "--images") && index + 1 != argc) images_directory = argv[++index];
-        else return fmt::println(stderr, "uform_grow: unknown flag {}", flag), 1;
-    }
-    if (steps != 1) return fmt::println(stderr, "uform_grow: pass one of --deepen and --widen"), 1;
+    // Progress lines reach a redirected log as they are printed.
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
+    switch_t deepen = switch_t::absent_k, widen = switch_t::absent_k;
+    std::string_view images_directory;
+    std::array<flag_t, 3> const flags {{
+        {"--deepen", "", "follow every block with its copy, doubling the depth", &deepen},
+        {"--widen", "", "repeat the residual stream and the heads, doubling the width", &widen},
+        {"--images", "directory", "also check the first 16 files of this directory", &images_directory},
+    }};
+    std::array<std::string_view, 2> paths;
+    std::size_t const given = parse_or_exit(
+        argc, argv, "uform_grow <in.safetensors> <out.safetensors> --deepen | --widen [--images <directory>]", flags,
+        paths);
+    if (given != 2) return fmt::println(stderr, "uform_grow: pass the source and the grown checkpoint, see --help"), 1;
+    if ((deepen == switch_t::present_k) == (widen == switch_t::present_k))
+        return fmt::println(stderr, "uform_grow: pass one of --deepen and --widen"), 1;
+    // Both are `argv` entries, so each stays null-terminated for the C calls taking a path.
+    char const *source_path = paths[0].data(), *grown_path = paths[1].data();
+    step_t const step = widen == switch_t::present_k ? step_t::widen_k : step_t::deepen_k;
+    std::signal(SIGINT, request_stop);
+    std::signal(SIGTERM, request_stop);
 
+    verb_phase_t phase {.name = "grow", .unit = "blocks"};
     std::size_t hidden = 0, depth = 0;
     {
         expected<checkpoint_to_load_t> source = checkpoint_to_load_t::make(source_path);
         expected<ue::geometry_t> geometry = source ? ue::geometry_t::from(*source)
                                                    : expected<ue::geometry_t>::fail(std::move(source));
         checkpoint_to_save_t grown;
-        expected_t written = geometry ? grow_(*source, *geometry, step, grown) : expected_t::fail(std::move(geometry));
+        expected_t written = geometry ? grow_(*source, *geometry, step, phase, grown)
+                                      : expected_t::fail(std::move(geometry));
+        // A stop between blocks leaves the output unwritten.
+        if (stop_requested) return verb_stopped(phase), exit_stopped_k;
         if (written) written = grown.save(grown_path);
         if (!written) return fmt::println(stderr, "uform_grow: {}", std::string_view {written.description_}), 1;
         hidden = geometry->hidden, depth = geometry->depth;
@@ -467,8 +495,9 @@ int main(int argc, char** argv) {
     strings_t captions, images, image_names;
     for (std::string_view caption : captions_k)
         if (!captions.append({caption})) return fmt::println(stderr, "uform_grow: caption staging failed"), 1;
-    if (images_directory) {
-        DIR* directory = opendir(images_directory);
+    if (!images_directory.empty()) {
+        // A text value views the tail of its `argv` entry or its variable, so it ends in a null.
+        DIR* directory = opendir(images_directory.data());
         if (!directory) return fmt::println(stderr, "uform_grow: cannot open {}", images_directory), 1;
         char path[4096];
         for (dirent* entry = readdir(directory); entry && images.count() != images_count_k;
@@ -502,9 +531,11 @@ int main(int argc, char** argv) {
 
     st::basic_vector<float> source_rows, grown_rows;
     std::size_t source_dimensions = 0, grown_dimensions = 0;
-    bool checked = encode_(session, source_path, captions, images, source_dimensions, source_rows) &&
-                   encode_(session, grown_path, captions, images, grown_dimensions, grown_rows) &&
+    phase.name = "verify";
+    bool checked = encode_(session, source_path, captions, images, phase, source_dimensions, source_rows) &&
+                   encode_(session, grown_path, captions, images, phase, grown_dimensions, grown_rows) &&
                    source_dimensions == hidden && grown_dimensions >= hidden;
+    bool const stopped = !checked && stop_requested;
     if (checked) {
         std::size_t const texts = captions.count(), items = texts + images.count();
         worst_t const worst_text = worst_(source_rows, grown_rows, hidden, grown_dimensions, 0, texts);
@@ -521,8 +552,11 @@ int main(int argc, char** argv) {
     uform_arena_free(session.arena);
     uform_executor_free(session.executor);
     cuDevicePrimaryCtxRelease(session.device);
-    if (checked) return fmt::println("uform_grow: wrote {}", grown_path), 0;
+    // A finished check keeps its output, and a signal arriving after it still exits as stopped.
+    if (checked) return fmt::println("uform_grow: wrote {}", grown_path), stop_requested ? exit_stopped_k : 0;
     std::remove(grown_path);
+    // An unverified output is a partial one, so a stop deletes it too.
+    if (stopped) return verb_stopped(phase), exit_stopped_k;
     fmt::println(stderr, "uform_grow: the check failed below a cosine of {}, so {} is deleted", cosine_floor_k,
                  grown_path);
     return 1;

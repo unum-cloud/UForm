@@ -23,6 +23,9 @@
 #if !UFORM_TEST_STUB   // the stand-in runs every call on its caller, built as C99 without threads to race
 #include <stdatomic.h> // `atomic_int` - the gate a deferred call waits at
 #endif
+#include <time.h> // `time` - the deadline a spin gives up at
+
+#include <math.h>    // `sqrtf`
 #include <stdbool.h> // `bool`
 #include <stdint.h>  // `uint8_t`, `uint32_t`
 #include <stdio.h>   // `printf`, `fopen`, `fwrite`, `remove`
@@ -32,6 +35,10 @@
 #include <forkunion/forkunion.h> // `fu_pool_new`, `fu_topology_new` - the pool a lender spawns
 
 #include "uform/uform.h"
+
+/** How long a check waits for what it expects to happen. A passing test never waits it out, so it
+ *  bounds hangs rather than speed, and leaves room for sanitizers and emulated CPUs. */
+#define UFORM_TEST_WAIT_LIMIT_SECONDS 120
 
 static void expect(bool must_be_true, char const* message) {
     if (must_be_true) return;
@@ -148,6 +155,15 @@ static void test_library_probes(void) {
     printf("Test: Library Probes\n");
     expect(uform_capabilities_compiled() != NULL, "The compiled capabilities must be reported");
     expect(uform_capabilities_available() != NULL, "The available capabilities must be reported");
+    int major = -1, minor = -1, patch = -1;
+    uform_version(&major, &minor, &patch);
+    expect(major == UFORM_VERSION_MAJOR && minor == UFORM_VERSION_MINOR && patch == UFORM_VERSION_PATCH,
+           "The linked library reports the version its header carries");
+    char core[64];
+    snprintf(core, sizeof(core), "%d.%d.%d", major, minor, patch);
+    char const* const named = uform_version_name();
+    expect(strncmp(named, core, strlen(core)) == 0 && (named[strlen(core)] == '\0' || named[strlen(core)] == '-'),
+           "The version name is the numeric version, a pre-release suffix at most following it");
 
     uform_status_t const statuses[] = {
         uform_status_success_k,
@@ -160,6 +176,7 @@ static void test_library_probes(void) {
         uform_status_device_k,
         uform_status_malformed_k,
         uform_status_internal_k,
+        uform_status_uninitialized_k,
         uform_status_config_mismatch_k,
         uform_status_contended_k,
         uform_status_cancelled_k,
@@ -175,6 +192,8 @@ static void test_library_probes(void) {
     }
     expect(strcmp(uform_status_name(uform_status_deferred_k), "deferred") == 0, "The non-final status spells deferred");
     expect(strcmp(uform_status_name(uform_status_out_of_memory_k), "out-of-memory") == 0, "Names are dash-separated");
+    expect(strcmp(uform_status_name(uform_status_uninitialized_k), "uninitialized") == 0,
+           "A NULL handle's status spells uninitialized");
     expect(strcmp(uform_status_name((uform_status_t)6), "unrecognized") == 0, "An unused value spells unrecognized");
     uform_status_t untouched_status = uform_status_io_k;
     expect(uform_status_from_name(view_of("no-such"), &untouched_status) == uform_status_invalid_argument_k &&
@@ -222,6 +241,33 @@ static void test_library_probes(void) {
     expect(uform_multimem_tier_from_name(view_of("ring"), &tier) == uform_status_invalid_argument_k &&
                tier == uform_multimem_tier_peer_read_k,
            "An unrecognized multimem tier fails rather than reading as switch-reduced");
+    for (int value = 0; value != 4; ++value) {
+        uform_pair_loss_form_t form = uform_pair_loss_form_sigmoid_k;
+        uform_late_interaction_side_t side = uform_late_interaction_side_query_and_document_k;
+        uform_gpu_vendor_t vendor = uform_gpu_vendor_apple_k;
+        expect(uform_pair_loss_form_from_name(view_of(uform_pair_loss_form_name((uform_pair_loss_form_t)value)),
+                                              &form) == uform_status_success_k &&
+                   form == (uform_pair_loss_form_t)value,
+               "Every pair-loss form reads back from its name");
+        expect(uform_late_interaction_side_from_name(
+                   view_of(uform_late_interaction_side_name((uform_late_interaction_side_t)value)), &side) ==
+                       uform_status_success_k &&
+                   side == (uform_late_interaction_side_t)value,
+               "Every late-interaction side reads back from its name");
+        expect(uform_gpu_vendor_from_name(view_of(uform_gpu_vendor_name((uform_gpu_vendor_t)value)), &vendor) ==
+                       uform_status_success_k &&
+                   vendor == (uform_gpu_vendor_t)value,
+               "Every GPU vendor reads back from its name");
+    }
+    expect(strcmp(uform_late_interaction_side_name(uform_late_interaction_side_query_and_document_k),
+                  "query-and-document") == 0,
+           "A late-interaction side spells its name");
+    uform_pair_loss_form_t untouched_form = uform_pair_loss_form_ranked_k;
+    expect(uform_pair_loss_form_from_name(view_of("steep"), &untouched_form) == uform_status_invalid_argument_k &&
+               untouched_form == uform_pair_loss_form_ranked_k,
+           "An unrecognized pair-loss form fails and leaves its output");
+    expect(strcmp(uform_gpu_vendor_name((uform_gpu_vendor_t)7), "unrecognized") == 0,
+           "An unused vendor value spells unrecognized");
 
     // Classes fit a byte, so walking every byte meets each class and every gap between blocks;
     // the CPU walk starts at "unknown", which a pin spells too.
@@ -291,6 +337,17 @@ static void test_executors(void) {
     expect((outcome.status == uform_status_success_k) == (gpu != NULL), "Only a created executor is written");
     uform_executor_free(gpu);
 
+    // A borrowed stream is refused before any device is looked for, so every build answers alike.
+    void* const borrowed[] = {&outcome};
+    gpu = NULL;
+    uform_executor_for_vram(&(uform_executor_for_vram_t) {.executor = &gpu, .outcome = &outcome, .streams = borrowed});
+    expect(outcome.status == uform_status_unsupported_k && gpu == NULL, "Borrowed streams are refused");
+    uform_executor_for_vram(&(uform_executor_for_vram_t) {.executor = &gpu,
+                                                          .outcome = &outcome,
+                                                          .vram = {.devices = NULL, .devices_count = 1},
+                                                          .streams = borrowed});
+    expect(outcome.status == uform_status_invalid_argument_k, "A malformed device list is refused before the streams");
+
     uform_executor_free(NULL);
     uform_arena_free(NULL);
     uform_model_free(NULL);
@@ -313,25 +370,26 @@ static void test_model_load(void) {
     expect(description.gpu_class == uform_gpu_class_unknown_k, "A RAM model names no GPU class");
 
     uform_outcome_t pin_outcome = {0};
-    // A monoversioned build compiles its one class alone, so the serial floor is not there to pin.
-    uform_cpu_class_t const pinned_class = description.cpu_class == uform_cpu_class_monoversioned_k
-                                               ? uform_cpu_class_monoversioned_k
-                                               : uform_cpu_class_serial_k;
-    uform_model_t pinned = NULL;
-    uform_model_load_ram(&(uform_model_load_ram_t) {.model = &pinned,
+    // A monoversioned build compiles its one class alone, so no serial floor is there to cap at.
+    bool const monoversioned = description.cpu_class == uform_cpu_class_monoversioned_k;
+    uform_cpu_class_t const capped_class = monoversioned ? uform_cpu_class_monoversioned_k : uform_cpu_class_serial_k;
+    uform_model_t capped = NULL;
+    uform_model_load_ram(&(uform_model_load_ram_t) {.model = &capped,
                                                     .executor = executor,
                                                     .outcome = &pin_outcome,
                                                     .path = view_of(checkpoint_path),
-                                                    .ram = {.cpu_class = pinned_class},
+                                                    .ram = {.cpu_class_ceiling = capped_class},
                                                     .quantization = uform_scalar_bf16_k});
     expect(!pin_outcome.message, pin_outcome.message);
-    uform_model_description_t pinned_description = {0};
-    uform_model_describe(&(uform_model_describe_t) {.model = pinned,
+    uform_model_description_t capped_description = {0};
+    uform_model_describe(&(uform_model_describe_t) {.model = capped,
                                                     .executor = executor,
                                                     .outcome = &pin_outcome,
-                                                    .description = &pinned_description});
-    expect(pinned_description.cpu_class == pinned_class, "A pinned load packs for the pinned class");
-    uform_model_free(pinned);
+                                                    .description = &capped_description});
+    expect(capped_description.cpu_class == capped_class, "A ceiling the CPU runs packs for that class");
+    uform_model_free(capped);
+
+    // A ceiling of another family shares only the serial floor with this CPU, so it runs as serial.
     uform_model_t foreign = NULL;
     uform_cpu_class_t const foreign_class = description.cpu_class == uform_cpu_class_wasm64_extended_k
                                                 ? uform_cpu_class_intel_diamond_k
@@ -340,10 +398,23 @@ static void test_model_load(void) {
                                                     .executor = executor,
                                                     .outcome = &pin_outcome,
                                                     .path = view_of(checkpoint_path),
-                                                    .ram = {.cpu_class = foreign_class},
+                                                    .ram = {.cpu_class_ceiling = foreign_class},
                                                     .quantization = uform_scalar_bf16_k});
-    expect(pin_outcome.status == uform_status_unsupported_k, "A class this CPU does not run is refused");
-    expect(foreign == NULL, "A refused pin leaves no model");
+    if (monoversioned) {
+        expect(pin_outcome.status == uform_status_unsupported_k, "A ceiling below the one class is refused");
+        expect(foreign == NULL, "A refused ceiling leaves no model");
+    }
+    else {
+        expect(!pin_outcome.message, pin_outcome.message);
+        uform_model_description_t foreign_description = {0};
+        uform_model_describe(&(uform_model_describe_t) {.model = foreign,
+                                                        .executor = executor,
+                                                        .outcome = &pin_outcome,
+                                                        .description = &foreign_description});
+        expect(foreign_description.cpu_class == uform_cpu_class_serial_k,
+               "A ceiling this CPU does not run falls to the best class under it");
+        uform_model_free(foreign);
+    }
 
     FILE* const file = fopen(checkpoint_path, "rb");
     expect(file != NULL, "The checkpoint must be readable");
@@ -903,7 +974,8 @@ static uform_continuation_t wait_at_gate(size_t completed, size_t total, void* s
     gate_t* const gate = (gate_t*)state;
     gate->completed = completed, gate->total = total;
     atomic_store(&gate->reached, 1);
-    while (!atomic_load(&gate->opened)) {}
+    time_t const deadline = time(NULL) + UFORM_TEST_WAIT_LIMIT_SECONDS;
+    while (!atomic_load(&gate->opened) && time(NULL) < deadline) {}
     return uform_continue_k;
 }
 
@@ -927,7 +999,9 @@ static void test_held_calls(void) {
     gate_t gate = {0, 0, 0, 0};
     encode_texts(model, executor, uform_completion_deferred_k, &texts, &deferred,
                  (uform_progress_t) {wait_at_gate, &gate, 1});
-    while (!atomic_load(&gate.reached)) {}
+    time_t const deadline = time(NULL) + UFORM_TEST_WAIT_LIMIT_SECONDS;
+    while (!atomic_load(&gate.reached) && time(NULL) < deadline) {}
+    expect(atomic_load(&gate.reached), "A deferred call reaches its first progress report");
     expect(gate.completed <= gate.total && gate.total == texts.count, "A report counts the batch's items");
     expect(uform_outcome_status(&deferred.outcome) == uform_status_deferred_k, "A running call is deferred");
 
@@ -942,7 +1016,8 @@ static void test_held_calls(void) {
     expect(borrower.embeddings.data == NULL, "A refused call leaves its outputs NULL");
 
     atomic_store(&gate.opened, 1);
-    while (uform_outcome_status(&deferred.outcome) == uform_status_deferred_k) {}
+    time_t const landing_deadline = time(NULL) + UFORM_TEST_WAIT_LIMIT_SECONDS;
+    while (uform_outcome_status(&deferred.outcome) == uform_status_deferred_k && time(NULL) < landing_deadline) {}
     expect(deferred.outcome.status == uform_status_success_k, "Polling alone sees a deferred call finish");
     expect(same_outputs(&blocking, &deferred, texts.count), "A deferred call lands what a blocking one does");
     encode_texts(model, NULL, uform_completion_blocking_k, &texts, &borrower, silent);
@@ -1048,7 +1123,9 @@ static void test_arenas(void) {
                placement.device == -1,
            "A RAM executor's arena lives in host pages");
     uform_arena_describe(&(uform_arena_describe_t) {.arena = NULL, .outcome = &outcome, .description = &placement});
-    expect(outcome.status == uform_status_invalid_argument_k, "A NULL arena is refused");
+    expect(outcome.status == uform_status_uninitialized_k, "A NULL arena is refused");
+    uform_arena_describe(&(uform_arena_describe_t) {.arena = outputs.arena, .outcome = &outcome, .description = NULL});
+    expect(outcome.status == uform_status_invalid_argument_k, "A NULL description is refused");
 
     uform_arena_free(outputs.arena);
     uform_model_free(model);
@@ -1182,13 +1259,19 @@ static void test_refusals(void) {
     uform_text_encode(&encode);
     expect(outcome.status == uform_status_invalid_argument_k, "A call naming no output is refused");
 
-    encode.embeddings = &embeddings, encode.model = NULL;
+    encode.model = NULL;
     uform_text_encode(&encode);
-    expect(outcome.status == uform_status_invalid_argument_k, "A null model is refused");
+    expect(outcome.status == uform_status_uninitialized_k, "A null model is refused before the outputs");
 
-    encode.model = model, encode.texts.offsets = NULL;
+    encode.model = model, encode.embeddings = &embeddings, encode.texts.offsets = NULL;
     uform_text_encode(&encode);
     expect(outcome.status == uform_status_invalid_argument_k, "A tape without offsets is refused");
+
+    size_t const descending[] = {0, 8, 4};
+    encode.texts.offsets = descending;
+    uform_text_encode(&encode);
+    expect(outcome.status == uform_status_invalid_argument_k, "A tape whose offsets descend is refused");
+    encode.texts = tape_of(&texts);
 
 #if !UFORM_TEST_STUB // the stand-in loads any readable bytes and multiplies pixels unchecked
     uint8_t const wrapped_pixels[26] = {0};
@@ -1252,6 +1335,14 @@ static void test_refusals(void) {
                                                           .schedule = {.steps = 1}});
     expect(outcome.status == uform_status_device_k, "A trainer needs a VRAM executor");
     expect(trainer == NULL, "A refused trainer is never created");
+    uform_trainer_step(&(uform_trainer_step_t) {.trainer = NULL, .executor = executor, .outcome = &outcome});
+    expect(outcome.status == uform_status_uninitialized_k, "A null trainer is refused before its executor");
+    uform_trainer_save(&(uform_trainer_save_t) {.trainer = NULL, .executor = executor, .outcome = &outcome});
+    expect(outcome.status == uform_status_uninitialized_k, "A null trainer is refused before its path");
+    uform_mesh_describe(&(uform_mesh_describe_t) {.mesh = NULL, .outcome = &outcome, .description = NULL});
+    expect(outcome.status == uform_status_uninitialized_k, "A null mesh is refused before its description");
+    uform_model_describe(&(uform_model_describe_t) {.model = NULL, .executor = executor, .outcome = &outcome});
+    expect(outcome.status == uform_status_uninitialized_k, "A null model is refused before its description");
 
     uform_model_t gpu_model = NULL;
     uform_model_load_vram(&(uform_model_load_vram_t) {.model = &gpu_model,
@@ -1285,6 +1376,75 @@ static char const* write_scratch_checkpoint(void) {
            "The scratch checkpoint must be written");
     fclose(file);
     return path;
+}
+
+/** The cosine of row @p i of @p texts and the one row of @p images, which come unnormalized. */
+static float quickstart_cosine(uform_rows_view_t texts, size_t i, uform_rows_view_t images) {
+    float const* text = (float const*)((char const*)texts.data + i * texts.stride);
+    float const* image = (float const*)images.data;
+    float dot = 0, texts_norm = 0, images_norm = 0;
+    for (size_t k = 0; k != texts.columns; ++k)
+        dot += text[k] * image[k], texts_norm += text[k] * text[k], images_norm += image[k] * image[k];
+    return dot / sqrtf(texts_norm * images_norm);
+}
+
+/** The Quickstart of @c c/README.md , line for line, but loading the suite's checkpoint in place
+ *  of @c model.safetensors , taking the photo from @ref write_png in place of reading @c cat.png ,
+ *  and expecting each status where the README chains them. */
+static void test_quickstart(void) {
+    printf("Test: Quickstart\n");
+    uform_outcome_t outcome = {0};
+    uform_executor_t executor = NULL;
+    uform_model_t model = NULL;
+    uform_arena_t texts_arena = NULL, images_arena = NULL;
+    char const* path = checkpoint_path;
+    uform_executor_for_ram(&(uform_executor_for_ram_t) {.executor = &executor, .outcome = &outcome});
+    if (!outcome.status)
+        uform_model_load_ram(&(uform_model_load_ram_t) {.model = &model,
+                                                        .executor = executor,
+                                                        .outcome = &outcome,
+                                                        .path = {(uint8_t const*)path, strlen(path)},
+                                                        .quantization = uform_scalar_bf16_k});
+    if (!outcome.status)
+        uform_arena_init(&(uform_arena_init_t) {.arena = &texts_arena, .executor = executor, .outcome = &outcome});
+    if (!outcome.status)
+        uform_arena_init(&(uform_arena_init_t) {.arena = &images_arena, .executor = executor, .outcome = &outcome});
+
+    char const* captions[] = {"a cat on a mat", "a sunrise over the bay"};
+    char const caption_bytes[] = "a cat on a mata sunrise over the bay";
+    size_t const caption_offsets[] = {0, 14, 36};
+    static unsigned char photo[png_capacity];
+    size_t const photo_offsets[] = {0, write_png(photo)};
+
+    uform_rows_view_t texts = {0}, images = {0};
+    if (!outcome.status)
+        uform_text_encode(&(uform_text_encode_t) {.model = model,
+                                                  .executor = executor,
+                                                  .outcome = &outcome,
+                                                  .count = 2,
+                                                  .texts = {caption_bytes, caption_offsets, uform_scalar_u8_k},
+                                                  .embeddings = &texts,
+                                                  .arena = texts_arena,
+                                                  .outputs_scalar = uform_scalar_f32_k});
+    if (!outcome.status)
+        uform_image_encode(&(uform_image_encode_t) {.model = model,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .count = 1,
+                                                    .images = {photo, photo_offsets, uform_scalar_u8_k},
+                                                    .embeddings = &images,
+                                                    .arena = images_arena,
+                                                    .outputs_scalar = uform_scalar_f32_k});
+
+    // A build without host decoders refuses the photo, which the README's build decodes.
+    bool const decodes_files = outcome.status != uform_status_unsupported_k;
+    expect(!outcome.status || !decodes_files, outcome.message);
+    size_t const best = !decodes_files ? 0 : quickstart_cosine(texts, 1, images) > quickstart_cosine(texts, 0, images);
+    float const cosine = decodes_files ? quickstart_cosine(texts, best, images) : 0;
+    expect(strlen(captions[best]) != 0 && cosine == cosine, "The Quickstart names a caption at a finite cosine");
+
+    uform_arena_free(images_arena), uform_arena_free(texts_arena);
+    uform_model_free(model), uform_executor_free(executor);
 }
 
 /** Prints the version line, then the capabilities as "- Compiled for:" and "- This machine:". */
@@ -1324,6 +1484,7 @@ int main(int argc, char* argv[]) {
     if (selected("arenas")) test_arenas();
     if (selected("progress")) test_progress();
     if (selected("refusals")) test_refusals();
+    if (selected("quickstart")) test_quickstart();
 
     if (scratch) remove(scratch);
     printf("All tests passed!\n");

@@ -20,11 +20,8 @@ use std::path::{Path, PathBuf};
 
 /// Every CMake option an implementation can switch on, with the values switching it on and off,
 /// so a reconfigured tree never keeps an earlier choice.
-const KNOWN_OPTIONS: &[(&str, &str, &str)] = &[
-    ("UFORM_BUILD_STUB", "ON", "OFF"),
-    ("UFORM_CUDA_ARCH", "all", ""),
-    ("UFORM_ROCM_ARCH", "all", ""),
-];
+const KNOWN_OPTIONS: &[(&str, &str, &str)] =
+    &[("UFORM_BUILD_STUB", "ON", "OFF"), ("UFORM_CUDA_ARCH", "all", ""), ("UFORM_ROCM_ARCH", "all", "")];
 
 /// One implementation of the C interface, and what CMake must be told to produce it.
 #[derive(Clone, Copy)]
@@ -52,39 +49,19 @@ const ENGINE: Implementation = Implementation {
     target: "uform_static",
     directory: "c",
     library: "uform_static",
-    dependencies: &[
-        "turbojpeg",
-        "png",
-        "webp",
-        "avformat",
-        "avcodec",
-        "avutil",
-        "swresample",
-        "swscale",
-    ],
+    dependencies: &["turbojpeg", "png", "webp", "avformat", "avcodec", "avutil", "swresample", "swscale"],
     sources: &["src", "cmake"],
 };
 
 /// The engine with the NVIDIA residency, the trainer and the mesh.
-const ENGINE_CUDA: Implementation = Implementation {
-    feature: "cuda",
-    options: &["UFORM_CUDA_ARCH"],
-    ..ENGINE
-};
+const ENGINE_CUDA: Implementation = Implementation { feature: "cuda", options: &["UFORM_CUDA_ARCH"], ..ENGINE };
 
 /// The engine with the AMD residency.
-const ENGINE_ROCM: Implementation = Implementation {
-    feature: "rocm",
-    options: &["UFORM_ROCM_ARCH"],
-    ..ENGINE
-};
+const ENGINE_ROCM: Implementation = Implementation { feature: "rocm", options: &["UFORM_ROCM_ARCH"], ..ENGINE };
 
 /// The engine with both GPU residencies, driven by one binary.
-const ENGINE_CUDA_ROCM: Implementation = Implementation {
-    feature: "cuda and rocm",
-    options: &["UFORM_CUDA_ARCH", "UFORM_ROCM_ARCH"],
-    ..ENGINE
-};
+const ENGINE_CUDA_ROCM: Implementation =
+    Implementation { feature: "cuda and rocm", options: &["UFORM_CUDA_ARCH", "UFORM_ROCM_ARCH"], ..ENGINE };
 
 /// The stand-in, which answers the same verbs over the C++ standard library alone.
 const STUB: Implementation = Implementation {
@@ -196,10 +173,7 @@ fn build_library(manifest: &Path, chosen: Implementation, target_os: &str) -> Re
     // The crate reconfigures on every invocation by default, which on this tree is a fresh probe of
     // every dependency before a build that has nothing to do.
     // CMake's Debug configuration instruments for sanitizers whose runtimes rustc never links.
-    library
-        .profile("RelWithDebInfo")
-        .build_target(chosen.target)
-        .always_configure(false);
+    library.profile("RelWithDebInfo").build_target(chosen.target).always_configure(false);
     for (option, on, off) in KNOWN_OPTIONS {
         library.define(option, if chosen.options.contains(option) { on } else { off });
     }
@@ -221,9 +195,7 @@ fn build_library(manifest: &Path, chosen: Implementation, target_os: &str) -> Re
     println!("cargo:rerun-if-env-changed=CXX");
     let compiler = env::var("CXX").unwrap_or_else(|_| String::from("clang++"));
     if env::var_os("CXX").is_none() {
-        library
-            .define("CMAKE_C_COMPILER", "clang")
-            .define("CMAKE_CXX_COMPILER", &compiler);
+        library.define("CMAKE_C_COMPILER", "clang").define("CMAKE_CXX_COMPILER", &compiler);
     }
     if chosen.options.contains(&"UFORM_CUDA_ARCH") {
         library.define("CMAKE_CUDA_HOST_COMPILER", &compiler);
@@ -234,10 +206,7 @@ fn build_library(manifest: &Path, chosen: Implementation, target_os: &str) -> Re
     if target_os == "wasi" {
         println!("cargo:rerun-if-env-changed=WASI_SDK_PATH");
         println!("cargo:rerun-if-env-changed=CARGO_CFG_TARGET_FEATURE");
-        library.define(
-            "CMAKE_TOOLCHAIN_FILE",
-            manifest.join("cmake/toolchain-wasm32-wasi.cmake"),
-        );
+        library.define("CMAKE_TOOLCHAIN_FILE", manifest.join("cmake/toolchain-wasm32-wasi.cmake"));
         // An engine validates a module whole, so the SIMD tier is the one the Rust target declares;
         // the flags `cmake-rs` passes replace the toolchain's initial ones, so the tier and
         // `-fno-exceptions` ride with them.
@@ -245,20 +214,14 @@ fn build_library(manifest: &Path, chosen: Implementation, target_os: &str) -> Re
         if !target_features.split(',').any(|declared| declared == "simd128") {
             return Err("UForm on WebAssembly needs `-C target-feature=+simd128`".into());
         }
-        library
-            .cflag("-msimd128")
-            .cxxflag("-msimd128")
-            .cxxflag("-fno-exceptions");
+        library.cflag("-msimd128").cxxflag("-msimd128").cxxflag("-fno-exceptions");
     }
 
     // `build_target` stops short of installing, so the archive sits where the generator left it:
     // directly under the target's own directory, or one config deeper on the multi-config ones.
     let build = library.build().join("build").join(chosen.directory);
     println!("cargo:rustc-link-search=native={}", build.display());
-    println!(
-        "cargo:rustc-link-search=native={}",
-        build.join("RelWithDebInfo").display()
-    );
+    println!("cargo:rustc-link-search=native={}", build.join("RelWithDebInfo").display());
 
     // Only what the chosen implementation actually compiles, so a stand-in build ignores the
     // engine's sources and an engine build ignores the stand-in's.

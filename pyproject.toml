@@ -14,23 +14,23 @@ authors = [
   { email = "vladimir.orshulevich@unum.cloud", name = "Vladimir Orshulevich" },
 ]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
-    "Natural Language :: English",
-    "Operating System :: MacOS",
-    "Operating System :: Microsoft :: Windows",
-    "Operating System :: Unix",
-    "Programming Language :: C",
-    "Programming Language :: C++",
-    "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
-    "Programming Language :: Python :: 3.15",
-    "Programming Language :: Python :: Free Threading :: 3 - Stable",
-    "Programming Language :: Python :: Implementation :: CPython",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "Topic :: Scientific/Engineering :: Image Recognition",
-    "Typing :: Typed",
+  "Development Status :: 5 - Production/Stable",
+  "Natural Language :: English",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: Unix",
+  "Programming Language :: C",
+  "Programming Language :: C++",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3.15",
+  "Programming Language :: Python :: Free Threading :: 3 - Stable",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Scientific/Engineering :: Image Recognition",
+  "Typing :: Typed",
 ]
 # None. CMake links the C library into the extension, so the wheel is self-contained: inputs arrive through the
 # buffer protocol, which is CPython's own, and NumPy is a convenience of the caller rather than of the model.
@@ -52,29 +52,29 @@ requires-python = ">=3.12"
 # as wheels so the native extension resolves them from inside `.venv` (via $ORIGIN RPATH) with no
 # system CUDA install; RAPIDS cuDF / RMM come from the [[tool.uv.index]] NVIDIA index below.
 train = [
-    "torch>=2.12.0",
-    "cudf-cu13>=26.4.0",
-    "cupy-cuda13x>=14.1.0",
-    "rmm-cu13>=26.4.0",
-    "pyarrow>=24.0.0",
-    "safetensors>=0.4.5",
-    "cuda-toolkit[cccl,cublas,cudart,cufft,cufile,curand,cusparse,nvcc,nvjitlink,nvrtc,nvtx,nvvm]>=13.0.2",
-    "nvidia-nvimgcodec-cu13>=0.8",
-    "zstandard>=0.23.0",
-    "usearch>=2.16.0",
-    # Load-bearing under torch 2.12 + cupy 14.1: cupy's testing hooks import pytest during torch init.
-    "pytest>=8.0",
+  "torch>=2.12.0",
+  "cudf-cu13>=26.4.0",
+  "cupy-cuda13x>=14.1.0",
+  "rmm-cu13>=26.4.0",
+  "pyarrow>=24.0.0",
+  "safetensors>=0.4.5",
+  "cuda-toolkit[cccl,cublas,cudart,cufft,cufile,curand,cusparse,nvcc,nvjitlink,nvrtc,nvtx,nvvm]>=13.0.2",
+  "nvidia-nvimgcodec-cu13>=0.8",
+  "zstandard>=0.23.0",
+  "usearch>=2.16.0",
+  # Load-bearing under torch 2.12 + cupy 14.1: cupy's testing hooks import pytest during torch init.
+  "pytest>=8.0",
 ]
 
 # Offline dataset download / pre-processing extras — pulled in only when running the `scripts/data/`
 # mining and repack scripts (video first-frame decode, tar -> parquet sweeps, hard-negative mining).
 mining = [
-    "av>=17.0",
-    "transformers>=5.9.0",
-    "pandas>=2.2.0",
-    "orjson>=3.11.9",
-    "xxhash>=3.7.0",
-    "yt-dlp",
+  "av>=17.0",
+  "transformers>=5.9.0",
+  "pandas>=2.2.0",
+  "orjson>=3.11.9",
+  "xxhash>=3.7.0",
+  "yt-dlp",
 ]
 
 # Evaluation extras — heavy benchmark libraries for the MTEB / BEIR eval suites; not needed to train.
@@ -82,17 +82,20 @@ eval = ["mteb>=1.40.0", "datasets>=4.8.0", "scipy>=1.14.0"]
 
 # Development tooling for both the inference package and the training / data code.
 dev = [
-    "mypy>=1.14.0",
-    "pre-commit>=4.0.0",
-    "pandas",
-    "requests",
-    "tabulate",
-    "psutil>=5.9.0",
-    "nvidia-ml-py>=12.535.0",
+  "mypy>=1.14.0",
+  "pre-commit>=4.0.0",
+  "pandas",
+  "requests",
+  "tabulate",
+  "psutil>=5.9.0",
+  "nvidia-ml-py>=12.535.0",
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/unum-cloud/UForm"
+Homepage = "https://www.unum.cloud/docs/uform"
+Documentation = "https://www.unum.cloud/docs/uform/python"
+Repository = "https://github.com/unum-cloud/UForm"
+Issues = "https://github.com/unum-cloud/UForm/issues"
 
 # One CMake tree serves the C library and the extension, so the SDK has one native build rather than a second one
 # described in a `setup.py`.
@@ -178,6 +181,7 @@ known-first-party = ["uform"]
 combine-as-imports = true
 
 [tool.ruff.lint.per-file-ignores]
+".cmake-format.py" = ["C420", "D100", "F821"] # cmake-format defines `section` when it runs the profile
 "__init__.py" = ["E401"]
 
 [tool.ruff.lint.pydocstyle]

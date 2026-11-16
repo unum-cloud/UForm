@@ -15,6 +15,7 @@ import build from "node-gyp-build";
 import * as path from "path";
 import { existsSync } from "fs";
 import { getFileName, getRoot } from "bindings";
+import type { GpuVendor, LateInteractionSide, MultimemTier } from "./types.js";
 
 /** The C `uform_completion_t` a verb is submitted with: `0` blocks, `1` defers. */
 export type Completion = 0 | 1;
@@ -46,7 +47,6 @@ export interface CompiledArena {
 export interface CompiledDeferred {
   status(): string;
   wait(): void;
-  settled(): Promise<void>;
   result(): unknown;
 }
 
@@ -102,7 +102,7 @@ export interface CompiledDescription {
 /** One GPU this process can drive, its position in the listing being the ordinal VRAM placements
  *  name it by. */
 export interface CompiledGpuDevice {
-  vendor: number;
+  vendor: GpuVendor;
   vendorOrdinal: number;
   gpuClass: string | null;
   computeUnits: number;
@@ -117,7 +117,7 @@ export interface CompiledMeshDescription {
   gpusPerColocatedDomain: number;
   hostDomainIndex: number;
   firstGpuIndex: number;
-  multimemTier: string;
+  multimemTier: MultimemTier;
   gpuClass: string | null;
 }
 
@@ -184,28 +184,28 @@ export interface CompiledModelConstructor {
     executor: CompiledExecutor | undefined,
     memoryDomains: number[] | undefined,
     quantization: number,
-    cpuClass: string | undefined,
+    cpuClassCeiling: string | undefined,
   ): CompiledModel;
   loadRamBuffer(
     buffer: ArrayBufferView,
     executor: CompiledExecutor | undefined,
     memoryDomains: number[] | undefined,
     quantization: number,
-    cpuClass: string | undefined,
+    cpuClassCeiling: string | undefined,
   ): CompiledModel;
   loadVram(
     path: string,
     executor: CompiledExecutor | undefined,
     devices: number[] | undefined,
     quantization: number,
-    gpuClass: string | undefined,
+    gpuClassCeiling: string | undefined,
   ): CompiledModel;
   loadVramBuffer(
     buffer: ArrayBufferView,
     executor: CompiledExecutor | undefined,
     devices: number[] | undefined,
     quantization: number,
-    gpuClass: string | undefined,
+    gpuClassCeiling: string | undefined,
   ): CompiledModel;
 }
 
@@ -231,7 +231,7 @@ export interface CompiledTrainer {
       offsets: Offsets,
       bags: Uint32Array | undefined,
       temperatureGroups: Uint32Array | undefined,
-      sides: Int32Array | undefined,
+      sides: readonly LateInteractionSide[] | undefined,
       choices: Uint8Array | undefined,
       choiceOffsets: Offsets | undefined,
       choiceTargets: Float32Array | undefined,

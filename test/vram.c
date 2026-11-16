@@ -232,7 +232,7 @@ typedef struct heads_t {
 } heads_t;
 
 static heads_t read_heads(inputs_t const* inputs, uform_model_t model, uform_executor_t executor, uform_arena_t arena,
-                          size_t token_width, bool on_device) {
+                          size_t token_width, bool is_on_device) {
     heads_t heads = {0};
     uform_outcome_t outcome = {0};
     uform_tape_view_t const texts = {inputs->texts, inputs->text_offsets, uform_scalar_u8_k};
@@ -247,11 +247,11 @@ static heads_t read_heads(inputs_t const* inputs, uform_model_t model, uform_exe
                                               .outputs_scalar = uform_scalar_f32_k});
     expect_success(&outcome, "Token vectors");
     expect(token_vectors.rows.stride == token_width * sizeof(float), "Token vectors are packed f32");
-    copy_out(heads.token_offsets, token_vectors.offsets, sizeof(heads.token_offsets), on_device);
+    copy_out(heads.token_offsets, token_vectors.offsets, sizeof(heads.token_offsets), is_on_device);
     size_t const tokens = heads.token_offsets[items_count];
     heads.token_vectors = malloc((tokens ? tokens : 1) * token_width * sizeof(float));
     expect(heads.token_vectors != NULL, "Host copy of the token vectors");
-    copy_out(heads.token_vectors, token_vectors.rows.data, tokens * token_width * sizeof(float), on_device);
+    copy_out(heads.token_vectors, token_vectors.rows.data, tokens * token_width * sizeof(float), is_on_device);
 
     uform_tape_view_t probabilities = {0};
     uform_text_choose(&(uform_text_choose_t) {.model = model,
@@ -263,8 +263,8 @@ static heads_t read_heads(inputs_t const* inputs, uform_model_t model, uform_exe
                                               .probabilities = &probabilities,
                                               .arena = arena});
     expect_success(&outcome, "Choose");
-    copy_out(heads.probability_offsets, probabilities.offsets, sizeof(heads.probability_offsets), on_device);
-    copy_out(heads.probabilities, probabilities.data, sizeof(heads.probabilities), on_device);
+    copy_out(heads.probability_offsets, probabilities.offsets, sizeof(heads.probability_offsets), is_on_device);
+    copy_out(heads.probabilities, probabilities.data, sizeof(heads.probabilities), is_on_device);
     return heads;
 }
 

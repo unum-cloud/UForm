@@ -525,7 +525,7 @@ static void mixer_routes_segments(test_suite_t& suite) {
 
     auto multimem_made = multimem_domain_t::make(
         topology, members.devices, 1024u + multimodal_batch_mixer_t::payload_scalars_needed(shape, topology.shape),
-        members.streams, 120.0);
+        members.streams, wait_limit_seconds_k);
     if (!multimem_made)
         return suite.check(false, "multimem_domain make (needs multicast capability): {}", multimem_made.description_);
     multimem_domain_t multimem = std::move(multimem_made.value_);
@@ -591,7 +591,7 @@ static void mixer_routes_bags(test_suite_t& suite, u32_t rows, u32_t columns_per
 
     auto multimem_made = multimem_domain_t::make(
         topology, members.devices, 1024u + multimodal_batch_mixer_t::payload_scalars_needed(shape, topology.shape),
-        members.streams, 120.0);
+        members.streams, wait_limit_seconds_k);
     if (!multimem_made)
         return suite.check(false, "multimem_domain make (needs multicast capability): {}", multimem_made.description_);
     multimem_domain_t multimem = std::move(multimem_made.value_);

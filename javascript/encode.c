@@ -110,7 +110,7 @@ static uform_js_encode_call_t* uform_js_encode_open(napi_env env, napi_callback_
                                                     size_t tail, uform_model_t* model,
                                                     uform_js_encode_arguments_t* parsed) {
     uform_js_model_t* const wrapped = (uform_js_model_t*)uform_js_self(env, info, wanted, arguments, self);
-    if (wrapped && !wrapped->handle) uform_js_throw(env, uform_status_invalid_argument_k, "The model was freed");
+    if (wrapped && !wrapped->handle) uform_js_throw(env, uform_status_uninitialized_k, "The model was freed");
     if (!wrapped || !wrapped->handle) return NULL;
     *model = wrapped->handle;
     uform_js_encode_call_t* const call = (uform_js_encode_call_t*)uform_js_call_open_on(
@@ -365,7 +365,7 @@ static napi_value uform_js_finish_choose(napi_env env, uform_js_call_t* call, na
 static napi_value uform_js_text_choose(napi_env env, napi_callback_info info) {
     napi_value arguments[9], self = NULL, deferred = NULL;
     uform_js_model_t* const model = (uform_js_model_t*)uform_js_self(env, info, 9, arguments, &self);
-    if (model && !model->handle) uform_js_throw(env, uform_status_invalid_argument_k, "The model was freed");
+    if (model && !model->handle) uform_js_throw(env, uform_status_uninitialized_k, "The model was freed");
     if (!model || !model->handle) return NULL;
     uform_js_choose_call_t local;
     uform_text_choose_t choose = {.model = model->handle};

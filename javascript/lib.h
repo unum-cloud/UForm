@@ -18,8 +18,8 @@
  *  Every verb takes the C @c completion beside its executor. A blocking call answers its result; a
  *  deferred one answers a @c CompiledDeferred holding the outcome and strong references to every
  *  JavaScript value the library borrows until the call is final. Its @c wait blocks the calling
- *  thread in @c uform_outcome_wait, and its @c settled hands that wait to the libuv pool through
- *  @c napi_async_work, the one thread this layer ever borrows, and only while a caller awaits.
+ *  thread in @c uform_outcome_wait, and its @c status reads the outcome without blocking, which an
+ *  @c await polls between turns of the event loop, so this layer never borrows a thread.
  *
  *  A JavaScript function runs only on the thread owning its context, which no executor's thread
  *  is, so a progress handler is taken only by a call without an executor, where the library calls
@@ -209,10 +209,6 @@ typedef struct uform_js_call_t {
 
     /** The @b optional progress handler of a call on the calling thread. */
     napi_value progress;
-
-    /** The first exception the progress handler threw, thrown instead of the
-     *  cancellation it caused. */
-    napi_ref failure;
 } uform_js_call_t;
 
 #pragma endregion Vocabulary
@@ -250,6 +246,17 @@ bool uform_js_double_from_value(napi_env env, napi_value value, char const* fiel
  *  @return The block the caller frees, or @c NULL with an exception pending.
  */
 char* uform_js_string_from_value(napi_env env, napi_value value, char const* field, uform_bytes_view_t* view);
+
+/** Reads the pair-loss form @p value names, derived when absent; @c false with an exception
+ *  pending. */
+bool uform_js_pair_loss_form_from_value(napi_env env, napi_value value, uform_pair_loss_form_t* result);
+
+/** Reads the late-interaction side @p value names; @c false with an exception pending. */
+bool uform_js_late_interaction_side_from_value(napi_env env, napi_value value, uform_late_interaction_side_t* result);
+
+/** Hands @p call a heap block of @p bytes it frees once final; @c NULL with
+ *  an exception pending. */
+void* uform_js_call_own(napi_env env, uform_js_call_t* call, size_t bytes);
 
 /** Reads the C @c completion every verb takes beside its executor. */
 bool uform_js_completion_from_value(napi_env env, napi_value value, uform_completion_t* result);

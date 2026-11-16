@@ -53,10 +53,10 @@ static void publish_model(uform_model_t* output, uform_scalar_t quantization, st
     *output = model;
 }
 
-/** Refuses a pin to any class but serial, the only one the stand-in runs as. */
-static bool reject_pin(uform_cpu_class_t cpu_class, uform_outcome_t* outcome) {
-    return reject_if(cpu_class != uform_cpu_class_unknown_k && cpu_class != uform_cpu_class_serial_k,
-                     uform_status_unsupported_k, "The stand-in runs as the serial class alone", outcome);
+/** Refuses a ceiling no class takes; every other caps the stand-in at serial, its only class. */
+static bool reject_ceiling(uform_cpu_class_t ceiling, uform_outcome_t* outcome) {
+    return reject_if(std::string_view(uform_cpu_class_name(ceiling)) == "unrecognized", uform_status_invalid_argument_k,
+                     "No CPU class has that value", outcome);
 }
 
 extern "C" {
@@ -67,7 +67,9 @@ void uform_model_load_ram(uform_model_load_ram_t* arguments) {
     if (reject_if(!arguments->model, uform_status_invalid_argument_k, "The model output must not be null", outcome))
         return;
     *arguments->model = nullptr;
-    if (reject_quantization(arguments->quantization, outcome) || reject_pin(arguments->ram.cpu_class, outcome)) return;
+    if (reject_quantization(arguments->quantization, outcome) ||
+        reject_ceiling(arguments->ram.cpu_class_ceiling, outcome))
+        return;
     if (reject_if(!arguments->path.data || !arguments->path.length, uform_status_invalid_argument_k,
                   "The path must not be empty", outcome))
         return;
@@ -85,7 +87,9 @@ void uform_model_load_ram_buffer(uform_model_load_ram_buffer_t* arguments) {
     if (reject_if(!arguments->model, uform_status_invalid_argument_k, "The model output must not be null", outcome))
         return;
     *arguments->model = nullptr;
-    if (reject_quantization(arguments->quantization, outcome) || reject_pin(arguments->ram.cpu_class, outcome)) return;
+    if (reject_quantization(arguments->quantization, outcome) ||
+        reject_ceiling(arguments->ram.cpu_class_ceiling, outcome))
+        return;
     if (reject_if(!arguments->buffer.data || !arguments->buffer.length, uform_status_invalid_argument_k,
                   "The checkpoint must not be empty", outcome))
         return;
@@ -109,8 +113,9 @@ void uform_model_load_vram_buffer(uform_model_load_vram_buffer_t* arguments) {
 void uform_model_describe(uform_model_describe_t* arguments) {
     if (through_executor<uform_model_describe>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
-    if (reject_if(!arguments->model || !arguments->description, uform_status_invalid_argument_k,
-                  "The model and the description must not be null", outcome))
+    if (reject_if(!arguments->model, uform_status_uninitialized_k, "The model must not be null", outcome)) return;
+    if (reject_if(!arguments->description, uform_status_invalid_argument_k, "The description must not be null",
+                  outcome))
         return;
     uform_model_handle_t const& model = *arguments->model;
     *arguments->description = {dimensions_k,

@@ -10,6 +10,8 @@ Author: Ash Vardanian
 Date: November 8, 2026
 """
 
+from std.ffi import c_int
+from std.math import sqrt
 from std.os import getenv
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
@@ -23,6 +25,8 @@ from uform import (
     Executor,
     GPUClass,
     GPUDevice,
+    GPUVendor,
+    LateInteractionSide,
     Library,
     Mesh,
     Modality,
@@ -32,6 +36,7 @@ from uform import (
     Negatives,
     Objective,
     Outputs,
+    PairLossForm,
     Progress,
     RamOptions,
     Residency,
@@ -128,6 +133,17 @@ def test_names_round_trip_through_the_engine_tables() raises:
     assert_true(library.negatives_from_name("ambient") == Negatives.AMBIENT)
     assert_equal(library.multimem_tier_name(MultimemTier.PEER_READ), "peer-read")
     assert_true(library.multimem_tier_from_name("peer-read") == MultimemTier.PEER_READ)
+    for code in range(4):
+        var form = PairLossForm(c_int(code))
+        assert_true(library.pair_loss_form_from_name(library.pair_loss_form_name(form)) == form)
+        var side = LateInteractionSide(c_int(code))
+        assert_true(library.late_interaction_side_from_name(library.late_interaction_side_name(side)) == side)
+        var vendor = GPUVendor(c_int(code))
+        assert_true(library.gpu_vendor_from_name(library.gpu_vendor_name(vendor)) == vendor)
+    assert_equal(library.pair_loss_form_name(PairLossForm.SIGMOID), "sigmoid")
+    assert_equal(library.late_interaction_side_name(LateInteractionSide.QUERY_AND_DOCUMENT), "query-and-document")
+    assert_equal(library.gpu_vendor_name(GPUVendor.NVIDIA), "nvidia")
+    assert_equal(library.status_name(Status.UNINITIALIZED), "uninitialized")
     var refused = Status.SUCCESS
     try:
         _ = library.mood_from_name("sleepy")
@@ -216,7 +232,8 @@ def test_a_device_executor_needs_a_device() raises:
 
 
 def test_training_verbs_refuse_a_host_executor() raises:
-    """Every training verb needs a device executor, and a RAM one is refused with `DEVICE`."""
+    """Every training constructor needs a device executor, and a RAM one is refused with `DEVICE`; a
+    verb on a null trainer or mesh is refused with `UNINITIALIZED` before anything else."""
     if not _engine_is_present():
         print("skipped: libuform_shared is not on the loader path")
         return
@@ -254,14 +271,17 @@ def test_training_verbs_refuse_a_host_executor() raises:
     except error:
         statuses.append(error.status)
     assert_equal(len(statuses), 6, "every training verb must be refused")
-    for status in statuses:
-        assert_true(status == Status.DEVICE, "a RAM executor is refused as the wrong device")
+    for position in range(len(statuses)):
+        if position < 2:
+            assert_true(statuses[position] == Status.DEVICE, "a RAM executor is refused as the wrong device")
+        else:
+            assert_true(statuses[position] == Status.UNINITIALIZED, "a null trainer is refused before its executor")
     var refused = Status.SUCCESS
     try:
         _ = Mesh(library=library, address=NULL_ADDRESS).describe()
     except error:
         refused = error.status
-    assert_true(refused == Status.UNSUPPORTED, "a build without the trainer describes no mesh")
+    assert_true(refused == Status.UNINITIALIZED, "a null mesh is refused before the build's own refusal")
 
 
 # endregion Engine
@@ -289,6 +309,19 @@ def test_model_describes_a_loaded_checkpoint() raises:
     var bytes = open(path, "r").read_bytes()
     var from_buffer = Model.load_ram_buffer(executor, bytes).on(executor).describe()
     assert_equal(Int(from_buffer.dimensions), Int(description.dimensions))
+
+
+def test_a_ceiling_loads_the_best_class_under_it() raises:
+    """A serial ceiling loads serial, and a ceiling of a family this CPU does not run falls to serial."""
+    var path = _checkpoint()
+    if not _engine_is_present() or path.byte_length() == 0:
+        print("skipped: UFORM_TEST_CHECKPOINT names no checkpoint")
+        return
+    var library = Library()
+    var executor = Executor.for_ram(library, threads=2)
+    for ceiling in [CPUClass.SERIAL, CPUClass.WASM64_EXTENDED]:
+        var model = Model.load_ram(executor, path, RamOptions(cpu_class_ceiling=ceiling))
+        assert_true(model.describe().cpu_class == CPUClass.SERIAL)
 
 
 def test_text_encode_lands_rows_in_the_arena() raises:
@@ -359,10 +392,13 @@ def test_deferred_encoding_matches_the_blocking_one() raises:
     var call = model.deferred(executor).text_encode(TapeView.of(texts, offsets), Outputs.EMBEDDINGS, deferred_arena)
     var status = call.status()
     assert_true(status == Status.DEFERRED or status == Status.SUCCESS)
-    var waited = call.wait().embeddings().value().row[DType.float32](0)
-    var expected = blocking.embeddings().value().row[DType.float32](0)
-    for position in range(len(expected)):
-        assert_equal(waited[position], expected[position])
+    var waited = call.wait().embeddings().value()
+    var expected = blocking.embeddings().value()
+    for position in range(expected.columns()):
+        assert_equal(waited.row[DType.float32](0)[position], expected.row[DType.float32](0)[position])
+    _ = call^  # the rows read the call's outcome and arenas, which Mojo would free at their last use
+    _ = blocking_arena^
+    _ = deferred_arena^
 
 
 @fieldwise_init
@@ -515,6 +551,57 @@ def test_mismatched_pixel_shapes_are_refused_before_the_call() raises:
 # endregion Model
 
 
+# region Quickstart
+
+
+def _cosine(text: Span[Float32, _], image: Span[Float32, _]) -> Float32:
+    var dot: Float32 = 0  # embeddings come unnormalized
+    var text_norm: Float32 = 0
+    var image_norm: Float32 = 0
+    for i in range(len(image)):
+        dot += text[i] * image[i]
+        text_norm += text[i] * text[i]
+        image_norm += image[i] * image[i]
+    return dot / sqrt(text_norm * image_norm)
+
+
+def test_the_quickstart_names_the_caption_closest_to_the_photo() raises:
+    """The Quickstart of `mojo/README.md`, line for line, but loading the suite's checkpoint in place
+    of `model.safetensors` and an 8 x 8 PNG in place of reading `cat.png`; a build without host
+    decoders refuses the photo, which the README's build decodes."""
+    var path = _checkpoint()
+    if not _engine_is_present() or path.byte_length() == 0:
+        print("skipped: UFORM_TEST_CHECKPOINT names no checkpoint")
+        return
+    var library = Library()
+    var executor = Executor.for_ram(library)
+    var model = Model.load_ram(executor, path)
+    var texts_arena = Arena(executor)
+    var images_arena = Arena(executor)
+
+    var captions: List[String] = ["a cat on a mat", "a sunrise over the bay"]
+    var caption_offsets: List[UInt] = [0, 14, 36]
+    var photo: List[UInt8] = [137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 8, 0, 0, 0, 8, 8, 2, 0, 0, 0, 75, 109, 41, 220, 0, 0, 0, 75, 73, 68, 65, 84, 120, 156, 99, 96, 224, 16, 144, 80, 208, 48, 176, 112, 240, 8, 136, 72, 200, 40, 168, 104, 232, 152, 48, 99, 193, 138, 13, 59, 24, 176, 9, 30, 56, 113, 225, 6, 3, 54, 193, 7, 47, 62, 252, 96, 192, 42, 8, 52, 158, 1, 155, 32, 200, 120, 6, 108, 130, 32, 227, 25, 176, 9, 130, 140, 103, 192, 38, 8, 50, 30, 0, 179, 100, 93, 1, 16, 63, 179, 153, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130]
+    var photo_offsets: List[UInt] = [0, UInt(len(photo))]
+    var tape = TapeView.of("a cat on a mata sunrise over the bay".as_bytes(), caption_offsets)
+    var texts = model.on(executor).text_encode(tape, Outputs.EMBEDDINGS, texts_arena).embeddings().value()
+    var best = -1
+    var refused = Status.SUCCESS
+    try:
+        var images = model.on(executor).image_encode(TapeView.of(photo, photo_offsets), Outputs.EMBEDDINGS, images_arena)
+        var image = images.embeddings().value().row[DType.float32](0)
+        best = 1 if _cosine(texts.row[DType.float32](1), image) > _cosine(texts.row[DType.float32](0), image) else 0
+    except error:
+        refused = error.status
+    if best >= 0:
+        assert_true(captions[best].byte_length() > 0)
+    else:
+        assert_true(refused == Status.UNSUPPORTED, "only a build without host decoders refuses the photo")
+
+
+# endregion Quickstart
+
+
 def main() raises:
     var suite = TestSuite()
     suite.test[test_outputs_combine_as_flags]()
@@ -529,6 +616,7 @@ def main() raises:
     suite.test[test_a_device_executor_needs_a_device]()
     suite.test[test_training_verbs_refuse_a_host_executor]()
     suite.test[test_model_describes_a_loaded_checkpoint]()
+    suite.test[test_a_ceiling_loads_the_best_class_under_it]()
     suite.test[test_text_encode_lands_rows_in_the_arena]()
     suite.test[test_a_later_call_retires_earlier_rows]()
     suite.test[test_deferred_encoding_matches_the_blocking_one]()
@@ -537,4 +625,5 @@ def main() raises:
     suite.test[test_text_choose_answers_a_probability_per_choice]()
     suite.test[test_pixels_and_samples_encode_without_codecs]()
     suite.test[test_mismatched_pixel_shapes_are_refused_before_the_call]()
+    suite.test[test_the_quickstart_names_the_caption_closest_to_the_photo]()
     suite^.run()

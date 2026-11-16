@@ -92,12 +92,6 @@ using namespace unum::uform::test;
     return config;
 }
 
-/** The test tier's rendezvous deadline — short enough that a dead peer never costs the surviving
- *  domain two minutes per case, but long enough for the real two-node cold start: the FIRST
- *  exchange rides NFS attribute-cache latency plus the peers' eager-module-loading skew, which can
- *  take tens of seconds (a warm local rendezvous completes in well under one). */
-inline constexpr f64_t test_rendezvous_timeout_seconds_k = 60.0;
-
 /** One width tier: the mesh every cell of the tier builds its trainer over, the devices it drives,
  *  and the kernels they call. */
 struct tier_t {
@@ -404,8 +398,7 @@ static void run_base_conformance(test_suite_t& suite, world_health_t& health, ch
                     if (sz::failed(text.assign(mine.view())))
                         return suite.check(false, "[{}] loss-summand staging failed", label);
                 }
-                else if (expected_t arrived = topology.await_text(domain_index, key.view(), text,
-                                                                  test_rendezvous_timeout_seconds_k);
+                else if (expected_t arrived = topology.await_text(domain_index, key.view(), text, wait_limit_seconds_k);
                          !arrived)
                     return suite.check(false, "[{}] loss-summand exchange: {}", label, arrived.description_);
                 char const* cursor = text.c_str();
@@ -876,11 +869,11 @@ static void spectrum_world(test_suite_t& suite, world_health_t& health, tier_t w
         }
         expected<multimem_domain_t> domain = multimem_domain_t::make(
             mesh.topology, devices, distributed_pooled_spectrum_t::payload_scalars_needed(config), streams.span(),
-            test_rendezvous_timeout_seconds_k);
+            wait_limit_seconds_k);
         if (!domain) return expected_t::fail(std::move(domain));
         expected<distributed_pooled_spectrum_t> spectrum = distributed_pooled_spectrum_t::make(
             domain.value_, mesh.colocated, arenas.span(), streams.span(), {}, 0, config, numerics,
-            test_rendezvous_timeout_seconds_k);
+            wait_limit_seconds_k);
         if (!spectrum) return expected_t::fail(std::move(spectrum));
         for (std::size_t rank = 0; rank != devices.size(); ++rank)
             if (expected_t shaped = spectrum.value_(rank, pooled[rank].view(), pooled_grad[rank].span(), streams[rank]);
@@ -952,7 +945,7 @@ int main(int, char** argv) {
     mesh_options_t options;
     options.host_domain_index = host_domain_index_from_environment();
     options.host_domain_count = host_domain_count_from_environment();
-    options.timeout_seconds = test_rendezvous_timeout_seconds_k;
+    options.timeout_seconds = wait_limit_seconds_k;
     if (char const* directory = std::getenv("UFORM_EXCHANGE_DIR"); directory != nullptr)
         options.directory = sz::string_view_t {directory, std::strlen(directory)};
     if (char const* job = std::getenv("UFORM_JOB_ID"); job != nullptr)

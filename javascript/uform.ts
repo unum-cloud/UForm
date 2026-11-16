@@ -18,11 +18,9 @@ export {
   ArenaView,
   Deferred,
   Executor,
-  GpuVendor,
   LateInteractionSide,
   Modality,
   Mood,
-  MultimemTier,
   Negatives,
   Objective,
   PairLossForm,
@@ -31,14 +29,15 @@ export {
   gpuDevices,
 } from "./types.js";
 export type {
-  Answer,
   ExecutorForRamConfig,
   ExecutorForVramConfig,
   ExecutorOnPoolConfig,
   GpuDevice,
+  GpuVendor,
+  MultimemTier,
   UFormError,
 } from "./types.js";
-export { EncodeVerbs, Outputs, Probabilities, Rows, States } from "./encode.js";
+export { Outputs, Probabilities, Rows, States } from "./encode.js";
 export type { ChooseConfig, Chosen, EncodeConfig, EncodeStats, Encoded, Pixels, Tape } from "./encode.js";
 export { Model, ModelDeferredOn, ModelOn } from "./model.js";
 export type { ModelDescription, ModelLoadRamConfig, ModelLoadVramConfig } from "./model.js";

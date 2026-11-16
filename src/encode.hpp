@@ -355,6 +355,10 @@ struct vram_site {
 
 #pragma region Calls
 
+/** A choice's arguments, which land probabilities over its choices rather than any surface. */
+template <typename arguments_type_>
+concept choice_arguments = requires(arguments_type_& arguments) { arguments.probabilities; };
+
 /** The surfaces a call's arguments name, and the scalar they land as. */
 struct requested_t {
     uform_rows_view_t* embeddings = nullptr;
@@ -366,7 +370,7 @@ struct requested_t {
 /** The surfaces @p arguments name; a choice names none of them, as it lands probabilities. */
 template <typename arguments_type_>
 requested_t requested_of(arguments_type_ const& arguments) noexcept {
-    if constexpr (requires { arguments.probabilities; }) return {};
+    if constexpr (choice_arguments<arguments_type_>) return {};
     else return {arguments.embeddings, arguments.states, arguments.token_vectors, arguments.outputs_scalar};
 }
 
@@ -378,15 +382,17 @@ void clear_outputs(arguments_type_& arguments) noexcept {
     if (requested.embeddings) *requested.embeddings = {};
     if (requested.states) *requested.states = {};
     if (requested.token_vectors) *requested.token_vectors = {};
-    if constexpr (requires { arguments.probabilities; })
+    if constexpr (choice_arguments<arguments_type_>)
         if (arguments.probabilities) *arguments.probabilities = {};
     if (arguments.stats) *arguments.stats = {};
 }
 
-/** The refusals @p tape shares with every tape a call reads: storage, offsets and @p element . */
+/** The refusals @p tape shares with every tape a call reads: storage, ascending offsets and
+ *  @p element . */
 inline failure_t validate_tape(uform_tape_view_t const& tape, std::size_t count, uform_scalar_t element) noexcept {
     if (!tape.offsets || (!tape.data && count && tape.offsets[count] != tape.offsets[0]))
         return {uform_status_invalid_argument_k, "The tape must name its storage and offsets"};
+    if (!offsets_ascend(tape, count)) return {uform_status_invalid_argument_k, "A tape's offsets descend"};
     if (tape.scalar != element) return {uform_status_unsupported_layout_k, "The tape holds another scalar"};
     return {};
 }
@@ -409,9 +415,9 @@ inline failure_t validate_choices(uform_text_choose_t const& arguments) noexcept
 template <typename arguments_type_>
 failure_t validate_call(arguments_type_ const& arguments, uform_tape_view_t const& tape,
                         uform_scalar_t element) noexcept {
-    if (!arguments.model) return {uform_status_invalid_argument_k, "The model must not be null"};
+    if (!arguments.model) return {uform_status_uninitialized_k, "The model must not be null"};
     requested_t const requested = requested_of(arguments);
-    if constexpr (requires { arguments.probabilities; }) {
+    if constexpr (choice_arguments<arguments_type_>) {
         if (failure_t const refused = validate_choices(arguments); refused.message) return refused;
     }
     else if (!requested.embeddings && !requested.states && !requested.token_vectors)
@@ -478,6 +484,16 @@ failure_t for_items(pool_view_t pool, std::size_t begin, std::size_t end, step_t
     return first;
 }
 
+/** Lands @p zero_row as the embedding of every item of @p slice , all of them empty, which the
+ *  tower refuses and each pools to a zero row. */
+template <typename site_type_>
+failure_t land_zero_rows(site_type_& site, ue::rows_span_t embeddings, slice_t slice, bytes_span_t zero_row) noexcept {
+    for (std::size_t item = slice.begin; item != slice.end; ++item)
+        if (failure_t const landed = site.land(embeddings.bytes.row(item).values().value, zero_row); landed.message)
+            return landed;
+    return {};
+}
+
 /**
  *  @brief The body every encode verb shares once its arena is claimed: plan, size the outputs, pack
  *      and encode each slice on @p site , land the views and the stats.
@@ -524,11 +540,11 @@ void encode_items(arguments_type_& arguments, packer_type_& packer, site_type_& 
     b8_t* const states = output(requested.states, memory, tokens * row_bytes);
     b8_t* const token_vectors = output(requested.token_vectors, memory, tokens * token_row_bytes);
     f32_t* masked_logits = nullptr; // in host pages, where the choices' softmax reads them
-    if constexpr (requires { arguments.probabilities; })
+    if constexpr (choice_arguments<arguments_type_>)
         masked_logits = transfers.template allocate<f32_t>(count * geometry.masked_vocabulary + 1);
     if (!offsets_memory || (ragged && !landed_offsets_memory) || (requested.embeddings && !embeddings) ||
         (requested.states && !states) || (requested.token_vectors && !token_vectors) ||
-        (requires { arguments.probabilities; } && !masked_logits))
+        (choice_arguments<arguments_type_> && !masked_logits))
         return fail({uform_status_out_of_memory_k, "Failed to allocate the outputs"});
     std::span<std::size_t> const offsets {offsets_memory, count + 1};
     std::span<std::size_t> const landed_offsets {landed_offsets_memory, ragged ? count + 1 : 0};
@@ -621,11 +637,9 @@ void encode_items(arguments_type_& arguments, packer_type_& packer, site_type_& 
                 encoded.message)
                 return fail(encoded);
         }
-        else if (embeddings) // every item of the slice is empty, which the tower refuses, and each pools to a zero row
-            for (std::size_t item = slice.begin; item != slice.end; ++item)
-                if (failure_t const landed = site.land(surfaces.embeddings.bytes.row(item).values().value, zero_row);
-                    landed.message)
-                    return fail(landed);
+        else if (embeddings)
+            if (failure_t const landed = land_zero_rows(site, surfaces.embeddings, slice, zero_row); landed.message)
+                return fail(landed);
         if (failure_t const finished = site.finish(); finished.message) return fail(finished);
         if (ticks(slice.end) == continuation_t::cancel_k)
             return fail({uform_status_cancelled_k, "The caller's handler stopped the call"});
@@ -635,7 +649,7 @@ void encode_items(arguments_type_& arguments, packer_type_& packer, site_type_& 
             landed.message)
             return fail(landed);
     if (failure_t const finished = site.finish(); finished.message) return fail(finished);
-    if constexpr (requires { arguments.probabilities; })
+    if constexpr (choice_arguments<arguments_type_>)
         if (failure_t const chosen = land_choices(arguments, surfaces.masked_logits, site, memory); chosen.message)
             return fail(chosen);
 
@@ -662,10 +676,11 @@ void encode_on_devices(arguments_type_& arguments, packer_type_& packer, encoder
     vram_site<residency_> site {devices.decoders.view(), devices.staging.chunks, lead.transfers, memory.stream(),
                                 verbs};
     for (vram_device_t& device : devices.devices)
-        for (vram_replica_t const& replica : replicas)
-            if (replica.ordinal == device.ordinal && (device.capabilities & vendor_of(residency_)))
-                if (site.shards.push_back({&device, &replica}) != status_t::success_k)
-                    return fail({uform_status_internal_k, "More devices than one process drives"});
+        for (vram_replica_t const& replica : replicas) {
+            bool const serves = replica.ordinal == device.ordinal && (device.capabilities & vendor_of(residency_));
+            if (serves && site.shards.push_back({&device, &replica}) != status_t::success_k)
+                return fail({uform_status_internal_k, "More devices than one process drives"});
+        }
     if (!site.shards.size()) return fail({uform_status_device_k, "The model holds no replica on the executor"});
     encode_items(arguments, packer, site, memory, outcome);
     site.finish(); // a failed slice leaves work queued, which drains before the next call reuses what it reads

@@ -19,6 +19,10 @@ import pytest
 
 import uform
 
+WAIT_LIMIT = 120
+"""How long a test waits for what it expects to happen, in seconds. A passing test never waits it out, so it
+bounds hangs rather than speed, and leaves room for sanitizers and emulated CPUs."""
+
 
 def pytest_report_header() -> list[str]:
     """What this run is actually exercising, printed where pytest prints its own header."""
@@ -40,6 +44,12 @@ def checkpoint(tmp_path: Path) -> Path:
     path = tmp_path / "model.safetensors"
     path.write_bytes(b"stand-in checkpoint bytes")
     return path
+
+
+@pytest.fixture
+def wait_limit() -> int:
+    """`WAIT_LIMIT`, for a timeout a test hands the library."""
+    return WAIT_LIMIT
 
 
 @pytest.fixture

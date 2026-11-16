@@ -18,8 +18,6 @@
  *
  *  An item spanning more than 512 tokens keeps its first 512 and counts as truncated.
  */
-#include <array>            // `std::array` - a token's position as bytes
-#include <bit>              // `std::bit_cast`
 #include <initializer_list> // `std::initializer_list`
 
 #include "lib.hpp"
@@ -56,8 +54,7 @@ static void clear_outputs(arguments_& arguments) {
 template <typename arguments_>
 static bool reject_call(arguments_ const& arguments, uform_tape_view_t tape, uform_scalar_t element,
                         uform_outcome_t* outcome) {
-    if (reject_if(!arguments.model, uform_status_invalid_argument_k, "The model must not be null", outcome))
-        return true;
+    if (reject_if(!arguments.model, uform_status_uninitialized_k, "The model must not be null", outcome)) return true;
     if (reject_if(!arguments.embeddings && !arguments.states && !arguments.token_vectors,
                   uform_status_invalid_argument_k, "Name the embeddings, the states or the token vectors", outcome))
         return true;
@@ -69,6 +66,10 @@ static bool reject_call(arguments_ const& arguments, uform_tape_view_t tape, ufo
     if (reject_if(!tape.offsets || (!tape.data && arguments.count), uform_status_invalid_argument_k,
                   "The tape must name storage", outcome))
         return true;
+    for (std::size_t item = 0; item != arguments.count; ++item)
+        if (reject_if(tape.offsets[item + 1] < tape.offsets[item], uform_status_invalid_argument_k,
+                      "A tape's offsets descend", outcome))
+            return true;
     if (reject_if(tape.scalar != element, uform_status_unsupported_layout_k, "The tape holds another scalar", outcome))
         return true;
     return false;
@@ -113,15 +114,8 @@ static void encode(arguments_& arguments, std::initializer_list<void const*> inp
             std::uint64_t const seed = fnv1a(entry.data, entry.length);
             std::size_t const kept = fu::min_of(entry.tokens, context_k);
             if (arguments.embeddings) write_row(embeddings + item * row_bytes, scalar, seed);
-            if (offsets) {
-                for (std::size_t token = 0; token != kept; ++token) {
-                    std::array<std::byte, sizeof(std::uint64_t)> const position =
-                        std::bit_cast<std::array<std::byte, sizeof(std::uint64_t)>>(std::uint64_t {token});
-                    std::uint64_t const token_seed = fnv1a(position.data(), position.size(), seed);
-                    write_row(states + (row + token) * row_bytes, scalar, token_seed);
-                }
-                offsets[item + 1] = row + kept;
-            }
+            if (offsets) write_token_rows(states + row * row_bytes, row_bytes, kept, scalar, seed);
+            if (offsets) offsets[item + 1] = row + kept;
             row += kept;
         }
         if (reject_if(!ticks.carry_on(item), uform_status_cancelled_k, "The caller's handler stopped the call",
@@ -166,7 +160,7 @@ void uform_text_choose(uform_text_choose_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     if (arguments->probabilities) *arguments->probabilities = {};
     if (arguments->stats) *arguments->stats = {};
-    if (reject_if(!arguments->model, uform_status_invalid_argument_k, "The model must not be null", outcome)) return;
+    if (reject_if(!arguments->model, uform_status_uninitialized_k, "The model must not be null", outcome)) return;
     reject_if(true, uform_status_unsupported_k, "The model carries no byte decoder", outcome);
 }
 

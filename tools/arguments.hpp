@@ -1,0 +1,545 @@
+/**
+ *  @file tools/arguments.hpp
+ *  @author Ash Vardanian
+ *  @date November 16, 2026
+ *  @brief Command-line flags for every UForm binary: one table parses the arguments, reads their
+ *      variables and prints the usage; and the stop flag and progress lines every long verb shares.
+ *
+ *  Flags are long kebab-case words whose value follows as the next argument or after @c =. Byte
+ *  counts carry a binary suffix, durations carry @c ms or @c s, counts are plain integers, and
+ *  lists are comma-separated. A flag naming a library enumerator writes that enumerator, parsed by
+ *  the C interface's own names. A text value views the tail of its @c argv entry, so it is
+ *  null-terminated; list items are not. A value that does not parse prints @c --flag="value"
+ *  @c does @c not @c parse, @c expected @c <grammar>.
+ *
+ *  @code{.cpp}
+ *  count_t batch {256};
+ *  std::string_view output;
+ *  uform_objective_t objective = uform_objective_masked_k;
+ *  std::array<flag_t, 3> const flags {{
+ *      {"--output", "path", "where the calibrated checkpoint is written", &output},
+ *      {"--batch", "items", "items one encoding call takes", &batch},
+ *      {"--objective", "name", "which losses a step relaxes", &objective},
+ *  }};
+ *  arguments_t const parsed = parse_arguments(argc, argv, flags, {});
+ *  @endcode
+ */
+#pragma once
+
+#include <cctype>  // `std::toupper` - the variable names
+#include <csignal> // `std::sig_atomic_t`, `std::signal`, `SIGINT`, `SIGTERM`
+#include <cstddef> // `std::size_t`
+#include <cstdint> // `std::uint32_t`, `std::uint64_t`
+#include <cstdio>  // `stderr`, `stdout`
+#include <cstdlib> // `std::exit`, `std::strtod`, `std::getenv`
+
+#include <array>        // `std::array`
+#include <charconv>     // `std::from_chars`
+#include <chrono>       // `std::chrono::milliseconds`, `std::chrono::steady_clock`
+#include <limits>       // `std::numeric_limits`
+#include <random>       // `std::random_device`
+#include <regex>        // `std::regex`, `std::regex_search` - the filter
+#include <span>         // `std::span`
+#include <string_view>  // `std::string_view`
+#include <system_error> // `std::errc`
+#include <variant>      // `std::variant`
+
+#include <fmt/format.h>
+
+#include <stringzilla/stringzilla.hpp> // `sz::string_t`
+
+#include "uform/uform.h" // the enumerators flags name and their spellings
+
+/** Prints an owning StringZilla string as the text it holds, never as a range of characters. */
+template <>
+struct fmt::formatter<ashvardanian::stringzilla::string_t> : fmt::formatter<std::string_view> {
+    fmt::format_context::iterator format(ashvardanian::stringzilla::string_t const& text,
+                                         fmt::format_context& context) const {
+        return fmt::formatter<std::string_view>::format(text, context);
+    }
+};
+
+namespace unum::uform::tools {
+
+namespace sz = ashvardanian::stringzilla;
+
+/** Exits with status 1 after printing that @p what could not be allocated. */
+[[noreturn]] inline void exit_out_of_memory(std::string_view what) noexcept {
+    fmt::println(stderr, "out of memory for {}", what);
+    std::exit(1);
+}
+
+/** Appends @p format over @p args to @p text, exiting with status 1 when it cannot grow. */
+template <typename... args_types_>
+void append_formatted(sz::string_t& text, fmt::format_string<args_types_ const&...> format,
+                      args_types_ const&... args) noexcept {
+    std::size_t const length = text.size();
+    if (text.resize(length + fmt::formatted_size(format, args...)) != sz::status_t::success_k)
+        exit_out_of_memory("a text");
+    fmt::format_to(text.data() + length, format, args...);
+}
+
+/** @p format over @p args as an owning string, exiting with status 1 when it cannot allocate. */
+template <typename... args_types_>
+sz::string_t formatted(fmt::format_string<args_types_ const&...> format, args_types_ const&... args) noexcept {
+    sz::string_t text;
+    append_formatted(text, format, args...);
+    return text;
+}
+
+/** Outcome of parsing one value or a whole argument list. */
+enum class argument_status_t {
+
+    /** Every argument matched its flag. */
+    parsed_k,
+
+    /** <tt>--help</tt> was given, so the caller prints the usage and exits. */
+    help_k,
+
+    /** An argument starting with <tt>--</tt> names no flag. */
+    unknown_flag_k,
+
+    /** A flag taking a value ended the argument list. */
+    missing_value_k,
+
+    /** A switch was given a value through @c =. */
+    unexpected_value_k,
+
+    /** The digits do not form a non-negative integer. */
+    invalid_number_k,
+
+    /** The value overflows its destination or falls outside its bounds. */
+    out_of_range_k,
+
+    /** A list or the positional arguments exceed their capacity. */
+    too_many_items_k,
+
+    /** A list holds fewer items than it requires. */
+    too_few_items_k,
+
+    /** The value names no enumerator of its destination. */
+    unknown_name_k,
+};
+
+/** A plain non-negative integer, accepted only within @b [minimum,maximum]. */
+struct count_t {
+    std::size_t value = 0;
+    std::size_t minimum = 1;
+    std::size_t maximum = (std::numeric_limits<std::size_t>::max)();
+};
+
+/** Comma-separated counts like @c 16,256,4096, each within @b [minimum,maximum].
+ *  Between @c minimum_size and @c maximum_size of them are accepted. */
+struct counts_t {
+    static constexpr std::size_t capacity_k = 16;
+    std::array<std::size_t, capacity_k> values {};
+    std::size_t size = 0;
+    std::size_t minimum = 1;
+    std::size_t maximum = (std::numeric_limits<std::size_t>::max)();
+    std::size_t minimum_size = 1;
+    std::size_t maximum_size = capacity_k;
+
+    [[nodiscard]] std::span<std::size_t const> view() const noexcept { return {values.data(), size}; }
+};
+
+/** A byte count: an integer, or one suffixed K, M, G or T for its binary multiple, like 24G. */
+struct bytes_t {
+    std::size_t value = 0;
+};
+
+/** Whether a flag without a value appeared. */
+enum class switch_t : bool {
+    absent_k,
+    present_k,
+};
+
+/** Which named checks run: every one for an empty pattern, else those the pattern finds as an
+ *  ECMAScript regex, or as a substring when it is no valid regex. */
+struct filter_t {
+    std::string_view pattern;
+    std::regex regex;
+    bool compiled = false;
+
+    /** Whether @p name passes the filter. */
+    bool selects(std::string_view name) const noexcept {
+        if (pattern.empty()) return true;
+        if (compiled) return std::regex_search(name.begin(), name.end(), regex);
+        return name.find(pattern) != std::string_view::npos;
+    }
+};
+
+/** The filter @p pattern spells, compiled once. */
+inline filter_t filter_of(std::string_view pattern) {
+    filter_t filter {pattern, {}, false};
+    if (pattern.empty()) return filter;
+#if defined(__cpp_exceptions) && __cpp_exceptions
+    try {
+        filter.regex.assign(pattern.begin(), pattern.end());
+        filter.compiled = true;
+    }
+    catch (std::regex_error const&) {
+    }
+#else
+    filter.regex.assign(pattern.begin(), pattern.end());
+    filter.compiled = true;
+#endif
+    return filter;
+}
+
+/** One flag: its name with both dashes, the usage placeholder, one help line, and the value it
+ *  writes. */
+struct flag_t {
+    std::string_view name;
+    std::string_view placeholder;
+    std::string_view help;
+    std::variant<std::string_view*, count_t*, counts_t*, switch_t*, std::chrono::milliseconds*, std::uint32_t*, double*,
+                 filter_t*, uform_objective_t*, uform_pair_loss_form_t*, bytes_t*>
+        destination;
+};
+
+/** Result of @c parse_arguments: the status, the argument and flag it concerns, the value that
+ *  failed, and how many positionals were collected. */
+struct arguments_t {
+    argument_status_t status = argument_status_t::parsed_k;
+    std::string_view argument;
+    std::string_view value;
+    flag_t const* flag = nullptr;
+    std::size_t positionals_count = 0;
+};
+
+[[nodiscard]] inline argument_status_t parse_integer_(std::string_view digits, std::uint64_t& value) noexcept {
+    if (digits.empty()) return argument_status_t::invalid_number_k;
+    auto const [end, parse_status] = std::from_chars(digits.data(), digits.data() + digits.size(), value);
+    if (parse_status == std::errc::result_out_of_range) return argument_status_t::out_of_range_k;
+    if (parse_status != std::errc {} || end != digits.data() + digits.size())
+        return argument_status_t::invalid_number_k;
+    return argument_status_t::parsed_k;
+}
+
+[[nodiscard]] inline argument_status_t parse_bounded_(std::string_view text, std::size_t minimum, std::size_t maximum,
+                                                      std::size_t& value) noexcept {
+    std::uint64_t parsed = 0;
+    argument_status_t const status = parse_integer_(text, parsed);
+    if (status != argument_status_t::parsed_k) return status;
+    if (parsed < minimum || parsed > maximum) return argument_status_t::out_of_range_k;
+    value = static_cast<std::size_t>(parsed);
+    return argument_status_t::parsed_k;
+}
+
+/** Parses a plain integer within the bounds @p count already carries. */
+[[nodiscard]] inline argument_status_t parse_count(std::string_view text, count_t& count) noexcept {
+    return parse_bounded_(text, count.minimum, count.maximum, count.value);
+}
+
+/** Parses comma-separated counts within the bounds @p counts carries, replacing the items it
+ *  held. */
+[[nodiscard]] inline argument_status_t parse_counts(std::string_view text, counts_t& counts) noexcept {
+    std::size_t const maximum_size = counts.maximum_size < counts_t::capacity_k ? counts.maximum_size
+                                                                                : counts_t::capacity_k;
+    counts.size = 0;
+    while (true) {
+        std::size_t const comma = text.find(',');
+        if (counts.size == maximum_size) return argument_status_t::too_many_items_k;
+        argument_status_t const status = parse_bounded_(text.substr(0, comma), counts.minimum, counts.maximum,
+                                                        counts.values[counts.size]);
+        if (status != argument_status_t::parsed_k) return status;
+        ++counts.size;
+        if (comma == std::string_view::npos) break;
+        text.remove_prefix(comma + 1);
+    }
+    return counts.size < counts.minimum_size ? argument_status_t::too_few_items_k : argument_status_t::parsed_k;
+}
+
+/** Parses a byte count into @p bytes: digits, then an optional K, M, G or T. */
+[[nodiscard]] inline argument_status_t parse_bytes(std::string_view text, bytes_t& bytes) noexcept {
+    std::size_t shift = 0;
+    if (!text.empty()) switch (text.back()) {
+        case 'K': shift = 10; break;
+        case 'M': shift = 20; break;
+        case 'G': shift = 30; break;
+        case 'T': shift = 40; break;
+        default: break;
+        }
+    if (shift) text.remove_suffix(1);
+    std::uint64_t parsed = 0;
+    if (argument_status_t const status = parse_integer_(text, parsed); status != argument_status_t::parsed_k)
+        return status;
+    if (parsed > ((std::numeric_limits<std::size_t>::max)() >> shift)) return argument_status_t::out_of_range_k;
+    bytes.value = static_cast<std::size_t>(parsed) << shift;
+    return argument_status_t::parsed_k;
+}
+
+/** Parses a positive duration in whole milliseconds or seconds, like "200ms" or "10s", into
+ *  @p duration . */
+[[nodiscard]] inline argument_status_t parse_duration(std::string_view text,
+                                                      std::chrono::milliseconds& duration) noexcept {
+    std::uint32_t count = 0;
+    auto const [end, parse_status] = std::from_chars(text.data(), text.data() + text.size(), count);
+    if (parse_status != std::errc {} || !count) return argument_status_t::invalid_number_k;
+    std::string_view const unit = text.substr(end - text.data());
+    if (unit == "ms") duration = std::chrono::milliseconds(count);
+    else if (unit == "s") duration = std::chrono::seconds(count);
+    else return argument_status_t::invalid_number_k;
+    return argument_status_t::parsed_k;
+}
+
+/** Parses a 32-bit seed, or "random" for a fresh draw from @c std::random_device, into @p seed . */
+[[nodiscard]] inline argument_status_t parse_seed(std::string_view text, std::uint32_t& seed) noexcept {
+    if (text == "random")
+        return seed = static_cast<std::uint32_t>(std::random_device {}()), argument_status_t::parsed_k;
+    std::uint32_t parsed = 0;
+    auto const [end, parse_status] = std::from_chars(text.data(), text.data() + text.size(), parsed);
+    if (parse_status != std::errc {} || end != text.data() + text.size()) return argument_status_t::invalid_number_k;
+    seed = parsed;
+    return argument_status_t::parsed_k;
+}
+
+/** Parses a non-negative real, like "0.125" or "1e-3", into @p real . */
+[[nodiscard]] inline argument_status_t parse_real(std::string_view text, double& real) noexcept {
+    // Text values view the tail of their `argv` entry, so `strtod` stops at its terminator.
+    char* end = nullptr;
+    double const parsed = std::strtod(text.data(), &end);
+    if (text.empty() || end != text.data() + text.size() || !(parsed >= 0)) return argument_status_t::invalid_number_k;
+    real = parsed;
+    return argument_status_t::parsed_k;
+}
+
+/** The bytes of @p text as the C interface borrows a path or a name. */
+inline uform_bytes_view_t bytes_view(std::string_view text) noexcept {
+    return {reinterpret_cast<std::uint8_t const*>(text.data()), text.size()};
+}
+
+/** Writes the enumerator a status-answering @p from_name reads @p value as into @p destination. */
+template <typename enumeration_type_>
+[[nodiscard]] argument_status_t assign_named_(std::string_view value, enumeration_type_& destination,
+                                              uform_status_t (*from_name)(uform_bytes_view_t,
+                                                                          enumeration_type_*)) noexcept {
+    enumeration_type_ parsed {};
+    if (from_name(bytes_view(value), &parsed) != uform_status_success_k) return argument_status_t::unknown_name_k;
+    destination = parsed;
+    return argument_status_t::parsed_k;
+}
+
+[[nodiscard]] inline argument_status_t assign_(flag_t const& flag, std::string_view value) noexcept {
+    if (std::string_view* const* text = std::get_if<std::string_view*>(&flag.destination)) {
+        **text = value;
+        return argument_status_t::parsed_k;
+    }
+    if (count_t* const* count = std::get_if<count_t*>(&flag.destination)) return parse_count(value, **count);
+    if (counts_t* const* counts = std::get_if<counts_t*>(&flag.destination)) return parse_counts(value, **counts);
+    if (std::chrono::milliseconds* const* duration = std::get_if<std::chrono::milliseconds*>(&flag.destination))
+        return parse_duration(value, **duration);
+    if (std::uint32_t* const* seed = std::get_if<std::uint32_t*>(&flag.destination)) return parse_seed(value, **seed);
+    if (double* const* real = std::get_if<double*>(&flag.destination)) return parse_real(value, **real);
+    if (filter_t* const* filter = std::get_if<filter_t*>(&flag.destination)) {
+        **filter = filter_of(value);
+        return argument_status_t::parsed_k;
+    }
+    if (uform_objective_t* const* objective = std::get_if<uform_objective_t*>(&flag.destination))
+        return assign_named_(value, **objective, uform_objective_from_name);
+    if (uform_pair_loss_form_t* const* form = std::get_if<uform_pair_loss_form_t*>(&flag.destination))
+        return assign_named_(value, **form, uform_pair_loss_form_from_name);
+    if (bytes_t* const* bytes = std::get_if<bytes_t*>(&flag.destination)) return parse_bytes(value, **bytes);
+    return argument_status_t::unexpected_value_k;
+}
+
+/**
+ *  @brief Parses @p argv against @p flags, collecting undashed arguments into @p positionals.
+ *
+ *  Parsing stops at the first failure, leaving earlier destinations written.
+ *
+ *  @param[in] argc Entries of @p argv, the first of which is the program name and is skipped.
+ *  @param[in] argv The arguments, which every text destination and list item goes on viewing.
+ *  @param[in] flags Every flag the binary accepts; @c --help is always accepted and never listed.
+ *  @param[out] positionals Receives positional arguments in order, viewing into @p argv.
+ */
+[[nodiscard]] inline arguments_t parse_arguments(int argc, char const* const* argv, std::span<flag_t const> flags,
+                                                 std::span<std::string_view> positionals) noexcept {
+    arguments_t result;
+    for (int index = 1; index < argc; ++index) {
+        std::string_view const argument = argv[index];
+        result.argument = argument, result.value = {}, result.flag = nullptr;
+
+        if (!argument.starts_with("--")) {
+            if (result.positionals_count == positionals.size()) {
+                result.status = argument_status_t::too_many_items_k;
+                return result;
+            }
+            positionals[result.positionals_count++] = argument;
+            continue;
+        }
+        if (argument == "--help") {
+            result.status = argument_status_t::help_k;
+            return result;
+        }
+
+        std::size_t const equals = argument.find('=');
+        std::string_view const name = argument.substr(0, equals);
+        flag_t const* flag = nullptr;
+        for (flag_t const& candidate : flags)
+            if (candidate.name == name) flag = &candidate;
+        if (!flag) {
+            result.status = argument_status_t::unknown_flag_k;
+            return result;
+        }
+        result.flag = flag;
+
+        switch_t* const* toggle = std::get_if<switch_t*>(&flag->destination);
+        if (toggle && equals != std::string_view::npos) {
+            result.value = argument.substr(equals + 1);
+            result.status = argument_status_t::unexpected_value_k;
+            return result;
+        }
+        if (toggle) {
+            **toggle = switch_t::present_k;
+            continue;
+        }
+        if (equals == std::string_view::npos && index + 1 == argc) {
+            result.status = argument_status_t::missing_value_k;
+            return result;
+        }
+
+        result.value = equals != std::string_view::npos ? argument.substr(equals + 1) : argv[++index];
+        result.status = assign_(*flag, result.value);
+        if (result.status != argument_status_t::parsed_k) return result;
+    }
+    result = {.positionals_count = result.positionals_count};
+    return result;
+}
+
+/** The grammar a value of @p flag parses in, as the error line names it. */
+[[nodiscard]] inline std::string_view grammar(flag_t const& flag) noexcept {
+    if (count_t* const* count = std::get_if<count_t*>(&flag.destination))
+        return (*count)->minimum ? "a positive count" : "an unsigned integer";
+    if (counts_t* const* counts = std::get_if<counts_t*>(&flag.destination))
+        return (*counts)->minimum ? "positive counts like 64,128" : "unsigned integers like 0,1";
+    if (std::holds_alternative<std::chrono::milliseconds*>(flag.destination)) return "a duration like 200ms or 10s";
+    if (std::holds_alternative<std::uint32_t*>(flag.destination)) return "an unsigned integer or random";
+    if (std::holds_alternative<double*>(flag.destination)) return "a non-negative real";
+    if (std::holds_alternative<filter_t*>(flag.destination)) return "an ECMAScript regex or a substring";
+    if (std::holds_alternative<uform_objective_t*>(flag.destination)) return "masked, contrastive or joint";
+    if (std::holds_alternative<uform_pair_loss_form_t*>(flag.destination))
+        return "derived, balanced, ranked or sigmoid";
+    if (std::holds_alternative<switch_t*>(flag.destination)) return "no value";
+    if (std::holds_alternative<bytes_t*>(flag.destination)) return "bytes like 4096 or 24G";
+    return "a value";
+}
+
+/** The variable that sets @p flag's default: <tt>--batch</tt> reads @c UFORM_BATCH. */
+[[nodiscard]] inline sz::string_t uform_variable(flag_t const& flag) noexcept {
+    sz::string_t variable = formatted("UFORM_{}", flag.name.substr(2));
+    for (std::size_t letter = std::string_view {"UFORM_"}.size(); letter != variable.size(); ++letter)
+        variable[letter] = variable[letter] == '-'
+                               ? '_'
+                               : static_cast<char>(std::toupper(static_cast<unsigned char>(variable[letter])));
+    return variable;
+}
+
+/** Writes @p value, a variable's text, into @p flag: a switch takes 1, 0, true or false, the rest
+ *  parse as on the command line. */
+[[nodiscard]] inline argument_status_t assign_variable_(flag_t const& flag, std::string_view value) noexcept {
+    switch_t* const* toggle = std::get_if<switch_t*>(&flag.destination);
+    if (!toggle) return assign_(flag, value);
+    bool const present = value == "1" || value == "true";
+    if (!present && value != "0" && value != "false") return argument_status_t::unexpected_value_k;
+    **toggle = present ? switch_t::present_k : switch_t::absent_k;
+    return argument_status_t::parsed_k;
+}
+
+/** Prints @p synopsis and one aligned line per flag, generated from the same table that parses. */
+inline void print_usage(std::string_view synopsis, std::span<flag_t const> flags) {
+    constexpr std::size_t column_k = 34;
+    fmt::println("Usage: {}\n", synopsis);
+    for (flag_t const& flag : flags) {
+        std::size_t const width = flag.name.size() + (flag.placeholder.empty() ? 0 : flag.placeholder.size() + 3);
+        std::size_t const padding = width < column_k ? column_k - width : 1;
+        if (flag.placeholder.empty())
+            fmt::println("  {}{:{}}{} [env: {}]", flag.name, "", padding, flag.help, uform_variable(flag));
+        else
+            fmt::println("  {} <{}>{:{}}{} [env: {}]", flag.name, flag.placeholder, "", padding, flag.help,
+                         uform_variable(flag));
+    }
+    fmt::println("  --help{:{}}print this message", "", column_k - 6);
+}
+
+/** Parses @p argv against @p flags, each defaulting to its @ref uform_variable when set, and
+ *  collects undashed arguments into @p positionals, answering how many came. Given @c --help, it
+ *  prints the usage and exits with status 0. At the first variable or argument that fails, it
+ *  prints one line naming the flag, its value and the grammar it expects, and exits with 1. */
+inline std::size_t parse_or_exit(int argc, char const* const* argv, std::string_view synopsis,
+                                 std::span<flag_t const> flags, std::span<std::string_view> positionals = {}) {
+    for (flag_t const& flag : flags) {
+        sz::string_t const variable = uform_variable(flag);
+        char const* const value = std::getenv(variable.c_str());
+        if (!value || !*value || assign_variable_(flag, value) == argument_status_t::parsed_k) continue;
+        bool const toggle = std::holds_alternative<switch_t*>(flag.destination);
+        fmt::println(stderr, "{}=\"{}\" does not parse, expected {}", variable, value,
+                     toggle ? "1, 0, true or false" : grammar(flag));
+        std::exit(1);
+    }
+    arguments_t const parsed = parse_arguments(argc, argv, flags, positionals);
+    if (parsed.status == argument_status_t::parsed_k) return parsed.positionals_count;
+    if (parsed.status == argument_status_t::help_k) {
+        print_usage(synopsis, flags);
+        std::exit(0);
+    }
+    if (parsed.status == argument_status_t::too_many_items_k && !parsed.flag)
+        fmt::println(stderr, "{} is one argument too many, see --help", parsed.argument);
+    else if (!parsed.flag) fmt::println(stderr, "{} is not a flag, see --help", parsed.argument);
+    else
+        fmt::println(stderr, "{}=\"{}\" does not parse, expected {}", parsed.flag->name, parsed.value,
+                     grammar(*parsed.flag));
+    std::exit(1);
+}
+
+/** Set by the first SIGINT or SIGTERM: every long verb stops at its next barrier, saves what stands
+ *  where it saves, and the process exits with @ref exit_stopped_k. */
+inline volatile std::sig_atomic_t stop_requested = 0;
+
+/** The exit status of a verb a signal stopped, as shells report a command SIGINT ended. */
+inline constexpr int exit_stopped_k = 130;
+
+/** Asks the verb in hand to stop at its next barrier; only a flag is safe to touch here. */
+inline void request_stop(int) noexcept {
+    stop_requested = 1;
+    std::signal(SIGINT, SIG_DFL); // a second Ctrl-C ends the process at once
+    std::signal(SIGTERM, SIG_DFL);
+}
+
+using verb_clock_t = std::chrono::steady_clock;
+
+/** The phase a verb is in: what the shared progress handler prints, and what a stop names. A call
+ *  covering a slice of the phase starts at @c first of its @c total, which a zero @c total leaves
+ *  to the call. */
+struct verb_phase_t {
+    std::string_view name;
+    std::string_view unit;
+    std::FILE* stream = stdout;
+    std::string_view label {};
+    std::size_t first = 0;
+    std::size_t total = 0;
+    verb_clock_t::time_point printed {};
+};
+
+/** The handler every long verb passes: prints the phase's advance at most once a second, and
+ *  answers cancel once a signal asked the process to stop. */
+inline uform_continuation_t verb_progress(std::size_t completed, std::size_t total, void* state) noexcept {
+    verb_phase_t& phase = *static_cast<verb_phase_t*>(state);
+    verb_clock_t::time_point const now = verb_clock_t::now();
+    if (now - phase.printed >= std::chrono::seconds(1)) {
+        phase.printed = now;
+        fmt::println(phase.stream, "{}{}: {} of {} {}", phase.label, phase.name, phase.first + completed,
+                     phase.total ? phase.total : total, phase.unit);
+    }
+    return stop_requested ? uform_cancel_k : uform_continue_k;
+}
+
+/** The C handler reporting into @p phase. */
+inline uform_progress_t verb_progress_of(verb_phase_t& phase) noexcept { return {verb_progress, &phase, 0}; }
+
+/** Prints in which phase a signal stopped the verb. */
+inline void verb_stopped(verb_phase_t const& phase) noexcept {
+    fmt::println(phase.stream, "{}stopped in {}", phase.label, phase.name);
+}
+
+} // namespace unum::uform::tools

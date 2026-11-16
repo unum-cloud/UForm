@@ -72,6 +72,41 @@ uform_status_t uform_multimem_tier_from_name(uform_bytes_view_t name, uform_mult
         name, {uform_multimem_tier_switch_reduced_k, uform_multimem_tier_peer_read_k}, uform_multimem_tier_name, tier);
 }
 
+char const* uform_pair_loss_form_name(uform_pair_loss_form_t form) {
+    switch (form) {
+    case uform_pair_loss_form_derived_k: return "derived";
+    case uform_pair_loss_form_balanced_k: return "balanced";
+    case uform_pair_loss_form_ranked_k: return "ranked";
+    case uform_pair_loss_form_sigmoid_k: return "sigmoid";
+    default: return "unrecognized";
+    }
+}
+
+uform_status_t uform_pair_loss_form_from_name(uform_bytes_view_t name, uform_pair_loss_form_t* form) {
+    return read_name<uform_pair_loss_form_t>(name,
+                                             {uform_pair_loss_form_derived_k, uform_pair_loss_form_balanced_k,
+                                              uform_pair_loss_form_ranked_k, uform_pair_loss_form_sigmoid_k},
+                                             uform_pair_loss_form_name, form);
+}
+
+char const* uform_late_interaction_side_name(uform_late_interaction_side_t side) {
+    switch (side) {
+    case uform_late_interaction_side_none_k: return "none";
+    case uform_late_interaction_side_query_k: return "query";
+    case uform_late_interaction_side_document_k: return "document";
+    case uform_late_interaction_side_query_and_document_k: return "query-and-document";
+    default: return "unrecognized";
+    }
+}
+
+uform_status_t uform_late_interaction_side_from_name(uform_bytes_view_t name, uform_late_interaction_side_t* side) {
+    return read_name<uform_late_interaction_side_t>(
+        name,
+        {uform_late_interaction_side_none_k, uform_late_interaction_side_query_k,
+         uform_late_interaction_side_document_k, uform_late_interaction_side_query_and_document_k},
+        uform_late_interaction_side_name, side);
+}
+
 void uform_mesh_bootstrap(uform_mesh_bootstrap_t* arguments) {
     if (through_executor<uform_mesh_bootstrap>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
@@ -82,8 +117,8 @@ void uform_mesh_bootstrap(uform_mesh_bootstrap_t* arguments) {
 void uform_mesh_describe(uform_mesh_describe_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     if (arguments->description) *arguments->description = {};
-    reject_if(!arguments->mesh || !arguments->description, uform_status_invalid_argument_k,
-              "The mesh and the description must not be null", outcome);
+    if (reject_if(!arguments->mesh, uform_status_uninitialized_k, "The mesh must not be null", outcome)) return;
+    reject_if(!arguments->description, uform_status_invalid_argument_k, "The description must not be null", outcome);
 }
 
 void uform_mesh_free(uform_mesh_t mesh) {
@@ -103,16 +138,14 @@ void uform_trainer_step(uform_trainer_step_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     if (arguments->embeddings) *arguments->embeddings = {};
     if (arguments->stats) *arguments->stats = {};
-    if (reject_if(!arguments->trainer, uform_status_invalid_argument_k, "The trainer must not be null", outcome))
-        return;
+    if (reject_if(!arguments->trainer, uform_status_uninitialized_k, "The trainer must not be null", outcome)) return;
     propagate_error(uform_status_device_k, outcome, "This build carries no GPU backends");
 }
 
 void uform_trainer_save(uform_trainer_save_t* arguments) {
     if (through_executor<uform_trainer_save>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
-    if (reject_if(!arguments->trainer, uform_status_invalid_argument_k, "The trainer must not be null", outcome))
-        return;
+    if (reject_if(!arguments->trainer, uform_status_uninitialized_k, "The trainer must not be null", outcome)) return;
     propagate_error(uform_status_device_k, outcome, "This build carries no GPU backends");
 }
 

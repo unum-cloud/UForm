@@ -109,7 +109,7 @@ const bytesViewLayout = struct([["data", "pointer"], ["length", "size"]]);
 const ramOptionsLayout = struct([
   ["memory_domains", "pointer"],
   ["memory_domains_count", "size"],
-  ["cpu_class", "enum"],
+  ["cpu_class_ceiling", "enum"],
 ]);
 const tapeLayout = struct([["data", "pointer"], ["offsets", "pointer"], ["scalar", "enum"]]);
 const progressLayout = struct([["callback", "pointer"], ["state", "pointer"], ["steps", "size"]]);
@@ -281,7 +281,6 @@ function wasmBackend(module: WasmModule): Compiled {
     return {
       status: () => (failure ? ((failure.error as { code?: string }).code ?? Status.Internal) : Status.Success),
       wait: () => undefined,
-      settled: () => Promise.resolve(),
       result: () => {
         if (failure) throw failure.error;
         return value;
@@ -396,8 +395,8 @@ function wasmBackend(module: WasmModule): Compiled {
     return arena;
   }
 
-  /** Rewinds `arena` and runs `verb` on the structure at `call`, rethrowing what a
-   *  progress handler threw. */
+  /** Rewinds `arena` and runs `verb` on the structure at `call`; a progress handler's throw cancels
+   *  the call and goes to the uncaught-exception handlers, since no caller catches it. */
   function invoke(
     frame: Frame,
     verb: (arguments_: number) => void,
@@ -408,15 +407,15 @@ function wasmBackend(module: WasmModule): Compiled {
     progress: ProgressCallback | undefined,
   ): void {
     let relay = 0;
-    let thrown: { error: unknown } | undefined;
     try {
       if (progress) {
         relay = module.addFunction((completed: number, total: number) => {
-          if (thrown) return 1;
           try {
             return progress(completed, total) === false ? 1 : 0;
           } catch (error) {
-            thrown = { error };
+            queueMicrotask(() => {
+              throw error;
+            });
             return 1;
           }
         }, "iiii");
@@ -424,7 +423,6 @@ function wasmBackend(module: WasmModule): Compiled {
       }
       arena.rewind();
       verb(call);
-      if (thrown) throw thrown.error;
       check(frame, outcome);
     } finally {
       if (relay) module.removeFunction(relay);
@@ -518,10 +516,10 @@ function wasmBackend(module: WasmModule): Compiled {
       executor: CompiledExecutor | undefined,
       memoryDomains: number[] | undefined,
       quantization: number,
-      cpuClass: string | undefined,
+      cpuClassCeiling: string | undefined,
     ): CompiledModel {
-      const pin = cpuClass === undefined ? 0 : cpuClasses[cpuClass];
-      if (pin === undefined) throw fail(Status.UnknownKind, "The 'cpuClass' argument names no CPU class");
+      const ceiling = cpuClassCeiling === undefined ? 0 : cpuClasses[cpuClassCeiling];
+      if (ceiling === undefined) throw fail(Status.UnknownKind, "The 'cpuClassCeiling' argument names no CPU class");
       const frame = new Frame(module);
       try {
         const slot = frame.zeroed(4);
@@ -531,7 +529,7 @@ function wasmBackend(module: WasmModule): Compiled {
         frame.store(load + loadRamBufferLayout.at.outcome, outcome);
         frame.store(load + loadRamBufferLayout.at["buffer.data"], frame.copy(buffer));
         frame.store(load + loadRamBufferLayout.at["buffer.length"], buffer.byteLength);
-        frame.store(load + loadRamBufferLayout.at["ram.cpu_class"], pin);
+        frame.store(load + loadRamBufferLayout.at["ram.cpu_class_ceiling"], ceiling);
         frame.store(load + loadRamBufferLayout.at.quantization, quantization);
         module._uform_model_load_ram_buffer(load);
         check(frame, outcome);
@@ -542,7 +540,7 @@ function wasmBackend(module: WasmModule): Compiled {
     }
 
     #live(): number {
-      if (!this.handle) throw fail(Status.InvalidArgument, "The model was freed");
+      if (!this.handle) throw fail(Status.Uninitialized, "The model was freed");
       return this.handle;
     }
 
@@ -765,11 +763,9 @@ export {
   ArenaView,
   Deferred,
   Executor,
-  GpuVendor,
   LateInteractionSide,
   Modality,
   Mood,
-  MultimemTier,
   Negatives,
   Objective,
   PairLossForm,
@@ -778,14 +774,15 @@ export {
   gpuDevices,
 } from "./types.js";
 export type {
-  Answer,
   ExecutorForRamConfig,
   ExecutorForVramConfig,
   ExecutorOnPoolConfig,
   GpuDevice,
+  GpuVendor,
+  MultimemTier,
   UFormError,
 } from "./types.js";
-export { EncodeVerbs, Outputs, Probabilities, Rows, States } from "./encode.js";
+export { Outputs, Probabilities, Rows, States } from "./encode.js";
 export type { ChooseConfig, Chosen, EncodeConfig, EncodeStats, Encoded, Pixels, Tape } from "./encode.js";
 export { Model, ModelDeferredOn, ModelOn } from "./model.js";
 export type { ModelDescription, ModelLoadRamConfig, ModelLoadVramConfig } from "./model.js";

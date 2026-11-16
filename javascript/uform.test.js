@@ -96,7 +96,8 @@ test("names come from the C tables", () => {
   assert.strictEqual(typeof uform.capabilitiesCompiled(), "string");
   assert.strictEqual(Scalar.BF16, "bf16");
   assert.strictEqual(uform.Modality.Video, "video");
-  assert.strictEqual(uform.MultimemTier.PeerRead, "peer-read");
+  assert.strictEqual(uform.PairLossForm.Ranked, "ranked");
+  assert.strictEqual(uform.LateInteractionSide.QueryAndDocument, "query-and-document");
   assert.strictEqual(uform.Objective.Joint, "joint");
 });
 
@@ -124,7 +125,7 @@ test("models load from paths and buffers and describe themselves", () => {
   throwsStatus(() => Model.loadRam(checkpointPath, { quantization: Scalar.F32 }), Status.Unsupported);
   throwsStatus(() => Model.loadVram(checkpointPath), Status.Device);
   buffered.free();
-  throwsStatus(() => buffered.describe(), Status.InvalidArgument);
+  throwsStatus(() => buffered.describe(), Status.Uninitialized);
   model.free();
 });
 
@@ -266,34 +267,49 @@ test("samples and encoded files count their tokens", () => {
   if (video) assert.strictEqual(video.embeddings.rows, 1);
 });
 
-test("progress runs on the calling thread, and stops or rethrows", () => {
+test("progress runs on the calling thread, and stops or reports its throw uncaught", () => {
   using model = Model.loadRam(checkpointPath);
   using arena = new Arena();
   const heard = [];
   model.textEncode(["a", "b", "c", "d"], arena, { progress: (completed, total) => void heard.push([completed, total]) });
   assert.deepStrictEqual(heard.at(-1), [4, 4]);
   throwsStatus(() => model.textEncode(["a", "b"], arena, { progress: () => false }), Status.Cancelled);
-  assert.throws(
-    () =>
-      model.textEncode(["a", "b"], arena, {
-        progress: () => {
-          throw new RangeError("from the handler");
-        },
-      }),
-    RangeError,
-  );
+  const reported = [];
+  // The runner's own handler would fail the test, so only this one listens meanwhile.
+  const runners = process.rawListeners("uncaughtException");
+  process.removeAllListeners("uncaughtException");
+  process.on("uncaughtException", (error) => reported.push(error));
+  try {
+    throwsStatus(
+      () =>
+        model.textEncode(["a", "b"], arena, {
+          progress: () => {
+            throw new RangeError("from the handler");
+          },
+        }),
+      Status.Cancelled,
+    );
+  } finally {
+    process.removeAllListeners("uncaughtException");
+    for (const runner of runners) process.on("uncaughtException", runner);
+  }
+  assert.ok(reported.length === 1 && reported[0] instanceof RangeError);
   using executor = Executor.forRam();
   throwsStatus(() => model.on(executor).textEncode(["a"], arena, { progress: () => true }), Status.InvalidArgument);
 });
 
-test("classes pin by their C names, and the GPU listing answers", () => {
+test("class ceilings take their C names and fall to the best class under them, and the GPU listing answers", () => {
   for (const device of uform.gpuDevices()) assert.strictEqual(typeof device.gpuClass, "string");
-  using model = Model.loadRam(checkpointPath, { cpuClass: "serial" });
+  using model = Model.loadRam(checkpointPath, { cpuClassCeiling: "serial" });
   const description = model.describe();
   assert.strictEqual(description.cpuClass, "serial");
   assert.strictEqual(description.gpuClass, null);
-  throwsStatus(() => Model.loadRam(checkpointPath, { cpuClass: "intel-pentium" }), Status.InvalidArgument);
-  Executor.forRam({ cpuClass: "serial" }).free();
+  // A ceiling of another family shares only the serial floor with this CPU.
+  const foreignCeiling = process.arch === "x64" ? "apple-m2" : "intel-haswell";
+  using foreign = Model.loadRam(checkpointPath, { cpuClassCeiling: foreignCeiling });
+  assert.strictEqual(foreign.describe().cpuClass, "serial");
+  throwsStatus(() => Model.loadRam(checkpointPath, { cpuClassCeiling: "intel-pentium" }), Status.InvalidArgument);
+  Executor.forRam({ cpuClassCeiling: "serial" }).free();
 });
 
 test("token vectors are unit rows beside the states, or unsupported without a token head", () => {
@@ -327,6 +343,23 @@ test("choices sum to one per item, or unsupported without the byte decoder", () 
   throwsStatus(() => model.textChoose(texts, choices, arena, past), Status.InvalidArgument);
 });
 
+test("the README's Quickstart runs as written and names a caption", () => {
+  // The Node block of `## Quickstart`, run in a directory holding the files it names; only the
+  // package specifier is pointed at the in-tree build.
+  const readme = fs.readFileSync(path.join(__dirname, "README.md"), "utf8");
+  const section = readme.split("\n## Quickstart\n")[1].split("\n## ")[0];
+  const block = section.split("```js\n")[1].split("\n```")[0];
+  const entry = require("node:url").pathToFileURL(path.join(__dirname, "dist", "esm", "uform.js")).href;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "uform-quickstart-"));
+  fs.copyFileSync(checkpointPath, path.join(directory, "model.safetensors"));
+  fs.writeFileSync(path.join(directory, "cat.png"), png());
+  fs.writeFileSync(path.join(directory, "quickstart.mjs"), block.replace('"@unum-cloud/uform"', JSON.stringify(entry)));
+  const printed = require("node:child_process").execFileSync(
+    process.execPath, ["--js-explicit-resource-management", "quickstart.mjs"], { cwd: directory, encoding: "utf8" });
+  assert.match(printed, /^'(a cat on a mat|a sunrise over the bay)' describes the photo best\n$/);
+  fs.rmSync(directory, { recursive: true });
+});
+
 test("training reports device on a build without GPUs", () => {
   using executor = Executor.forRam();
   throwsStatus(() => uform.Mesh.bootstrap(executor), Status.Device);
@@ -340,6 +373,8 @@ test("training reports device on a build without GPUs", () => {
   };
   throwsStatus(() => uform.Trainer.initVram(executor, heads), Status.Device);
   throwsStatus(() => uform.Trainer.initVram(executor, { ...heads, choices: { weight: "heavy" } }), Status.InvalidArgument);
+  const steep = { ...heads, lateInteraction: { weight: 1, pairLoss: "steep" } };
+  throwsStatus(() => uform.Trainer.initVram(executor, steep), Status.InvalidArgument);
 });
 
 const wasmModule = path.join(__dirname, "dist", "wasm", "uform.mjs");
@@ -395,5 +430,5 @@ test("wasm: pixels, samples, receivers and refusals", { skip: wasmSkip }, async 
   else assert.strictEqual(model.textChoose(["stop?"], ["yn"], arena).probabilities.data.length, 2);
   arena.free();
   model.free();
-  throwsStatus(() => model.describe(), Status.InvalidArgument);
+  throwsStatus(() => model.describe(), Status.Uninitialized);
 });

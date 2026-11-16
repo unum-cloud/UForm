@@ -24,10 +24,10 @@ use core::ptr;
 use std::path::Path;
 
 use crate::types::{
-    check, fail, lower_progress, path_view, ram_options, uform_bytes_view_t, uform_completion_blocking_k,
-    uform_completion_t, uform_cpu_class_t, uform_executor_t, uform_gpu_class_t, uform_outcome_t, uform_progress_t,
-    uform_ram_options_t, uform_scalar_t, uform_vram_options_t, vram_options, Blocking, CPUClass, Callbacks, Calling,
-    Completion, Deferring, Executor, GPUClass, Handles, On, ProgressCallback, Result, Scalar, Status,
+    Blocking, CPUClass, Calling, Completion, Deferring, Executor, GPUClass, Handles, On, ProgressCallback, Result,
+    Scalar, Status, check, fail, lower_progress, path_view, ram_options, uform_bytes_view_t,
+    uform_completion_blocking_k, uform_completion_t, uform_cpu_class_t, uform_executor_t, uform_gpu_class_t,
+    uform_outcome_t, uform_progress_t, uform_ram_options_t, uform_scalar_t, uform_vram_options_t, vram_options,
 };
 
 // region: Raw Declarations
@@ -118,7 +118,7 @@ pub struct uform_model_describe_t {
     pub description: *mut uform_model_description_t,
 }
 
-extern "C" {
+unsafe extern "C" {
     pub fn uform_model_load_ram(arguments: *mut uform_model_load_ram_t);
     pub fn uform_model_load_ram_buffer(arguments: *mut uform_model_load_ram_buffer_t);
     pub fn uform_model_load_vram(arguments: *mut uform_model_load_vram_t);
@@ -167,9 +167,9 @@ pub struct ModelLoadRamConfig<'config> {
     pub executor: Option<&'config Executor>,
     /// NUMA node IDs to place the weights in; empty derives every node the process may allocate on.
     pub memory_domains: &'config [i32],
-    /// The class to pack and dispatch as, admitting every rung whose features it holds; `None`
-    /// derives the CPU's own.
-    pub cpu_class: Option<CPUClass>,
+    /// The newest class to pack and dispatch as: the load runs the newest compiled class this CPU
+    /// runs at or under it, and `None` sets no ceiling.
+    pub cpu_class_ceiling: Option<CPUClass>,
     /// The scalar the transformer blocks run in: [`Scalar::BF16`] as the checkpoint stores it, or
     /// [`Scalar::E4M3`] quantized at load.
     pub quantization: Scalar,
@@ -185,7 +185,7 @@ impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for ModelL
             path: path.as_ref(),
             executor: None,
             memory_domains: &[],
-            cpu_class: None,
+            cpu_class_ceiling: None,
             quantization: Scalar::BF16,
             progress: None,
             progress_steps: 0,
@@ -205,8 +205,8 @@ pub struct ModelLoadVramConfig<'config> {
     /// Positions in what [`gpu_devices`](crate::gpu_devices) lists, each holding a replica; empty
     /// derives one free device.
     pub devices: &'config [i32],
-    /// The class every device dispatches as; `None` derives the devices' own, which must agree.
-    pub gpu_class: Option<GPUClass>,
+    /// The newest class every device dispatches as; `None` sets no ceiling.
+    pub gpu_class_ceiling: Option<GPUClass>,
     /// The scalar the transformer blocks run in, as for [`ModelLoadRamConfig::quantization`].
     pub quantization: Scalar,
     /// Reports the tensors placed and stops wherever it says to; a stopped load creates no model.
@@ -221,7 +221,7 @@ impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for ModelL
             path: path.as_ref(),
             executor: None,
             devices: &[],
-            gpu_class: None,
+            gpu_class_ceiling: None,
             quantization: Scalar::BF16,
             progress: None,
             progress_steps: 0,
@@ -240,8 +240,8 @@ pub struct ModelLoadRamBufferConfig<'config> {
     pub executor: Option<&'config Executor>,
     /// NUMA node IDs to place the weights in; empty derives every node the process may allocate on.
     pub memory_domains: &'config [i32],
-    /// The class to pack and dispatch as, as for [`ModelLoadRamConfig::cpu_class`].
-    pub cpu_class: Option<CPUClass>,
+    /// The newest class to pack and dispatch as, as for [`ModelLoadRamConfig::cpu_class_ceiling`].
+    pub cpu_class_ceiling: Option<CPUClass>,
     /// The scalar the transformer blocks run in, as for [`ModelLoadRamConfig::quantization`].
     pub quantization: Scalar,
     /// Reports the tensors placed and stops wherever it says to; a stopped load creates no model.
@@ -256,7 +256,7 @@ impl<'config> From<&'config [u8]> for ModelLoadRamBufferConfig<'config> {
             buffer,
             executor: None,
             memory_domains: &[],
-            cpu_class: None,
+            cpu_class_ceiling: None,
             quantization: Scalar::BF16,
             progress: None,
             progress_steps: 0,
@@ -265,7 +265,9 @@ impl<'config> From<&'config [u8]> for ModelLoadRamBufferConfig<'config> {
 }
 
 impl<'config, Bytes: Deref<Target = [u8]>> From<&'config Bytes> for ModelLoadRamBufferConfig<'config> {
-    fn from(bytes: &'config Bytes) -> Self { ModelLoadRamBufferConfig::from(&**bytes) }
+    fn from(bytes: &'config Bytes) -> Self {
+        ModelLoadRamBufferConfig::from(&**bytes)
+    }
 }
 
 /// A checkpoint held in memory and how it is copied onto devices; see [`Model::load_vram_buffer`].
@@ -281,8 +283,9 @@ pub struct ModelLoadVramBufferConfig<'config> {
     /// Positions in what [`gpu_devices`](crate::gpu_devices) lists, each holding a replica; empty
     /// derives one free device.
     pub devices: &'config [i32],
-    /// The class every device dispatches as, as for [`ModelLoadVramConfig::gpu_class`].
-    pub gpu_class: Option<GPUClass>,
+    /// The newest class every device dispatches as, as for
+    /// [`ModelLoadVramConfig::gpu_class_ceiling`].
+    pub gpu_class_ceiling: Option<GPUClass>,
     /// The scalar the transformer blocks run in, as for [`ModelLoadRamConfig::quantization`].
     pub quantization: Scalar,
     /// Reports the tensors placed and stops wherever it says to; a stopped load creates no model.
@@ -297,7 +300,7 @@ impl<'config> From<&'config [u8]> for ModelLoadVramBufferConfig<'config> {
             buffer,
             executor: None,
             devices: &[],
-            gpu_class: None,
+            gpu_class_ceiling: None,
             quantization: Scalar::BF16,
             progress: None,
             progress_steps: 0,
@@ -306,7 +309,9 @@ impl<'config> From<&'config [u8]> for ModelLoadVramBufferConfig<'config> {
 }
 
 impl<'config, Bytes: Deref<Target = [u8]>> From<&'config Bytes> for ModelLoadVramBufferConfig<'config> {
-    fn from(bytes: &'config Bytes) -> Self { ModelLoadVramBufferConfig::from(&**bytes) }
+    fn from(bytes: &'config Bytes) -> Self {
+        ModelLoadVramBufferConfig::from(&**bytes)
+    }
 }
 
 // endregion: Configs
@@ -340,26 +345,22 @@ unsafe impl Send for Model {}
 unsafe impl Sync for Model {}
 
 impl Drop for Model {
-    fn drop(&mut self) { unsafe { uform_model_free(self.handle) } }
+    fn drop(&mut self) {
+        unsafe { uform_model_free(self.handle) }
+    }
 }
 
 impl Model {
     /// A model whose handle a constructor is about to fill.
     fn null() -> Self {
-        Model {
-            handle: ptr::null_mut(),
-        }
+        Model { handle: ptr::null_mut() }
     }
 
     /// The receiver whose verbs block on `executor`, failing `Contended` while another holds it.
     ///
     /// Rust-only.
     pub fn on<'model>(&'model self, executor: &'model Executor) -> On<'model, Model> {
-        On {
-            handle: self,
-            executor,
-            completion: PhantomData,
-        }
+        On { handle: self, executor, completion: PhantomData }
     }
 
     /// The receiver whose verbs submit their calls to `executor`, answering a
@@ -396,11 +397,7 @@ impl Model {
     ///
     /// Rust-only.
     pub fn deferred<'model>(&'model self, executor: &'model Executor) -> On<'model, Model, Deferring> {
-        On {
-            handle: self,
-            executor,
-            completion: PhantomData,
-        }
+        On { handle: self, executor, completion: PhantomData }
     }
 
     /// Copies a checkpoint file into host memory and packs its products for the CPU; a bare path
@@ -409,8 +406,7 @@ impl Model {
     /// Calls `uform_model_load_ram`.
     pub fn load_ram<'config>(config: impl Into<ModelLoadRamConfig<'config>>) -> Result<Self> {
         let mut config = config.into();
-        let callbacks = Callbacks::default();
-        let progress = lower_progress(&mut config.progress, config.progress_steps, &callbacks);
+        let progress = lower_progress(&mut config.progress, config.progress_steps);
         let mut model = Model::null();
         let mut outcome = uform_outcome_t::default();
         unsafe {
@@ -420,12 +416,11 @@ impl Model {
                 outcome: &mut outcome,
                 completion: uform_completion_blocking_k,
                 path: path_view(config.path)?,
-                ram: ram_options(config.memory_domains, config.cpu_class),
+                ram: ram_options(config.memory_domains, config.cpu_class_ceiling),
                 quantization: config.quantization as uform_scalar_t,
                 progress,
             })
         };
-        callbacks.raise();
         check(outcome).map(|()| model)
     }
 
@@ -434,8 +429,7 @@ impl Model {
     /// Calls `uform_model_load_ram_buffer`.
     pub fn load_ram_buffer<'config>(config: impl Into<ModelLoadRamBufferConfig<'config>>) -> Result<Self> {
         let mut config = config.into();
-        let callbacks = Callbacks::default();
-        let progress = lower_progress(&mut config.progress, config.progress_steps, &callbacks);
+        let progress = lower_progress(&mut config.progress, config.progress_steps);
         let mut model = Model::null();
         let mut outcome = uform_outcome_t::default();
         unsafe {
@@ -445,12 +439,11 @@ impl Model {
                 outcome: &mut outcome,
                 completion: uform_completion_blocking_k,
                 buffer: config.buffer.into(),
-                ram: ram_options(config.memory_domains, config.cpu_class),
+                ram: ram_options(config.memory_domains, config.cpu_class_ceiling),
                 quantization: config.quantization as uform_scalar_t,
                 progress,
             })
         };
-        callbacks.raise();
         check(outcome).map(|()| model)
     }
 
@@ -459,8 +452,7 @@ impl Model {
     /// Calls `uform_model_load_vram`.
     pub fn load_vram<'config>(config: impl Into<ModelLoadVramConfig<'config>>) -> Result<Self> {
         let mut config = config.into();
-        let callbacks = Callbacks::default();
-        let progress = lower_progress(&mut config.progress, config.progress_steps, &callbacks);
+        let progress = lower_progress(&mut config.progress, config.progress_steps);
         let mut model = Model::null();
         let mut outcome = uform_outcome_t::default();
         unsafe {
@@ -470,12 +462,11 @@ impl Model {
                 outcome: &mut outcome,
                 completion: uform_completion_blocking_k,
                 path: path_view(config.path)?,
-                vram: vram_options(config.devices, config.gpu_class),
+                vram: vram_options(config.devices, config.gpu_class_ceiling),
                 quantization: config.quantization as uform_scalar_t,
                 progress,
             })
         };
-        callbacks.raise();
         check(outcome).map(|()| model)
     }
 
@@ -484,8 +475,7 @@ impl Model {
     /// Calls `uform_model_load_vram_buffer`.
     pub fn load_vram_buffer<'config>(config: impl Into<ModelLoadVramBufferConfig<'config>>) -> Result<Self> {
         let mut config = config.into();
-        let callbacks = Callbacks::default();
-        let progress = lower_progress(&mut config.progress, config.progress_steps, &callbacks);
+        let progress = lower_progress(&mut config.progress, config.progress_steps);
         let mut model = Model::null();
         let mut outcome = uform_outcome_t::default();
         unsafe {
@@ -495,12 +485,11 @@ impl Model {
                 outcome: &mut outcome,
                 completion: uform_completion_blocking_k,
                 buffer: config.buffer.into(),
-                vram: vram_options(config.devices, config.gpu_class),
+                vram: vram_options(config.devices, config.gpu_class_ceiling),
                 quantization: config.quantization as uform_scalar_t,
                 progress,
             })
         };
-        callbacks.raise();
         check(outcome).map(|()| model)
     }
 }
@@ -540,10 +529,7 @@ impl<'model> ModelVerbs<'model> for &'model Model {
     type Completion = Blocking;
 
     fn handles(&self) -> Handles {
-        Handles {
-            handle: self.handle,
-            executor: ptr::null_mut(),
-        }
+        Handles { handle: self.handle, executor: ptr::null_mut() }
     }
 }
 
@@ -551,10 +537,7 @@ impl<'model, Completion: crate::types::Completion> ModelVerbs<'model> for On<'mo
     type Completion = Completion;
 
     fn handles(&self) -> Handles {
-        Handles {
-            handle: self.handle.handle,
-            executor: self.executor.handle,
-        }
+        Handles { handle: self.handle.handle, executor: self.executor.handle }
     }
 }
 
@@ -576,13 +559,9 @@ unsafe impl Send for ModelDescribe {}
 impl Calling for ModelDescribe {
     type Arguments = uform_model_describe_t;
     type Output = ModelDescription;
+    type Inputs = ();
 
-    fn arguments(
-        &mut self,
-        outcome: *mut uform_outcome_t,
-        completion: uform_completion_t,
-        _: &Callbacks,
-    ) -> Result<Self::Arguments> {
+    fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments> {
         Ok(uform_model_describe_t {
             model: self.handles.handle,
             executor: self.handles.executor,
@@ -592,22 +571,26 @@ impl Calling for ModelDescribe {
         })
     }
 
-    unsafe fn call(arguments: *mut Self::Arguments) { uform_model_describe(arguments) }
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { uform_model_describe(arguments) }
+    }
 
-    fn finish(self) -> Result<ModelDescription> {
-        Ok(ModelDescription {
-            dimensions: self.description.dimensions,
-            context: self.description.context,
-            quantization: Scalar::from_raw(self.description.quantization).ok_or(fail(
-                Status::Internal,
-                "the library reported a quantization this binding cannot name",
-            ))?,
-            memory_usage: self.description.memory_usage,
-            cpu_class: CPUClass::from_raw(self.description.cpu_class),
-            gpu_class: GPUClass::from_raw(self.description.gpu_class),
-            token_width: self.description.token_width,
-            choice_temperature_groups: self.description.choice_temperature_groups,
-        })
+    fn finish(self, status: Result<()>) -> (Result<ModelDescription>, ()) {
+        let described = self.description;
+        let description = status.and_then(|()| {
+            Ok(ModelDescription {
+                dimensions: described.dimensions,
+                context: described.context,
+                quantization: Scalar::from_raw(described.quantization)
+                    .ok_or(fail(Status::Internal, "the library reported a quantization this binding cannot name"))?,
+                memory_usage: described.memory_usage,
+                cpu_class: CPUClass::from_raw(described.cpu_class),
+                gpu_class: GPUClass::from_raw(described.gpu_class),
+                token_width: described.token_width,
+                choice_temperature_groups: described.choice_temperature_groups,
+            })
+        });
+        (description, ())
     }
 }
 
@@ -644,34 +627,20 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// Every machine runs the serial class, so pinning it loads, and the description reports it.
+    /// Every machine runs the serial class, so a serial ceiling loads it, and a ceiling of a family
+    /// this CPU does not run falls to serial; the description reports the class picked.
     #[test]
-    fn a_serial_pin_loads_and_describes_itself() -> Result<()> {
+    fn a_ceiling_loads_the_best_class_under_it() -> Result<()> {
         let checkpoint = checkpoint();
-        let config = ModelLoadRamBufferConfig {
-            cpu_class: Some(CPUClass::Serial),
-            ..ModelLoadRamBufferConfig::from(&checkpoint)
-        };
-        let description = Model::load_ram_buffer(config)?.describe()?;
-        assert_eq!(
-            (description.cpu_class, description.gpu_class),
-            (Some(CPUClass::Serial), None)
-        );
+        for ceiling in [CPUClass::Serial, CPUClass::Wasm64Extended] {
+            let config = ModelLoadRamBufferConfig {
+                cpu_class_ceiling: Some(ceiling),
+                ..ModelLoadRamBufferConfig::from(&checkpoint)
+            };
+            let description = Model::load_ram_buffer(config)?.describe()?;
+            assert_eq!((description.cpu_class, description.gpu_class), (Some(CPUClass::Serial), None));
+        }
         Ok(())
-    }
-
-    #[test]
-    fn descriptions_lay_out_as_the_header_declares() {
-        use core::mem::{offset_of, size_of};
-
-        let word = size_of::<usize>();
-        let cpu_class = offset_of!(uform_model_description_t, cpu_class);
-        assert_eq!(cpu_class, 4 * word);
-        assert_eq!(offset_of!(uform_model_description_t, gpu_class), cpu_class + 4);
-        assert_eq!(offset_of!(uform_model_description_t, token_width), cpu_class + 8);
-        assert_eq!(size_of::<uform_model_description_t>(), cpu_class + 8 + 2 * word);
-        assert_eq!(offset_of!(uform_ram_options_t, cpu_class), 2 * word);
-        assert_eq!(offset_of!(uform_vram_options_t, gpu_class), 2 * word);
     }
 
     #[test]
@@ -680,10 +649,8 @@ pub(crate) mod tests {
         assert_eq!(missing.unwrap_err().status, Status::Io);
         let empty = Model::load_ram_buffer(&[0u8; 0][..]);
         assert!(empty.is_err(), "an empty checkpoint holds no model");
-        let config = ModelLoadRamBufferConfig {
-            quantization: Scalar::F64,
-            ..ModelLoadRamBufferConfig::from(&[1u8; 16][..])
-        };
+        let config =
+            ModelLoadRamBufferConfig { quantization: Scalar::F64, ..ModelLoadRamBufferConfig::from(&[1u8; 16][..]) };
         assert!(Model::load_ram_buffer(config).is_err(), "blocks run in bf16 or e4m3");
     }
 

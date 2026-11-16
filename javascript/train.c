@@ -188,20 +188,47 @@ static bool uform_js_masking_from_value(napi_env env, napi_value value, uform_ma
            uform_js_float_field(env, value, "audioWeight", &masking->audio_weight);
 }
 
+/** Reads the pair-loss form an options object names under @c pairLoss; absent reads derived. */
+static bool uform_js_pair_loss_field(napi_env env, napi_value object, uform_pair_loss_form_t* form) {
+    return uform_js_pair_loss_form_from_value(env, uform_js_property(env, object, "pairLoss"), form);
+}
+
+/** Reads one late-interaction side name per item into a block @p call owns. */
+static bool uform_js_sides_from_value(napi_env env, napi_value value, uform_js_call_t* call, size_t count,
+                                      uform_late_interaction_side_t const** sides) {
+    bool is_array = false;
+    uint32_t length = 0;
+    *sides = NULL;
+    if (napi_is_array(env, value, &is_array) != napi_ok || !is_array)
+        return uform_js_throw_field(env, "sides", "must be an array of side names");
+    if (napi_get_array_length(env, value, &length) != napi_ok || length != count)
+        return uform_js_throw_field(env, "sides", "must hold one entry per item");
+    uform_late_interaction_side_t* const read = (uform_late_interaction_side_t*)uform_js_call_own(
+        env, call, count * sizeof(uform_late_interaction_side_t));
+    if (!read) return false;
+    for (uint32_t position = 0; position != length; ++position) {
+        napi_value name = NULL;
+        if (napi_get_element(env, value, position, &name) != napi_ok ||
+            !uform_js_late_interaction_side_from_value(env, name, &read[position]))
+            return false;
+    }
+    *sides = read;
+    return true;
+}
+
 /** Reads the contrastive loss's scoring; the Matryoshka widths land in a block the caller frees. */
 static bool uform_js_contrastive_from_value(napi_env env, napi_value value, uform_contrastive_t* contrastive,
                                             size_t** widths) {
-    size_t negatives = 0, pair_loss = 0;
+    size_t negatives = 0;
     if (!uform_js_size_field(env, value, "temperatureGroups", &contrastive->temperature_groups) ||
         !uform_js_float_field(env, value, "inverseTemperature", &contrastive->inverse_temperature) ||
         !uform_js_float_field(env, value, "bias", &contrastive->bias) ||
         !uform_js_size_field(env, value, "negatives", &negatives) ||
         !uform_js_float_field(env, value, "ambientRepulsionWeight", &contrastive->ambient_repulsion_weight) ||
         !uform_js_size_field(env, value, "maxEdgesPerDevice", &contrastive->max_edges_per_device) ||
-        !uform_js_size_field(env, value, "pairLoss", &pair_loss))
+        !uform_js_pair_loss_field(env, value, &contrastive->pair_loss))
         return false;
     contrastive->negatives = (uform_negatives_t)negatives;
-    contrastive->pair_loss = (uform_pair_loss_form_t)pair_loss;
     int32_t* ordinals = NULL;
     size_t count = 0;
     if (!uform_js_ordinals_from_value(env, uform_js_property(env, value, "matryoshkaDimensions"),
@@ -222,20 +249,16 @@ static bool uform_js_contrastive_from_value(napi_env env, napi_value value, ufor
 /** Reads the late-interaction loss's scoring of the per-token vectors. */
 static bool uform_js_late_interaction_from_value(napi_env env, napi_value value,
                                                  uform_late_interaction_t* late_interaction) {
-    size_t pair_loss = 0;
-    if (!uform_js_float_field(env, value, "weight", &late_interaction->weight) ||
-        !uform_js_size_field(env, value, "width", &late_interaction->width) ||
-        !uform_js_float_field(env, value, "inverseTemperature", &late_interaction->inverse_temperature) ||
-        !uform_js_float_field(env, value, "bias", &late_interaction->bias) ||
-        !uform_js_size_field(env, value, "maxQuerySpan", &late_interaction->max_query_span) ||
-        !uform_js_size_field(env, value, "maxQueryTokensPerDevice", &late_interaction->max_query_tokens_per_device) ||
-        !uform_js_size_field(env, value, "maxDocumentsPerDevice", &late_interaction->max_documents_per_device) ||
-        !uform_js_size_field(env, value, "maxDocumentTokensPerDevice",
-                             &late_interaction->max_document_tokens_per_device) ||
-        !uform_js_size_field(env, value, "pairLoss", &pair_loss))
-        return false;
-    late_interaction->pair_loss = (uform_pair_loss_form_t)pair_loss;
-    return true;
+    return uform_js_float_field(env, value, "weight", &late_interaction->weight) &&
+           uform_js_size_field(env, value, "width", &late_interaction->width) &&
+           uform_js_float_field(env, value, "inverseTemperature", &late_interaction->inverse_temperature) &&
+           uform_js_float_field(env, value, "bias", &late_interaction->bias) &&
+           uform_js_size_field(env, value, "maxQuerySpan", &late_interaction->max_query_span) &&
+           uform_js_size_field(env, value, "maxQueryTokensPerDevice", &late_interaction->max_query_tokens_per_device) &&
+           uform_js_size_field(env, value, "maxDocumentsPerDevice", &late_interaction->max_documents_per_device) &&
+           uform_js_size_field(env, value, "maxDocumentTokensPerDevice",
+                               &late_interaction->max_document_tokens_per_device) &&
+           uform_js_pair_loss_field(env, value, &late_interaction->pair_loss);
 }
 
 /** @c initVram(executor, mesh, {resume, depth, hidden, batch, objective, masking, contrastive,
@@ -312,7 +335,7 @@ static uform_js_trainer_t* uform_js_trainer_live(napi_env env, napi_callback_inf
                                                  napi_value* arguments, napi_value* self) {
     uform_js_trainer_t* const trainer = (uform_js_trainer_t*)uform_js_self(env, info, wanted, arguments, self);
     if (trainer && !trainer->handle) {
-        uform_js_throw(env, uform_status_invalid_argument_k, "The trainer was freed");
+        uform_js_throw(env, uform_status_uninitialized_k, "The trainer was freed");
         return NULL;
     }
     return trainer;
@@ -409,8 +432,8 @@ static napi_value uform_js_trainer_step(napi_env env, napi_callback_info info) {
     uform_js_trainer_call_t* const call = (uform_js_trainer_call_t*)uform_js_call_open_on(
         env, arguments, &local.call, sizeof(local), &step.executor, &step.completion);
     if (!call) return NULL;
-    void *modalities = NULL, *sides = NULL;
-    size_t modalities_count = 0, sides_count = 0;
+    void* modalities = NULL;
+    size_t modalities_count = 0;
     napi_value const ignore[3] = {arguments[18], arguments[19], NULL};
     bool const with_arena = !uform_js_value_absent(env, arguments[20]);
     bool const with_sides = !uform_js_value_absent(env, arguments[7]);
@@ -421,9 +444,7 @@ static napi_value uform_js_trainer_step(napi_env env, napi_callback_info info) {
         (modalities_count == step.count || uform_js_throw_field(env, "modalities", "must hold one entry per item")) &&
         uform_js_per_item_from_value(env, arguments[5], "bags", step.count, &step.bags) &&
         uform_js_per_item_from_value(env, arguments[6], "temperatureGroups", step.count, &step.temperature_groups) &&
-        (!with_sides ||
-         (uform_js_array_from_value(env, arguments[7], "sides", napi_int32_array, &sides, &sides_count) &&
-          (sides_count == step.count || uform_js_throw_field(env, "sides", "must hold one entry per item")))) &&
+        (!with_sides || uform_js_sides_from_value(env, arguments[7], &call->call, step.count, &step.sides)) &&
         uform_js_choices_from_value(env, arguments + 8, step.count, &call->call, &step.choices, &step.choice_targets) &&
         uform_js_edges_from_value(env, arguments + 12, &call->call, &step.relations.attract) &&
         uform_js_edges_from_value(env, arguments + 15, &call->call, &step.relations.repel) &&
@@ -442,7 +463,6 @@ static napi_value uform_js_trainer_step(napi_env env, napi_callback_info info) {
     call->call.finish = uform_js_finish_step;
     call->count = step.count;
     step.modalities = (uform_modality_t const*)modalities;
-    step.sides = (uform_late_interaction_side_t const*)sides;
     step.outcome = &call->call.outcome;
     step.embeddings = with_arena ? &call->embeddings : NULL;
     step.stats = &call->stats;

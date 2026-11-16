@@ -6,7 +6,7 @@
  *      executor whose threads a verb runs on, the arena every scaling output lands in, and the
  *      deferred call a deferred receiver answers.
  */
-import type { Compiled, CompiledArena, CompiledDeferred, CompiledExecutor } from "./library.js";
+import type { Compiled, CompiledArena, CompiledDeferred, CompiledExecutor, Completion } from "./library.js";
 
 /**
  *  What went wrong, one member per `uform_status_*_k` of the C interface and spelled as its
@@ -27,6 +27,7 @@ export enum Status {
   Device = "device",
   Malformed = "malformed",
   Internal = "internal",
+  Uninitialized = "uninitialized",
   ConfigMismatch = "config-mismatch",
   Contended = "contended",
   Cancelled = "cancelled",
@@ -116,62 +117,42 @@ export enum Negatives {
   Named = "named",
 }
 
-/**
- *  How a mesh's NVLink domains reduce.
- *  @enum {string}
- *  @readonly
- */
-export enum MultimemTier {
-  SwitchReduced = "switch-reduced",
-  PeerRead = "peer-read",
-}
+/** How a mesh's NVLink domains reduce, as `uform_multimem_tier_name` spells it. */
+export type MultimemTier = "switch-reduced" | "peer-read";
 
-/**
- *  How a contrastive term turns a row of scores into forces, numbered as
- *  `uform_pair_loss_form_t` numbers them.
- *  @enum {number}
- *  @readonly
- */
+/** How a contrastive term turns a row of scores into forces, one member per
+ *  `uform_pair_loss_form_t`.
+ *  @enum {string}
+ *  @readonly */
 export enum PairLossForm {
   /** The term's own form: sigmoid for pooled embeddings, ranked for token vectors. */
-  Derived = 0,
+  Derived = "derived",
   /** The sigmoid cross-entropy of every cell, its attract and repel halves normalized apart. */
-  Balanced = 1,
+  Balanced = "balanced",
   /** The sigmoid cross-entropy of every positive's score over every negative's, where
    *  the bias cancels. */
-  Ranked = 2,
+  Ranked = "ranked",
   /** SigLIP's sigmoid cross-entropy of every cell, each repel weighed like an attract. */
-  Sigmoid = 3,
+  Sigmoid = "sigmoid",
 }
 
-/**
- *  Which side of a late-interaction score an item takes, numbered as
- *  `uform_late_interaction_side_t` numbers them.
- *  @enum {number}
- *  @readonly
- */
+/** Which side of a late-interaction score an item takes, one member per
+ *  `uform_late_interaction_side_t`.
+ *  @enum {string}
+ *  @readonly */
 export enum LateInteractionSide {
   /** The item takes no part in late interaction. */
-  None = 0,
+  None = "none",
   /** The item's tokens score the documents it attracts and repels. */
-  Query = 1,
+  Query = "query",
   /** The item's tokens are scored by the queries naming it. */
-  Document = 2,
+  Document = "document",
   /** The item plays both sides. */
-  QueryAndDocument = 3,
+  QueryAndDocument = "query-and-document",
 }
 
-/**
- *  The runtime that drives a GPU, numbered as `uform_gpu_vendor_t` numbers them.
- *  @enum {number}
- *  @readonly
- */
-export enum GpuVendor {
-  Unknown = 0,
-  Nvidia = 1,
-  Amd = 2,
-  Apple = 3,
-}
+/** The runtime that drives a GPU, one name per `uform_gpu_vendor_t`. */
+export type GpuVendor = "unknown" | "nvidia" | "amd" | "apple";
 
 /** One GPU this process can drive. Mirrors `uform_gpu_device_t`. */
 export interface GpuDevice {
@@ -250,8 +231,9 @@ export function gpuDevices(): GpuDevice[] {
 export interface ExecutorForRamConfig {
   /** NUMA node IDs the threads are spread over; absent spreads them over every node. */
   memoryDomains?: number[];
-  /** The CPU class to dispatch as, spelled like "intel-haswell"; absent derives the CPU's own. */
-  cpuClass?: string;
+  /** The newest CPU class to dispatch as, spelled like "intel-haswell", capped by what the CPU
+   *  runs; absent sets no ceiling. */
+  cpuClassCeiling?: string;
   /** Threads to spawn; absent takes 7/8 of the cores the domains carry. */
   threads?: number;
 }
@@ -260,23 +242,25 @@ export interface ExecutorForRamConfig {
 export interface ExecutorOnPoolConfig {
   /** NUMA node IDs of the models it will drive; absent derives every node. */
   memoryDomains?: number[];
-  /** The CPU class to dispatch as, spelled like "intel-haswell"; absent derives the CPU's own. */
-  cpuClass?: string;
+  /** The newest CPU class to dispatch as, spelled like "intel-haswell", capped by what the CPU
+   *  runs; absent sets no ceiling. */
+  cpuClassCeiling?: string;
 }
 
 /** Which devices a VRAM executor drives, and on which streams. */
 export interface ExecutorForVramConfig {
   /** Device ordinals, positions in {@link gpuDevices}, to drive; absent takes one free device. */
   devices?: number[];
-  /** The GPU class every device dispatches as, spelled like "nvidia-hopper"; absent derives
-   *  the devices' own. */
-  gpuClass?: string;
+  /** The newest GPU class every device dispatches as, spelled like "nvidia-hopper": the best
+   *  class all of them load at or under it; absent sets no ceiling. */
+  gpuClassCeiling?: string;
   /** NUMA node IDs whose cores the host decoders take; absent takes every node. */
   memoryDomains?: number[];
-  /** The CPU class the host decoders dispatch as, spelled like "intel-haswell"; absent derives
-   *  the CPU's own. */
-  cpuClass?: string;
-  /** Borrowed CUDA stream addresses, one per device in `devices` order; absent creates its own. */
+  /** The newest CPU class the host decoders dispatch as, spelled like "intel-haswell"; absent
+   *  sets no ceiling. */
+  cpuClassCeiling?: string;
+  /** Borrowed CUDA stream addresses, one per device in `devices` order, which the library refuses
+   *  as unsupported; absent creates its own. */
   streams?: bigint[];
   /** Ceiling on scratch bytes per device; absent lets scratch grow as batches ask. */
   scratchLimit?: number;
@@ -398,6 +382,24 @@ export abstract class ArenaView {
   }
 }
 
+/** Yields one turn of the event loop: `setImmediate` under Node, a zero timeout in a page. */
+const yieldTurn: (next: () => void) => void = globalThis.setImmediate ?? ((next) => setTimeout(next, 0));
+
+/** Resolves once `call` is final, polling its status with a doubling pause from 1 µs up to 1 ms:
+ *  pauses under 1 ms only yield a turn of the event loop, and the rest sleep 1 ms. */
+function polled(call: CompiledDeferred): Promise<void> {
+  return new Promise((resolve) => {
+    let pause = 0.001;
+    const poll = (): void => {
+      if (call.status() !== Status.Deferred) return resolve();
+      if (pause < 1) yieldTurn(poll);
+      else setTimeout(poll, 1);
+      pause = Math.min(pause * 2, 1);
+    };
+    poll();
+  });
+}
+
 /** Deferred calls dropped before they are final, each handed back to the collector until it is, so
  *  none is freed while the library still writes into it. */
 const unfinished = new FinalizationRegistry<CompiledDeferred>((call) => {
@@ -409,8 +411,9 @@ const unfinished = new FinalizationRegistry<CompiledDeferred>((call) => {
  *
  *  It keeps everything the library reads or writes alive until then - the outcome, the inputs, the
  *  outputs and every handle it names - so none of them is collected under the call. `status` polls
- *  without blocking, `wait` blocks and answers, and `await` runs that wait on the libuv pool; both
- *  answer the same cached result, or throw the same failure, however often they are asked. On the
+ *  without blocking, `wait` blocks and answers, and `await` polls the status between turns of the
+ *  event loop, never parking a thread; both answer the same cached result, or throw the same
+ *  failure, however often they are asked. On the
  *  WebAssembly backend the call is final once submitted.
  *
  *  ```js
@@ -446,15 +449,15 @@ export class Deferred<T> implements PromiseLike<T>, Disposable {
     return this.#unwrap();
   }
 
-  /** Waits off the calling thread, which is what `await` reaches for. Calls `uform_outcome_wait` on
-   *  the libuv pool. */
+  /** Polls until the call is final without blocking the event loop, which is what `await` reaches
+   *  for. Calls `uform_outcome_status` between turns, backing off from 1 µs up to 1 ms. */
   then<Fulfilled = T, Rejected = never>(
     onFulfilled?: ((value: T) => Fulfilled | PromiseLike<Fulfilled>) | null,
     onRejected?: ((reason: unknown) => Rejected | PromiseLike<Rejected>) | null,
   ): Promise<Fulfilled | Rejected> {
     this.#settling ??= this.#outcome
       ? Promise.resolve().then(() => this.#unwrap())
-      : this.#call.settled().then(() => {
+      : polled(this.#call).then(() => {
           this.#settle();
           return this.#unwrap();
         });
@@ -485,16 +488,26 @@ export class Deferred<T> implements PromiseLike<T>, Disposable {
   }
 }
 
-/** How a receiver hands back what its verbs answer: as is, or as a {@link Deferred} of it. */
-export type Answer<Receiving, Answered> = Receiving extends "deferred" ? Deferred<Answered> : Answered;
+/** One verb's native call, given the completion its receiver picks, and how its answer lifts. */
+export interface Call<Answered> {
+  readonly run: (completion: Completion) => unknown;
+  readonly answer: (raw: never) => Answered;
+}
 
-/** The completion a receiver submits with, and the way it wraps the answer. */
-export function submitAs<Receiving extends "blocking" | "deferred", Raw, Answered>(
-  receiving: Receiving,
-  call: (completion: 0 | 1) => unknown,
+/** Pairs a verb's native call with the lift of its answer. */
+export function callOf<Raw, Answered>(
+  run: (completion: Completion) => unknown,
   answer: (raw: Raw) => Answered,
-): Answer<Receiving, Answered> {
-  if (receiving === "deferred")
-    return new Deferred(call(1) as CompiledDeferred, answer as (raw: never) => Answered) as Answer<Receiving, Answered>;
-  return answer(call(0) as Raw) as Answer<Receiving, Answered>;
+): Call<Answered> {
+  return { run, answer: answer as (raw: never) => Answered };
+}
+
+/** Runs a call to its end on the receiver's thread or executor, answering its lifted result. */
+export function block<Answered>(call: Call<Answered>): Answered {
+  return (call.answer as (raw: unknown) => Answered)(call.run(0));
+}
+
+/** Submits a call to the receiver's executor, answering the {@link Deferred} that owns it. */
+export function defer<Answered>(call: Call<Answered>): Deferred<Answered> {
+  return new Deferred(call.run(1) as CompiledDeferred, call.answer);
 }

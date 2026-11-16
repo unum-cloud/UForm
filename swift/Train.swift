@@ -109,7 +109,7 @@ public struct MultimemTier: Hashable, Sendable, CustomStringConvertible {
 }
 
 /// How a contrastive term turns a row of scores into forces, carrying the C enumerator.
-public struct PairLossForm: Hashable, Sendable {
+public struct PairLossForm: Hashable, Sendable, CustomStringConvertible {
     /// The C enumerator.
     let raw: uform_pair_loss_form_t
 
@@ -122,10 +122,22 @@ public struct PairLossForm: Hashable, Sendable {
     public static let ranked = PairLossForm(raw: uform_pair_loss_form_ranked_k)
     /// SigLIP's sigmoid cross-entropy of every cell, each repel weighed like an attract.
     public static let sigmoid = PairLossForm(raw: uform_pair_loss_form_sigmoid_k)
+
+    /// The form as the library spells it. Calls `uform_pair_loss_form_name`.
+    public var description: String { String(cString: uform_pair_loss_form_name(raw)) }
+
+    /// Reads a spelling back, and nil for one no form carries. Calls
+    /// `uform_pair_loss_form_from_name`.
+    public init?(name: String) {
+        guard let raw = parsed(name, uform_pair_loss_form_from_name) else { return nil }
+        self.raw = raw
+    }
+
+    init(raw: uform_pair_loss_form_t) { self.raw = raw }
 }
 
 /// Which side of a late-interaction score an item takes, carrying the C enumerator.
-public struct LateInteractionSide: Hashable, Sendable {
+public struct LateInteractionSide: Hashable, Sendable, CustomStringConvertible {
     /// The C enumerator.
     let raw: uform_late_interaction_side_t
 
@@ -137,6 +149,18 @@ public struct LateInteractionSide: Hashable, Sendable {
     public static let document = LateInteractionSide(raw: uform_late_interaction_side_document_k)
     /// The item plays both sides.
     public static let queryAndDocument = LateInteractionSide(raw: uform_late_interaction_side_query_and_document_k)
+
+    /// The side as the library spells it. Calls `uform_late_interaction_side_name`.
+    public var description: String { String(cString: uform_late_interaction_side_name(raw)) }
+
+    /// Reads a spelling back, and nil for one no side carries. Calls
+    /// `uform_late_interaction_side_from_name`.
+    public init?(name: String) {
+        guard let raw = parsed(name, uform_late_interaction_side_from_name) else { return nil }
+        self.raw = raw
+    }
+
+    init(raw: uform_late_interaction_side_t) { self.raw = raw }
 }
 
 // MARK: - Mesh
@@ -189,7 +213,8 @@ public struct MeshDescription: Sendable {
     public var firstGpuIndex: Int
     /// How its NVLink domains reduce.
     public var multimemTier: MultimemTier
-    /// The class every GPU of the run dispatches as: the executor's pin, or the devices' own.
+    /// The class every GPU of the run dispatches as: the best class its devices load under the
+    /// executor's ceiling.
     public var gpuClass: GPUClass?
 
     init(_ raw: uform_mesh_description_t) {
@@ -690,6 +715,20 @@ public final class Trainer: @unchecked Sendable {
         }
     }
 
+    /// The same verbs, blocking on `executor`, the one the trainer was made on, and throwing
+    /// `contended` while another call holds it. Binding-only: names the executor every call passes.
+    public func on(_ executor: Executor) -> TrainerOn { TrainerOn(trainer: self, executor: executor) }
+
+    /// The same verbs, submitted to `executor`, the one the trainer was made on, and answered at
+    /// once as a `Deferred`. Binding-only: names the executor and the deferred completion every
+    /// call passes.
+    public func deferred(_ executor: Executor) -> TrainerDeferredOn {
+        TrainerDeferredOn(trainer: self, executor: executor)
+    }
+
+    /// The verbs, blocking on the executor the trainer was made on.
+    var here: TrainerOn { TrainerOn(trainer: self, executor: executor) }
+
     /// Applies one optimizer step over this process's items and every peer's; every process of the
     /// run calls it once per step. With an `arena`, the step also lands the pooled embeddings it
     /// scored there, as `outputsScalar`. `sides` places each item in the late-interaction loss, nil
@@ -697,6 +736,81 @@ public final class Trainer: @unchecked Sendable {
     /// and `choiceTargets` their target probabilities, an entry as long as the item's choices. Each
     /// list of items is gathered into one tape, the one copy this form makes before lending it as
     /// the packed form does. Calls `uform_trainer_step`.
+    public func step(
+        modalities: [Modality],
+        contents: [[UInt8]],
+        bags: [UInt32]? = nil,
+        temperatureGroups: [UInt32]? = nil,
+        sides: [LateInteractionSide]? = nil,
+        relations: Relations = Relations(),
+        choices: [[UInt8]]? = nil,
+        choiceTargets: [[Float]]? = nil,
+        arena: Arena? = nil,
+        outputsScalar: Scalar = .f32
+    ) throws(UFormError) -> TrainerStep {
+        try here.step(
+            modalities: modalities,
+            contents: contents,
+            bags: bags,
+            temperatureGroups: temperatureGroups,
+            sides: sides,
+            relations: relations,
+            choices: choices,
+            choiceTargets: choiceTargets,
+            arena: arena,
+            outputsScalar: outputsScalar
+        )
+    }
+
+    /// Applies one optimizer step over tapes already packed as `data` and its `count + 1`
+    /// Apache Arrow `offsets`, lent to the library in place, without a copy, until the step
+    /// returns. Calls `uform_trainer_step`.
+    public func step(
+        modalities: [Modality],
+        contents: (data: [UInt8], offsets: [Int]),
+        bags: [UInt32]? = nil,
+        temperatureGroups: [UInt32]? = nil,
+        sides: [LateInteractionSide]? = nil,
+        relations: Relations = Relations(),
+        choices: (data: [UInt8], offsets: [Int])? = nil,
+        choiceTargets: (data: [Float], offsets: [Int])? = nil,
+        arena: Arena? = nil,
+        outputsScalar: Scalar = .f32
+    ) throws(UFormError) -> TrainerStep {
+        try here.step(
+            modalities: modalities,
+            contents: contents,
+            bags: bags,
+            temperatureGroups: temperatureGroups,
+            sides: sides,
+            relations: relations,
+            choices: choices,
+            choiceTargets: choiceTargets,
+            arena: arena,
+            outputsScalar: outputsScalar
+        )
+    }
+
+    /// Writes the weights and the step to a safetensors checkpoint, which `Model.loadVram`
+    /// and its siblings serve and `initVram` resumes; only the process of index zero
+    /// writes. Calls `uform_trainer_save`.
+    public func save(path: String, progress: Progress? = nil, progressSteps: Int = 0) throws(UFormError) {
+        try here.save(path: path, progress: progress, progressSteps: progressSteps)
+    }
+}
+
+// MARK: - Trainer Receivers
+
+/// A trainer's verbs on an executor, each blocking until final and throwing `contended` while
+/// another call holds the executor; see `Trainer.on(_:)` and the trainer's own verbs for what each
+/// one does.
+public struct TrainerOn: Sendable {
+    /// The trainer every verb addresses.
+    let trainer: Trainer
+    /// The executor every verb runs on.
+    let executor: Executor
+
+    /// Calls `uform_trainer_step`, gathering each list of items into one tape.
     public func step(
         modalities: [Modality],
         contents: [[UInt8]],
@@ -723,9 +837,7 @@ public final class Trainer: @unchecked Sendable {
         )
     }
 
-    /// Applies one optimizer step over tapes already packed as `data` and its `count + 1`
-    /// Apache Arrow `offsets`, lent to the library in place, without a copy, until the step
-    /// returns. Calls `uform_trainer_step`.
+    /// Calls `uform_trainer_step`, lending the packed tapes in place until the step returns.
     public func step(
         modalities: [Modality],
         contents: (data: [UInt8], offsets: [Int]),
@@ -738,20 +850,145 @@ public final class Trainer: @unchecked Sendable {
         arena: Arena? = nil,
         outputsScalar: Scalar = .f32
     ) throws(UFormError) -> TrainerStep {
-        let count = modalities.count
-        // The C side reads one entry per item, and one offset more, behind pointers that
-        // carry no count.
-        let edges = [relations.attract, relations.repel, relations.ignore].compactMap { $0 }
-        guard bounds(contents.offsets, count, contents.data.count), bags.map({ $0.count == count }) ?? true,
-            temperatureGroups.map({ $0.count == count }) ?? true, sides.map({ $0.count == count }) ?? true,
-            edges.allSatisfy({ $0.offsets.count == count + 1 && ($0.weights?.count ?? $0.ids.count) == $0.ids.count }),
-            (choices == nil) == (choiceTargets == nil),
-            choices.map({ bounds($0.offsets, count, $0.data.count) }) ?? true,
-            choiceTargets.map({ bounds($0.offsets, count, $0.data.count) }) ?? true
-        else {
-            throw UFormError(status: .shapeMismatch, message: "every per-item list must name one entry per item")
+        try checkStep(modalities.count, contents, bags, temperatureGroups, sides, relations, choices, choiceTargets)
+        let call = TrainerCall(trainer: trainer, executor: executor, landing: Landing())
+        // The step blocks, so the tapes' own storage outlives the call it is lent to.
+        var submission: Submission<TrainerStep>?
+        var failure: UFormError?
+        withTape(contents, .u8) { contents in
+            withTape(choices, .u8) { choices in
+                withTape(choiceTargets, .f32) { choiceTargets in
+                    do throws(UFormError) {
+                        submission = try call.step(
+                            modalities: modalities,
+                            tapes: (contents, choices, choiceTargets),
+                            bags: bags,
+                            temperatureGroups: temperatureGroups,
+                            sides: sides,
+                            relations: relations,
+                            arena: arena,
+                            outputsScalar: outputsScalar
+                        )
+                    }
+                    catch {
+                        failure = error
+                    }
+                }
+            }
         }
-        let landing = Landing()
+        if let failure { throw failure }
+        return try submission!.wait()
+    }
+
+    /// Calls `uform_trainer_save`.
+    public func save(path: String, progress: Progress? = nil, progressSteps: Int = 0) throws(UFormError) {
+        let call = TrainerCall(trainer: trainer, executor: executor, landing: Landing())
+        try call.save(path: path, progress: progress, progressSteps: progressSteps).wait()
+    }
+}
+
+/// A trainer's verbs submitted to an executor, each answered at once as a `Deferred` that finishes
+/// there.
+///
+/// A deferred step copies its tapes and lists, so the caller's arrays may go at once. The trainer,
+/// the executor and the arena are borrowed as a blocking call borrows them, since releasing any of
+/// them waits for the calls naming it.
+public struct TrainerDeferredOn: Sendable {
+    /// The trainer every verb addresses.
+    let trainer: Trainer
+    /// The executor every verb is submitted to.
+    let executor: Executor
+
+    /// Calls `uform_trainer_step`, gathering each list of items into one tape.
+    public func step(
+        modalities: [Modality],
+        contents: [[UInt8]],
+        bags: [UInt32]? = nil,
+        temperatureGroups: [UInt32]? = nil,
+        sides: [LateInteractionSide]? = nil,
+        relations: Relations = Relations(),
+        choices: [[UInt8]]? = nil,
+        choiceTargets: [[Float]]? = nil,
+        arena: Arena? = nil,
+        outputsScalar: Scalar = .f32
+    ) throws(UFormError) -> Deferred<TrainerStep> {
+        try step(
+            modalities: modalities,
+            contents: packed(contents),
+            bags: bags,
+            temperatureGroups: temperatureGroups,
+            sides: sides,
+            relations: relations,
+            choices: choices.map(packed),
+            choiceTargets: choiceTargets.map(packed),
+            arena: arena,
+            outputsScalar: outputsScalar
+        )
+    }
+
+    /// Calls `uform_trainer_step`, copying the packed tapes into the call.
+    public func step(
+        modalities: [Modality],
+        contents: (data: [UInt8], offsets: [Int]),
+        bags: [UInt32]? = nil,
+        temperatureGroups: [UInt32]? = nil,
+        sides: [LateInteractionSide]? = nil,
+        relations: Relations = Relations(),
+        choices: (data: [UInt8], offsets: [Int])? = nil,
+        choiceTargets: (data: [Float], offsets: [Int])? = nil,
+        arena: Arena? = nil,
+        outputsScalar: Scalar = .f32
+    ) throws(UFormError) -> Deferred<TrainerStep> {
+        try checkStep(modalities.count, contents, bags, temperatureGroups, sides, relations, choices, choiceTargets)
+        let landing = Landing(uform_completion_deferred_k)
+        let call = TrainerCall(trainer: trainer, executor: executor, landing: landing)
+        let tapes = (landing.lend(contents, .u8), landing.lend(choices, .u8), landing.lend(choiceTargets, .f32))
+        return Deferred(
+            try call.step(
+                modalities: modalities,
+                tapes: tapes,
+                bags: bags,
+                temperatureGroups: temperatureGroups,
+                sides: sides,
+                relations: relations,
+                arena: arena,
+                outputsScalar: outputsScalar
+            )
+        )
+    }
+
+    /// Calls `uform_trainer_save`.
+    public func save(path: String, progress: Progress? = nil, progressSteps: Int = 0) throws(UFormError)
+        -> Deferred<Void>
+    {
+        let call = TrainerCall(trainer: trainer, executor: executor, landing: Landing(uform_completion_deferred_k))
+        return Deferred(try call.save(path: path, progress: progress, progressSteps: progressSteps))
+    }
+}
+
+/// The trainer, executor and landing one verb lowers into its argument structure, and the one place
+/// each verb is written.
+struct TrainerCall {
+    /// The trainer the call addresses.
+    let trainer: Trainer
+    /// The executor the call runs on.
+    let executor: Executor
+    /// Where the call's outcome, inputs and slots live until it is final.
+    let landing: Landing
+
+    /// Lowers a step whose `tapes`, the contents, choices and choice targets, stay readable until
+    /// the call is final.
+    func step(
+        modalities: [Modality],
+        tapes: (uform_tape_view_t, uform_tape_view_t, uform_tape_view_t),
+        bags: [UInt32]?,
+        temperatureGroups: [UInt32]?,
+        sides: [LateInteractionSide]?,
+        relations: Relations,
+        arena: Arena?,
+        outputsScalar: Scalar
+    ) throws(UFormError) -> Submission<TrainerStep> {
+        let count = modalities.count
         let stats = landing.slots(uform_trainer_step_stats_t())
         let embeddings = arena.map { _ in landing.slots(uform_rows_view_t()) }
         let write = arena.map { landing.lend($0) }
@@ -764,15 +1001,18 @@ public final class Trainer: @unchecked Sendable {
             )
         }
         var arguments = uform_trainer_step_t()
-        arguments.trainer = raw
+        arguments.trainer = trainer.raw
         arguments.executor = executor.raw
         arguments.outcome = landing.outcome
         arguments.completion = landing.completion
         arguments.count = count
         arguments.modalities = landing.lend(modalities.map(\.raw))
+        arguments.contents = tapes.0
         arguments.bags = bags.flatMap { landing.lend($0) }
         arguments.temperature_groups = temperatureGroups.flatMap { landing.lend($0) }
         arguments.sides = sides.flatMap { landing.lend($0.map(\.raw)) }
+        arguments.choices = tapes.1
+        arguments.choice_targets = tapes.2
         arguments.relations = uform_relations_view_t(
             attract: lent(relations.attract),
             repel: lent(relations.repel),
@@ -782,18 +1022,8 @@ public final class Trainer: @unchecked Sendable {
         arguments.arena = arena?.raw
         arguments.outputs_scalar = outputsScalar.raw
         arguments.stats = stats
-        // The step blocks, so the tapes' own storage outlives the call it is lent to.
-        withTape(contents, .u8) { contents in
-            withTape(choices, .u8) { choices in
-                withTape(choiceTargets, .f32) { choiceTargets in
-                    arguments.contents = contents
-                    arguments.choices = choices
-                    arguments.choice_targets = choiceTargets
-                    uform_trainer_step(&arguments)
-                }
-            }
-        }
-        return try landing.read {
+        uform_trainer_step(&arguments)
+        return try landing.submitted {
             TrainerStep(
                 stats: TrainerStepStats(stats.pointee),
                 embeddings: embeddings.map { Rows(write: write!, view: $0.pointee, count: count) }
@@ -801,13 +1031,9 @@ public final class Trainer: @unchecked Sendable {
         }
     }
 
-    /// Writes the weights and the step to a safetensors checkpoint, which `Model.loadVram`
-    /// and its siblings serve and `initVram` resumes; only the process of index zero
-    /// writes. Calls `uform_trainer_save`.
-    public func save(path: String, progress: Progress? = nil, progressSteps: Int = 0) throws(UFormError) {
-        let landing = Landing()
+    func save(path: String, progress: Progress?, progressSteps: Int) throws(UFormError) -> Submission<Void> {
         var arguments = uform_trainer_save_t(
-            trainer: raw,
+            trainer: trainer.raw,
             executor: executor.raw,
             outcome: landing.outcome,
             completion: landing.completion,
@@ -815,7 +1041,31 @@ public final class Trainer: @unchecked Sendable {
             progress: landing.lend(progress, steps: progressSteps)
         )
         uform_trainer_save(&arguments)
-        try landing.read {}
+        return try landing.submitted {}
+    }
+}
+
+/// Refuses a step whose per-item lists do not name one entry per item, since the C side reads
+/// them behind pointers that carry no count.
+private func checkStep(
+    _ count: Int,
+    _ contents: (data: [UInt8], offsets: [Int]),
+    _ bags: [UInt32]?,
+    _ temperatureGroups: [UInt32]?,
+    _ sides: [LateInteractionSide]?,
+    _ relations: Relations,
+    _ choices: (data: [UInt8], offsets: [Int])?,
+    _ choiceTargets: (data: [Float], offsets: [Int])?
+) throws(UFormError) {
+    let edges = [relations.attract, relations.repel, relations.ignore].compactMap { $0 }
+    guard bounds(contents.offsets, count, contents.data.count), bags.map({ $0.count == count }) ?? true,
+        temperatureGroups.map({ $0.count == count }) ?? true, sides.map({ $0.count == count }) ?? true,
+        edges.allSatisfy({ $0.offsets.count == count + 1 && ($0.weights?.count ?? $0.ids.count) == $0.ids.count }),
+        (choices == nil) == (choiceTargets == nil),
+        choices.map({ bounds($0.offsets, count, $0.data.count) }) ?? true,
+        choiceTargets.map({ bounds($0.offsets, count, $0.data.count) }) ?? true
+    else {
+        throw UFormError(status: .shapeMismatch, message: "every per-item list must name one entry per item")
     }
 }
 
@@ -837,6 +1087,22 @@ private func packed<Item: Collection>(_ items: [Item]) -> (data: [Item.Element],
 private func bounds(_ offsets: [Int], _ count: Int, _ elements: Int) -> Bool {
     offsets.count == count + 1 && offsets[0] >= 0 && offsets[count] <= elements
         && zip(offsets, offsets.dropFirst()).allSatisfy { $0 <= $1 }
+}
+
+extension Landing {
+    /// Copies a packed `tape` into the landing, so a deferred call may read it after the verb
+    /// returns; nil lends an empty tape.
+    fileprivate func lend<Element: BitwiseCopyable>(
+        _ tape: (data: [Element], offsets: [Int])?,
+        _ scalar: Scalar
+    ) -> uform_tape_view_t {
+        guard let tape else { return uform_tape_view_t() }
+        return uform_tape_view_t(
+            data: lend(tape.data).map(UnsafeRawPointer.init),
+            offsets: lend(tape.offsets),
+            scalar: scalar.raw
+        )
+    }
 }
 
 /// Runs `body` with `tape` lent in place over its arrays' own storage, valid only until `body`

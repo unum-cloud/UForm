@@ -13,6 +13,7 @@
 
 #include <memory> // `std::unique_ptr` - a handle under construction
 #include <new>    // `std::nothrow`
+#include <span>   // `std::span` - the devices a VRAM executor names
 
 #include <forkunion/topology.hpp> // `fu::current_thread_id` - the thread running an executor's call
 
@@ -239,36 +240,57 @@ static gpu_device_t describe_gpu(nk::device_kind_t kind, std::size_t vendor_ordi
     return device;
 }
 
-/** The newest class of @p kind 's ladder serving @p device at or under @p pinned. */
+/** The newest class of @p kind 's ladder serving @p device at or under @p ceiling. */
 static gpu_class_t pick_gpu_class(nk::device_kind_t kind, gpu_device_t const& device,
-                                  uform_gpu_class_t pinned) noexcept {
-    return kind == nk::device_kind_t::cuda_k ? pick_gpu_class(nvidia_ladder_t {}, device, pinned)
-                                             : pick_gpu_class(amd_ladder_t {}, device, pinned);
+                                  uform_gpu_class_t ceiling) noexcept {
+    return kind == nk::device_kind_t::cuda_k ? pick_gpu_class(nvidia_ladder_t {}, device, ceiling)
+                                             : pick_gpu_class(amd_ladder_t {}, device, ceiling);
 }
 
-/** Opens a stream and a scratch arena on the GPU the process-wide @p listed ordinal names, CUDA's
- *  devices first, then ROCm's, dispatching as @p pinned , and appends it to @p devices. False once
- *  @p outcome records why not. */
-static bool open_device(per_gpu_array<vram_device_t>& devices, i32_t listed, nk_size_t cuda_devices,
-                        nk_size_t rocm_devices, uform_gpu_class_t pinned, std::size_t scratch_limit,
-                        uform_outcome_t* outcome) noexcept {
-    if (pinned != uform_gpu_class_unknown_k && !listed_in(gpu_classes_k, pinned))
-        return propagate_error(uform_status_invalid_argument_k, outcome, "No GPU class has that value");
-    if (listed < 0 || static_cast<nk_size_t>(listed) >= cuda_devices + rocm_devices)
-        return propagate_error(uform_status_device_k, outcome, "A device ordinal names no GPU this build drives");
+/** The device kind and vendor ordinal of the GPU the process-wide @p listed ordinal names, CUDA's
+ *  devices first, then ROCm's. */
+static nk::device_kind_t device_kind_of(i32_t listed, nk_size_t cuda_devices, nk_size_t& vendor_ordinal) noexcept {
     nk_size_t const flat_ordinal = static_cast<nk_size_t>(listed);
-    nk::device_kind_t const kind = flat_ordinal < cuda_devices ? nk::device_kind_t::cuda_k : nk::device_kind_t::rocm_k;
-    nk_size_t const vendor_ordinal = kind == nk::device_kind_t::cuda_k ? flat_ordinal : flat_ordinal - cuda_devices;
+    bool const cuda = flat_ordinal < cuda_devices;
+    vendor_ordinal = cuda ? flat_ordinal : flat_ordinal - cuda_devices;
+    return cuda ? nk::device_kind_t::cuda_k : nk::device_kind_t::rocm_k;
+}
+
+/** Writes to @p picked the best class all devices of @p listed load, never above @p ceiling , as
+ *  one model's replicas run one class. False once @p outcome records why not. */
+static bool resolve_placement(std::span<i32_t const> listed, nk_size_t cuda_devices, nk_size_t rocm_devices,
+                              uform_gpu_class_t ceiling, gpu_class_t& picked, uform_outcome_t* outcome) noexcept {
+    if (ceiling != uform_gpu_class_unknown_k && !listed_in(gpu_classes_k, ceiling))
+        return propagate_error(uform_status_invalid_argument_k, outcome, "No GPU class has that value");
+    gpu_device_t shared;
+    nk::device_kind_t kind = nk::device_kind_t::cuda_k;
+    for (std::size_t index = 0; index != listed.size(); ++index) {
+        if (listed[index] < 0 || static_cast<nk_size_t>(listed[index]) >= cuda_devices + rocm_devices)
+            return propagate_error(uform_status_device_k, outcome, "A device ordinal names no GPU this build drives");
+        nk_size_t vendor_ordinal = 0;
+        nk::device_kind_t const device_kind = device_kind_of(listed[index], cuda_devices, vendor_ordinal);
+        ue::device_description_t description;
+        gpu_device_t const described = describe_gpu(device_kind, vendor_ordinal, description);
+        if (index && described.vendor != shared.vendor)
+            return propagate_error(uform_status_config_mismatch_k, outcome, "The devices span vendors");
+        if (!index) shared = described, kind = device_kind;
+        else shared.detected &= described.detected, shared.compiled &= described.compiled;
+    }
+    picked = pick_gpu_class(kind, shared, ceiling);
+    if (picked == gpu_class_t::unknown_k)
+        return propagate_error(uform_status_unsupported_k, outcome,
+                               "The GPUs share no compiled class under the ceiling");
+    return true;
+}
+
+/** Opens a stream and a scratch arena on the GPU the process-wide @p listed ordinal names as
+ *  @p gpu_class and appends it to @p devices; false once @p outcome records why not. */
+static bool open_device(per_gpu_array<vram_device_t>& devices, i32_t listed, nk_size_t cuda_devices,
+                        gpu_class_t gpu_class, std::size_t scratch_limit, uform_outcome_t* outcome) noexcept {
+    nk_size_t vendor_ordinal = 0;
+    nk::device_kind_t const kind = device_kind_of(listed, cuda_devices, vendor_ordinal);
     nk::expected<nk::device_t> const device = nk::device_t::make(kind, vendor_ordinal);
     if (!device) return propagate_error(status_of(static_cast<nk_status_t>(device.status)), outcome, "No such GPU");
-    ue::device_description_t description;
-    gpu_device_t const described = describe_gpu(kind, vendor_ordinal, description);
-    gpu_class_t const gpu_class = pick_gpu_class(kind, described, pinned);
-    if (!gpu_class_serves(gpu_class, described))
-        return propagate_error(uform_status_unsupported_k, outcome, "No class this build holds runs on the GPU");
-    nk_capability_t const pinned_kits = numkong_capabilities_of(static_cast<gpu_class_t>(pinned));
-    if (pinned != uform_gpu_class_unknown_k && (described.detected & pinned_kits) != pinned_kits)
-        return propagate_error(uform_status_unsupported_k, outcome, "The GPU does not admit the pin");
     nk_capability_t const capabilities = numkong_capabilities_of(gpu_class);
     nk::expected<owned_stream_t> stream = owned_stream_t::make(device.value);
     if (!stream)
@@ -352,13 +374,13 @@ UFORM_EXPORT void uform_gpu_devices(uform_gpu_devices_t* arguments) {
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
 
-/** Sets the ceiling @p ram pins, or the machine's, then hands out @p executor , whose pool and
- *  memory domains are set. */
+/** Sets the machine's ceiling capped by the one @p ram sets, then hands out @p executor , whose
+ *  pool and memory domains are set. */
 static void hand_out_ram_executor(std::unique_ptr<uform_executor_handle_t> executor, uform_ram_options_t const& ram,
                                   uform_executor_t* output, uform_outcome_t* outcome) noexcept {
-    expected<cpu_ceiling_t> ceiling = pick_cpu_ceiling(ram.cpu_class);
+    expected<cpu_ceiling_t> ceiling = pick_cpu_ceiling(ram.cpu_class_ceiling);
     if (!ceiling)
-        return propagate_error(status_of(ceiling.status_), outcome, "The CPU does not admit the pinned class"), void();
+        return propagate_error(status_of(ceiling.status_), outcome, "No compiled class fits the ceiling"), void();
     std::get<ram_executor_t>(executor->executor).ceiling = *ceiling;
     hand_out_executor(std::move(executor), *ceiling, output, outcome);
 }
@@ -401,13 +423,13 @@ UFORM_EXPORT void uform_executor_for_vram(uform_executor_for_vram_t* arguments) 
     call_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
     uform_vram_options_t const& vram = arguments->vram;
-    if (arguments->streams)
-        return propagate_error(uform_status_unsupported_k, outcome, "Borrowed streams are not wired yet"), void();
     if (vram.devices_count && !vram.devices)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The devices must not be null"), void();
-    expected<cpu_ceiling_t> ceiling = pick_cpu_ceiling(arguments->ram.cpu_class);
+    expected<cpu_ceiling_t> ceiling = pick_cpu_ceiling(arguments->ram.cpu_class_ceiling);
     if (!ceiling)
-        return propagate_error(status_of(ceiling.status_), outcome, "The CPU does not admit the pinned class"), void();
+        return propagate_error(status_of(ceiling.status_), outcome, "No compiled class fits the ceiling"), void();
+    if (arguments->streams) // refused on any machine, as an option the executor cannot honour
+        return propagate_error(uform_status_unsupported_k, outcome, "The executor drives only its own streams"), void();
     nk_size_t cuda_devices = 0, rocm_devices = 0;
     if (nk_count_devices_cuda(&cuda_devices) != nk_success_k) cuda_devices = 0;
     if (nk_count_devices_rocm(&rocm_devices) != nk_success_k) rocm_devices = 0;
@@ -419,16 +441,13 @@ UFORM_EXPORT void uform_executor_for_vram(uform_executor_for_vram_t* arguments) 
     if (!executor)
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
     vram_executor_t& devices = executor->executor.emplace<vram_executor_t>();
-    std::size_t const count = vram.devices_count ? vram.devices_count : 1;
-    for (std::size_t index = 0; index != count; ++index) {
-        i32_t const listed = vram.devices_count ? vram.devices[index] : 0;
-        if (!open_device(devices.devices, listed, cuda_devices, rocm_devices, vram.gpu_class, arguments->scratch_limit,
-                         outcome))
-            return;
-    }
-    for (vram_device_t const& device : devices.devices)
-        if (device.gpu_class != devices.devices[0].gpu_class)
-            return propagate_error(uform_status_config_mismatch_k, outcome, "The devices differ in class"), void();
+    static constexpr i32_t device_zero_k[] {0};
+    std::span<i32_t const> const listed = vram.devices_count ? std::span<i32_t const> {vram.devices, vram.devices_count}
+                                                             : std::span<i32_t const> {device_zero_k};
+    gpu_class_t gpu_class = gpu_class_t::unknown_k;
+    if (!resolve_placement(listed, cuda_devices, rocm_devices, vram.gpu_class_ceiling, gpu_class, outcome)) return;
+    for (i32_t const ordinal : listed)
+        if (!open_device(devices.devices, ordinal, cuda_devices, gpu_class, arguments->scratch_limit, outcome)) return;
     st::basic_vector<i32_t> memory_domains;
     if (!adopt_memory_domains(memory_domains, arguments->ram, *topology, outcome)) return;
     // The caller is decoder 0: it stages, feeds the devices and waits, so calls finish on return
@@ -498,10 +517,10 @@ UFORM_EXPORT void uform_arena_free(uform_arena_t arena) {
 
 UFORM_EXPORT void uform_arena_describe(uform_arena_describe_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
-    if (!arguments->arena || !arguments->description)
-        return propagate_error(uform_status_invalid_argument_k, outcome,
-                               "The arena and its description must not be null"),
-               void();
+    if (!arguments->arena)
+        return propagate_error(uform_status_uninitialized_k, outcome, "The arena must not be null"), void();
+    if (!arguments->description)
+        return propagate_error(uform_status_invalid_argument_k, outcome, "The description must not be null"), void();
     *arguments->description = {uform_residency_ram_k, -1};
     if (std::holds_alternative<device_arena_t>(arguments->arena->memory))
         *arguments->description = {uform_residency_vram_k,
@@ -525,6 +544,7 @@ UFORM_EXPORT char const* uform_status_name(uform_status_t status) {
     case uform_status_device_k: return "device";
     case uform_status_malformed_k: return "malformed";
     case uform_status_internal_k: return "internal";
+    case uform_status_uninitialized_k: return "uninitialized";
     case uform_status_config_mismatch_k: return "config-mismatch";
     case uform_status_contended_k: return "contended";
     case uform_status_cancelled_k: return "cancelled";
@@ -539,8 +559,9 @@ UFORM_EXPORT uform_status_t uform_status_from_name(uform_bytes_view_t name, ufor
         name,
         {uform_status_success_k, uform_status_deferred_k, uform_status_out_of_memory_k, uform_status_shape_mismatch_k,
          uform_status_unsupported_layout_k, uform_status_unknown_kind_k, uform_status_io_k, uform_status_device_k,
-         uform_status_malformed_k, uform_status_internal_k, uform_status_config_mismatch_k, uform_status_contended_k,
-         uform_status_cancelled_k, uform_status_unsupported_k, uform_status_invalid_argument_k},
+         uform_status_malformed_k, uform_status_internal_k, uform_status_uninitialized_k,
+         uform_status_config_mismatch_k, uform_status_contended_k, uform_status_cancelled_k, uform_status_unsupported_k,
+         uform_status_invalid_argument_k},
         uform_status_name, status);
 }
 
@@ -641,6 +662,22 @@ UFORM_EXPORT uform_status_t uform_gpu_class_from_name(uform_bytes_view_t name, u
     return read_name<uform_gpu_class_t>(name, gpu_classes_k, uform_gpu_class_name, gpu_class);
 }
 
+UFORM_EXPORT char const* uform_gpu_vendor_name(uform_gpu_vendor_t vendor) {
+    switch (vendor) {
+    case uform_gpu_vendor_unknown_k: return "unknown";
+    case uform_gpu_vendor_nvidia_k: return "nvidia";
+    case uform_gpu_vendor_amd_k: return "amd";
+    case uform_gpu_vendor_apple_k: return "apple";
+    }
+    return "unrecognized";
+}
+
+UFORM_EXPORT uform_status_t uform_gpu_vendor_from_name(uform_bytes_view_t name, uform_gpu_vendor_t* vendor) {
+    return read_name<uform_gpu_vendor_t>(
+        name, {uform_gpu_vendor_unknown_k, uform_gpu_vendor_nvidia_k, uform_gpu_vendor_amd_k, uform_gpu_vendor_apple_k},
+        uform_gpu_vendor_name, vendor);
+}
+
 UFORM_EXPORT char const* uform_modality_name(uform_modality_t modality) {
     switch (modality) {
     case uform_modality_text_k: return "text";
@@ -698,6 +735,42 @@ UFORM_EXPORT uform_status_t uform_multimem_tier_from_name(uform_bytes_view_t nam
         name, {uform_multimem_tier_switch_reduced_k, uform_multimem_tier_peer_read_k}, uform_multimem_tier_name, tier);
 }
 
+UFORM_EXPORT char const* uform_pair_loss_form_name(uform_pair_loss_form_t form) {
+    switch (form) {
+    case uform_pair_loss_form_derived_k: return "derived";
+    case uform_pair_loss_form_balanced_k: return "balanced";
+    case uform_pair_loss_form_ranked_k: return "ranked";
+    case uform_pair_loss_form_sigmoid_k: return "sigmoid";
+    }
+    return "unrecognized";
+}
+
+UFORM_EXPORT uform_status_t uform_pair_loss_form_from_name(uform_bytes_view_t name, uform_pair_loss_form_t* form) {
+    return read_name<uform_pair_loss_form_t>(name,
+                                             {uform_pair_loss_form_derived_k, uform_pair_loss_form_balanced_k,
+                                              uform_pair_loss_form_ranked_k, uform_pair_loss_form_sigmoid_k},
+                                             uform_pair_loss_form_name, form);
+}
+
+UFORM_EXPORT char const* uform_late_interaction_side_name(uform_late_interaction_side_t side) {
+    switch (side) {
+    case uform_late_interaction_side_none_k: return "none";
+    case uform_late_interaction_side_query_k: return "query";
+    case uform_late_interaction_side_document_k: return "document";
+    case uform_late_interaction_side_query_and_document_k: return "query-and-document";
+    }
+    return "unrecognized";
+}
+
+UFORM_EXPORT uform_status_t uform_late_interaction_side_from_name(uform_bytes_view_t name,
+                                                                  uform_late_interaction_side_t* side) {
+    return read_name<uform_late_interaction_side_t>(
+        name,
+        {uform_late_interaction_side_none_k, uform_late_interaction_side_query_k,
+         uform_late_interaction_side_document_k, uform_late_interaction_side_query_and_document_k},
+        uform_late_interaction_side_name, side);
+}
+
 #pragma endregion Names
 
 #pragma region Probes
@@ -706,9 +779,8 @@ UFORM_EXPORT void uform_version(int* major, int* minor, int* patch) {
     *major = UFORM_VERSION_MAJOR, *minor = UFORM_VERSION_MINOR, *patch = UFORM_VERSION_PATCH;
 }
 
-/** The release tooling rewrites the literal in place, pre-release suffix included, as it
- *  does the macros. */
-UFORM_EXPORT char const* uform_version_name(void) { return "4.0.0-rc.1"; }
+/** The build reads @c VERSION whole, pre-release suffix included, which the macros cannot carry. */
+UFORM_EXPORT char const* uform_version_name(void) { return UFORM_VERSION_NAME; }
 
 UFORM_EXPORT char const* uform_capabilities_compiled(void) {
     static char const* const rendered = [] {

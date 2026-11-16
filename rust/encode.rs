@@ -17,16 +17,17 @@
 // The C mirror keeps the C spelling of every name.
 #![allow(non_camel_case_types)]
 
+use core::borrow::BorrowMut;
 use core::fmt;
-use core::ops::{BitOr, BitOrAssign};
+use core::ops::{BitOr, BitOrAssign, ControlFlow};
 use core::ptr;
 
-use crate::model::{uform_model_t, Answer, ModelVerbs};
+use crate::model::{Answer, ModelVerbs, uform_model_t};
 use crate::types::{
-    fail, lower_progress, uform_arena_t, uform_completion_t, uform_executor_t, uform_outcome_t, uform_progress_t,
-    uform_rows_tape_view_t, uform_rows_view_t, uform_scalar_t, uform_tape_view_t, Accepts, Arena, Callbacks, Calling,
-    Completion, Deferring, Exported, Gathered, Handles, ProgressCallback, Result, Rows, RowsTape, Scalar, Status, Tape,
-    TapeView,
+    Accepts, Arena, Calling, Completion, Deferring, Exported, Gathered, Handles, ProgressCallback, Result, Rows,
+    RowsTape, Scalar, Status, Tape, TapeView, fail, lower_progress, output_slot, uform_arena_t, uform_completion_t,
+    uform_executor_t, uform_outcome_t, uform_progress_t, uform_rows_tape_view_t, uform_rows_view_t, uform_scalar_t,
+    uform_tape_view_t,
 };
 
 // region: Raw Declarations
@@ -157,7 +158,7 @@ pub struct uform_text_choose_t {
     pub stats: *mut uform_text_encode_stats_t,
 }
 
-extern "C" {
+unsafe extern "C" {
     pub fn uform_text_encode(arguments: *mut uform_text_encode_t);
     pub fn uform_text_choose(arguments: *mut uform_text_choose_t);
     pub fn uform_image_encode(arguments: *mut uform_image_encode_t);
@@ -190,20 +191,28 @@ impl Outputs {
     pub const TOKEN_VECTORS: Outputs = Outputs(4);
 
     /// Whether every surface `other` names is kept.
-    pub const fn contains(self, other: Outputs) -> bool { self.0 & other.0 == other.0 }
+    pub const fn contains(self, other: Outputs) -> bool {
+        self.0 & other.0 == other.0
+    }
 }
 
 impl Default for Outputs {
-    fn default() -> Self { Outputs::EMBEDDINGS }
+    fn default() -> Self {
+        Outputs::EMBEDDINGS
+    }
 }
 
 impl BitOr for Outputs {
     type Output = Outputs;
-    fn bitor(self, other: Outputs) -> Outputs { Outputs(self.0 | other.0) }
+    fn bitor(self, other: Outputs) -> Outputs {
+        Outputs(self.0 | other.0)
+    }
 }
 
 impl BitOrAssign for Outputs {
-    fn bitor_assign(&mut self, other: Outputs) { self.0 |= other.0 }
+    fn bitor_assign(&mut self, other: Outputs) {
+        self.0 |= other.0
+    }
 }
 
 impl fmt::Debug for Outputs {
@@ -213,10 +222,7 @@ impl fmt::Debug for Outputs {
             (Outputs::STATES, "STATES"),
             (Outputs::TOKEN_VECTORS, "TOKEN_VECTORS"),
         ];
-        let mut kept = names
-            .iter()
-            .filter(|(flag, _)| self.contains(*flag))
-            .map(|(_, name)| *name);
+        let mut kept = names.iter().filter(|(flag, _)| self.contains(*flag)).map(|(_, name)| *name);
         formatter.write_str(kept.next().unwrap_or("NONE"))?;
         kept.try_for_each(|name| write!(formatter, " | {name}"))
     }
@@ -358,185 +364,195 @@ pub struct AudioEncodeStats {
 
 /// The scalar and the knobs of [`EncodeVerbs::text_encode`]; a bare [`Scalar`] is the whole config.
 ///
+/// A blocking call lends its handler and stats; a deferred one owns them, and
+/// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
+///
 /// Mirrors `uform_text_encode_t`.
-pub struct TextEncodeConfig<'config> {
+pub struct TextEncodeConfig<Progress, Stats> {
     /// The scalar type every output lands as.
     pub outputs_scalar: Scalar,
     /// Reports the items encoded and stops wherever it says to; a stopped call reports
     /// [`Status::Cancelled`] and leaves no outputs.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the truncation report lands, overwritten by the call.
-    pub stats: Option<&'config mut TextEncodeStats>,
+    pub stats: Option<Stats>,
 }
 
-impl From<Scalar> for TextEncodeConfig<'_> {
+impl<'config> From<Scalar> for TextEncodeConfig<&'config mut ProgressCallback<'config>, &'config mut TextEncodeStats> {
     fn from(outputs_scalar: Scalar) -> Self {
-        TextEncodeConfig {
-            outputs_scalar,
-            progress: None,
-            progress_steps: 0,
-            stats: None,
-        }
+        TextEncodeConfig { outputs_scalar, progress: None, progress_steps: 0, stats: None }
     }
 }
 
 /// The scalar and the knobs of [`EncodeVerbs::image_encode`]; a bare [`Scalar`] is
 /// the whole config.
 ///
+/// A blocking call lends its handler and stats; a deferred one owns them, and
+/// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
+///
 /// Mirrors `uform_image_encode_t`.
-pub struct ImageEncodeConfig<'config> {
+pub struct ImageEncodeConfig<Progress, Stats> {
     /// The scalar type every output lands as.
     pub outputs_scalar: Scalar,
     /// Reports the items encoded and stops wherever it says to.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the truncation report lands, overwritten by the call.
-    pub stats: Option<&'config mut ImageEncodeStats>,
+    pub stats: Option<Stats>,
 }
 
-impl From<Scalar> for ImageEncodeConfig<'_> {
+impl<'config> From<Scalar>
+    for ImageEncodeConfig<&'config mut ProgressCallback<'config>, &'config mut ImageEncodeStats>
+{
     fn from(outputs_scalar: Scalar) -> Self {
-        ImageEncodeConfig {
-            outputs_scalar,
-            progress: None,
-            progress_steps: 0,
-            stats: None,
-        }
+        ImageEncodeConfig { outputs_scalar, progress: None, progress_steps: 0, stats: None }
     }
 }
 
 /// The scalar and the knobs of [`EncodeVerbs::image_encode_pixels`]; a bare [`Scalar`] is
 /// the whole config.
 ///
+/// A blocking call lends its handler and stats; a deferred one owns them, and
+/// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
+///
 /// Mirrors `uform_image_encode_pixels_t`.
-pub struct ImageEncodePixelsConfig<'config> {
+pub struct ImageEncodePixelsConfig<Progress, Stats> {
     /// The scalar type every output lands as.
     pub outputs_scalar: Scalar,
     /// Reports the items encoded and stops wherever it says to.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the truncation report lands, overwritten by the call.
-    pub stats: Option<&'config mut ImageEncodeStats>,
+    pub stats: Option<Stats>,
 }
 
-impl From<Scalar> for ImageEncodePixelsConfig<'_> {
+impl<'config> From<Scalar>
+    for ImageEncodePixelsConfig<&'config mut ProgressCallback<'config>, &'config mut ImageEncodeStats>
+{
     fn from(outputs_scalar: Scalar) -> Self {
-        ImageEncodePixelsConfig {
-            outputs_scalar,
-            progress: None,
-            progress_steps: 0,
-            stats: None,
-        }
+        ImageEncodePixelsConfig { outputs_scalar, progress: None, progress_steps: 0, stats: None }
     }
 }
 
 /// The scalar and the knobs of [`EncodeVerbs::video_encode`]; a bare [`Scalar`] is
 /// the whole config.
 ///
+/// A blocking call lends its handler and stats; a deferred one owns them, and
+/// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
+///
 /// Mirrors `uform_video_encode_t`.
-pub struct VideoEncodeConfig<'config> {
+pub struct VideoEncodeConfig<Progress, Stats> {
     /// The scalar type every output lands as.
     pub outputs_scalar: Scalar,
     /// Reports the items encoded and stops wherever it says to.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the truncation report lands, overwritten by the call.
-    pub stats: Option<&'config mut VideoEncodeStats>,
+    pub stats: Option<Stats>,
 }
 
-impl From<Scalar> for VideoEncodeConfig<'_> {
+impl<'config> From<Scalar>
+    for VideoEncodeConfig<&'config mut ProgressCallback<'config>, &'config mut VideoEncodeStats>
+{
     fn from(outputs_scalar: Scalar) -> Self {
-        VideoEncodeConfig {
-            outputs_scalar,
-            progress: None,
-            progress_steps: 0,
-            stats: None,
-        }
+        VideoEncodeConfig { outputs_scalar, progress: None, progress_steps: 0, stats: None }
     }
 }
 
 /// The scalar and the knobs of [`EncodeVerbs::audio_encode`]; a bare [`Scalar`] is
 /// the whole config.
 ///
+/// A blocking call lends its handler and stats; a deferred one owns them, and
+/// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
+///
 /// Mirrors `uform_audio_encode_t`.
-pub struct AudioEncodeConfig<'config> {
+pub struct AudioEncodeConfig<Progress, Stats> {
     /// The scalar type every output lands as.
     pub outputs_scalar: Scalar,
     /// Reports the items encoded and stops wherever it says to.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the truncation report lands, overwritten by the call.
-    pub stats: Option<&'config mut AudioEncodeStats>,
+    pub stats: Option<Stats>,
 }
 
-impl From<Scalar> for AudioEncodeConfig<'_> {
+impl<'config> From<Scalar>
+    for AudioEncodeConfig<&'config mut ProgressCallback<'config>, &'config mut AudioEncodeStats>
+{
     fn from(outputs_scalar: Scalar) -> Self {
-        AudioEncodeConfig {
-            outputs_scalar,
-            progress: None,
-            progress_steps: 0,
-            stats: None,
-        }
+        AudioEncodeConfig { outputs_scalar, progress: None, progress_steps: 0, stats: None }
     }
 }
 
 /// The scalar and the knobs of [`EncodeVerbs::audio_encode_samples`]; a bare [`Scalar`] is
 /// the whole config.
 ///
+/// A blocking call lends its handler and stats; a deferred one owns them, and
+/// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
+///
 /// Mirrors `uform_audio_encode_samples_t`.
-pub struct AudioEncodeSamplesConfig<'config> {
+pub struct AudioEncodeSamplesConfig<Progress, Stats> {
     /// The scalar type every output lands as.
     pub outputs_scalar: Scalar,
     /// Reports the items encoded and stops wherever it says to.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the truncation report lands, overwritten by the call.
-    pub stats: Option<&'config mut AudioEncodeStats>,
+    pub stats: Option<Stats>,
 }
 
-impl From<Scalar> for AudioEncodeSamplesConfig<'_> {
+impl<'config> From<Scalar>
+    for AudioEncodeSamplesConfig<&'config mut ProgressCallback<'config>, &'config mut AudioEncodeStats>
+{
     fn from(outputs_scalar: Scalar) -> Self {
-        AudioEncodeSamplesConfig {
-            outputs_scalar,
-            progress: None,
-            progress_steps: 0,
-            stats: None,
-        }
+        AudioEncodeSamplesConfig { outputs_scalar, progress: None, progress_steps: 0, stats: None }
     }
 }
 
 /// The question types and the knobs of [`EncodeVerbs::text_choose`]; [`TextChooseConfig::default`]
 /// puts every item in group zero.
 ///
+/// A blocking call lends its handler and stats; a deferred one owns them, and
+/// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
+///
 /// Mirrors `uform_text_choose_t`.
-#[derive(Default)]
-pub struct TextChooseConfig<'config> {
+pub struct TextChooseConfig<
+    'config,
+    Progress = &'config mut ProgressCallback<'config>,
+    Stats = &'config mut TextEncodeStats,
+> {
     /// The question type of each item, below the model's `choice_temperature_groups`; empty puts
     /// every item in group zero.
     pub temperature_groups: &'config [u32],
     /// Reports the items scored and stops wherever it says to; a stopped call reports
     /// [`Status::Cancelled`] and leaves no outputs.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the truncation report lands, overwritten by the call.
-    pub stats: Option<&'config mut TextEncodeStats>,
+    pub stats: Option<Stats>,
 }
 
-impl Accepts<TextEncodeConfig<'static>> for Deferring {}
-impl Accepts<TextChooseConfig<'static>> for Deferring {}
-impl Accepts<ImageEncodeConfig<'static>> for Deferring {}
-impl Accepts<ImageEncodePixelsConfig<'static>> for Deferring {}
-impl Accepts<VideoEncodeConfig<'static>> for Deferring {}
-impl Accepts<AudioEncodeConfig<'static>> for Deferring {}
-impl Accepts<AudioEncodeSamplesConfig<'static>> for Deferring {}
+impl Default for TextChooseConfig<'_> {
+    fn default() -> Self {
+        TextChooseConfig { temperature_groups: &[], progress: None, progress_steps: 0, stats: None }
+    }
+}
+
+impl<Progress: 'static, Stats: 'static> Accepts<TextEncodeConfig<Progress, Stats>> for Deferring {}
+impl<Progress: 'static, Stats: 'static> Accepts<TextChooseConfig<'static, Progress, Stats>> for Deferring {}
+impl<Progress: 'static, Stats: 'static> Accepts<ImageEncodeConfig<Progress, Stats>> for Deferring {}
+impl<Progress: 'static, Stats: 'static> Accepts<ImageEncodePixelsConfig<Progress, Stats>> for Deferring {}
+impl<Progress: 'static, Stats: 'static> Accepts<VideoEncodeConfig<Progress, Stats>> for Deferring {}
+impl<Progress: 'static, Stats: 'static> Accepts<AudioEncodeConfig<Progress, Stats>> for Deferring {}
+impl<Progress: 'static, Stats: 'static> Accepts<AudioEncodeSamplesConfig<Progress, Stats>> for Deferring {}
 
 // endregion: Configs
 
@@ -556,15 +572,20 @@ pub trait EncodeVerbs<'model>: ModelVerbs<'model> {
     /// Encodes UTF-8 texts through one forward, a token per byte.
     ///
     /// Calls `uform_text_encode`.
-    fn text_encode<'config, 'arena, Texts: TapeView<u8>>(
+    fn text_encode<
+        'arena,
+        Texts: TapeView<u8>,
+        Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
+        Stats: BorrowMut<TextEncodeStats>,
+    >(
         self,
         texts: Texts,
         outputs: Outputs,
-        config: impl Into<TextEncodeConfig<'config>>,
+        config: impl Into<TextEncodeConfig<Progress, Stats>>,
         arena: &'arena mut Arena,
-    ) -> Answer<'model, Self, TextEncode<'config, 'arena, Texts>>
+    ) -> Answer<'model, Self, TextEncode<'arena, Texts, Progress, Stats>>
     where
-        Self::Completion: Accepts<Texts> + Accepts<TextEncodeConfig<'config>>,
+        Self::Completion: Accepts<Texts> + Accepts<TextEncodeConfig<Progress, Stats>>,
     {
         <Self::Completion as Completion>::answer(TextEncode {
             handles: self.handles(),
@@ -585,15 +606,22 @@ pub trait EncodeVerbs<'model>: ModelVerbs<'model> {
     /// the byte decoder fails the call with [`Status::Unsupported`].
     ///
     /// Calls `uform_text_choose`.
-    fn text_choose<'config, 'arena, Texts: TapeView<u8>, Choices: TapeView<u8>>(
+    fn text_choose<
+        'config,
+        'arena,
+        Texts: TapeView<u8>,
+        Choices: TapeView<u8>,
+        Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
+        Stats: BorrowMut<TextEncodeStats>,
+    >(
         self,
         texts: Texts,
         choices: Choices,
-        config: impl Into<TextChooseConfig<'config>>,
+        config: impl Into<TextChooseConfig<'config, Progress, Stats>>,
         arena: &'arena mut Arena,
-    ) -> Answer<'model, Self, TextChoose<'config, 'arena, Texts, Choices>>
+    ) -> Answer<'model, Self, TextChoose<'config, 'arena, Texts, Choices, Progress, Stats>>
     where
-        Self::Completion: Accepts<Texts> + Accepts<Choices> + Accepts<TextChooseConfig<'config>>,
+        Self::Completion: Accepts<Texts> + Accepts<Choices> + Accepts<TextChooseConfig<'config, Progress, Stats>>,
     {
         <Self::Completion as Completion>::answer(TextChoose {
             handles: self.handles(),
@@ -612,15 +640,20 @@ pub trait EncodeVerbs<'model>: ModelVerbs<'model> {
     /// [`Status::Malformed`].
     ///
     /// Calls `uform_image_encode`.
-    fn image_encode<'config, 'arena, Images: TapeView<u8>>(
+    fn image_encode<
+        'arena,
+        Images: TapeView<u8>,
+        Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
+        Stats: BorrowMut<ImageEncodeStats>,
+    >(
         self,
         images: Images,
         outputs: Outputs,
-        config: impl Into<ImageEncodeConfig<'config>>,
+        config: impl Into<ImageEncodeConfig<Progress, Stats>>,
         arena: &'arena mut Arena,
-    ) -> Answer<'model, Self, ImageEncode<'config, 'arena, Images>>
+    ) -> Answer<'model, Self, ImageEncode<'arena, Images, Progress, Stats>>
     where
-        Self::Completion: Accepts<Images> + Accepts<ImageEncodeConfig<'config>>,
+        Self::Completion: Accepts<Images> + Accepts<ImageEncodeConfig<Progress, Stats>>,
     {
         <Self::Completion as Completion>::answer(ImageEncode {
             handles: self.handles(),
@@ -636,18 +669,25 @@ pub trait EncodeVerbs<'model>: ModelVerbs<'model> {
     /// `widths[i]` pixels; an item of another length fails with [`Status::ShapeMismatch`].
     ///
     /// Calls `uform_image_encode_pixels`.
-    fn image_encode_pixels<'config, 'arena, Pixels: TapeView<u8>, Heights: AsRef<[u32]>, Widths: AsRef<[u32]>>(
+    fn image_encode_pixels<
+        'arena,
+        Pixels: TapeView<u8>,
+        Heights: AsRef<[u32]>,
+        Widths: AsRef<[u32]>,
+        Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
+        Stats: BorrowMut<ImageEncodeStats>,
+    >(
         self,
         pixels: Pixels,
         heights: Heights,
         widths: Widths,
         outputs: Outputs,
-        config: impl Into<ImageEncodePixelsConfig<'config>>,
+        config: impl Into<ImageEncodePixelsConfig<Progress, Stats>>,
         arena: &'arena mut Arena,
-    ) -> Answer<'model, Self, ImageEncodePixels<'config, 'arena, Pixels, Heights, Widths>>
+    ) -> Answer<'model, Self, ImageEncodePixels<'arena, Pixels, Heights, Widths, Progress, Stats>>
     where
         Self::Completion:
-            Accepts<Pixels> + Accepts<Heights> + Accepts<Widths> + Accepts<ImageEncodePixelsConfig<'config>>,
+            Accepts<Pixels> + Accepts<Heights> + Accepts<Widths> + Accepts<ImageEncodePixelsConfig<Progress, Stats>>,
     {
         <Self::Completion as Completion>::answer(ImageEncodePixels {
             handles: self.handles(),
@@ -664,15 +704,20 @@ pub trait EncodeVerbs<'model>: ModelVerbs<'model> {
     /// Decodes and encodes MP4 or WebM clips.
     ///
     /// Calls `uform_video_encode`.
-    fn video_encode<'config, 'arena, Videos: TapeView<u8>>(
+    fn video_encode<
+        'arena,
+        Videos: TapeView<u8>,
+        Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
+        Stats: BorrowMut<VideoEncodeStats>,
+    >(
         self,
         videos: Videos,
         outputs: Outputs,
-        config: impl Into<VideoEncodeConfig<'config>>,
+        config: impl Into<VideoEncodeConfig<Progress, Stats>>,
         arena: &'arena mut Arena,
-    ) -> Answer<'model, Self, VideoEncode<'config, 'arena, Videos>>
+    ) -> Answer<'model, Self, VideoEncode<'arena, Videos, Progress, Stats>>
     where
-        Self::Completion: Accepts<Videos> + Accepts<VideoEncodeConfig<'config>>,
+        Self::Completion: Accepts<Videos> + Accepts<VideoEncodeConfig<Progress, Stats>>,
     {
         <Self::Completion as Completion>::answer(VideoEncode {
             handles: self.handles(),
@@ -687,15 +732,20 @@ pub trait EncodeVerbs<'model>: ModelVerbs<'model> {
     /// Decodes and encodes WAV, FLAC, MP3 or Opus recordings, resampled to mono.
     ///
     /// Calls `uform_audio_encode`.
-    fn audio_encode<'config, 'arena, Recordings: TapeView<u8>>(
+    fn audio_encode<
+        'arena,
+        Recordings: TapeView<u8>,
+        Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
+        Stats: BorrowMut<AudioEncodeStats>,
+    >(
         self,
         recordings: Recordings,
         outputs: Outputs,
-        config: impl Into<AudioEncodeConfig<'config>>,
+        config: impl Into<AudioEncodeConfig<Progress, Stats>>,
         arena: &'arena mut Arena,
-    ) -> Answer<'model, Self, AudioEncode<'config, 'arena, Recordings>>
+    ) -> Answer<'model, Self, AudioEncode<'arena, Recordings, Progress, Stats>>
     where
-        Self::Completion: Accepts<Recordings> + Accepts<AudioEncodeConfig<'config>>,
+        Self::Completion: Accepts<Recordings> + Accepts<AudioEncodeConfig<Progress, Stats>>,
     {
         <Self::Completion as Completion>::answer(AudioEncode {
             handles: self.handles(),
@@ -711,16 +761,21 @@ pub trait EncodeVerbs<'model>: ModelVerbs<'model> {
     /// where it differs.
     ///
     /// Calls `uform_audio_encode_samples`.
-    fn audio_encode_samples<'config, 'arena, Samples: TapeView<f32>>(
+    fn audio_encode_samples<
+        'arena,
+        Samples: TapeView<f32>,
+        Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
+        Stats: BorrowMut<AudioEncodeStats>,
+    >(
         self,
         samples: Samples,
         sample_rate: u32,
         outputs: Outputs,
-        config: impl Into<AudioEncodeSamplesConfig<'config>>,
+        config: impl Into<AudioEncodeSamplesConfig<Progress, Stats>>,
         arena: &'arena mut Arena,
-    ) -> Answer<'model, Self, AudioEncodeSamples<'config, 'arena, Samples>>
+    ) -> Answer<'model, Self, AudioEncodeSamples<'arena, Samples, Progress, Stats>>
     where
-        Self::Completion: Accepts<Samples> + Accepts<AudioEncodeSamplesConfig<'config>>,
+        Self::Completion: Accepts<Samples> + Accepts<AudioEncodeSamplesConfig<Progress, Stats>>,
     {
         <Self::Completion as Completion>::answer(AudioEncodeSamples {
             handles: self.handles(),
@@ -743,28 +798,30 @@ impl<'model, Receiver: ModelVerbs<'model>> EncodeVerbs<'model> for Receiver {}
 /// A text forward; see [`EncodeVerbs::text_encode`].
 ///
 /// Calls `uform_text_encode`.
-pub struct TextEncode<'config, 'arena, Texts> {
+pub struct TextEncode<'arena, Texts, Progress, Stats> {
     handles: Handles,
     texts: Texts,
     gathered: Gathered<u8>,
     surfaces: Surfaces,
-    config: TextEncodeConfig<'config>,
+    config: TextEncodeConfig<Progress, Stats>,
     arena: &'arena mut Arena,
 }
 
-impl<'arena, Texts: TapeView<u8>> Calling for TextEncode<'_, 'arena, Texts> {
+impl<
+    'arena,
+    Texts: TapeView<u8>,
+    Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
+    Stats: BorrowMut<TextEncodeStats>,
+> Calling for TextEncode<'arena, Texts, Progress, Stats>
+{
     type Arguments = uform_text_encode_t;
     type Output = Encoded<'arena>;
+    type Inputs = (Texts, TextEncodeConfig<Progress, Stats>);
 
-    fn arguments(
-        &mut self,
-        outcome: *mut uform_outcome_t,
-        completion: uform_completion_t,
-        callbacks: &Callbacks,
-    ) -> Result<Self::Arguments> {
+    fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments> {
         let batch = self.texts.tape(&mut self.gathered)?;
         let lent = self.surfaces.lend(batch.count);
-        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
+        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps);
         Ok(uform_text_encode_t {
             model: self.handles.handle,
             executor: self.handles.executor,
@@ -778,19 +835,24 @@ impl<'arena, Texts: TapeView<u8>> Calling for TextEncode<'_, 'arena, Texts> {
             arena: self.arena.handle,
             outputs_scalar: self.config.outputs_scalar as uform_scalar_t,
             progress,
-            stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
+            stats: output_slot(&mut self.config.stats),
         })
     }
 
-    unsafe fn call(arguments: *mut Self::Arguments) { uform_text_encode(arguments) }
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { uform_text_encode(arguments) }
+    }
 
-    fn finish(self) -> Result<Encoded<'arena>> { Ok(self.surfaces.finish(self.arena)) }
+    fn finish(self, status: Result<()>) -> (Result<Encoded<'arena>>, Self::Inputs) {
+        let TextEncode { texts, surfaces, config, arena, .. } = self;
+        (status.map(|()| surfaces.finish(arena)), (texts, config))
+    }
 }
 
 /// A text forward scoring each item's legal choices; see [`EncodeVerbs::text_choose`].
 ///
 /// Calls `uform_text_choose`.
-pub struct TextChoose<'config, 'arena, Texts, Choices> {
+pub struct TextChoose<'config, 'arena, Texts, Choices, Progress, Stats> {
     handles: Handles,
     texts: Texts,
     choices: Choices,
@@ -798,31 +860,32 @@ pub struct TextChoose<'config, 'arena, Texts, Choices> {
     gathered_choices: Gathered<u8>,
     probabilities: Exported<uform_tape_view_t>,
     count: usize,
-    config: TextChooseConfig<'config>,
+    config: TextChooseConfig<'config, Progress, Stats>,
     arena: &'arena mut Arena,
 }
 
-impl<'arena, Texts: TapeView<u8>, Choices: TapeView<u8>> Calling for TextChoose<'_, 'arena, Texts, Choices> {
+impl<
+    'config,
+    'arena,
+    Texts: TapeView<u8>,
+    Choices: TapeView<u8>,
+    Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
+    Stats: BorrowMut<TextEncodeStats>,
+> Calling for TextChoose<'config, 'arena, Texts, Choices, Progress, Stats>
+{
     type Arguments = uform_text_choose_t;
     type Output = Tape<'arena>;
+    type Inputs = (Texts, Choices, TextChooseConfig<'config, Progress, Stats>);
 
-    fn arguments(
-        &mut self,
-        outcome: *mut uform_outcome_t,
-        completion: uform_completion_t,
-        callbacks: &Callbacks,
-    ) -> Result<Self::Arguments> {
+    fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments> {
         let texts = self.texts.tape(&mut self.gathered_texts)?;
         let choices = self.choices.tape(&mut self.gathered_choices)?;
         let groups = self.config.temperature_groups;
         if choices.count != texts.count || (!groups.is_empty() && groups.len() != texts.count) {
-            return Err(fail(
-                Status::ShapeMismatch,
-                "every item needs its choices and, if any, one group",
-            ));
+            return Err(fail(Status::ShapeMismatch, "every item needs its choices and, if any, one group"));
         }
         self.count = texts.count;
-        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
+        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps);
         Ok(uform_text_choose_t {
             model: self.handles.handle,
             executor: self.handles.executor,
@@ -838,46 +901,48 @@ impl<'arena, Texts: TapeView<u8>, Choices: TapeView<u8>> Calling for TextChoose<
             probabilities: ptr::from_mut(&mut self.probabilities.0),
             arena: self.arena.handle,
             progress,
-            stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
+            stats: output_slot(&mut self.config.stats),
         })
     }
 
-    unsafe fn call(arguments: *mut Self::Arguments) { uform_text_choose(arguments) }
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { uform_text_choose(arguments) }
+    }
 
-    fn finish(self) -> Result<Tape<'arena>> {
-        Ok(Tape {
-            arena: self.arena,
-            view: self.probabilities,
-            count: self.count,
-        })
+    fn finish(self, status: Result<()>) -> (Result<Tape<'arena>>, Self::Inputs) {
+        let TextChoose { texts, choices, probabilities, count, config, arena, .. } = self;
+        let tape = status.map(|()| Tape { arena, view: probabilities, count });
+        (tape, (texts, choices, config))
     }
 }
 
 /// An image forward over encoded files; see [`EncodeVerbs::image_encode`].
 ///
 /// Calls `uform_image_encode`.
-pub struct ImageEncode<'config, 'arena, Images> {
+pub struct ImageEncode<'arena, Images, Progress, Stats> {
     handles: Handles,
     images: Images,
     gathered: Gathered<u8>,
     surfaces: Surfaces,
-    config: ImageEncodeConfig<'config>,
+    config: ImageEncodeConfig<Progress, Stats>,
     arena: &'arena mut Arena,
 }
 
-impl<'arena, Images: TapeView<u8>> Calling for ImageEncode<'_, 'arena, Images> {
+impl<
+    'arena,
+    Images: TapeView<u8>,
+    Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
+    Stats: BorrowMut<ImageEncodeStats>,
+> Calling for ImageEncode<'arena, Images, Progress, Stats>
+{
     type Arguments = uform_image_encode_t;
     type Output = Encoded<'arena>;
+    type Inputs = (Images, ImageEncodeConfig<Progress, Stats>);
 
-    fn arguments(
-        &mut self,
-        outcome: *mut uform_outcome_t,
-        completion: uform_completion_t,
-        callbacks: &Callbacks,
-    ) -> Result<Self::Arguments> {
+    fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments> {
         let batch = self.images.tape(&mut self.gathered)?;
         let lent = self.surfaces.lend(batch.count);
-        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
+        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps);
         Ok(uform_image_encode_t {
             model: self.handles.handle,
             executor: self.handles.executor,
@@ -891,48 +956,55 @@ impl<'arena, Images: TapeView<u8>> Calling for ImageEncode<'_, 'arena, Images> {
             arena: self.arena.handle,
             outputs_scalar: self.config.outputs_scalar as uform_scalar_t,
             progress,
-            stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
+            stats: output_slot(&mut self.config.stats),
         })
     }
 
-    unsafe fn call(arguments: *mut Self::Arguments) { uform_image_encode(arguments) }
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { uform_image_encode(arguments) }
+    }
 
-    fn finish(self) -> Result<Encoded<'arena>> { Ok(self.surfaces.finish(self.arena)) }
+    fn finish(self, status: Result<()>) -> (Result<Encoded<'arena>>, Self::Inputs) {
+        let ImageEncode { images, surfaces, config, arena, .. } = self;
+        (status.map(|()| surfaces.finish(arena)), (images, config))
+    }
 }
 
 /// An image forward over decoded pixels; see [`EncodeVerbs::image_encode_pixels`].
 ///
 /// Calls `uform_image_encode_pixels`.
-pub struct ImageEncodePixels<'config, 'arena, Pixels, Heights, Widths> {
+pub struct ImageEncodePixels<'arena, Pixels, Heights, Widths, Progress, Stats> {
     handles: Handles,
     pixels: Pixels,
     heights: Heights,
     widths: Widths,
     gathered: Gathered<u8>,
     surfaces: Surfaces,
-    config: ImageEncodePixelsConfig<'config>,
+    config: ImageEncodePixelsConfig<Progress, Stats>,
     arena: &'arena mut Arena,
 }
 
-impl<'arena, Pixels: TapeView<u8>, Heights: AsRef<[u32]>, Widths: AsRef<[u32]>> Calling
-    for ImageEncodePixels<'_, 'arena, Pixels, Heights, Widths>
+impl<
+    'arena,
+    Pixels: TapeView<u8>,
+    Heights: AsRef<[u32]>,
+    Widths: AsRef<[u32]>,
+    Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
+    Stats: BorrowMut<ImageEncodeStats>,
+> Calling for ImageEncodePixels<'arena, Pixels, Heights, Widths, Progress, Stats>
 {
     type Arguments = uform_image_encode_pixels_t;
     type Output = Encoded<'arena>;
+    type Inputs = (Pixels, Heights, Widths, ImageEncodePixelsConfig<Progress, Stats>);
 
-    fn arguments(
-        &mut self,
-        outcome: *mut uform_outcome_t,
-        completion: uform_completion_t,
-        callbacks: &Callbacks,
-    ) -> Result<Self::Arguments> {
+    fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments> {
         let batch = self.pixels.tape(&mut self.gathered)?;
         let (heights, widths) = (self.heights.as_ref(), self.widths.as_ref());
         if heights.len() != batch.count || widths.len() != batch.count {
             return Err(fail(Status::ShapeMismatch, "every item needs one height and one width"));
         }
         let lent = self.surfaces.lend(batch.count);
-        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
+        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps);
         Ok(uform_image_encode_pixels_t {
             model: self.handles.handle,
             executor: self.handles.executor,
@@ -948,40 +1020,47 @@ impl<'arena, Pixels: TapeView<u8>, Heights: AsRef<[u32]>, Widths: AsRef<[u32]>> 
             arena: self.arena.handle,
             outputs_scalar: self.config.outputs_scalar as uform_scalar_t,
             progress,
-            stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
+            stats: output_slot(&mut self.config.stats),
         })
     }
 
-    unsafe fn call(arguments: *mut Self::Arguments) { uform_image_encode_pixels(arguments) }
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { uform_image_encode_pixels(arguments) }
+    }
 
-    fn finish(self) -> Result<Encoded<'arena>> { Ok(self.surfaces.finish(self.arena)) }
+    fn finish(self, status: Result<()>) -> (Result<Encoded<'arena>>, Self::Inputs) {
+        let ImageEncodePixels { pixels, heights, widths, surfaces, config, arena, .. } = self;
+        (status.map(|()| surfaces.finish(arena)), (pixels, heights, widths, config))
+    }
 }
 
 /// A video forward over encoded clips; see [`EncodeVerbs::video_encode`].
 ///
 /// Calls `uform_video_encode`.
-pub struct VideoEncode<'config, 'arena, Videos> {
+pub struct VideoEncode<'arena, Videos, Progress, Stats> {
     handles: Handles,
     videos: Videos,
     gathered: Gathered<u8>,
     surfaces: Surfaces,
-    config: VideoEncodeConfig<'config>,
+    config: VideoEncodeConfig<Progress, Stats>,
     arena: &'arena mut Arena,
 }
 
-impl<'arena, Videos: TapeView<u8>> Calling for VideoEncode<'_, 'arena, Videos> {
+impl<
+    'arena,
+    Videos: TapeView<u8>,
+    Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
+    Stats: BorrowMut<VideoEncodeStats>,
+> Calling for VideoEncode<'arena, Videos, Progress, Stats>
+{
     type Arguments = uform_video_encode_t;
     type Output = Encoded<'arena>;
+    type Inputs = (Videos, VideoEncodeConfig<Progress, Stats>);
 
-    fn arguments(
-        &mut self,
-        outcome: *mut uform_outcome_t,
-        completion: uform_completion_t,
-        callbacks: &Callbacks,
-    ) -> Result<Self::Arguments> {
+    fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments> {
         let batch = self.videos.tape(&mut self.gathered)?;
         let lent = self.surfaces.lend(batch.count);
-        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
+        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps);
         Ok(uform_video_encode_t {
             model: self.handles.handle,
             executor: self.handles.executor,
@@ -995,40 +1074,47 @@ impl<'arena, Videos: TapeView<u8>> Calling for VideoEncode<'_, 'arena, Videos> {
             arena: self.arena.handle,
             outputs_scalar: self.config.outputs_scalar as uform_scalar_t,
             progress,
-            stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
+            stats: output_slot(&mut self.config.stats),
         })
     }
 
-    unsafe fn call(arguments: *mut Self::Arguments) { uform_video_encode(arguments) }
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { uform_video_encode(arguments) }
+    }
 
-    fn finish(self) -> Result<Encoded<'arena>> { Ok(self.surfaces.finish(self.arena)) }
+    fn finish(self, status: Result<()>) -> (Result<Encoded<'arena>>, Self::Inputs) {
+        let VideoEncode { videos, surfaces, config, arena, .. } = self;
+        (status.map(|()| surfaces.finish(arena)), (videos, config))
+    }
 }
 
 /// An audio forward over encoded recordings; see [`EncodeVerbs::audio_encode`].
 ///
 /// Calls `uform_audio_encode`.
-pub struct AudioEncode<'config, 'arena, Recordings> {
+pub struct AudioEncode<'arena, Recordings, Progress, Stats> {
     handles: Handles,
     recordings: Recordings,
     gathered: Gathered<u8>,
     surfaces: Surfaces,
-    config: AudioEncodeConfig<'config>,
+    config: AudioEncodeConfig<Progress, Stats>,
     arena: &'arena mut Arena,
 }
 
-impl<'arena, Recordings: TapeView<u8>> Calling for AudioEncode<'_, 'arena, Recordings> {
+impl<
+    'arena,
+    Recordings: TapeView<u8>,
+    Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
+    Stats: BorrowMut<AudioEncodeStats>,
+> Calling for AudioEncode<'arena, Recordings, Progress, Stats>
+{
     type Arguments = uform_audio_encode_t;
     type Output = Encoded<'arena>;
+    type Inputs = (Recordings, AudioEncodeConfig<Progress, Stats>);
 
-    fn arguments(
-        &mut self,
-        outcome: *mut uform_outcome_t,
-        completion: uform_completion_t,
-        callbacks: &Callbacks,
-    ) -> Result<Self::Arguments> {
+    fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments> {
         let batch = self.recordings.tape(&mut self.gathered)?;
         let lent = self.surfaces.lend(batch.count);
-        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
+        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps);
         Ok(uform_audio_encode_t {
             model: self.handles.handle,
             executor: self.handles.executor,
@@ -1042,41 +1128,48 @@ impl<'arena, Recordings: TapeView<u8>> Calling for AudioEncode<'_, 'arena, Recor
             arena: self.arena.handle,
             outputs_scalar: self.config.outputs_scalar as uform_scalar_t,
             progress,
-            stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
+            stats: output_slot(&mut self.config.stats),
         })
     }
 
-    unsafe fn call(arguments: *mut Self::Arguments) { uform_audio_encode(arguments) }
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { uform_audio_encode(arguments) }
+    }
 
-    fn finish(self) -> Result<Encoded<'arena>> { Ok(self.surfaces.finish(self.arena)) }
+    fn finish(self, status: Result<()>) -> (Result<Encoded<'arena>>, Self::Inputs) {
+        let AudioEncode { recordings, surfaces, config, arena, .. } = self;
+        (status.map(|()| surfaces.finish(arena)), (recordings, config))
+    }
 }
 
 /// An audio forward over decoded samples; see [`EncodeVerbs::audio_encode_samples`].
 ///
 /// Calls `uform_audio_encode_samples`.
-pub struct AudioEncodeSamples<'config, 'arena, Samples> {
+pub struct AudioEncodeSamples<'arena, Samples, Progress, Stats> {
     handles: Handles,
     samples: Samples,
     sample_rate: u32,
     gathered: Gathered<f32>,
     surfaces: Surfaces,
-    config: AudioEncodeSamplesConfig<'config>,
+    config: AudioEncodeSamplesConfig<Progress, Stats>,
     arena: &'arena mut Arena,
 }
 
-impl<'arena, Samples: TapeView<f32>> Calling for AudioEncodeSamples<'_, 'arena, Samples> {
+impl<
+    'arena,
+    Samples: TapeView<f32>,
+    Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
+    Stats: BorrowMut<AudioEncodeStats>,
+> Calling for AudioEncodeSamples<'arena, Samples, Progress, Stats>
+{
     type Arguments = uform_audio_encode_samples_t;
     type Output = Encoded<'arena>;
+    type Inputs = (Samples, AudioEncodeSamplesConfig<Progress, Stats>);
 
-    fn arguments(
-        &mut self,
-        outcome: *mut uform_outcome_t,
-        completion: uform_completion_t,
-        callbacks: &Callbacks,
-    ) -> Result<Self::Arguments> {
+    fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments> {
         let batch = self.samples.tape(&mut self.gathered)?;
         let lent = self.surfaces.lend(batch.count);
-        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
+        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps);
         Ok(uform_audio_encode_samples_t {
             model: self.handles.handle,
             executor: self.handles.executor,
@@ -1091,13 +1184,18 @@ impl<'arena, Samples: TapeView<f32>> Calling for AudioEncodeSamples<'_, 'arena, 
             arena: self.arena.handle,
             outputs_scalar: self.config.outputs_scalar as uform_scalar_t,
             progress,
-            stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
+            stats: output_slot(&mut self.config.stats),
         })
     }
 
-    unsafe fn call(arguments: *mut Self::Arguments) { uform_audio_encode_samples(arguments) }
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { uform_audio_encode_samples(arguments) }
+    }
 
-    fn finish(self) -> Result<Encoded<'arena>> { Ok(self.surfaces.finish(self.arena)) }
+    fn finish(self, status: Result<()>) -> (Result<Encoded<'arena>>, Self::Inputs) {
+        let AudioEncodeSamples { samples, surfaces, config, arena, .. } = self;
+        (status.map(|()| surfaces.finish(arena)), (samples, config))
+    }
 }
 
 // endregion: Calls
@@ -1110,21 +1208,21 @@ mod tests {
     use core::ops::ControlFlow;
     use core::pin::pin;
     use core::task::{Context, Poll, Waker};
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
     use crate::model::Model;
     use crate::types::{Executor, Mood};
 
-    fn model() -> Result<Model> { Model::load_ram_buffer(&crate::model::tests::checkpoint()) }
+    fn model() -> Result<Model> {
+        Model::load_ram_buffer(&crate::model::tests::checkpoint())
+    }
 
     /// CRC-32 of `bytes`, as PNG chunks carry it.
     fn crc32(bytes: &[u8]) -> u32 {
         !bytes.iter().fold(!0u32, |crc, &byte| {
-            (0..8).fold(crc ^ u32::from(byte), |crc, _| {
-                (crc >> 1) ^ (0xEDB8_8320 & 0u32.wrapping_sub(crc & 1))
-            })
+            (0..8).fold(crc ^ u32::from(byte), |crc, _| (crc >> 1) ^ (0xEDB8_8320 & 0u32.wrapping_sub(crc & 1)))
         })
     }
 
@@ -1147,11 +1245,9 @@ mod tests {
         ]
         .concat();
         let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
-        for (kind, data) in [
-            (b"IHDR", &[0, 0, 0, 8, 0, 0, 0, 8, 8, 2, 0, 0, 0][..]),
-            (b"IDAT", &stream),
-            (b"IEND", &[]),
-        ] {
+        for (kind, data) in
+            [(b"IHDR", &[0, 0, 0, 8, 0, 0, 0, 8, 8, 2, 0, 0, 0][..]), (b"IDAT", &stream), (b"IEND", &[])]
+        {
             let body = [&kind[..], data].concat();
             png.extend((data.len() as u32).to_be_bytes());
             png.extend(&body);
@@ -1162,9 +1258,8 @@ mod tests {
 
     /// A valid 16 kHz mono 16-bit WAV of a sawtooth.
     fn wav() -> Vec<u8> {
-        let samples: Vec<u8> = (0..1600i32)
-            .flat_map(|sample| (((sample % 64) * 512 - 16384) as i16).to_le_bytes())
-            .collect();
+        let samples: Vec<u8> =
+            (0..1600i32).flat_map(|sample| (((sample % 64) * 512 - 16384) as i16).to_le_bytes()).collect();
         let format = [1u16, 1].map(u16::to_le_bytes).concat();
         let rates = [16_000u32, 32_000].map(u32::to_le_bytes).concat();
         let framing = [2u16, 16].map(u16::to_le_bytes).concat();
@@ -1184,14 +1279,13 @@ mod tests {
     }
 
     /// One executor per test, since an executor runs one call at a time.
-    fn executor() -> Result<Executor> { Executor::for_ram(&[], None, 1) }
+    fn executor() -> Result<Executor> {
+        Executor::for_ram(&[], None, 1)
+    }
 
     /// The rows an embeddings surface holds, copied out of the arena.
     fn embeddings_of(encoded: &Encoded<'_>) -> Result<Vec<f32>> {
-        let embeddings = encoded
-            .embeddings
-            .as_ref()
-            .ok_or(fail(Status::Internal, "no embeddings were kept"))?;
+        let embeddings = encoded.embeddings.as_ref().ok_or(fail(Status::Internal, "no embeddings were kept"))?;
         Ok(embeddings.values::<f32>()?.to_vec())
     }
 
@@ -1213,16 +1307,10 @@ mod tests {
         let texts = ["a caption", "", "another, longer caption"];
         let mut arena = Arena::new()?;
         let mut stats = TextEncodeStats::default();
-        let config = TextEncodeConfig {
-            stats: Some(&mut stats),
-            ..TextEncodeConfig::from(Scalar::F32)
-        };
+        let config = TextEncodeConfig { stats: Some(&mut stats), ..TextEncodeConfig::from(Scalar::F32) };
         let encoded = model.text_encode(&texts, Outputs::EMBEDDINGS | Outputs::STATES, config, &mut arena)?;
 
-        let embeddings = encoded
-            .embeddings
-            .as_ref()
-            .ok_or(fail(Status::Internal, "no embeddings"))?;
+        let embeddings = encoded.embeddings.as_ref().ok_or(fail(Status::Internal, "no embeddings"))?;
         assert_eq!((embeddings.count(), embeddings.columns()), (texts.len(), dimensions));
         assert_eq!(embeddings.scalar(), Some(Scalar::F32));
         assert_eq!(embeddings.values::<f32>()?.len(), texts.len() * dimensions);
@@ -1233,26 +1321,16 @@ mod tests {
         assert_eq!(states.offsets()?, [0, 9, 9, 32]);
         assert_eq!(states.rows()?.count(), 32);
         assert_eq!(states.item(1)?.count(), 0);
-        assert_eq!(
-            states.item(2)?.values::<f32>()?,
-            &states.rows()?.values::<f32>()?[9 * dimensions..]
-        );
-        assert_eq!(
-            states.item(3).err().map(|error| error.status),
-            Some(Status::InvalidArgument)
-        );
+        assert_eq!(states.item(2)?.values::<f32>()?, &states.rows()?.values::<f32>()?[9 * dimensions..]);
+        assert_eq!(states.item(3).err().map(|error| error.status), Some(Status::InvalidArgument));
         let local = embeddings_of(&encoded)?;
         assert_eq!((stats.truncated, stats.tokens), (0, 32));
 
         let executor = executor()?;
-        let blocking = model
-            .on(&executor)
-            .text_encode(texts, Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
+        let blocking = model.on(&executor).text_encode(texts, Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
         assert_eq!(embeddings_of(&blocking)?, local);
         let texts: Vec<String> = texts.iter().map(|text| text.to_string()).collect();
-        let deferred = model
-            .deferred(&executor)
-            .text_encode(texts, Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
+        let deferred = model.deferred(&executor).text_encode(texts, Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
         assert_eq!(embeddings_of(&deferred.wait()?)?, local);
         Ok(())
     }
@@ -1276,9 +1354,7 @@ mod tests {
         }
         let encoded = encoded?;
         let states = encoded.states.ok_or(fail(Status::Internal, "no states"))?;
-        let vectors = encoded
-            .token_vectors
-            .ok_or(fail(Status::Internal, "no token vectors"))?;
+        let vectors = encoded.token_vectors.ok_or(fail(Status::Internal, "no token vectors"))?;
         assert_eq!(vectors.offsets()?, states.offsets()?);
         let rows = vectors.rows()?;
         assert_eq!(rows.columns(), token_width);
@@ -1309,10 +1385,7 @@ mod tests {
             let sum: f32 = probabilities.item::<f32>(item)?.iter().sum();
             assert!((0.999..1.001).contains(&sum), "each item's probabilities sum to one");
         }
-        let past = TextChooseConfig {
-            temperature_groups: &[0, groups as u32],
-            ..TextChooseConfig::default()
-        };
+        let past = TextChooseConfig { temperature_groups: &[0, groups as u32], ..TextChooseConfig::default() };
         let refused = model.text_choose(&texts, &choices, past, &mut arena);
         assert_eq!(refused.err().map(|error| error.status), Some(Status::InvalidArgument));
         Ok(())
@@ -1354,18 +1427,11 @@ mod tests {
         let model = model()?;
         let context = model.describe()?.context;
         let mut stats = TextEncodeStats::default();
-        let config = TextEncodeConfig {
-            stats: Some(&mut stats),
-            ..TextEncodeConfig::from(Scalar::F32)
-        };
+        let config = TextEncodeConfig { stats: Some(&mut stats), ..TextEncodeConfig::from(Scalar::F32) };
         let long = "u".repeat(context + 7);
         let mut arena = Arena::new()?;
         let encoded = model.text_encode(&[long.as_str(), "short"], Outputs::STATES, config, &mut arena)?;
-        let offsets = encoded
-            .states
-            .ok_or(fail(Status::Internal, "no states"))?
-            .offsets()?
-            .to_vec();
+        let offsets = encoded.states.ok_or(fail(Status::Internal, "no states"))?.offsets()?.to_vec();
         assert_eq!(offsets, [0, context, context + 5]);
         assert_eq!((stats.truncated, stats.tokens), (1, context + 5));
         Ok(())
@@ -1386,14 +1452,8 @@ mod tests {
         )?;
         assert_eq!(encoded.embeddings.map(|rows| rows.count()), Some(1));
 
-        let unpaired = model.image_encode_pixels(
-            [&image],
-            [16u32, 16],
-            [8u32],
-            Outputs::EMBEDDINGS,
-            Scalar::F16,
-            &mut arena,
-        );
+        let unpaired =
+            model.image_encode_pixels([&image], [16u32, 16], [8u32], Outputs::EMBEDDINGS, Scalar::F16, &mut arena);
         assert_eq!(unpaired.err().map(|error| error.status), Some(Status::ShapeMismatch));
         let misshapen =
             model.image_encode_pixels([&image], [16u32], [9u32], Outputs::EMBEDDINGS, Scalar::F16, &mut arena);
@@ -1407,10 +1467,8 @@ mod tests {
         let mut arena = Arena::new()?;
         let samples = vec![vec![0.25f32; 1000], vec![-0.5f32; 10]];
         let mut stats = AudioEncodeStats::default();
-        let config = AudioEncodeSamplesConfig {
-            stats: Some(&mut stats),
-            ..AudioEncodeSamplesConfig::from(Scalar::F32)
-        };
+        let config =
+            AudioEncodeSamplesConfig { stats: Some(&mut stats), ..AudioEncodeSamplesConfig::from(Scalar::F32) };
         let encoded = model.audio_encode_samples(&samples, 16_000, Outputs::EMBEDDINGS, config, &mut arena)?;
         assert_eq!(encoded.embeddings.map(|rows| rows.count()), Some(2));
         assert!(stats.tokens >= 2, "every recording spans a frame");
@@ -1423,26 +1481,13 @@ mod tests {
     }
 
     #[test]
-    fn a_stopping_handler_cancels_the_call_and_a_panicking_one_resurfaces() -> Result<()> {
+    fn a_stopping_handler_cancels_the_call() -> Result<()> {
         let model = model()?;
         let mut arena = Arena::new()?;
         let mut stop = |_, _| ControlFlow::Break(());
-        let config = TextEncodeConfig {
-            progress: Some(&mut stop),
-            ..TextEncodeConfig::from(Scalar::F32)
-        };
+        let config = TextEncodeConfig { progress: Some(&mut stop as _), ..TextEncodeConfig::from(Scalar::F32) };
         let stopped = model.text_encode(&["a", "b"], Outputs::EMBEDDINGS, config, &mut arena);
         assert_eq!(stopped.err().map(|error| error.status), Some(Status::Cancelled));
-
-        let raised = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
-            let mut explode = |_, _| -> ControlFlow<()> { panic!("the handler failed") };
-            let config = TextEncodeConfig {
-                progress: Some(&mut explode),
-                ..TextEncodeConfig::from(Scalar::F32)
-            };
-            let _ = model.text_encode(&["a"], Outputs::EMBEDDINGS, config, &mut arena);
-        }));
-        assert!(raised.is_err(), "the handler's panic resurfaces once the call is final");
         Ok(())
     }
 
@@ -1454,9 +1499,7 @@ mod tests {
         let executor = executor()?;
         let mut arena = Arena::new_in(&executor)?;
         let call =
-            model
-                .deferred(&executor)
-                .text_encode(vec!["uform"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
+            model.deferred(&executor).text_encode(vec!["uform"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
         let mut awaited = pin!(call.into_future());
         let mut context = Context::from_waker(Waker::noop());
         let encoded = loop {
@@ -1480,7 +1523,7 @@ mod tests {
         let mut arena = Arena::new_in(&executor)?;
         let (reached, opened) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
         let submitter = std::thread::current().id();
-        let gate = Box::leak(Box::new({
+        let gate = {
             let (reached, opened) = (reached.clone(), opened.clone());
             move |_: usize, _: usize| {
                 // A call run at submission is on the submitter, which could never open it.
@@ -1490,25 +1533,26 @@ mod tests {
                 }
                 ControlFlow::Continue(())
             }
-        }));
-        let config = TextEncodeConfig {
-            progress: Some(gate),
-            ..TextEncodeConfig::from(Scalar::F32)
         };
-        let call = model
-            .deferred(&executor)
-            .text_encode(vec!["uform"], Outputs::EMBEDDINGS, config, &mut arena)?;
+        // The deferred call owns its handler and stats, and hands both back once final.
+        let config = TextEncodeConfig {
+            outputs_scalar: Scalar::F32,
+            progress: Some(gate),
+            progress_steps: 0,
+            stats: Some(TextEncodeStats::default()),
+        };
+        let call = model.deferred(&executor).text_encode(vec!["uform"], Outputs::EMBEDDINGS, config, &mut arena)?;
         if call.status() == Err(Status::Deferred) {
             while !reached.load(Ordering::Acquire) {}
             let refused = model.on(&executor).describe();
             assert_eq!(refused.err().map(|error| error.status), Some(Status::Contended));
             opened.store(true, Ordering::Release);
         }
-        assert!(call.wait().is_ok());
-        assert!(
-            model.on(&executor).describe().is_ok(),
-            "a final call gives its executor back"
-        );
+        let (encoded, (_, config)) = call.wait_with_inputs();
+        assert!(encoded.is_ok());
+        assert!(config.progress.is_some(), "the call hands its handler back");
+        assert_eq!(config.stats.map(|stats| stats.tokens), Some(5));
+        assert!(model.on(&executor).describe().is_ok(), "a final call gives its executor back");
         Ok(())
     }
 
@@ -1519,22 +1563,41 @@ mod tests {
         let model = model()?;
         let executor = executor()?;
         let mut arena = Arena::new_in(&executor)?;
-        let call = model
-            .deferred(&executor)
-            .text_encode(vec!["a"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
+        let call = model.deferred(&executor).text_encode(vec!["a"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
         drop(call);
-        assert!(model
-            .text_encode(&["b"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena)
-            .is_ok());
+        assert!(model.text_encode(&["b"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena).is_ok());
 
-        let leaked = model
-            .deferred(&executor)
-            .text_encode(vec!["c"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
+        let leaked = model.deferred(&executor).text_encode(vec!["c"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
         core::mem::forget(leaked);
         executor.drain(Mood::Parked)?;
-        assert!(model
-            .text_encode(&["d"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena)
-            .is_ok());
+        assert!(model.text_encode(&["d"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena).is_ok());
+        Ok(())
+    }
+
+    /// The Quickstart of `rust/README.md`, line for line, but loading the suite's checkpoint
+    /// bytes and photo in place of `model.safetensors` and `cat.png`, and checking the caption
+    /// it prints.
+    #[test]
+    fn the_quickstart_names_the_caption_closest_to_the_photo() -> core::result::Result<(), Box<dyn std::error::Error>> {
+        let executor = Executor::for_ram(&[], None, 0)?;
+        let mut texts_arena = Arena::new_in(&executor)?;
+        let mut images_arena = Arena::new_in(&executor)?;
+        let model = model()?;
+
+        let captions = ["a cat on a mat", "a sunrise over the bay"];
+        let photo = png();
+        let texts = model.on(&executor).text_encode(&captions, Outputs::EMBEDDINGS, Scalar::F32, &mut texts_arena)?;
+        let images = model.on(&executor).image_encode(&[photo], Outputs::EMBEDDINGS, Scalar::F32, &mut images_arena)?;
+        let (texts, images) = (texts.embeddings.expect("asked for"), images.embeddings.expect("asked for"));
+
+        let image: &[f32] = images.values()?;
+        let cosine = |text: &[f32]| {
+            let dot: f32 = text.iter().zip(image).map(|(t, i)| t * i).sum();
+            dot / (text.iter().map(|t| t * t).sum::<f32>() * image.iter().map(|i| i * i).sum::<f32>()).sqrt()
+        };
+        let rows: Vec<&[f32]> = texts.values::<f32>()?.chunks(texts.columns()).collect();
+        let best = usize::from(cosine(rows[1]) > cosine(rows[0]));
+        assert!(captions[best].starts_with('a') && !cosine(rows[best]).is_nan());
         Ok(())
     }
 }

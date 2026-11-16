@@ -54,11 +54,11 @@ uform_sibling(
 )
 uform_sibling(
     forkunion FETCHCONTENT_SOURCE_DIR_FORKUNION https://github.com/ashvardanian/ForkUnion
-    b9c6f4c4c3b417061c67859517b945716916bd51
+    7fe655aa759804b6c3a5ceef517650a5fceee02e
 )
 
 # SmashTable's containers, header-only
 uform_sibling(
     smashtable FETCHCONTENT_SOURCE_DIR_SMASHTABLE https://github.com/ashvardanian/SmashTable
-    c2a4b7310423d671099ebd3e3f250383959cd413
+    09caec7b2084dd20a6563c8f0e87448eebf90d43
 )

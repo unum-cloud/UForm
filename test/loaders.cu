@@ -1286,12 +1286,14 @@ static void cross_rank_sampling(test_suite_t& suite) {
     for (std::size_t peer = 0; peer != count; ++peer) {
         if (peer == index) continue;
         sz::string_t other;
-        if (expected_t awaited = topology.await_text(static_cast<u32_t>(peer), "shards", other, 60.0); !awaited)
+        if (expected_t awaited = topology.await_text(static_cast<u32_t>(peer), "shards", other, wait_limit_seconds_k);
+            !awaited)
             distinct = false;
         else if (other.view() == mine.view()) distinct = false; // a peer drew the byte-identical shard set
     }
     suite.check(distinct, "rank {} must draw a shard set distinct from every peer", index);
-    suite.check(static_cast<bool>(topology.barrier("done", 60.0)), "the closing barrier should complete");
+    suite.check(static_cast<bool>(topology.barrier("done", wait_limit_seconds_k)),
+                "the closing barrier should complete");
 }
 
 int main(int, char** argv) {

@@ -36,11 +36,13 @@ from uform.model import (
 )
 from uform.train import (
     MeshBootstrap,
+    LateInteractionSide,
     MeshDescribe,
     Modality,
     MultimemTier,
     Negatives,
     Objective,
+    PairLossForm,
     TrainerInitVram,
     TrainerSave,
     TrainerStep,
@@ -61,6 +63,7 @@ from uform.types import (
     GPUDevice,
     GPUDevices,
     GPUDevicesArguments,
+    GPUVendor,
     Mood,
     NameOf,
     Outcome,
@@ -160,6 +163,10 @@ struct Symbols:
     """`uform_gpu_class_name`."""
     var gpu_class_from_name: FromName
     """`uform_gpu_class_from_name`."""
+    var gpu_vendor_name: NameOf
+    """`uform_gpu_vendor_name`."""
+    var gpu_vendor_from_name: FromName
+    """`uform_gpu_vendor_from_name`."""
     var gpu_devices: GPUDevices
     """`uform_gpu_devices`."""
 
@@ -224,6 +231,14 @@ struct Symbols:
     """`uform_multimem_tier_name`."""
     var multimem_tier_from_name: FromName
     """`uform_multimem_tier_from_name`."""
+    var pair_loss_form_name: NameOf
+    """`uform_pair_loss_form_name`."""
+    var pair_loss_form_from_name: FromName
+    """`uform_pair_loss_form_from_name`."""
+    var late_interaction_side_name: NameOf
+    """`uform_late_interaction_side_name`."""
+    var late_interaction_side_from_name: FromName
+    """`uform_late_interaction_side_from_name`."""
     var mesh_bootstrap: MeshBootstrap
     """`uform_mesh_bootstrap`."""
     var mesh_describe: MeshDescribe
@@ -265,6 +280,8 @@ struct Symbols:
         self.cpu_class_from_name = _resolve[FromName](handle, "uform_cpu_class_from_name")
         self.gpu_class_name = _resolve[NameOf](handle, "uform_gpu_class_name")
         self.gpu_class_from_name = _resolve[FromName](handle, "uform_gpu_class_from_name")
+        self.gpu_vendor_name = _resolve[NameOf](handle, "uform_gpu_vendor_name")
+        self.gpu_vendor_from_name = _resolve[FromName](handle, "uform_gpu_vendor_from_name")
         self.gpu_devices = _resolve[GPUDevices](handle, "uform_gpu_devices")
 
         self.executor_for_ram = _resolve[ExecutorForRam](handle, "uform_executor_for_ram")
@@ -299,6 +316,10 @@ struct Symbols:
         self.negatives_from_name = _resolve[FromName](handle, "uform_negatives_from_name")
         self.multimem_tier_name = _resolve[NameOf](handle, "uform_multimem_tier_name")
         self.multimem_tier_from_name = _resolve[FromName](handle, "uform_multimem_tier_from_name")
+        self.pair_loss_form_name = _resolve[NameOf](handle, "uform_pair_loss_form_name")
+        self.pair_loss_form_from_name = _resolve[FromName](handle, "uform_pair_loss_form_from_name")
+        self.late_interaction_side_name = _resolve[NameOf](handle, "uform_late_interaction_side_name")
+        self.late_interaction_side_from_name = _resolve[FromName](handle, "uform_late_interaction_side_from_name")
         self.mesh_bootstrap = _resolve[MeshBootstrap](handle, "uform_mesh_bootstrap")
         self.mesh_describe = _resolve[MeshDescribe](handle, "uform_mesh_describe")
         self.mesh_free = _resolve[Release](handle, "uform_mesh_free")
@@ -448,6 +469,14 @@ struct Library(ImplicitlyCopyable):
         """Reads a spelling back, raising `INVALID_ARGUMENT` when unrecognized. Calls `uform_gpu_class_from_name`."""
         return GPUClass(self._from_name(self.symbols().gpu_class_from_name, name, "uform_gpu_class_from_name"))
 
+    def gpu_vendor_name(self, vendor: GPUVendor) -> String:
+        """The engine's spelling of a GPU vendor, as `NVIDIA` spells "nvidia". Calls `uform_gpu_vendor_name`."""
+        return text_at(self.symbols().gpu_vendor_name(vendor.code))
+
+    def gpu_vendor_from_name(self, name: StringSlice) raises Error -> GPUVendor:
+        """Reads a spelling back, raising `INVALID_ARGUMENT` when unrecognized. Calls `uform_gpu_vendor_from_name`."""
+        return GPUVendor(self._from_name(self.symbols().gpu_vendor_from_name, name, "uform_gpu_vendor_from_name"))
+
     def modality_name(self, modality: Modality) -> String:
         """The engine's spelling of a modality, as `TEXT` spells "text". Calls `uform_modality_name`."""
         return text_at(self.symbols().modality_name(modality.code))
@@ -480,6 +509,30 @@ struct Library(ImplicitlyCopyable):
     def multimem_tier_from_name(self, name: StringSlice) raises Error -> MultimemTier:
         """Reads a spelling back, raising `INVALID_ARGUMENT` when unrecognized. Calls `uform_multimem_tier_from_name`."""
         return MultimemTier(self._from_name(self.symbols().multimem_tier_from_name, name, "uform_multimem_tier_from_name"))
+
+    def pair_loss_form_name(self, form: PairLossForm) -> String:
+        """The engine's spelling of a pair-loss form, as `SIGMOID` spells "sigmoid". Calls `uform_pair_loss_form_name`.
+        """
+        return text_at(self.symbols().pair_loss_form_name(form.code))
+
+    def pair_loss_form_from_name(self, name: StringSlice) raises Error -> PairLossForm:
+        """Reads a spelling back, raising `INVALID_ARGUMENT` when unrecognized. Calls `uform_pair_loss_form_from_name`.
+        """
+        return PairLossForm(self._from_name(self.symbols().pair_loss_form_from_name, name, "uform_pair_loss_form_from_name"))
+
+    def late_interaction_side_name(self, side: LateInteractionSide) -> String:
+        """The engine's spelling of a late-interaction side, as `QUERY_AND_DOCUMENT` spells "query-and-document".
+        Calls `uform_late_interaction_side_name`.
+        """
+        return text_at(self.symbols().late_interaction_side_name(side.code))
+
+    def late_interaction_side_from_name(self, name: StringSlice) raises Error -> LateInteractionSide:
+        """Reads a spelling back, raising `INVALID_ARGUMENT` when unrecognized. Calls
+        `uform_late_interaction_side_from_name`.
+        """
+        return LateInteractionSide(
+            self._from_name(self.symbols().late_interaction_side_from_name, name, "uform_late_interaction_side_from_name")
+        )
 
     def _error(self, outcome: Outcome, symbol: StaticString) -> Error:
         """The failure a final outcome reports, its status spelled by the engine's own table."""

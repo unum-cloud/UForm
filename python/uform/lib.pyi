@@ -63,6 +63,7 @@ class Status(IntEnum):
     DEVICE = 8
     MALFORMED = 9
     INTERNAL = 10
+    UNINITIALIZED = 12
     CONFIG_MISMATCH = 13
     CONTENDED = 14
     CANCELLED = 15
@@ -94,7 +95,7 @@ class Mood(IntEnum):
     SPINNING = 1
 
 class CPUClass(IntEnum):
-    """The CPU families dispatch picks from, valued as `uform_cpu_class_t`; a RAM placement may pin one."""
+    """The CPU families dispatch picks from, valued as `uform_cpu_class_t`; a RAM placement may cap at one."""
 
     SERIAL = 1
     MONOVERSIONED = 2
@@ -117,7 +118,7 @@ class CPUClass(IntEnum):
     WASM64_EXTENDED = 20
 
 class GPUClass(IntEnum):
-    """The GPU families dispatch picks from, valued as `uform_gpu_class_t`; a VRAM placement may pin one."""
+    """The GPU families dispatch picks from, valued as `uform_gpu_class_t`; a VRAM placement may cap at one."""
 
     NVIDIA_AMPERE = 1
     NVIDIA_ADA = 2
@@ -140,10 +141,8 @@ class GPUVendor(IntEnum):
     APPLE = 3
 
 @final
-class GPUDevice(structseq[Any], tuple[GPUVendor, int, GPUClass | None, int, int, str]):
+class GPUDevice:
     """One GPU this process can drive, its position in `gpu_devices()` being its ordinal."""
-
-    __match_args__: Final = ("vendor", "vendor_ordinal", "gpu_class", "compute_units", "memory_bytes", "name")
 
     @property
     def vendor(self) -> GPUVendor:
@@ -254,6 +253,9 @@ class MalformedError(Error, ValueError):
 class InternalError(Error):
     """The library reported neither success nor a failure - a defect."""
 
+class UninitializedError(Error):
+    """The handle the call operates on is missing, refused before any other check."""
+
 class ConfigMismatchError(Error, ValueError):
     """The request contradicts a frozen configuration, like resuming a checkpoint of another geometry."""
 
@@ -267,7 +269,7 @@ class UnsupportedError(Error, NotImplementedError):
     """The verb is declared, but this residency or model does not implement it."""
 
 class InvalidArgumentError(Error, ValueError):
-    """An argument breaks the verb's contract, a closed executor and a rewound arena's output included."""
+    """An argument breaks the verb's contract, a closed executor included."""
 
 @final
 class Executor:
@@ -280,7 +282,7 @@ class Executor:
         threads: int = 0,
         *,
         memory_domains: Sequence[int] | None = None,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
     ) -> Executor:
         """Creates an executor of host threads for RAM-resident models. Calls `uform_executor_for_ram`."""
         ...
@@ -292,7 +294,7 @@ class Executor:
         /,
         *,
         memory_domains: Sequence[int] | None = None,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
     ) -> Executor:
         """Borrows a ForkUnion pool; raises `UnsupportedError` until borrowing is designed. Calls `uform_executor_on_pool`."""
         ...
@@ -303,9 +305,9 @@ class Executor:
         devices: Sequence[int] | None = None,
         *,
         scratch_limit: int = 0,
-        gpu_class: GPUClass | None = None,
+        gpu_class_ceiling: GPUClass | None = None,
         memory_domains: Sequence[int] | None = None,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
     ) -> Executor:
         """Opens one submission stream on every named device. Calls `uform_executor_for_vram`."""
         ...
@@ -336,7 +338,7 @@ class ArenaBuffer:
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
     def __buffer__(self, flags: int, /) -> memoryview:
-        """Host memory only; device memory raises `DeviceError`, a rewound arena `InvalidArgumentError`."""
+        """Host memory only; device memory raises `DeviceError`. Valid until the next call rewinds the arena."""
         ...
 
     def __len__(self) -> int:
@@ -351,7 +353,7 @@ class ArenaBuffer:
         dl_device: tuple[int, int] | None = None,
         copy: bool | None = None,
     ) -> Any:
-        """A DLPack capsule over the output in place; the arena refuses to rewind until the consumer lets go."""
+        """A DLPack capsule over the output in place, valid until the next call rewinds the arena."""
         ...
 
     def __dlpack_device__(self) -> tuple[int, int]:
@@ -391,7 +393,7 @@ class Deferred[AnswerT]:
         ...
 
     def __await__(self) -> Generator[Any, None, AnswerT]:
-        """Runs `wait()` on the running event loop's default executor, suspending the task meanwhile."""
+        """Polls `status` between turns of the running event loop, sleeping 1 µs to 1 ms, so no thread waits."""
         ...
 
     def __repr__(self) -> str: ...
@@ -401,19 +403,8 @@ class Deferred[AnswerT]:
 # region: Models
 
 @final
-class ModelDescription(structseq[Any], tuple[int, int, Scalar, int, CPUClass | None, GPUClass | None, int, int]):
+class ModelDescription:
     """What a loaded model reports about itself, as `uform_model_description_t` holds it."""
-
-    __match_args__: Final = (
-        "dimensions",
-        "context",
-        "quantization",
-        "memory_usage",
-        "cpu_class",
-        "gpu_class",
-        "token_width",
-        "choice_temperature_groups",
-    )
 
     @property
     def dimensions(self) -> int:
@@ -517,7 +508,7 @@ class Model:
         /,
         *,
         memory_domains: Sequence[int] | None = None,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
         executor: Executor | None = None,
         quantization: Scalar = ...,
         progress: _Progress | None = None,
@@ -533,7 +524,7 @@ class Model:
         /,
         *,
         memory_domains: Sequence[int] | None = None,
-        cpu_class: CPUClass | None = None,
+        cpu_class_ceiling: CPUClass | None = None,
         executor: Executor | None = None,
         quantization: Scalar = ...,
         progress: _Progress | None = None,
@@ -549,7 +540,7 @@ class Model:
         /,
         *,
         devices: Sequence[int] | None = None,
-        gpu_class: GPUClass | None = None,
+        gpu_class_ceiling: GPUClass | None = None,
         executor: Executor | None = None,
         quantization: Scalar = ...,
         progress: _Progress | None = None,
@@ -565,7 +556,7 @@ class Model:
         /,
         *,
         devices: Sequence[int] | None = None,
-        gpu_class: GPUClass | None = None,
+        gpu_class_ceiling: GPUClass | None = None,
         executor: Executor | None = None,
         quantization: Scalar = ...,
         progress: _Progress | None = None,
@@ -902,18 +893,8 @@ class Relations(_Fields):
     def __new__(cls, *, attract: _EdgesLike = None, repel: _EdgesLike = None, ignore: _EdgesLike = None) -> Self: ...
 
 @final
-class MeshDescription(structseq[Any], tuple[int, int, int, int, int, MultimemTier, GPUClass | None]):
+class MeshDescription:
     """What a mesh reports about itself, as `uform_mesh_description_t` holds it."""
-
-    __match_args__: Final = (
-        "gpus_per_host_domain",
-        "gpus_per_multimem_domain",
-        "gpus_per_colocated_domain",
-        "host_domain_index",
-        "first_gpu_index",
-        "multimem_tier",
-        "gpu_class",
-    )
 
     @property
     def gpus_per_host_domain(self) -> int:
@@ -1095,7 +1076,11 @@ class Trainer:
 
 @final
 class On[TargetT]:
-    """A model or trainer bound to the executor its verbs block on, as `model.on(executor)` answers it."""
+    """A model or trainer bound to the executor its verbs block on, as `model.on(executor)` answers it.
+
+    It offers its target's verbs alone: `On[Model]` the description and encode verbs, `On[Trainer]` `step` and
+    `save`; any other attribute raises `AttributeError`.
+    """
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
     def __class_getitem__(cls, item: Any, /) -> GenericAlias:
@@ -1210,7 +1195,11 @@ class On[TargetT]:
 
 @final
 class DeferredOn[TargetT]:
-    """A model or trainer bound to the executor its verbs submit to, each answering a `Deferred` at once."""
+    """A model or trainer bound to the executor its verbs submit to, each answering a `Deferred` at once.
+
+    It offers its target's verbs alone: `DeferredOn[Model]` the description and encode verbs, `DeferredOn[Trainer]`
+    `step` and `save`; any other attribute raises `AttributeError`.
+    """
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
     def __class_getitem__(cls, item: Any, /) -> GenericAlias:

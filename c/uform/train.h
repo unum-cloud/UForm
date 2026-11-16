@@ -466,7 +466,8 @@ typedef struct uform_mesh_description_t {
     /** How its NVLink domains reduce. */
     uform_multimem_tier_t multimem_tier;
 
-    /** The class every GPU of the run dispatches as: the executor's pin, or the devices' own. */
+    /** The class every GPU of the run dispatches as: the best class its devices load under the
+     *  executor's ceiling. */
     uform_gpu_class_t gpu_class;
 } uform_mesh_description_t;
 
@@ -497,6 +498,23 @@ UFORM_EXPORT char const* uform_multimem_tier_name(uform_multimem_tier_t tier);
 /** Reads a multimem tier back from its spelling into @p tier, or fails with
  *  @c uform_status_invalid_argument_k. */
 UFORM_EXPORT uform_status_t uform_multimem_tier_from_name(uform_bytes_view_t name, uform_multimem_tier_t* tier);
+
+/** The canonical spelling of a pair-loss form, as @c uform_pair_loss_form_ranked_k spells
+ *  "ranked". */
+UFORM_EXPORT char const* uform_pair_loss_form_name(uform_pair_loss_form_t form);
+
+/** Reads a pair-loss form back from its spelling into @p form, or fails with
+ *  @c uform_status_invalid_argument_k. */
+UFORM_EXPORT uform_status_t uform_pair_loss_form_from_name(uform_bytes_view_t name, uform_pair_loss_form_t* form);
+
+/** The canonical spelling of a late-interaction side, as
+ *  @c uform_late_interaction_side_query_and_document_k spells "query-and-document". */
+UFORM_EXPORT char const* uform_late_interaction_side_name(uform_late_interaction_side_t side);
+
+/** Reads a late-interaction side back from its spelling into @p side, or fails with
+ *  @c uform_status_invalid_argument_k. */
+UFORM_EXPORT uform_status_t uform_late_interaction_side_from_name(uform_bytes_view_t name,
+                                                                  uform_late_interaction_side_t* side);
 
 /** A training run: the tower replicas, gradients, optimizer moments, heads, temperatures and the
  *  collectives sized by them, on the executor's devices. */

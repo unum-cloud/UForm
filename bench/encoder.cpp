@@ -14,8 +14,8 @@
  *
  *  Every row reports its median call in milliseconds beside the rate.
  *
- *  Usage: `uform_bench_encoder --checkpoint <path> [--residency ram|vram] [--cpu-class <name>]
- *  [--gpu-class <name>] [--precision bf16|e4m3]`.
+ *  Usage: <tt>uform_bench_encoder --checkpoint <path> [--residency ram|vram]
+ *  [--cpu-class-ceiling <name>] [--gpu-class-ceiling <name>] [--precision bf16|e4m3]</tt>.
  */
 #include <cstdint> // `std::uint8_t`, `std::int32_t`
 #include <cstring> // `std::strcmp`, `std::memcpy`
@@ -152,32 +152,37 @@ static void choose_items(loop_t& loop, session_t const& session, std::size_t bat
 }
 
 int main(int argc, char** argv) {
-    char const *checkpoint = nullptr, *residency = "ram", *cpu_class_text = "", *gpu_class_text = "",
+    char const *checkpoint = nullptr, *residency = "ram", *cpu_ceiling_text = "", *gpu_ceiling_text = "",
                *precision_text = "bf16";
     for (int index = 1; index + 1 < argc; index += 2) {
         char const *flag = argv[index], *value = argv[index + 1];
         if (!std::strcmp(flag, "--checkpoint")) checkpoint = value;
         else if (!std::strcmp(flag, "--residency")) residency = value;
-        else if (!std::strcmp(flag, "--cpu-class")) cpu_class_text = value;
-        else if (!std::strcmp(flag, "--gpu-class")) gpu_class_text = value;
+        else if (!std::strcmp(flag, "--cpu-class-ceiling")) cpu_ceiling_text = value;
+        else if (!std::strcmp(flag, "--gpu-class-ceiling")) gpu_ceiling_text = value;
         else if (!std::strcmp(flag, "--precision")) precision_text = value;
         else return fmt::println(stderr, "uform_bench_encoder: unknown flag {}", flag), 1;
     }
     if (argc % 2 == 0 || !checkpoint)
         return fmt::println(stderr, "Usage: uform_bench_encoder --checkpoint <path> [--residency ram|vram] " //
-                                    "[--cpu-class <name>] [--gpu-class <name>] [--precision bf16|e4m3]"),
+                                    "[--cpu-class-ceiling <name>] [--gpu-class-ceiling <name>] "             //
+                                    "[--precision bf16|e4m3]"),
                1;
     std::string_view const home = residency;
     if (home != "ram" && home != "vram")
         return fmt::println(stderr, "uform_bench_encoder: --residency takes ram or vram, not {}", home), 1;
-    uform_cpu_class_t cpu_class = uform_cpu_class_unknown_k;
-    uform_gpu_class_t gpu_class = uform_gpu_class_unknown_k;
-    if (*cpu_class_text && uform_cpu_class_from_name(bytes_of(cpu_class_text), &cpu_class) != uform_status_success_k)
-        return fmt::println(stderr, "uform_bench_encoder: {} names no CPU class", cpu_class_text), 1;
-    if (*gpu_class_text && uform_gpu_class_from_name(bytes_of(gpu_class_text), &gpu_class) != uform_status_success_k)
-        return fmt::println(stderr, "uform_bench_encoder: {} names no GPU class", gpu_class_text), 1;
-    if ((*cpu_class_text && home != "ram") || (*gpu_class_text && home != "vram"))
-        return fmt::println(stderr, "uform_bench_encoder: --cpu-class pins ram, --gpu-class pins vram"), 1;
+    uform_cpu_class_t cpu_class_ceiling = uform_cpu_class_unknown_k;
+    uform_gpu_class_t gpu_class_ceiling = uform_gpu_class_unknown_k;
+    if (*cpu_ceiling_text &&
+        uform_cpu_class_from_name(bytes_of(cpu_ceiling_text), &cpu_class_ceiling) != uform_status_success_k)
+        return fmt::println(stderr, "uform_bench_encoder: {} names no CPU class", cpu_ceiling_text), 1;
+    if (*gpu_ceiling_text &&
+        uform_gpu_class_from_name(bytes_of(gpu_ceiling_text), &gpu_class_ceiling) != uform_status_success_k)
+        return fmt::println(stderr, "uform_bench_encoder: {} names no GPU class", gpu_ceiling_text), 1;
+    if ((*cpu_ceiling_text && home != "ram") || (*gpu_ceiling_text && home != "vram"))
+        return fmt::println(stderr, "uform_bench_encoder: --cpu-class-ceiling caps ram, " //
+                                    "--gpu-class-ceiling caps vram"),
+               1;
     uform_scalar_t precision = uform_scalar_unknown_k;
     if (uform_scalar_from_name(bytes_of(precision_text), &precision) != uform_status_success_k ||
         (precision != uform_scalar_bf16_k && precision != uform_scalar_e4m3_k))
@@ -192,13 +197,13 @@ int main(int argc, char** argv) {
     if (home == "vram") {
         uform_executor_for_vram_t arguments {.executor = &session.executor,
                                              .outcome = &outcome,
-                                             .vram = {&device, 1, gpu_class}};
+                                             .vram = {&device, 1, gpu_class_ceiling}};
         uform_executor_for_vram(&arguments);
     }
     else {
         uform_executor_for_ram_t arguments {.executor = &session.executor,
                                             .outcome = &outcome,
-                                            .ram = {nullptr, 0, cpu_class}};
+                                            .ram = {nullptr, 0, cpu_class_ceiling}};
         uform_executor_for_ram(&arguments);
     }
     if (outcome.status != uform_status_success_k)
@@ -212,7 +217,7 @@ int main(int argc, char** argv) {
                                            .executor = session.executor,
                                            .outcome = &outcome,
                                            .path = bytes_of(checkpoint),
-                                           .vram = {&device, 1, gpu_class},
+                                           .vram = {&device, 1, gpu_class_ceiling},
                                            .quantization = precision};
         uform_model_load_vram(&arguments);
     }
@@ -221,7 +226,7 @@ int main(int argc, char** argv) {
                                           .executor = session.executor,
                                           .outcome = &outcome,
                                           .path = bytes_of(checkpoint),
-                                          .ram = {nullptr, 0, cpu_class},
+                                          .ram = {nullptr, 0, cpu_class_ceiling},
                                           .quantization = precision};
         uform_model_load_ram(&arguments);
     }

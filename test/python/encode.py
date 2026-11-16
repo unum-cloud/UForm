@@ -11,9 +11,11 @@ Date: October 18, 2026
 import asyncio
 import io
 import struct
+import sys
 import wave
 import zlib
 from array import array
+from typing import Any
 
 import pytest
 
@@ -156,7 +158,7 @@ def test_a_tape_pair_is_lent_as_is(model: uform.Model, arena: uform.Arena):
 
 
 def test_outputs_cross_as_dlpack(model: uform.Model, arena: uform.Arena):
-    """Host outputs export DLPack, lend a tape pair as a buffer would, and free their arena once dropped."""
+    """Host outputs export DLPack, lend a tape pair as a buffer would, and keep their arena alive while exported."""
     encoded = model.text_encode(TEXTS, arena, outputs=uform.Outputs.STATES)
     assert encoded.states.offsets.__dlpack_device__() == (1, 0)
     data = "".join(TEXTS).encode()
@@ -164,10 +166,8 @@ def test_outputs_cross_as_dlpack(model: uform.Model, arena: uform.Arena):
     gathered = bytes(memoryview(model.text_encode([text.encode() for text in TEXTS], uform.Arena()).embeddings))
     assert lent == gathered
     capsule = encoded.states.__dlpack__()
-    with pytest.raises(uform.ContendedError):
-        model.text_encode(TEXTS, arena)
+    del encoded, arena
     del capsule
-    model.text_encode(TEXTS, arena)
 
 
 def test_a_tape_pair_past_its_data_is_refused(model: uform.Model, arena: uform.Arena):
@@ -184,21 +184,20 @@ def test_one_text_is_not_a_batch(model: uform.Model, arena: uform.Arena):
         model.image_encode(b"one file", arena)
 
 
-def test_an_exported_buffer_pins_the_arena(model: uform.Model, arena: uform.Arena):
-    """While a buffer over its outputs lives, the arena refuses to rewind, and releasing it lets the next call in."""
-    view = memoryview(model.text_encode(TEXTS, arena).embeddings)
-    with pytest.raises(uform.ContendedError):
-        model.text_encode(TEXTS, arena)
-    view.release()
-    model.text_encode(TEXTS, arena)
+def test_an_arena_serves_one_call_at_a_time(model: uform.Model, executor: uform.Executor, arena: uform.Arena):
+    """The library refuses a call naming an arena a running call holds, and the binding only forwards the refusal."""
+    refused: list[uform.Error] = []
 
+    def contend(completed: int, total: int) -> bool:
+        try:
+            model.text_encode(TEXTS, arena)
+        except uform.ContendedError as error:
+            refused.append(error)
+        return True
 
-def test_a_rewound_output_goes_stale(model: uform.Model, arena: uform.Arena):
-    """A result whose arena a later call rewound refuses to be read."""
-    first = model.text_encode(TEXTS, arena)
+    assert len(model.on(executor).text_encode(TEXTS, arena, progress=contend).embeddings) == len(TEXTS)
+    assert refused and all(error.status is uform.Status.CONTENDED for error in refused)
     model.text_encode(TEXTS, arena)
-    with pytest.raises(uform.InvalidArgumentError):
-        memoryview(first.embeddings)
 
 
 def test_deferred_matches_blocking(model: uform.Model, executor: uform.Executor):
@@ -209,7 +208,7 @@ def test_deferred_matches_blocking(model: uform.Model, executor: uform.Executor)
 
 
 def test_deferred_awaits(model: uform.Model, executor: uform.Executor):
-    """`await` resolves the call on the event loop's default executor."""
+    """`await` polls the call between turns of the event loop, which stays free for other coroutines."""
 
     async def encode() -> uform.Encoded:
         call = model.deferred(executor).image_encode([png(), bytearray(png(16))], uform.Arena(executor))
@@ -241,15 +240,23 @@ def test_progress_reports_and_cancels(model: uform.Model, arena: uform.Arena):
         model.text_encode(["a"] * 8, arena, progress=lambda completed, total: completed < 4, progress_steps=4)
 
 
-def test_progress_cancels_a_deferred_call(model: uform.Model, executor: uform.Executor, arena: uform.Arena):
-    """A deferred call's handler runs on the executor's thread, and its exception surfaces at the wait."""
+def test_progress_cancels_a_deferred_call(
+    model: uform.Model, executor: uform.Executor, arena: uform.Arena, monkeypatch: pytest.MonkeyPatch
+):
+    """A deferred call's handler runs on the executor's thread and reports its exception, then cancels.
+
+    One that raises goes to `sys.unraisablehook`, and the call raises `CancelledError` at the wait.
+    """
 
     def explode(completed: int, total: int) -> bool:
         raise LookupError("from the handler")
 
+    unraised: list[Any] = []
+    monkeypatch.setattr(sys, "unraisablehook", unraised.append)
     call = model.deferred(executor).text_encode(TEXTS, arena, progress=explode)
-    with pytest.raises(LookupError, match="from the handler"):
+    with pytest.raises(uform.CancelledError):
         call.wait()
+    assert len(unraised) == 1 and isinstance(unraised[0].exc_value, LookupError)
     model.text_encode(TEXTS, arena)
 
 
@@ -308,8 +315,10 @@ def test_audio_encode_samples(model: uform.Model, arena: uform.Arena):
         model.audio_encode_samples([array("d", [0.0])], 16000, arena)
 
 
-def test_verbs_refuse_a_receiver_over_a_trainer(model: uform.Model, executor: uform.Executor):
-    """Every receiver offers every verb, and a verb checks the type of the target it addresses."""
+def test_a_receiver_offers_its_targets_verbs(model: uform.Model, executor: uform.Executor):
+    """One receiver type serves every target, binding the verbs of the target it holds and no others."""
     on = model.on(executor)
-    with pytest.raises(TypeError):
+    assert on.describe().dimensions == model.describe().dimensions
+    assert isinstance(model.deferred(executor).text_encode, type(model.text_encode))
+    with pytest.raises(AttributeError):
         on.step([uform.Modality.TEXT], ["a"])

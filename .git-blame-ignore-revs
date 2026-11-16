@@ -1,2 +1,6 @@
+# Large formatting commits that should be ignored in git blame
+
 # Comment reflow: whitespace and module header fields only
 0cfdfe9da6750610a4c11366c19dd0489c5998f9
+# Left-aligned pointers, which also carries the byte-view cast cleanup
+8c34fa928497d6a8a6cef97dbeb091337cf9f0fc

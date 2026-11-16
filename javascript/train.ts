@@ -9,24 +9,26 @@
 import type { CompiledMesh, CompiledMeshDescription, CompiledStepped, CompiledTrainer, Completion } from "./library.js";
 import { Rows, type Tape, bytesTape, samplesTape } from "./encode.js";
 import {
-  Answer,
   Arena,
+  type Call,
+  type Deferred,
   Executor,
   LateInteractionSide,
   Modality,
-  MultimemTier,
   Negatives,
   Objective,
   PairLossForm,
   Scalar,
   Status,
   backend,
+  block,
+  callOf,
+  defer,
   fail,
   modalityCode,
   negativesCode,
   objectiveCode,
   scalarCode,
-  submitAs,
 } from "./types.js";
 
 /** Where this process sits among the processes training one model, and how they
@@ -48,10 +50,7 @@ export interface MeshOptions {
 }
 
 /** What a mesh reports about itself. Mirrors `uform_mesh_description_t`. */
-export interface MeshDescription extends Omit<CompiledMeshDescription, "multimemTier"> {
-  /** How its NVLink domains reduce. */
-  multimemTier: MultimemTier;
-}
+export type MeshDescription = CompiledMeshDescription;
 
 /** The token the bootstrap holds, which is what a direct `new Mesh` cannot produce. */
 const meshSeal = Symbol("Mesh");
@@ -79,8 +78,7 @@ export class Mesh implements Disposable {
 
   /** Reports the mesh's shape and this process's place in it. Calls `uform_mesh_describe`. */
   describe(): MeshDescription {
-    const described = this.compiled.describe();
-    return { ...described, multimemTier: described.multimemTier as MultimemTier };
+    return this.compiled.describe();
   }
 
   /** Leaves the mesh; every trainer borrowing it must be freed first. Calls `uform_mesh_free`. */
@@ -249,84 +247,84 @@ function float32Of(values: Float32Array | number[] | undefined): Float32Array | 
   return values === undefined || values instanceof Float32Array ? values : Float32Array.from(values);
 }
 
-/** The verbs every receiver of a trainer shares. */
-abstract class TrainerVerbs<Receiving extends "blocking" | "deferred"> {
-  protected constructor(
-    protected readonly compiled: CompiledTrainer,
-    readonly executor: Executor,
-    protected readonly receiving: Receiving,
-  ) {}
+/** The body of every receiver's `step`. */
+function trainerStep(
+  trainer: CompiledTrainer,
+  executor: Executor,
+  batch: TrainerBatch,
+  config: TrainerStepConfig,
+): Call<Stepped> {
+  const contents = bytesTape(batch.contents);
+  const modalities = Int32Array.from(batch.modalities, modalityCode);
+  const { attract, repel, ignore } = batch.relations ?? {};
+  if ((batch.choices === undefined) !== (batch.choiceTargets === undefined))
+    throw fail(Status.InvalidArgument, "Pass both 'choices' and 'choiceTargets', or neither.");
+  const choices = batch.choices && bytesTape(batch.choices);
+  const choiceTargets = batch.choiceTargets && samplesTape(batch.choiceTargets);
+  const arena = config.arena?.compiled;
+  const scalar = arena ? scalarCode(config.outputsScalar ?? Scalar.F32) : undefined;
+  return callOf(
+    (completion: Completion) =>
+      trainer.step(
+        executor.compiled,
+        completion,
+        modalities,
+        contents.data,
+        contents.offsets,
+        uint32Of(batch.bags),
+        uint32Of(batch.temperatureGroups),
+        batch.sides,
+        choices?.data,
+        choices?.offsets,
+        choiceTargets?.data,
+        choiceTargets?.offsets,
+        uint32Of(attract?.offsets),
+        uint32Of(attract?.ids),
+        float32Of(attract?.weights),
+        uint32Of(repel?.offsets),
+        uint32Of(repel?.ids),
+        float32Of(repel?.weights),
+        uint32Of(ignore?.offsets),
+        uint32Of(ignore?.ids),
+        arena,
+        scalar,
+      ),
+    (stepped: CompiledStepped) => ({
+      stats: stepped.stats,
+      embeddings: stepped.embeddings && new Rows(stepped.embeddings),
+    }),
+  );
+}
 
-  /**
-   *  Applies one optimizer step over this process's items and every
-   *  peer's. Calls `uform_trainer_step`.
-   *  @param batch - This process's items, their modalities, bags and relations.
-   *  @param config - Where the scored embeddings land.
-   */
-  step(batch: TrainerBatch, config: TrainerStepConfig = {}): Answer<Receiving, Stepped> {
-    const contents = bytesTape(batch.contents);
-    const modalities = Int32Array.from(batch.modalities, modalityCode);
-    const { attract, repel, ignore } = batch.relations ?? {};
-    if ((batch.choices === undefined) !== (batch.choiceTargets === undefined))
-      throw fail(Status.InvalidArgument, "Pass both 'choices' and 'choiceTargets', or neither.");
-    const choices = batch.choices && bytesTape(batch.choices);
-    const choiceTargets = batch.choiceTargets && samplesTape(batch.choiceTargets);
-    const arena = config.arena?.compiled;
-    const scalar = arena ? scalarCode(config.outputsScalar ?? Scalar.F32) : undefined;
-    return submitAs(
-      this.receiving,
-      (completion: Completion) =>
-        this.compiled.step(
-          this.executor.compiled,
-          completion,
-          modalities,
-          contents.data,
-          contents.offsets,
-          uint32Of(batch.bags),
-          uint32Of(batch.temperatureGroups),
-          batch.sides && Int32Array.from(batch.sides),
-          choices?.data,
-          choices?.offsets,
-          choiceTargets?.data,
-          choiceTargets?.offsets,
-          uint32Of(attract?.offsets),
-          uint32Of(attract?.ids),
-          float32Of(attract?.weights),
-          uint32Of(repel?.offsets),
-          uint32Of(repel?.ids),
-          float32Of(repel?.weights),
-          uint32Of(ignore?.offsets),
-          uint32Of(ignore?.ids),
-          arena,
-          scalar,
-        ),
-      (stepped: CompiledStepped) => ({
-        stats: stepped.stats,
-        embeddings: stepped.embeddings && new Rows(stepped.embeddings),
-      }),
-    );
-  }
-
-  /**
-   *  Writes the weights and the step as a safetensors checkpoint; only process zero
-   *  writes. Calls `uform_trainer_save`.
-   *  @param path - The destination, written whole and renamed into place.
-   */
-  save(path: string): Answer<Receiving, void> {
-    return submitAs(
-      this.receiving,
-      (completion: Completion) => this.compiled.save(this.executor.compiled, completion, path),
-      () => undefined,
-    );
-  }
+/** The body of every receiver's `save`. */
+function trainerSave(trainer: CompiledTrainer, executor: Executor, path: string): Call<void> {
+  return callOf(
+    (completion: Completion) => trainer.save(executor.compiled, completion, path),
+    () => undefined,
+  );
 }
 
 /** The trainer's verbs, submitted to its executor and answered as {@link
  *  Deferred} calls: `trainer.deferred()`. */
-export class TrainerDeferredOn extends TrainerVerbs<"deferred"> {
+export class TrainerDeferredOn {
+  readonly #trainer: CompiledTrainer;
+  /** The executor every verb is submitted to, the trainer's own. */
+  readonly executor: Executor;
+
   /** Made by `trainer.deferred()`, never directly. */
-  constructor(compiled: CompiledTrainer, executor: Executor) {
-    super(compiled, executor, "deferred");
+  constructor(trainer: CompiledTrainer, executor: Executor) {
+    this.#trainer = trainer;
+    this.executor = executor;
+  }
+
+  /** {@inheritDoc Trainer.step} */
+  step(batch: TrainerBatch, config: TrainerStepConfig = {}): Deferred<Stepped> {
+    return defer(trainerStep(this.#trainer, this.executor, batch, config));
+  }
+
+  /** {@inheritDoc Trainer.save} */
+  save(path: string): Deferred<void> {
+    return defer(trainerSave(this.#trainer, this.executor, path));
   }
 }
 
@@ -337,11 +335,35 @@ const trainerSeal = Symbol("Trainer");
  *  A training run on a VRAM executor's devices, every verb blocking on that executor; `deferred()`
  *  submits them there instead.
  */
-export class Trainer extends TrainerVerbs<"blocking"> implements Disposable {
+export class Trainer implements Disposable {
+  readonly #trainer: CompiledTrainer;
+  /** The VRAM executor every verb blocks on. */
+  readonly executor: Executor;
+
   /** Reached through `Trainer.initVram`. */
   private constructor(seal: symbol, compiled: CompiledTrainer, executor: Executor) {
     if (seal !== trainerSeal) throw fail(Status.InvalidArgument, "A Trainer is made by Trainer.initVram.");
-    super(compiled, executor, "blocking");
+    this.#trainer = compiled;
+    this.executor = executor;
+  }
+
+  /**
+   *  Applies one optimizer step over this process's items and every
+   *  peer's. Calls `uform_trainer_step`.
+   *  @param batch - This process's items, their modalities, bags and relations.
+   *  @param config - Where the scored embeddings land.
+   */
+  step(batch: TrainerBatch, config: TrainerStepConfig = {}): Stepped {
+    return block(trainerStep(this.#trainer, this.executor, batch, config));
+  }
+
+  /**
+   *  Writes the weights and the step as a safetensors checkpoint; only process zero
+   *  writes. Calls `uform_trainer_save`.
+   *  @param path - The destination, written whole and renamed into place.
+   */
+  save(path: string): void {
+    return block(trainerSave(this.#trainer, this.executor, path));
   }
 
   /**
@@ -365,12 +387,12 @@ export class Trainer extends TrainerVerbs<"blocking"> implements Disposable {
   /** The same verbs, each submitted to the trainer's executor and answered as a
    *  {@link Deferred}. Binding-only. */
   deferred(): TrainerDeferredOn {
-    return new TrainerDeferredOn(this.compiled, this.executor);
+    return new TrainerDeferredOn(this.#trainer, this.executor);
   }
 
   /** Frees the trainer and lets go of its mesh. Calls `uform_trainer_free`. */
   free(): void {
-    this.compiled.free();
+    this.#trainer.free();
   }
 
   [Symbol.dispose](): void {

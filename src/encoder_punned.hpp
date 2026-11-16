@@ -80,26 +80,31 @@ encoder_verbs<vendored_residency_t::ram_k> const* pick_cpu_variant(cpu_ladder<cl
     return picked;
 }
 
-/** The newest class on @p ladder whose kits a device of @p device_capabilities runs and @p pinned
- *  takes, as its verbs. */
+/** No variant in a build without the residency's vendor. */
 template <vendored_residency_t residency_, gpu_class_t... classes_>
-encoder_verbs<residency_> const* pick_gpu_variant(gpu_ladder<classes_...>, uform_gpu_class_t pinned,
+encoder_verbs<residency_> const* pick_gpu_variant(gpu_ladder<classes_...>, uform_gpu_class_t,
+                                                  nk_capability_t) noexcept {
+    return nullptr;
+}
+
+/** The newest class on @p ladder whose kits a device of @p device_capabilities runs, at or under
+ *  @p ceiling , as its verbs. */
+template <vendored_residency_t residency_, gpu_class_t... classes_>
+    requires(gpu_vendor_compiled(vendor_of(residency_)))
+encoder_verbs<residency_> const* pick_gpu_variant(gpu_ladder<classes_...>, uform_gpu_class_t ceiling,
                                                   nk_capability_t device_capabilities) noexcept {
     encoder_verbs<residency_> const* picked = nullptr;
-    if constexpr (gpu_vendor_compiled(vendor_of(residency_))) {
-        if (!(device_capabilities & vendor_of(residency_))) return picked;
-        nk_capability_t const ceiling = pinned == uform_gpu_class_unknown_k
-                                            ? device_capabilities
-                                            : numkong_capabilities_of(static_cast<gpu_class_t>(pinned));
-        auto rung = [&]<gpu_class_t class_>() noexcept {
-            if constexpr (gpu_class_compiled(class_)) {
-                nk_capability_t const wanted = numkong_capabilities_of(class_);
-                if (picked || (device_capabilities & wanted) != wanted || (ceiling & wanted) != wanted) return;
-                picked = encoder_class_tables<residency_, class_>::find();
-            }
-        };
-        (rung.template operator()<classes_>(), ...);
-    }
+    if (!(device_capabilities & vendor_of(residency_))) return picked;
+    nk_capability_t const capped = ceiling == uform_gpu_class_unknown_k
+                                       ? device_capabilities
+                                       : numkong_capabilities_of(static_cast<gpu_class_t>(ceiling));
+    nk_capability_t const usable = device_capabilities & capped;
+    auto rung = [&]<gpu_class_t class_>() noexcept {
+        constexpr nk_capability_t wanted = numkong_capabilities_of(class_);
+        if constexpr (gpu_class_compiled(class_))
+            if (!picked && (usable & wanted) == wanted) picked = encoder_class_tables<residency_, class_>::find();
+    };
+    (rung.template operator()<classes_>(), ...);
     return picked;
 }
 

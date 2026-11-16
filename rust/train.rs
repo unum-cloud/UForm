@@ -16,19 +16,21 @@
 // The C mirror keeps the C spelling of every name.
 #![allow(non_camel_case_types)]
 
+use core::borrow::BorrowMut;
 use core::ffi::{c_char, c_int, c_void};
 use core::fmt;
 use core::marker::PhantomData;
+use core::ops::ControlFlow;
 use core::ptr;
 use core::str::FromStr;
 use std::path::Path;
 
 use crate::types::{
-    check, fail, lower_progress, path_view, read_spelling, spelling, uform_arena_t, uform_bytes_view_t,
-    uform_completion_blocking_k, uform_completion_t, uform_executor_t, uform_gpu_class_t, uform_outcome_t,
-    uform_progress_t, uform_rows_view_t, uform_scalar_t, uform_status_t, uform_tape_view_t, Accepts, Arena, Callbacks,
-    Calling, Completion, Deferring, Error, Executor, Exported, GPUClass, Gathered, Handles, On, ProgressCallback,
-    Result, Rows, Scalar, Status, TapeView,
+    Accepts, Arena, Calling, Completion, Deferring, Error, Executor, Exported, GPUClass, Gathered, Handles, On,
+    ProgressCallback, Result, Rows, Scalar, Status, TapeView, check, fail, lower_progress, output_slot, path_view,
+    read_spelling, spelling, uform_arena_t, uform_bytes_view_t, uform_completion_blocking_k, uform_completion_t,
+    uform_executor_t, uform_gpu_class_t, uform_outcome_t, uform_progress_t, uform_rows_view_t, uform_scalar_t,
+    uform_status_t, uform_tape_view_t,
 };
 
 // region: Raw Declarations
@@ -170,7 +172,7 @@ pub struct uform_trainer_save_t {
     pub progress: uform_progress_t,
 }
 
-extern "C" {
+unsafe extern "C" {
     pub fn uform_modality_name(modality: uform_modality_t) -> *const c_char;
     pub fn uform_modality_from_name(name: uform_bytes_view_t, modality: *mut uform_modality_t) -> uform_status_t;
     pub fn uform_objective_name(objective: uform_objective_t) -> *const c_char;
@@ -179,6 +181,16 @@ extern "C" {
     pub fn uform_negatives_from_name(name: uform_bytes_view_t, negatives: *mut uform_negatives_t) -> uform_status_t;
     pub fn uform_multimem_tier_name(tier: uform_multimem_tier_t) -> *const c_char;
     pub fn uform_multimem_tier_from_name(name: uform_bytes_view_t, tier: *mut uform_multimem_tier_t) -> uform_status_t;
+    pub fn uform_pair_loss_form_name(form: uform_pair_loss_form_t) -> *const c_char;
+    pub fn uform_pair_loss_form_from_name(
+        name: uform_bytes_view_t,
+        form: *mut uform_pair_loss_form_t,
+    ) -> uform_status_t;
+    pub fn uform_late_interaction_side_name(side: uform_late_interaction_side_t) -> *const c_char;
+    pub fn uform_late_interaction_side_from_name(
+        name: uform_bytes_view_t,
+        side: *mut uform_late_interaction_side_t,
+    ) -> uform_status_t;
 
     pub fn uform_mesh_bootstrap(arguments: *mut uform_mesh_bootstrap_t);
     pub fn uform_mesh_describe(arguments: *mut uform_mesh_describe_t);
@@ -233,7 +245,9 @@ impl FromStr for Modality {
     type Err = Error;
 
     /// Calls `uform_modality_from_name`.
-    fn from_str(text: &str) -> Result<Self> { read_spelling(text, uform_modality_from_name, Modality::from_raw) }
+    fn from_str(text: &str) -> Result<Self> {
+        read_spelling(text, uform_modality_from_name, Modality::from_raw)
+    }
 }
 
 /// Which losses a step relaxes, one enumerator per combination the engine trains.
@@ -273,7 +287,9 @@ impl FromStr for Objective {
     type Err = Error;
 
     /// Calls `uform_objective_from_name`.
-    fn from_str(text: &str) -> Result<Self> { read_spelling(text, uform_objective_from_name, Objective::from_raw) }
+    fn from_str(text: &str) -> Result<Self> {
+        read_spelling(text, uform_objective_from_name, Objective::from_raw)
+    }
 }
 
 /// Which pairs the contrastive loss pushes apart.
@@ -310,7 +326,9 @@ impl FromStr for Negatives {
     type Err = Error;
 
     /// Calls `uform_negatives_from_name`.
-    fn from_str(text: &str) -> Result<Self> { read_spelling(text, uform_negatives_from_name, Negatives::from_raw) }
+    fn from_str(text: &str) -> Result<Self> {
+        read_spelling(text, uform_negatives_from_name, Negatives::from_raw)
+    }
 }
 
 /// How a mesh's NVLink domains reduce.
@@ -386,6 +404,62 @@ pub enum LateInteractionSide {
     Document = 2,
     /// The item plays both sides.
     QueryAndDocument = 3,
+}
+
+impl PairLossForm {
+    fn from_raw(value: uform_pair_loss_form_t) -> Option<Self> {
+        match value {
+            0 => Some(PairLossForm::Derived),
+            1 => Some(PairLossForm::Balanced),
+            2 => Some(PairLossForm::Ranked),
+            3 => Some(PairLossForm::Sigmoid),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for PairLossForm {
+    /// Calls `uform_pair_loss_form_name`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(spelling(uform_pair_loss_form_name, *self as c_int))
+    }
+}
+
+impl FromStr for PairLossForm {
+    type Err = Error;
+
+    /// Calls `uform_pair_loss_form_from_name`.
+    fn from_str(text: &str) -> Result<Self> {
+        read_spelling(text, uform_pair_loss_form_from_name, PairLossForm::from_raw)
+    }
+}
+
+impl LateInteractionSide {
+    fn from_raw(value: uform_late_interaction_side_t) -> Option<Self> {
+        match value {
+            0 => Some(LateInteractionSide::None),
+            1 => Some(LateInteractionSide::Query),
+            2 => Some(LateInteractionSide::Document),
+            3 => Some(LateInteractionSide::QueryAndDocument),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for LateInteractionSide {
+    /// Calls `uform_late_interaction_side_name`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(spelling(uform_late_interaction_side_name, *self as c_int))
+    }
+}
+
+impl FromStr for LateInteractionSide {
+    type Err = Error;
+
+    /// Calls `uform_late_interaction_side_from_name`.
+    fn from_str(text: &str) -> Result<Self> {
+        read_spelling(text, uform_late_interaction_side_from_name, LateInteractionSide::from_raw)
+    }
 }
 
 // endregion: Enums
@@ -641,7 +715,8 @@ pub struct MeshDescription {
     pub first_gpu_index: usize,
     /// How its NVLink domains reduce.
     pub multimem_tier: MultimemTier,
-    /// The class every GPU of the run dispatches as: the executor's pin, or the devices' own.
+    /// The class every GPU of the run dispatches as: the best class its devices load under the
+    /// executor's ceiling.
     pub gpu_class: Option<GPUClass>,
 }
 
@@ -702,19 +777,12 @@ impl Edges<'_> {
     fn lower(&self, count: usize) -> Result<uform_edges_view_t> {
         if self.offsets.is_empty() {
             return match self.ids.is_empty() && self.weights.is_empty() {
-                true => Ok(uform_edges_view_t {
-                    offsets: ptr::null(),
-                    ids: ptr::null(),
-                    weights: ptr::null(),
-                }),
+                true => Ok(uform_edges_view_t { offsets: ptr::null(), ids: ptr::null(), weights: ptr::null() }),
                 false => Err(fail(Status::InvalidArgument, "edges without offsets name no items")),
             };
         }
         if self.offsets.len() != count + 1 {
-            return Err(fail(
-                Status::ShapeMismatch,
-                "an edge set holds one more offset than the step's items",
-            ));
+            return Err(fail(Status::ShapeMismatch, "an edge set holds one more offset than the step's items"));
         }
         if self.offsets.windows(2).any(|pair| pair[1] < pair[0]) || self.offsets[count] > self.ids.len() {
             return Err(fail(Status::Malformed, "the edge offsets decrease or run past the ids"));
@@ -815,8 +883,11 @@ fn lower_choices(
 
 /// The routing, targets and reports of [`TrainVerbs::step`].
 ///
+/// A blocking call lends its stats; a deferred one owns them, and
+/// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
+///
 /// Mirrors `uform_trainer_step_t`.
-pub struct TrainerStepConfig<'config, 'arena> {
+pub struct TrainerStepConfig<'config, 'arena, Stats = &'config mut TrainerStepStats> {
     /// The bag of each item, items sharing a bag landing on one device; empty keeps every item
     /// its own bag.
     pub bags: &'config [u32],
@@ -842,7 +913,7 @@ pub struct TrainerStepConfig<'config, 'arena> {
     /// The scalar type the embeddings land as, read only with an arena.
     pub outputs_scalar: Scalar,
     /// Where the losses land, overwritten by the call; `None` skips their readback too.
-    pub stats: Option<&'config mut TrainerStepStats>,
+    pub stats: Option<Stats>,
 }
 
 impl Default for TrainerStepConfig<'_, '_> {
@@ -863,38 +934,39 @@ impl Default for TrainerStepConfig<'_, '_> {
 
 impl<'config> From<Relations<'config>> for TrainerStepConfig<'config, '_> {
     fn from(relations: Relations<'config>) -> Self {
-        TrainerStepConfig {
-            relations,
-            ..TrainerStepConfig::default()
-        }
+        TrainerStepConfig { relations, ..TrainerStepConfig::default() }
     }
 }
 
 /// The path a checkpoint is written to and the handler counting its
 /// tensors; see [`TrainVerbs::save`].
 ///
+/// A blocking call lends its handler; a deferred one owns it, and
+/// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands it back.
+///
 /// Mirrors `uform_trainer_save_t`.
-pub struct TrainerSaveConfig<'config, Location> {
+pub struct TrainerSaveConfig<Location, Progress> {
     /// Destination of the safetensors checkpoint, written whole and renamed into place.
     pub path: Location,
     /// Reports the tensors written and stops wherever it says to.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
 }
 
-impl<Location: AsRef<Path>> From<Location> for TrainerSaveConfig<'_, Location> {
+impl<'config, Location: AsRef<Path>> From<Location>
+    for TrainerSaveConfig<Location, &'config mut ProgressCallback<'config>>
+{
     fn from(path: Location) -> Self {
-        TrainerSaveConfig {
-            path,
-            progress: None,
-            progress_steps: 0,
-        }
+        TrainerSaveConfig { path, progress: None, progress_steps: 0 }
     }
 }
 
-impl Accepts<TrainerStepConfig<'static, '_>> for Deferring {}
-impl<Location> Accepts<TrainerSaveConfig<'static, Location>> for Deferring where Deferring: Accepts<Location> {}
+impl<Stats: 'static> Accepts<TrainerStepConfig<'static, '_, Stats>> for Deferring {}
+impl<Location, Progress: 'static> Accepts<TrainerSaveConfig<Location, Progress>> for Deferring where
+    Deferring: Accepts<Location>
+{
+}
 
 // endregion: Configs
 
@@ -914,7 +986,9 @@ unsafe impl Send for Mesh {}
 unsafe impl Sync for Mesh {}
 
 impl Drop for Mesh {
-    fn drop(&mut self) { unsafe { uform_mesh_free(self.handle) } }
+    fn drop(&mut self) {
+        unsafe { uform_mesh_free(self.handle) }
+    }
 }
 
 impl Mesh {
@@ -924,9 +998,7 @@ impl Mesh {
     ///
     /// Calls `uform_mesh_bootstrap`.
     pub fn bootstrap(executor: &Executor, options: &MeshOptions) -> Result<Self> {
-        let mut mesh = Mesh {
-            handle: ptr::null_mut(),
-        };
+        let mut mesh = Mesh { handle: ptr::null_mut() };
         let mut outcome = uform_outcome_t::default();
         unsafe {
             uform_mesh_bootstrap(&mut uform_mesh_bootstrap_t {
@@ -967,10 +1039,8 @@ impl Mesh {
             gpus_per_colocated_domain: description.gpus_per_colocated_domain,
             host_domain_index: description.host_domain_index,
             first_gpu_index: description.first_gpu_index,
-            multimem_tier: MultimemTier::from_raw(description.multimem_tier).ok_or(fail(
-                Status::Internal,
-                "the library reported a tier this binding cannot name",
-            ))?,
+            multimem_tier: MultimemTier::from_raw(description.multimem_tier)
+                .ok_or(fail(Status::Internal, "the library reported a tier this binding cannot name"))?,
             gpu_class: GPUClass::from_raw(description.gpu_class),
         })
     }
@@ -1015,7 +1085,9 @@ pub struct Trainer<'mesh> {
 unsafe impl Send for Trainer<'_> {}
 
 impl Drop for Trainer<'_> {
-    fn drop(&mut self) { unsafe { uform_trainer_free(self.handle) } }
+    fn drop(&mut self) {
+        unsafe { uform_trainer_free(self.handle) }
+    }
 }
 
 impl<'mesh> Trainer<'mesh> {
@@ -1029,12 +1101,8 @@ impl<'mesh> Trainer<'mesh> {
         config: impl Into<TrainerInitVramConfig<'config, 'mesh>>,
     ) -> Result<Self> {
         let mut config = config.into();
-        let callbacks = Callbacks::default();
-        let progress = lower_progress(&mut config.progress, config.progress_steps, &callbacks);
-        let mut trainer = Trainer {
-            handle: ptr::null_mut(),
-            mesh: PhantomData,
-        };
+        let progress = lower_progress(&mut config.progress, config.progress_steps);
+        let mut trainer = Trainer { handle: ptr::null_mut(), mesh: PhantomData };
         let mut outcome = uform_outcome_t::default();
         unsafe {
             uform_trainer_init_vram(&mut uform_trainer_init_vram_t {
@@ -1057,7 +1125,6 @@ impl<'mesh> Trainer<'mesh> {
                 progress,
             })
         };
-        callbacks.raise();
         check(outcome).map(|()| trainer)
     }
 
@@ -1065,11 +1132,7 @@ impl<'mesh> Trainer<'mesh> {
     ///
     /// Rust-only.
     pub fn on<'trainer>(&'trainer self, executor: &'trainer Executor) -> On<'trainer, Trainer<'mesh>> {
-        On {
-            handle: self,
-            executor,
-            completion: PhantomData,
-        }
+        On { handle: self, executor, completion: PhantomData }
     }
 
     /// The receiver whose verbs submit their calls to `executor`, answering a
@@ -1077,11 +1140,7 @@ impl<'mesh> Trainer<'mesh> {
     ///
     /// Rust-only.
     pub fn deferred<'trainer>(&'trainer self, executor: &'trainer Executor) -> On<'trainer, Trainer<'mesh>, Deferring> {
-        On {
-            handle: self,
-            executor,
-            completion: PhantomData,
-        }
+        On { handle: self, executor, completion: PhantomData }
     }
 }
 
@@ -1108,14 +1167,20 @@ pub trait TrainVerbs<'trainer>: Copy {
     /// Answers the pooled embeddings when the config names an arena.
     ///
     /// Calls `uform_trainer_step`.
-    fn step<'config, 'arena, Modalities: AsRef<[Modality]>, Contents: TapeView<u8>>(
+    fn step<
+        'config,
+        'arena,
+        Modalities: AsRef<[Modality]>,
+        Contents: TapeView<u8>,
+        Stats: BorrowMut<TrainerStepStats>,
+    >(
         self,
         modalities: Modalities,
         contents: Contents,
-        config: impl Into<TrainerStepConfig<'config, 'arena>>,
-    ) -> Answer<'trainer, Self, TrainerStep<'config, 'arena, Modalities, Contents>>
+        config: impl Into<TrainerStepConfig<'config, 'arena, Stats>>,
+    ) -> Answer<'trainer, Self, TrainerStep<'config, 'arena, Modalities, Contents, Stats>>
     where
-        Self::Completion: Accepts<Modalities> + Accepts<Contents> + Accepts<TrainerStepConfig<'config, 'arena>>,
+        Self::Completion: Accepts<Modalities> + Accepts<Contents> + Accepts<TrainerStepConfig<'config, 'arena, Stats>>,
     {
         <Self::Completion as Completion>::answer(TrainerStep {
             handles: self.handles(),
@@ -1132,17 +1197,14 @@ pub trait TrainVerbs<'trainer>: Copy {
     /// resumes; only the process of index zero writes, the rest return at once.
     ///
     /// Calls `uform_trainer_save`.
-    fn save<'config, Location: AsRef<Path>>(
+    fn save<Location: AsRef<Path>, Progress: FnMut(usize, usize) -> ControlFlow<()> + Send>(
         self,
-        config: impl Into<TrainerSaveConfig<'config, Location>>,
-    ) -> Answer<'trainer, Self, TrainerSave<'config, Location>>
+        config: impl Into<TrainerSaveConfig<Location, Progress>>,
+    ) -> Answer<'trainer, Self, TrainerSave<Location, Progress>>
     where
-        Self::Completion: Accepts<TrainerSaveConfig<'config, Location>>,
+        Self::Completion: Accepts<TrainerSaveConfig<Location, Progress>>,
     {
-        <Self::Completion as Completion>::answer(TrainerSave {
-            handles: self.handles(),
-            config: config.into(),
-        })
+        <Self::Completion as Completion>::answer(TrainerSave { handles: self.handles(), config: config.into() })
     }
 }
 
@@ -1150,10 +1212,7 @@ impl<'trainer, Completion: crate::types::Completion> TrainVerbs<'trainer> for On
     type Completion = Completion;
 
     fn handles(&self) -> Handles {
-        Handles {
-            handle: self.handle.handle,
-            executor: self.executor.handle,
-        }
+        Handles { handle: self.handle.handle, executor: self.executor.handle }
     }
 }
 
@@ -1164,28 +1223,24 @@ impl<'trainer, Completion: crate::types::Completion> TrainVerbs<'trainer> for On
 /// One optimizer step; see [`TrainVerbs::step`].
 ///
 /// Calls `uform_trainer_step`.
-pub struct TrainerStep<'config, 'arena, Modalities, Contents> {
+pub struct TrainerStep<'config, 'arena, Modalities, Contents, Stats> {
     handles: Handles,
     modalities: Modalities,
     contents: Contents,
     gathered: Gathered<u8>,
-    config: TrainerStepConfig<'config, 'arena>,
+    config: TrainerStepConfig<'config, 'arena, Stats>,
     embeddings: Exported<uform_rows_view_t>,
     count: usize,
 }
 
-impl<'arena, Modalities: AsRef<[Modality]>, Contents: TapeView<u8>> Calling
-    for TrainerStep<'_, 'arena, Modalities, Contents>
+impl<'config, 'arena, Modalities: AsRef<[Modality]>, Contents: TapeView<u8>, Stats: BorrowMut<TrainerStepStats>> Calling
+    for TrainerStep<'config, 'arena, Modalities, Contents, Stats>
 {
     type Arguments = uform_trainer_step_t;
     type Output = Option<Rows<'arena>>;
+    type Inputs = (Modalities, Contents, TrainerStepConfig<'config, 'arena, Stats>);
 
-    fn arguments(
-        &mut self,
-        outcome: *mut uform_outcome_t,
-        completion: uform_completion_t,
-        _: &Callbacks,
-    ) -> Result<Self::Arguments> {
+    fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments> {
         let batch = self.contents.tape(&mut self.gathered)?;
         let count = batch.count;
         let modalities = self.modalities.as_ref();
@@ -1197,10 +1252,7 @@ impl<'arena, Modalities: AsRef<[Modality]>, Contents: TapeView<u8>> Calling
             .iter()
             .any(|&length| length != 0 && length != count)
         {
-            return Err(fail(
-                Status::ShapeMismatch,
-                "pass no bags, groups or sides, or one per item",
-            ));
+            return Err(fail(Status::ShapeMismatch, "pass no bags, groups or sides, or one per item"));
         }
         let (choices, choice_targets) = lower_choices(config.choices, config.choice_targets, count)?;
         let relations = uform_relations_view_t {
@@ -1238,42 +1290,41 @@ impl<'arena, Modalities: AsRef<[Modality]>, Contents: TapeView<u8>> Calling
             },
             arena: config.arena.as_deref().map_or(ptr::null_mut(), |arena| arena.handle),
             outputs_scalar: config.outputs_scalar as uform_scalar_t,
-            stats: config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
+            stats: output_slot(&mut config.stats),
         })
     }
 
-    unsafe fn call(arguments: *mut Self::Arguments) { uform_trainer_step(arguments) }
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { uform_trainer_step(arguments) }
+    }
 
-    fn finish(self) -> Result<Option<Rows<'arena>>> {
-        let (embeddings, count) = (self.embeddings, self.count);
-        Ok(self.config.arena.map(|arena| Rows {
-            arena,
-            view: embeddings,
-            count,
-        }))
+    fn finish(self, status: Result<()>) -> (Result<Option<Rows<'arena>>>, Self::Inputs) {
+        let TrainerStep { modalities, contents, mut config, embeddings, count, .. } = self;
+        // The arena goes to the rows it holds, so the config comes back without it.
+        let arena = config.arena.take();
+        let rows = status.map(|()| arena.map(|arena| Rows { arena, view: embeddings, count }));
+        (rows, (modalities, contents, config))
     }
 }
 
 /// A checkpoint write; see [`TrainVerbs::save`].
 ///
 /// Calls `uform_trainer_save`.
-pub struct TrainerSave<'config, Location> {
+pub struct TrainerSave<Location, Progress> {
     handles: Handles,
-    config: TrainerSaveConfig<'config, Location>,
+    config: TrainerSaveConfig<Location, Progress>,
 }
 
-impl<Location: AsRef<Path>> Calling for TrainerSave<'_, Location> {
+impl<Location: AsRef<Path>, Progress: FnMut(usize, usize) -> ControlFlow<()> + Send> Calling
+    for TrainerSave<Location, Progress>
+{
     type Arguments = uform_trainer_save_t;
     type Output = ();
+    type Inputs = TrainerSaveConfig<Location, Progress>;
 
-    fn arguments(
-        &mut self,
-        outcome: *mut uform_outcome_t,
-        completion: uform_completion_t,
-        callbacks: &Callbacks,
-    ) -> Result<Self::Arguments> {
+    fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments> {
         let path = path_view(self.config.path.as_ref())?;
-        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
+        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps);
         Ok(uform_trainer_save_t {
             trainer: self.handles.handle,
             executor: self.handles.executor,
@@ -1284,9 +1335,13 @@ impl<Location: AsRef<Path>> Calling for TrainerSave<'_, Location> {
         })
     }
 
-    unsafe fn call(arguments: *mut Self::Arguments) { uform_trainer_save(arguments) }
+    unsafe fn call(arguments: *mut Self::Arguments) {
+        unsafe { uform_trainer_save(arguments) }
+    }
 
-    fn finish(self) -> Result<()> { Ok(()) }
+    fn finish(self, status: Result<()>) -> (Result<()>, Self::Inputs) {
+        (status, self.config)
+    }
 }
 
 // endregion: Calls
@@ -1299,13 +1354,12 @@ mod tests {
 
     /// A trainer whose handle is null, which every verb refuses past the binding's own checks.
     fn null_trainer() -> Trainer<'static> {
-        Trainer {
-            handle: ptr::null_mut(),
-            mesh: PhantomData,
-        }
+        Trainer { handle: ptr::null_mut(), mesh: PhantomData }
     }
 
-    fn status_of<Value>(result: Result<Value>) -> Option<Status> { result.err().map(|error| error.status) }
+    fn status_of<Value>(result: Result<Value>) -> Option<Status> {
+        result.err().map(|error| error.status)
+    }
 
     #[test]
     fn training_enums_round_trip_through_the_library() {
@@ -1324,49 +1378,25 @@ mod tests {
         }
         assert_eq!(MultimemTier::PeerRead.to_string(), "peer-read");
         assert!("ring".parse::<MultimemTier>().is_err());
-        assert!(
-            "speech".parse::<Modality>().is_err(),
-            "the default a stranger reads as is refused"
-        );
+        for form in [PairLossForm::Derived, PairLossForm::Balanced, PairLossForm::Ranked, PairLossForm::Sigmoid] {
+            assert_eq!(form.to_string().parse(), Ok(form));
+        }
+        assert_eq!(PairLossForm::Sigmoid.to_string(), "sigmoid");
+        assert!("steep".parse::<PairLossForm>().is_err());
+        let sides = [
+            LateInteractionSide::None,
+            LateInteractionSide::Query,
+            LateInteractionSide::Document,
+            LateInteractionSide::QueryAndDocument,
+        ];
+        for side in sides {
+            assert_eq!(side.to_string().parse(), Ok(side));
+        }
+        assert_eq!(LateInteractionSide::QueryAndDocument.to_string(), "query-and-document");
+        assert!("both".parse::<LateInteractionSide>().is_err());
+        assert!("speech".parse::<Modality>().is_err(), "the default a stranger reads as is refused");
         assert!("both".parse::<Objective>().is_err());
         assert!("all".parse::<Negatives>().is_err());
-    }
-
-    #[test]
-    fn training_structs_lay_out_as_the_header_declares() {
-        use core::mem::{offset_of, size_of};
-
-        let word = size_of::<usize>();
-        assert_eq!(offset_of!(BatchShape, max_choices_per_item), 4 * word);
-        assert_eq!(
-            offset_of!(uform_contrastive_t, pair_loss),
-            size_of::<uform_contrastive_t>() - word
-        );
-        assert_eq!(offset_of!(LateInteraction, pair_loss), 7 * word);
-        assert_eq!(size_of::<Choices>(), 8);
-        assert_eq!(
-            offset_of!(uform_trainer_step_t, choices),
-            offset_of!(uform_trainer_step_t, sides) + word
-        );
-        assert_eq!(
-            offset_of!(uform_trainer_step_t, choice_targets),
-            offset_of!(uform_trainer_step_t, choices) + 3 * word
-        );
-        assert_eq!(
-            offset_of!(uform_trainer_step_t, relations),
-            offset_of!(uform_trainer_step_t, choice_targets) + 3 * word
-        );
-        let late_interaction_loss = offset_of!(TrainerStepStats, late_interaction_loss);
-        assert_eq!(
-            late_interaction_loss,
-            offset_of!(TrainerStepStats, masked_audio_loss) + 4
-        );
-        assert_eq!(offset_of!(TrainerStepStats, choices_loss), late_interaction_loss + 4);
-        assert_eq!(
-            offset_of!(TrainerStepStats, dropped),
-            offset_of!(TrainerStepStats, truncated) + word
-        );
-        assert_eq!(offset_of!(uform_mesh_description_t, gpu_class), 5 * word + 4);
     }
 
     /// Training is GPU-only, so a build without GPUs refuses both constructors as
@@ -1374,34 +1404,21 @@ mod tests {
     #[test]
     fn a_build_without_gpus_refuses_to_train() -> Result<()> {
         let executor = Executor::for_ram(&[], None, 1)?;
-        let options = MeshOptions {
-            directory: Path::new("/tmp"),
-            job: "uform-rust",
-            ..MeshOptions::default()
-        };
+        let options = MeshOptions { directory: Path::new("/tmp"), job: "uform-rust", ..MeshOptions::default() };
         assert_eq!(status_of(Mesh::bootstrap(&executor, &options)), Some(Status::Device));
         #[cfg(unix)]
         {
             use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
 
-            let options = MeshOptions {
-                directory: Path::new(OsStr::from_bytes(b"/tmp/\xff")),
-                ..options
-            };
+            let options = MeshOptions { directory: Path::new(OsStr::from_bytes(b"/tmp/\xff")), ..options };
             let refused = status_of(Mesh::bootstrap(&executor, &options));
             assert_eq!(refused, Some(Status::Device), "a path crosses as the OS's bytes");
         }
         let config = TrainerInitVramConfig {
             depth: 2,
             hidden: 128,
-            schedule: Schedule {
-                steps: 10,
-                ..Schedule::default()
-            },
-            contrastive: Contrastive {
-                matryoshka_dimensions: &[64, 128],
-                ..Contrastive::default()
-            },
+            schedule: Schedule { steps: 10, ..Schedule::default() },
+            contrastive: Contrastive { matryoshka_dimensions: &[64, 128], ..Contrastive::default() },
             ..TrainerInitVramConfig::default()
         };
         assert_eq!(status_of(Trainer::init_vram(&executor, config)), Some(Status::Device));
@@ -1420,49 +1437,21 @@ mod tests {
 
         let unpaired = receiver.step([Modality::Text], contents, TrainerStepConfig::default());
         assert_eq!(status_of(unpaired), Some(Status::ShapeMismatch));
-        let bags = TrainerStepConfig {
-            bags: &[0],
-            ..TrainerStepConfig::default()
-        };
-        assert_eq!(
-            status_of(receiver.step(modalities, contents, bags)),
-            Some(Status::ShapeMismatch)
-        );
-        let sides = TrainerStepConfig {
-            sides: &[LateInteractionSide::Query],
-            ..TrainerStepConfig::default()
-        };
-        assert_eq!(
-            status_of(receiver.step(modalities, contents, sides)),
-            Some(Status::ShapeMismatch)
-        );
+        let bags = TrainerStepConfig { bags: &[0], ..TrainerStepConfig::default() };
+        assert_eq!(status_of(receiver.step(modalities, contents, bags)), Some(Status::ShapeMismatch));
+        let sides = TrainerStepConfig { sides: &[LateInteractionSide::Query], ..TrainerStepConfig::default() };
+        assert_eq!(status_of(receiver.step(modalities, contents, sides)), Some(Status::ShapeMismatch));
         let untargeted = TrainerStepConfig {
             choices: (b"yn", &[0, 2, 2]),
             choice_targets: (&[1.0], &[0, 1, 1]),
             ..TrainerStepConfig::default()
         };
-        assert_eq!(
-            status_of(receiver.step(modalities, contents, untargeted)),
-            Some(Status::ShapeMismatch)
-        );
-        let unpaired_targets = TrainerStepConfig {
-            choices: (b"yn", &[0, 2, 2]),
-            ..TrainerStepConfig::default()
-        };
-        assert_eq!(
-            status_of(receiver.step(modalities, contents, unpaired_targets)),
-            Some(Status::InvalidArgument)
-        );
+        assert_eq!(status_of(receiver.step(modalities, contents, untargeted)), Some(Status::ShapeMismatch));
+        let unpaired_targets = TrainerStepConfig { choices: (b"yn", &[0, 2, 2]), ..TrainerStepConfig::default() };
+        assert_eq!(status_of(receiver.step(modalities, contents, unpaired_targets)), Some(Status::InvalidArgument));
 
         fn edges(offsets: &'static [usize], ids: &'static [u32]) -> Relations<'static> {
-            Relations {
-                attract: Edges {
-                    offsets,
-                    ids,
-                    weights: &[],
-                },
-                ..Relations::default()
-            }
+            Relations { attract: Edges { offsets, ids, weights: &[] }, ..Relations::default() }
         }
         let refusals = [
             (edges(&[0, 1], &[1]), Status::ShapeMismatch),
@@ -1474,22 +1463,20 @@ mod tests {
             assert_eq!(status_of(receiver.step(modalities, contents, relations)), Some(status));
         }
 
-        // A well-formed step reaches the library, which refuses the null trainer or, first,
-        // the RAM executor.
-        let refused = [Some(Status::InvalidArgument), Some(Status::Device)];
+        // A well-formed step reaches the library, which refuses the null trainer before the RAM
+        // executor.
+        let refused = Some(Status::Uninitialized);
         let mut arena = Arena::new_in(&executor)?;
         let config = TrainerStepConfig {
             relations: edges(&[0, 1, 2], &[1, 0]),
             arena: Some(&mut arena),
             ..TrainerStepConfig::default()
         };
-        assert!(refused.contains(&status_of(receiver.step(modalities, contents, config))));
+        assert_eq!(status_of(receiver.step(modalities, contents, config)), refused);
         let deferred =
-            trainer
-                .deferred(&executor)
-                .step(vec![Modality::Text], vec!["a"], TrainerStepConfig::default())?;
-        assert!(refused.contains(&status_of(deferred.wait())));
-        assert!(refused.contains(&status_of(receiver.save("/tmp/uform-rust.safetensors"))));
+            trainer.deferred(&executor).step(vec![Modality::Text], vec!["a"], TrainerStepConfig::default())?;
+        assert_eq!(status_of(deferred.wait()), refused);
+        assert_eq!(status_of(receiver.save("/tmp/uform-rust.safetensors")), refused);
         Ok(())
     }
 }

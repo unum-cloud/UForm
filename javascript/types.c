@@ -51,20 +51,39 @@ bool uform_js_cpu_class_from_value(napi_env env, napi_value value, uform_cpu_cla
     char name[uform_js_name_capacity_k];
     *result = uform_cpu_class_unknown_k;
     if (uform_js_value_absent(env, value)) return true;
-    if (!uform_js_name_from_value(env, value, "cpuClass", name)) return false;
+    if (!uform_js_name_from_value(env, value, "cpuClassCeiling", name)) return false;
     uform_status_t const status = uform_cpu_class_from_name(uform_js_name_view(name), result);
     if (status == uform_status_success_k) return true;
-    return uform_js_throw(env, status, "The 'cpuClass' argument names no CPU class");
+    return uform_js_throw(env, status, "The 'cpuClassCeiling' argument names no CPU class");
 }
 
 bool uform_js_gpu_class_from_value(napi_env env, napi_value value, uform_gpu_class_t* result) {
     char name[uform_js_name_capacity_k];
     *result = uform_gpu_class_unknown_k;
     if (uform_js_value_absent(env, value)) return true;
-    if (!uform_js_name_from_value(env, value, "gpuClass", name)) return false;
+    if (!uform_js_name_from_value(env, value, "gpuClassCeiling", name)) return false;
     uform_status_t const status = uform_gpu_class_from_name(uform_js_name_view(name), result);
     if (status == uform_status_success_k) return true;
-    return uform_js_throw(env, status, "The 'gpuClass' argument names no GPU class");
+    return uform_js_throw(env, status, "The 'gpuClassCeiling' argument names no GPU class");
+}
+
+bool uform_js_pair_loss_form_from_value(napi_env env, napi_value value, uform_pair_loss_form_t* result) {
+    char name[uform_js_name_capacity_k];
+    *result = uform_pair_loss_form_derived_k;
+    if (uform_js_value_absent(env, value)) return true;
+    if (!uform_js_name_from_value(env, value, "pairLoss", name)) return false;
+    uform_status_t const status = uform_pair_loss_form_from_name(uform_js_name_view(name), result);
+    if (status == uform_status_success_k) return true;
+    return uform_js_throw(env, status, "The 'pairLoss' argument names no pair-loss form");
+}
+
+bool uform_js_late_interaction_side_from_value(napi_env env, napi_value value, uform_late_interaction_side_t* result) {
+    char name[uform_js_name_capacity_k];
+    *result = uform_late_interaction_side_none_k;
+    if (!uform_js_name_from_value(env, value, "sides", name)) return false;
+    uform_status_t const status = uform_late_interaction_side_from_name(uform_js_name_view(name), result);
+    if (status == uform_status_success_k) return true;
+    return uform_js_throw(env, status, "The 'sides' argument names no late-interaction side");
 }
 
 napi_value uform_js_class_name(napi_env env, char const* name) {
@@ -328,9 +347,7 @@ bool uform_js_array_from_value(napi_env env, napi_value value, char const* field
     return true;
 }
 
-/** Hands @p call a heap block of @p bytes it frees once final; @c NULL with
- *  an exception pending. */
-static void* uform_js_call_own(napi_env env, uform_js_call_t* call, size_t bytes) {
+void* uform_js_call_own(napi_env env, uform_js_call_t* call, size_t bytes) {
     for (size_t block = 0; block != uform_js_owned_k; ++block) {
         if (call->owned[block]) continue;
         call->owned[block] = malloc(bytes ? bytes : 1);
@@ -401,17 +418,16 @@ bool uform_js_per_item_from_value(napi_env env, napi_value value, char const* fi
 }
 
 /** Calls the JavaScript progress handler in place: @c false from it cancels, and so does a throw,
- *  which the call rethrows once it returns. */
+ *  which goes to the process's uncaught-exception handlers since no caller catches it. */
 static uform_continuation_t uform_js_progress_relay(size_t completed, size_t total, void* state) {
     uform_js_call_t* const call = (uform_js_call_t*)state;
     napi_env const env = call->env;
     napi_value global = NULL, answer = NULL, exception = NULL;
     napi_value const arguments[2] = {uform_js_number(env, completed), uform_js_number(env, total)};
-    if (call->failure) return uform_cancel_k;
     if (napi_get_global(env, &global) != napi_ok ||
         napi_call_function(env, global, call->progress, 2, arguments, &answer) != napi_ok) {
         if (napi_get_and_clear_last_exception(env, &exception) == napi_ok && exception)
-            napi_create_reference(env, exception, 1, &call->failure);
+            napi_fatal_exception(env, exception);
         return uform_cancel_k;
     }
     napi_valuetype kind = napi_undefined;
@@ -611,7 +627,7 @@ static bool uform_js_pointer_from_value(napi_env env, napi_value value, char con
     return true;
 }
 
-/** <tt>forRam({memoryDomains, cpuClass, threads})</tt> → host threads over NUMA nodes. */
+/** <tt>forRam({memoryDomains, cpuClassCeiling, threads})</tt> → host threads over NUMA nodes. */
 static napi_value uform_js_executor_for_ram(napi_env env, napi_callback_info info) {
     napi_value config = NULL;
     uform_outcome_t outcome = {uform_status_success_k, NULL};
@@ -619,7 +635,8 @@ static napi_value uform_js_executor_for_ram(napi_env env, napi_callback_info inf
     uform_executor_for_ram_t for_ram = {.executor = &handle, .outcome = &outcome};
     int32_t* ordinals = NULL;
     if (!uform_js_arguments(env, info, 1, &config, NULL) ||
-        !uform_js_cpu_class_from_value(env, uform_js_property(env, config, "cpuClass"), &for_ram.ram.cpu_class) ||
+        !uform_js_cpu_class_from_value(env, uform_js_property(env, config, "cpuClassCeiling"),
+                                       &for_ram.ram.cpu_class_ceiling) ||
         !uform_js_size_from_value(env, uform_js_property(env, config, "threads"), "threads", &for_ram.threads) ||
         !uform_js_ordinals_from_value(env, uform_js_property(env, config, "memoryDomains"), "memoryDomains", &ordinals,
                                       &for_ram.ram.memory_domains_count))
@@ -630,7 +647,7 @@ static napi_value uform_js_executor_for_ram(napi_env env, napi_callback_info inf
     return uform_js_executor_adopt(env, &outcome, handle);
 }
 
-/** <tt>onPool(pool, {memoryDomains, cpuClass})</tt> → an executor borrowing
+/** <tt>onPool(pool, {memoryDomains, cpuClassCeiling})</tt> → an executor borrowing
  *  a ForkUnion pool. */
 static napi_value uform_js_executor_on_pool(napi_env env, napi_callback_info info) {
     napi_value arguments[2];
@@ -640,7 +657,8 @@ static napi_value uform_js_executor_on_pool(napi_env env, napi_callback_info inf
     int32_t* ordinals = NULL;
     if (!uform_js_arguments(env, info, 2, arguments, NULL) ||
         !uform_js_pointer_from_value(env, arguments[0], "pool", &on_pool.pool) ||
-        !uform_js_cpu_class_from_value(env, uform_js_property(env, arguments[1], "cpuClass"), &on_pool.ram.cpu_class) ||
+        !uform_js_cpu_class_from_value(env, uform_js_property(env, arguments[1], "cpuClassCeiling"),
+                                       &on_pool.ram.cpu_class_ceiling) ||
         !uform_js_ordinals_from_value(env, uform_js_property(env, arguments[1], "memoryDomains"), "memoryDomains",
                                       &ordinals, &on_pool.ram.memory_domains_count))
         return NULL;
@@ -650,7 +668,7 @@ static napi_value uform_js_executor_on_pool(napi_env env, napi_callback_info inf
     return uform_js_executor_adopt(env, &outcome, handle);
 }
 
-/** <tt>forVram({devices, gpuClass, memoryDomains, cpuClass, streams, scratchLimit})</tt>
+/** <tt>forVram({devices, gpuClassCeiling, memoryDomains, cpuClassCeiling, streams, scratchLimit})</tt>
  *  → a stream per device and host decoders over NUMA nodes. */
 static napi_value uform_js_executor_for_vram(napi_env env, napi_callback_info info) {
     napi_value config = NULL;
@@ -659,8 +677,10 @@ static napi_value uform_js_executor_for_vram(napi_env env, napi_callback_info in
     uform_executor_for_vram_t for_vram = {.executor = &handle, .outcome = &outcome};
     int32_t *ordinals = NULL, *memory_domains = NULL;
     if (!uform_js_arguments(env, info, 1, &config, NULL) ||
-        !uform_js_gpu_class_from_value(env, uform_js_property(env, config, "gpuClass"), &for_vram.vram.gpu_class) ||
-        !uform_js_cpu_class_from_value(env, uform_js_property(env, config, "cpuClass"), &for_vram.ram.cpu_class) ||
+        !uform_js_gpu_class_from_value(env, uform_js_property(env, config, "gpuClassCeiling"),
+                                       &for_vram.vram.gpu_class_ceiling) ||
+        !uform_js_cpu_class_from_value(env, uform_js_property(env, config, "cpuClassCeiling"),
+                                       &for_vram.ram.cpu_class_ceiling) ||
         !uform_js_size_from_value(env, uform_js_property(env, config, "scratchLimit"), "scratchLimit",
                                   &for_vram.scratch_limit) ||
         !uform_js_ordinals_from_value(env, uform_js_property(env, config, "devices"), "devices", &ordinals,
@@ -718,7 +738,7 @@ static napi_value uform_js_executor_drain(napi_env env, napi_callback_info info)
     uform_mood_t mood = uform_mood_parked_k;
     if (!executor || !uform_js_mood_from_value(env, argument, &mood)) return NULL;
     if (!executor->handle) {
-        uform_js_throw(env, uform_status_invalid_argument_k, "The Executor was already freed");
+        uform_js_throw(env, uform_status_uninitialized_k, "The Executor was already freed");
         return NULL;
     }
     uform_outcome_t outcome = {uform_status_success_k, NULL};
@@ -1007,8 +1027,6 @@ napi_value uform_js_arena_define(napi_env env) {
 
 /** Drops what a final call holds and owns, keeping its outcome readable; safe to repeat. */
 static void uform_js_call_release(napi_env env, uform_js_call_t* call) {
-    if (call->failure) napi_delete_reference(env, call->failure);
-    call->failure = NULL;
     for (size_t slot = 0; slot != uform_js_slots_k; ++slot) {
         if (call->held[slot]) napi_delete_reference(env, call->held[slot]);
         call->held[slot] = NULL;
@@ -1041,36 +1059,6 @@ static napi_value uform_js_deferred_status(napi_env env, napi_callback_info info
     return uform_js_static_string(env, uform_status_name(uform_outcome_status(&call->outcome)));
 }
 
-/** An outcome wait handed to the libuv pool, which a promise resolves once it returns. */
-typedef struct uform_js_settling_t {
-
-    /** The work item the pool runs. */
-    napi_async_work work;
-
-    /** The promise the loop resolves once the wait returns. */
-    napi_deferred promise;
-
-    /** A strong reference keeping the call alive through the wait. */
-    napi_ref wrapper;
-
-    /** The outcome the pool waits on. */
-    uform_outcome_t* outcome;
-} uform_js_settling_t;
-
-static void uform_js_settling_execute(napi_env env, void* data) {
-    (void)env;
-    uform_outcome_wait(((uform_js_settling_t*)data)->outcome);
-}
-
-static void uform_js_settling_complete(napi_env env, napi_status status, void* data) {
-    uform_js_settling_t* const settling = (uform_js_settling_t*)data;
-    (void)status;
-    napi_resolve_deferred(env, settling->promise, uform_js_undefined(env));
-    napi_delete_reference(env, settling->wrapper);
-    napi_delete_async_work(env, settling->work);
-    free(settling);
-}
-
 /** @c wait() - blocks the calling thread until the call is final. */
 static napi_value uform_js_deferred_wait(napi_env env, napi_callback_info info) {
     uform_js_call_t* const call = (uform_js_call_t*)uform_js_self(env, info, 0, NULL, NULL);
@@ -1079,39 +1067,8 @@ static napi_value uform_js_deferred_wait(napi_env env, napi_callback_info info) 
     return uform_js_undefined(env);
 }
 
-/** @c settled() → a promise resolved once the call is final, its wait run on the libuv pool. */
-static napi_value uform_js_deferred_settled(napi_env env, napi_callback_info info) {
-    napi_value self = NULL, promise = NULL, name = NULL;
-    uform_js_call_t* const call = (uform_js_call_t*)uform_js_self(env, info, 0, NULL, &self);
-    if (!call) return NULL;
-    uform_js_settling_t* const settling = (uform_js_settling_t*)calloc(1, sizeof(uform_js_settling_t));
-    if (!settling) {
-        uform_js_throw(env, uform_status_out_of_memory_k, "Could not allocate the wait");
-        return NULL;
-    }
-    settling->outcome = &call->outcome;
-    if (napi_create_string_utf8(env, "uform:deferred", NAPI_AUTO_LENGTH, &name) != napi_ok ||
-        napi_create_reference(env, self, 1, &settling->wrapper) != napi_ok ||
-        napi_create_async_work(env, NULL, name, uform_js_settling_execute, uform_js_settling_complete, settling,
-                               &settling->work) != napi_ok ||
-        napi_create_promise(env, &settling->promise, &promise) != napi_ok ||
-        napi_queue_async_work(env, settling->work) != napi_ok) {
-        if (settling->work) napi_delete_async_work(env, settling->work);
-        if (settling->wrapper) napi_delete_reference(env, settling->wrapper);
-        free(settling);
-        uform_js_throw(env, uform_status_internal_k, "Could not queue the wait");
-        return NULL;
-    }
-    return promise;
-}
-
-/** Builds a final call's answer, or throws its handler's exception, failure or stale arena. */
+/** Builds a final call's answer, or throws its failure or stale arena. */
 static napi_value uform_js_call_finish(napi_env env, uform_js_call_t* call, napi_value const* slots) {
-    napi_value failure = NULL;
-    if (call->failure && napi_get_reference_value(env, call->failure, &failure) == napi_ok) {
-        napi_throw(env, failure);
-        return NULL;
-    }
     if (!uform_js_succeeded(env, &call->outcome)) return NULL;
     if (call->arena && call->arena->holder != call) {
         uform_js_throw(env, uform_status_invalid_argument_k,
@@ -1146,7 +1103,6 @@ napi_value uform_js_deferred_define(napi_env env) {
     static napi_property_descriptor const properties[] = {
         {"status", NULL, uform_js_deferred_status, NULL, NULL, NULL, napi_default_method, NULL},
         {"wait", NULL, uform_js_deferred_wait, NULL, NULL, NULL, napi_default_method, NULL},
-        {"settled", NULL, uform_js_deferred_settled, NULL, NULL, NULL, napi_default_method, NULL},
         {"result", NULL, uform_js_deferred_result, NULL, NULL, NULL, napi_default_method, NULL},
     };
     napi_value deferred_class = NULL;
@@ -1255,7 +1211,7 @@ napi_value uform_js_gpu_devices(napi_env env, napi_callback_info info) {
     static char const* const names[] = {"vendor", "vendorOrdinal", "gpuClass", "computeUnits", "memoryBytes", "name"};
     for (size_t position = 0; listed && position != count; ++position) {
         uform_gpu_device_t const* const device = &devices[position];
-        napi_value const values[] = {uform_js_number(env, (size_t)device->vendor),
+        napi_value const values[] = {uform_js_static_string(env, uform_gpu_vendor_name(device->vendor)),
                                      uform_js_number(env, device->vendor_ordinal),
                                      uform_js_class_name(env, uform_gpu_class_name(device->gpu_class)),
                                      uform_js_number(env, device->compute_units),

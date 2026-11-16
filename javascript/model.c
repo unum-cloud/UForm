@@ -57,9 +57,9 @@ typedef enum uform_js_load_t {
     uform_js_load_vram_buffer_k,
 } uform_js_load_t;
 
-/** @c loadRam(path, executor, memoryDomains, quantization, cpuClass), @c loadVram(path, executor,
- *  devices, quantization, gpuClass), and their @c Buffer twins taking any @c TypedArray → a model,
- *  the load blocking on @p executor. */
+/** <tt>loadRam(path, executor, memoryDomains, quantization, cpuClassCeiling)</tt>,
+ *  <tt>loadVram(path, executor, devices, quantization, gpuClassCeiling)</tt>, and their @c Buffer
+ *  twins taking any @c TypedArray → a model, the load blocking on @p executor. */
 static napi_value uform_js_model_load(napi_env env, napi_callback_info info, uform_js_load_t load) {
     napi_value arguments[5];
     if (!uform_js_arguments(env, info, 5, arguments, NULL)) return NULL;
@@ -75,12 +75,13 @@ static napi_value uform_js_model_load(napi_env env, napi_callback_info info, ufo
     if (from_path) path = uform_js_string_from_value(env, arguments[0], "path", &bytes);
     else if (uform_js_bytes_from_value(env, arguments[0], "buffer", &buffer, &bytes.length))
         bytes.data = (uint8_t const*)buffer;
-    uform_cpu_class_t cpu_class = uform_cpu_class_unknown_k;
-    uform_gpu_class_t gpu_class = uform_gpu_class_unknown_k;
+    uform_cpu_class_t cpu_class_ceiling = uform_cpu_class_unknown_k;
+    uform_gpu_class_t gpu_class_ceiling = uform_gpu_class_unknown_k;
     bool const read = from_path ? path != NULL : bytes.data != NULL || !bytes.length;
-    bool const pinned = load >= uform_js_load_vram_k ? uform_js_gpu_class_from_value(env, arguments[4], &gpu_class)
-                                                     : uform_js_cpu_class_from_value(env, arguments[4], &cpu_class);
-    if (!read || !pinned || !uform_js_executor_from_value(env, arguments[1], &executor) ||
+    bool const capped = load >= uform_js_load_vram_k
+                            ? uform_js_gpu_class_from_value(env, arguments[4], &gpu_class_ceiling)
+                            : uform_js_cpu_class_from_value(env, arguments[4], &cpu_class_ceiling);
+    if (!read || !capped || !uform_js_executor_from_value(env, arguments[1], &executor) ||
         !uform_js_scalar_from_value(env, arguments[3], "quantization", &quantization) ||
         !uform_js_ordinals_from_value(env, arguments[2], field, &ordinals, &ordinals_count)) {
         free(path);
@@ -89,8 +90,8 @@ static napi_value uform_js_model_load(napi_env env, napi_callback_info info, ufo
 
     uform_model_t handle = NULL;
     uform_outcome_t outcome = {uform_status_success_k, NULL};
-    uform_ram_options_t const ram = {ordinals, ordinals_count, cpu_class};
-    uform_vram_options_t const vram = {ordinals, ordinals_count, gpu_class};
+    uform_ram_options_t const ram = {ordinals, ordinals_count, cpu_class_ceiling};
+    uform_vram_options_t const vram = {ordinals, ordinals_count, gpu_class_ceiling};
     switch (load) {
     case uform_js_load_ram_k: {
         uform_model_load_ram_t arguments = {.model = &handle,
@@ -179,7 +180,7 @@ static napi_value uform_js_finish_describe(napi_env env, uform_js_call_t* call, 
 static napi_value uform_js_model_describe(napi_env env, napi_callback_info info) {
     napi_value arguments[2], self = NULL, deferred = NULL;
     uform_js_model_t* const model = (uform_js_model_t*)uform_js_self(env, info, 2, arguments, &self);
-    if (model && !model->handle) uform_js_throw(env, uform_status_invalid_argument_k, "The model was freed");
+    if (model && !model->handle) uform_js_throw(env, uform_status_uninitialized_k, "The model was freed");
     if (!model || !model->handle) return NULL;
     uform_js_describe_call_t local;
     uform_model_describe_t describe = {.model = model->handle};

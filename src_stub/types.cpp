@@ -95,7 +95,7 @@ void uform_version(int* major, int* minor, int* patch) {
     if (patch) *patch = UFORM_VERSION_PATCH;
 }
 
-char const* uform_version_name(void) { return "4.0.0-rc.1"; }
+char const* uform_version_name(void) { return UFORM_VERSION_NAME; }
 char const* uform_capabilities_compiled(void) { return "serial"; }
 char const* uform_capabilities_available(void) { return "serial"; }
 
@@ -140,6 +140,11 @@ void uform_executor_on_pool(uform_executor_on_pool_t* arguments) {
 void uform_executor_for_vram(uform_executor_for_vram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     if (arguments->executor) *arguments->executor = nullptr;
+    if (reject_if(arguments->vram.devices_count && !arguments->vram.devices, uform_status_invalid_argument_k,
+                  "The devices must not be null", outcome))
+        return;
+    if (reject_if(arguments->streams, uform_status_unsupported_k, "The executor drives only its own streams", outcome))
+        return;
     propagate_error(uform_status_device_k, outcome, "This build carries no GPU backends");
 }
 
@@ -170,8 +175,9 @@ void uform_arena_free(uform_arena_t arena) {
 
 void uform_arena_describe(uform_arena_describe_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
-    if (reject_if(!arguments->arena || !arguments->description, uform_status_invalid_argument_k,
-                  "The arena and its description must not be null", outcome))
+    if (reject_if(!arguments->arena, uform_status_uninitialized_k, "The arena must not be null", outcome)) return;
+    if (reject_if(!arguments->description, uform_status_invalid_argument_k, "The description must not be null",
+                  outcome))
         return;
     *arguments->description = {uform_residency_ram_k, -1};
 }
@@ -188,6 +194,7 @@ char const* uform_status_name(uform_status_t status) {
     case uform_status_device_k: return "device";
     case uform_status_malformed_k: return "malformed";
     case uform_status_internal_k: return "internal";
+    case uform_status_uninitialized_k: return "uninitialized";
     case uform_status_config_mismatch_k: return "config-mismatch";
     case uform_status_contended_k: return "contended";
     case uform_status_cancelled_k: return "cancelled";
@@ -202,8 +209,9 @@ uform_status_t uform_status_from_name(uform_bytes_view_t name, uform_status_t* s
         name,
         {uform_status_success_k, uform_status_deferred_k, uform_status_out_of_memory_k, uform_status_shape_mismatch_k,
          uform_status_unsupported_layout_k, uform_status_unknown_kind_k, uform_status_io_k, uform_status_device_k,
-         uform_status_malformed_k, uform_status_internal_k, uform_status_config_mismatch_k, uform_status_contended_k,
-         uform_status_cancelled_k, uform_status_unsupported_k, uform_status_invalid_argument_k},
+         uform_status_malformed_k, uform_status_internal_k, uform_status_uninitialized_k,
+         uform_status_config_mismatch_k, uform_status_contended_k, uform_status_cancelled_k, uform_status_unsupported_k,
+         uform_status_invalid_argument_k},
         uform_status_name, status);
 }
 
@@ -314,6 +322,22 @@ uform_status_t uform_gpu_class_from_name(uform_bytes_view_t name, uform_gpu_clas
          uform_gpu_class_amd_cdna3_k, uform_gpu_class_amd_cdna4_k, uform_gpu_class_amd_cdna5_k,
          uform_gpu_class_apple_metal7_k, uform_gpu_class_apple_metal9_k, uform_gpu_class_apple_metal10_k},
         uform_gpu_class_name, gpu_class);
+}
+
+char const* uform_gpu_vendor_name(uform_gpu_vendor_t vendor) {
+    switch (vendor) {
+    case uform_gpu_vendor_unknown_k: return "unknown";
+    case uform_gpu_vendor_nvidia_k: return "nvidia";
+    case uform_gpu_vendor_amd_k: return "amd";
+    case uform_gpu_vendor_apple_k: return "apple";
+    default: return "unrecognized";
+    }
+}
+
+uform_status_t uform_gpu_vendor_from_name(uform_bytes_view_t name, uform_gpu_vendor_t* vendor) {
+    return read_name<uform_gpu_vendor_t>(
+        name, {uform_gpu_vendor_unknown_k, uform_gpu_vendor_nvidia_k, uform_gpu_vendor_amd_k, uform_gpu_vendor_apple_k},
+        uform_gpu_vendor_name, vendor);
 }
 
 void uform_gpu_devices(uform_gpu_devices_t* arguments) {

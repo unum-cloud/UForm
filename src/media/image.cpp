@@ -63,14 +63,15 @@ template <typename integer_type_>
         }
         u8_t const marker = std::to_integer<u8_t>(bytes[offset + 1]);
         bool const is_frame = marker >= 0xC0 && marker <= 0xCF && marker != 0xC4 && marker != 0xC8 && marker != 0xCC;
-        if (is_frame) {
-            u32_t const height = load_big_endian_<u16_t>(bytes + offset + 5);
-            u32_t const width = load_big_endian_<u16_t>(bytes + offset + 7);
-            if (width == 0 || height == 0)
-                return expected<image_probe_t>::fail(status_t::invalid_argument_k, "JPEG start-of-frame has no extent");
-            return image_probe_t {format_jpeg_k, image_extent_t {width, height}, 0};
+        if (!is_frame) {
+            offset += 2 + load_big_endian_<u16_t>(bytes + offset + 2); // skip this marker segment
+            continue;
         }
-        offset += 2 + load_big_endian_<u16_t>(bytes + offset + 2); // skip this marker segment
+        u32_t const height = load_big_endian_<u16_t>(bytes + offset + 5);
+        u32_t const width = load_big_endian_<u16_t>(bytes + offset + 7);
+        if (width == 0 || height == 0)
+            return expected<image_probe_t>::fail(status_t::invalid_argument_k, "JPEG start-of-frame has no extent");
+        return image_probe_t {format_jpeg_k, image_extent_t {width, height}, 0};
     }
     return image_probe_t {format_jpeg_k, image_extent_t {}, window_offset + offset};
 }

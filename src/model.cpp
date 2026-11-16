@@ -128,30 +128,34 @@ static void* pack_tower(uform_model_handle_t& model, checkpoint_to_load_t const&
     return *packed;
 }
 
-/** The ceiling a RAM load picks its class under: the class @p pinned names, or else the executor's
- *  ceiling, or the machine's without one; a pin past the executor's ceiling is refused. */
-static bool host_ceiling(uform_executor_t executor, uform_cpu_class_t pinned, cpu_ceiling_t& ceiling,
+/** The ceiling a RAM load picks its class under: the machine's masks intersected with the class
+ *  @p ceiling_class names and with the executor's ceiling, so a load never runs above either. */
+static bool host_ceiling(uform_executor_t executor, uform_cpu_class_t ceiling_class, cpu_ceiling_t& ceiling,
                          uform_outcome_t* outcome) noexcept {
     ram_executor_t const* const ram = executor ? std::get_if<ram_executor_t>(&executor->executor) : nullptr;
     if (executor && !ram)
         return propagate_error(uform_status_device_k, outcome, "A RAM load needs a RAM executor or none");
-    if (ram && pinned == uform_cpu_class_unknown_k) return ceiling = ram->ceiling, true;
-    expected<cpu_ceiling_t> picked = pick_cpu_ceiling(pinned);
-    if (!picked) return propagate_error(status_of(picked.status_), outcome, "The CPU does not admit the pinned class");
+    if (ram && ceiling_class == uform_cpu_class_unknown_k) return ceiling = ram->ceiling, true;
+    expected<cpu_ceiling_t> picked = pick_cpu_ceiling(ceiling_class);
+    if (!picked) return propagate_error(status_of(picked.status_), outcome, "No compiled class fits the ceiling");
     ceiling = *picked;
-    if (ram && ((ceiling.compute & ~ram->ceiling.compute) || (ceiling.sync & ~ram->ceiling.sync)))
-        return propagate_error(uform_status_unsupported_k, outcome, "The executor does not admit the pinned class");
+    if (ram) {
+        ceiling.compute &= ram->ceiling.compute;
+        ceiling.sync = static_cast<fu::capabilities_t>(ceiling.sync & ram->ceiling.sync);
+    }
     return true;
 }
 
-/** Packs a RAM model from @p loaded for the class @p ram_options pins, or the newest the CPU runs,
+/** Packs a RAM model from @p loaded for the newest class under the ceiling @p ram_options sets,
  *  and publishes it into @p output once the handler lets the load finish. */
 static void load_ram(uform_model_t* output, uform_executor_t executor, uform_ram_options_t const& ram_options,
                      expected<checkpoint_to_load_t> loaded, ue::precision_t precision, uform_progress_t progress,
                      uform_outcome_t* outcome) noexcept {
     cpu_ceiling_t ceiling;
-    if (!host_ceiling(executor, ram_options.cpu_class, ceiling, outcome)) return;
+    if (!host_ceiling(executor, ram_options.cpu_class_ceiling, ceiling, outcome)) return;
     encoder_verbs<vendored_residency_t::ram_k> const* const verbs = pick_cpu_variant(cpu_ladder_t {}, ceiling);
+    if (!verbs)
+        return propagate_error(uform_status_unsupported_k, outcome, "No compiled class fits both ceilings"), void();
     std::unique_ptr<uform_model_handle_t> model = start_model(loaded, precision, outcome);
     if (!model) return;
     model->tables = verbs;
@@ -177,11 +181,11 @@ static bool load_replicas(uform_model_handle_t& model, checkpoint_to_load_t cons
         for (std::size_t listed = 0; listed != vram.devices_count; ++listed)
             named += device.ordinal == vram.devices[listed];
         if (!named) continue;
-        encoder_verbs<residency_> const* const picked = pick_gpu_variant<residency_>(ladder_type_ {}, vram.gpu_class,
-                                                                                     device.capabilities);
+        encoder_verbs<residency_> const* const picked = pick_gpu_variant<residency_>(
+            ladder_type_ {}, vram.gpu_class_ceiling, device.capabilities);
         if (!picked)
             return propagate_error(uform_status_unsupported_k, outcome,
-                                   "A device runs no compiled class under the pin");
+                                   "A device runs no compiled class under the ceiling");
         if (verbs && picked != verbs)
             return propagate_error(uform_status_config_mismatch_k, outcome, "The devices differ in class");
         verbs = picked;
@@ -236,6 +240,10 @@ static expected<checkpoint_to_load_t> view_checkpoint(uform_bytes_view_t buffer)
     return checkpoint_to_load_t::view(std::as_bytes(std::span<u8_t const> {buffer.data, buffer.length}));
 }
 
+/** A load naming its checkpoint by path, which a C string ends at its first NUL. */
+template <typename arguments_type_>
+concept loads_from_path = requires(arguments_type_ const& arguments) { arguments.path; };
+
 /** The refusals every load shares, clearing the output first so a refused load leaves no model. */
 template <typename arguments_type_>
 static bool rejects_load(arguments_type_ const& arguments, uform_bytes_view_t source, ue::precision_t& precision,
@@ -245,7 +253,7 @@ static bool rejects_load(arguments_type_ const& arguments, uform_bytes_view_t so
     *arguments.model = nullptr;
     if (!source.data || !source.length)
         return !propagate_error(uform_status_invalid_argument_k, outcome, "The checkpoint must not be empty");
-    if constexpr (requires { arguments.path; }) // a C path ends at its first NUL, so one inside names another file
+    if constexpr (loads_from_path<arguments_type_>) // a NUL inside the path names another file
         if (std::memchr(source.data, 0, source.length))
             return !propagate_error(uform_status_invalid_argument_k, outcome, "The checkpoint path holds a NUL byte");
     return !precision_of(arguments.quantization, precision, outcome);
@@ -292,9 +300,10 @@ UFORM_EXPORT void uform_model_load_vram_buffer(uform_model_load_vram_buffer_t* a
 UFORM_EXPORT void uform_model_describe(uform_model_describe_t* arguments) {
     if (submitted<uform_model_describe>(arguments)) return;
     call_outcome_t outcome(*arguments);
-    if (!arguments->model || !arguments->description)
-        return propagate_error(uform_status_invalid_argument_k, outcome, "The model and description must not be null"),
-               void();
+    if (!arguments->model)
+        return propagate_error(uform_status_uninitialized_k, outcome, "The model must not be null"), void();
+    if (!arguments->description)
+        return propagate_error(uform_status_invalid_argument_k, outcome, "The description must not be null"), void();
     uform_model_handle_t const& model = *arguments->model;
     cpu_class_t picked_cpu = cpu_class_t::unknown_k;
     gpu_class_t picked_gpu = gpu_class_t::unknown_k;

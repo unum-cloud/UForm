@@ -727,7 +727,7 @@ struct gpu_replay_graph_t {
             if (outcome && (ended != CUDA_SUCCESS || graph == nullptr))
                 outcome = cuda_failure(ended, "stream capture end failed (trunk)");
         }
-        (void)destroy_event_(fork_event);
+        [[maybe_unused]] auto const fork_destroyed = destroy_event_(fork_event);
         for (CUevent& event : join_events) { [[maybe_unused]] auto const join_destroyed = destroy_event_(event); }
         if (!outcome) {
             if (graph != nullptr) cuGraphDestroy(graph);

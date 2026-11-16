@@ -6,7 +6,6 @@
  *      moods, progress, deferred calls, executors, arenas, and the rows calls write into arenas.
  */
 
-import Dispatch
 import UFormC
 
 // MARK: - Errors
@@ -39,6 +38,8 @@ public struct Status: Hashable, Sendable, CustomStringConvertible {
     public static let malformed = Status(raw: uform_status_malformed_k)
     /// The library reported neither success nor a failure.
     public static let `internal` = Status(raw: uform_status_internal_k)
+    /// The handle the call operates on is missing, refused before any other check.
+    public static let uninitialized = Status(raw: uform_status_uninitialized_k)
     /// The request contradicts a frozen configuration.
     public static let configMismatch = Status(raw: uform_status_config_mismatch_k)
     /// A call was refused rather than waited for - another call holds its executor or its
@@ -284,7 +285,7 @@ public struct GPUClass: Hashable, Sendable, CustomStringConvertible {
 }
 
 /// The vendor whose runtime drives a GPU, carrying the C enumerator.
-public struct GPUVendor: Hashable, Sendable {
+public struct GPUVendor: Hashable, Sendable, CustomStringConvertible {
     /// The C enumerator.
     let raw: uform_gpu_vendor_t
 
@@ -296,6 +297,18 @@ public struct GPUVendor: Hashable, Sendable {
     public static let amd = GPUVendor(raw: uform_gpu_vendor_amd_k)
     /// Apple, through Metal.
     public static let apple = GPUVendor(raw: uform_gpu_vendor_apple_k)
+
+    /// The vendor as the library spells it. Calls `uform_gpu_vendor_name`.
+    public var description: String { String(cString: uform_gpu_vendor_name(raw)) }
+
+    /// Reads a spelling back, and nil for one no vendor carries. Calls
+    /// `uform_gpu_vendor_from_name`.
+    public init?(name: String) {
+        guard let raw = parsed(name, uform_gpu_vendor_from_name) else { return nil }
+        self.raw = raw
+    }
+
+    init(raw: uform_gpu_vendor_t) { self.raw = raw }
 }
 
 /// One GPU this process can drive; its position in `gpuDevices()` is the ordinal every VRAM
@@ -445,23 +458,23 @@ final class Landing {
         return uform_bytes_view_t(data: bytes, length: utf8.count)
     }
 
-    /// Lends the host placement every RAM load and executor takes; nil `cpuClass` derives
-    /// the CPU's own.
-    func ram(_ memoryDomains: [Int32], _ cpuClass: CPUClass?) -> uform_ram_options_t {
+    /// Lends the host placement every RAM load and executor takes; nil `cpuClassCeiling` sets no
+    /// ceiling.
+    func ram(_ memoryDomains: [Int32], _ cpuClassCeiling: CPUClass?) -> uform_ram_options_t {
         uform_ram_options_t(
             memory_domains: lend(memoryDomains),
             memory_domains_count: memoryDomains.count,
-            cpu_class: cpuClass?.raw ?? uform_cpu_class_unknown_k
+            cpu_class_ceiling: cpuClassCeiling?.raw ?? uform_cpu_class_unknown_k
         )
     }
 
-    /// Lends the device placement every VRAM load and executor takes; nil `gpuClass` derives
-    /// the devices' own.
-    func vram(_ devices: [Int32], _ gpuClass: GPUClass?) -> uform_vram_options_t {
+    /// Lends the device placement every VRAM load and executor takes; nil `gpuClassCeiling` sets
+    /// no ceiling.
+    func vram(_ devices: [Int32], _ gpuClassCeiling: GPUClass?) -> uform_vram_options_t {
         uform_vram_options_t(
             devices: lend(devices),
             devices_count: devices.count,
-            gpu_class: gpuClass?.raw ?? uform_gpu_class_unknown_k
+            gpu_class_ceiling: gpuClassCeiling?.raw ?? uform_gpu_class_unknown_k
         )
     }
 
@@ -593,19 +606,21 @@ public final class Deferred<Value> {
 extension Deferred: @unchecked Sendable where Value: Sendable {}
 
 extension Deferred {
-    /// Waits for the call on a Dispatch thread, so an `async` caller suspends rather than blocks
-    /// and the cooperative pool keeps every thread; the result is read back in the caller's
-    /// isolation. Binding-only: runs `wait`.
+    /// Polls `status` from the awaiting task, sleeping between reads for 1 µs doubling up to 1 ms,
+    /// so an `async` caller suspends rather than blocks and no other thread waits for it; the
+    /// result is read back in the caller's isolation. A cancelled task stops sleeping and blocks in
+    /// `wait`, since the submitted call cannot be abandoned. Binding-only: runs `wait`.
     nonisolated(nonsending) public var value: Value {
         get async throws(UFormError) {
-            if case .pending(let landing, _) = submission {
-                nonisolated(unsafe) let outcome = landing.outcome
-                await withCheckedContinuation { continuation in
-                    DispatchQueue.global().async {
-                        _ = uform_outcome_wait(outcome)
-                        continuation.resume()
-                    }
+            var pause = Duration.microseconds(1)
+            while status == .deferred {
+                do {
+                    try await Task.sleep(for: pause)
                 }
+                catch {
+                    break
+                }
+                pause = min(pause * 2, .milliseconds(1))
             }
             return try wait()
         }
@@ -629,11 +644,12 @@ public final class Executor: @unchecked Sendable {
 
     /// Creates an executor of host threads for RAM-resident models, interleaved across the compute
     /// domains local to `memoryDomains`; an empty list derives every node the process may allocate
-    /// on. Zero `threads` takes 7/8 of the cores those domains carry. A `cpuClass` dispatches as if
-    /// the CPU were of that class; nil derives its own. Calls `uform_executor_for_ram`.
+    /// on. Zero `threads` takes 7/8 of the cores those domains carry. A `cpuClassCeiling`
+    /// dispatches as the newest compiled class the CPU runs at or under it; nil sets no ceiling.
+    /// Calls `uform_executor_for_ram`.
     public static func forRam(
         memoryDomains: [Int32] = [],
-        cpuClass: CPUClass? = nil,
+        cpuClassCeiling: CPUClass? = nil,
         threads: Int = 0
     ) throws(UFormError) -> Executor {
         let landing = Landing()
@@ -641,7 +657,7 @@ public final class Executor: @unchecked Sendable {
         var arguments = uform_executor_for_ram_t(
             executor: executor,
             outcome: landing.outcome,
-            ram: landing.ram(memoryDomains, cpuClass),
+            ram: landing.ram(memoryDomains, cpuClassCeiling),
             threads: threads
         )
         uform_executor_for_ram(&arguments)
@@ -649,11 +665,11 @@ public final class Executor: @unchecked Sendable {
     }
 
     /// Creates a RAM executor over a borrowed ForkUnion `fu_pool_t`, which must outlive it.
-    /// Reports `unsupported` until the library wires borrowed pools. A `cpuClass` pins as `forRam`
-    /// does. Calls `uform_executor_on_pool`.
+    /// Reports `unsupported` until the library wires borrowed pools. A `cpuClassCeiling` caps as
+    /// `forRam` does. Calls `uform_executor_on_pool`.
     public static func onPool(
         memoryDomains: [Int32] = [],
-        cpuClass: CPUClass? = nil,
+        cpuClassCeiling: CPUClass? = nil,
         pool: UnsafeMutableRawPointer
     ) throws(UFormError) -> Executor {
         let landing = Landing()
@@ -661,24 +677,24 @@ public final class Executor: @unchecked Sendable {
         var arguments = uform_executor_on_pool_t(
             executor: executor,
             outcome: landing.outcome,
-            ram: landing.ram(memoryDomains, cpuClass),
+            ram: landing.ram(memoryDomains, cpuClassCeiling),
             pool: pool
         )
         uform_executor_on_pool(&arguments)
         return try landing.read { () throws(UFormError) in Executor(raw: try created(executor)) }
     }
 
-    /// Opens one submission stream on every named device, or borrows the caller's `streams`,
-    /// one per device in `devices` order; an empty list derives one free device. A zero
-    /// `scratchLimit` lets per-device scratch grow as batches ask. A `gpuClass` dispatches
-    /// every device as that class; nil derives theirs. The host decoders take 7/8 of the
-    /// cores local to `memoryDomains` and dispatch as `cpuClass`, where nil derives the CPU's
-    /// own. Calls `uform_executor_for_vram`.
+    /// Opens one submission stream on every named device; an empty list derives one free device.
+    /// Borrowed `streams`, one per device in `devices` order, report `unsupported`. A zero
+    /// `scratchLimit` lets per-device scratch grow as batches ask. A `gpuClassCeiling`
+    /// dispatches every device as the best class all of them load at or under it; nil sets no
+    /// ceiling. The host decoders take 7/8 of the cores local to `memoryDomains` and dispatch
+    /// under `cpuClassCeiling` likewise. Calls `uform_executor_for_vram`.
     public static func forVram(
         devices: [Int32] = [],
-        gpuClass: GPUClass? = nil,
+        gpuClassCeiling: GPUClass? = nil,
         memoryDomains: [Int32] = [],
-        cpuClass: CPUClass? = nil,
+        cpuClassCeiling: CPUClass? = nil,
         streams: [UnsafeMutableRawPointer?]? = nil,
         scratchLimit: Int = 0
     ) throws(UFormError) -> Executor {
@@ -692,8 +708,8 @@ public final class Executor: @unchecked Sendable {
         var arguments = uform_executor_for_vram_t(
             executor: executor,
             outcome: landing.outcome,
-            vram: landing.vram(devices, gpuClass),
-            ram: landing.ram(memoryDomains, cpuClass),
+            vram: landing.vram(devices, gpuClassCeiling),
+            ram: landing.ram(memoryDomains, cpuClassCeiling),
             streams: lentStreams,
             scratch_limit: scratchLimit
         )

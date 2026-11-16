@@ -8,12 +8,13 @@
  *  Loads the checkpoint `test/tiny_checkpoint.cpp` writes and encodes three texts in BFloat16 and
  *  E4M3 through the serial floor's variant, the reference every other run compares with:
  *
- *  - Every CPU class this build compiled and this machine runs encodes through its own variant and
- *    matches the floor at the BFloat16 floor, its kernels summing in another order. A class whose
- *    kits match its parent's has no variant and skips.
+ *  - Every CPU class this build compiled encodes through the C interface, loaded under a
+ *    @c cpu_class_ceiling naming it, and matches the floor at the BFloat16 floor, its kernels
+ *    summing in another order. A ceiling the load resolves to a lower class, one this machine does
+ *    not run or whose kits match its parent's, skips.
  *  - Every device @c UFORM_DEVICES selects encodes through the newest class its vendor's ladder
- *    admits and matches the floor again: the products accumulate in another order and the rotary
- *    angles take the fast sine.
+ *    admits and matches the floor again at the same bound, its products accumulating in another
+ *    order.
  *  - With the Rust crate's dumps, the floor's BFloat16 states and embeddings match them. The crate
  *    deviates from the training recipe in three known places, so agreement is expected at the
  *    BFloat16 floor, not bitwise: its QK-norm reads BFloat16 rather than the Float32 product, its
@@ -39,6 +40,8 @@
 #include "uform/utilities/safetensors_format.hpp"
 #include "uform/encoder/multimodal_batch.hpp"
 #include "uform/encoder/geometry.hpp"
+
+#include "uform/uform.h" // `uform_model_load_ram`, `uform_text_encode` - the class cells' path
 
 #include "encoder_punned.hpp" // `encoder_verbs`, `encoder_class_tables`, `pick_gpu_variant`
 #include "harness.hpp"        // `test_suite_t`
@@ -181,23 +184,72 @@ static void check_agreement(test_suite_t& suite, char const* who, encoded_t cons
     check("masked logits", encoded.masked_logits, reference.masked_logits, items_k);
 }
 
-/** Encodes in @p precision through the variant of @p class_ , when this machine runs it and it
- *  advances past its parent, and compares with the serial floor's @p reference . */
-template <cpu_class_t class_>
-static void class_parity(test_suite_t& suite, checkpoint_to_load_t const& checkpoint, geometry_t const& geometry,
-                         pool_view_t pool, nk_capability_t available, precision_t precision, encoded_t const& reference,
-                         double tolerance) {
-    if (!cpu_rung_fits(class_, {available, fu::cpu_capabilities()}))
-        return suite.skip("this machine does not run the class");
-    encoder_verbs<vendored_residency_t::ram_k> const* const verbs =
-        encoder_class_tables<vendored_residency_t::ram_k, class_>::find();
-    if (!verbs) return suite.skip("the class picks the kits its parent does");
+/** Copies @p rows rows of @p view , written as Float32, into @p values . */
+static void copy_rows(uform_rows_view_t const& view, std::size_t rows, std::vector<float>& values) {
+    values.resize(rows * view.columns);
+    for (std::size_t row = 0; row != rows; ++row)
+        std::memcpy(values.data() + row * view.columns, static_cast<char const*>(view.data) + row * view.stride,
+                    view.columns * sizeof(float));
+}
+
+/** Loads the checkpoint at @p path through the C interface under the ceiling @p class_ , in
+ *  @p precision , and when the load picks that class, encodes the texts through
+ *  @c uform_text_encode and compares with the serial floor's @p reference . A ceiling the load
+ *  resolves lower, as one the machine cannot run or whose kits match its parent's, would only
+ *  repeat that lower class. */
+static void class_parity(test_suite_t& suite, char const* path, uform_cpu_class_t class_, precision_t precision,
+                         encoded_t const& reference, double tolerance) {
+    uform_outcome_t outcome {};
+    uform_model_t model = nullptr;
+    uform_model_load_ram_t load {
+        .model = &model,
+        .outcome = &outcome,
+        .path = {reinterpret_cast<std::uint8_t const*>(path), std::strlen(path)},
+        .ram = {.cpu_class_ceiling = class_},
+        .quantization = precision == precision_t::e4m3_k ? uform_scalar_e4m3_k : uform_scalar_bf16_k};
+    uform_model_load_ram(&load);
+    if (outcome.status == uform_status_unsupported_k && precision == precision_t::e4m3_k)
+        return suite.skip("the class has no E4M3 products");
+    if (outcome.status != uform_status_success_k) return suite.check(false, "load: {}", outcome.message);
+    uform_model_description_t description {};
+    uform_model_describe_t describe {.model = model, .outcome = &outcome, .description = &description};
+    uform_model_describe(&describe);
+    if (description.cpu_class != class_) {
+        uform_model_free(model);
+        return suite.skip("the class does not run here, so its ceiling resolves to a lower class");
+    }
+
+    uform_arena_t arena = nullptr;
+    uform_arena_init_t init {.arena = &arena, .outcome = &outcome};
+    uform_arena_init(&init);
+    if (outcome.status != uform_status_success_k)
+        return uform_model_free(model), suite.check(false, "arena: {}", outcome.message);
+    std::string bytes;
+    std::size_t offsets[items_k + 1] {};
+    for (std::size_t item = 0; item != items_k; ++item) bytes += texts_k[item], offsets[item + 1] = bytes.size();
+    uform_rows_view_t embeddings {};
+    uform_rows_tape_view_t states {}, token_vectors {};
+    uform_text_encode_t encode {.model = model,
+                                .outcome = &outcome,
+                                .count = items_k,
+                                .texts = {bytes.data(), offsets, uform_scalar_u8_k},
+                                .embeddings = &embeddings,
+                                .states = &states,
+                                .token_vectors = description.token_width ? &token_vectors : nullptr,
+                                .arena = arena,
+                                .outputs_scalar = uform_scalar_f32_k};
+    uform_text_encode(&encode);
     encoded_t encoded;
-    if (!encode(suite, *verbs, checkpoint, geometry, precision, numkong_capabilities_of(class_), pool, nullptr,
-                encoded))
-        return;
-    check_agreement(suite, uform_cpu_class_name(static_cast<uform_cpu_class_t>(class_)), encoded, reference,
-                    geometry.hidden, tolerance);
+    if (outcome.status == uform_status_success_k) {
+        copy_rows(embeddings, items_k, encoded.embeddings);
+        copy_rows(states.rows, states.offsets[items_k], encoded.states);
+        if (description.token_width)
+            copy_rows(token_vectors.rows, token_vectors.offsets[items_k], encoded.token_vectors);
+    }
+    uform_arena_free(arena);
+    uform_model_free(model);
+    if (outcome.status != uform_status_success_k) return suite.check(false, "encode: {}", outcome.message);
+    check_agreement(suite, uform_cpu_class_name(class_), encoded, reference, states.rows.columns, tolerance);
 }
 
 /** Encodes in @p precision on @p stream through @p verbs , the variant a device's vendor ladder
@@ -311,18 +363,19 @@ static void checkpoint_round_trip(test_suite_t& suite, checkpoint_to_load_t cons
     std::filesystem::remove(path, ignored);
 }
 
-/** Runs @ref class_parity for every class of the ladder this build compiled, in both precisions. */
+/** Runs @ref class_parity under a ceiling naming each class of the ladder this build compiled, in
+ *  both precisions. */
 template <cpu_class_t... classes_>
-static void run_class_parity(test_suite_t& suite, cpu_ladder<classes_...>, checkpoint_to_load_t const& checkpoint,
-                             geometry_t const& geometry, pool_view_t pool, nk_capability_t available,
+static void run_class_parity(test_suite_t& suite, cpu_ladder<classes_...>, char const* path,
                              encoded_t const& bf16_reference, encoded_t const& e4m3_reference) {
     auto rung = [&]<cpu_class_t class_>() {
         if constexpr (cpu_class_compiled(class_) && class_ != cpu_ladder_floor_k) {
-            char const* const name = uform_cpu_class_name(static_cast<uform_cpu_class_t>(class_));
-            suite.run(fmt::format("class_parity/{}/bf16", name), class_parity<class_>, checkpoint, geometry, pool,
-                      available, precision_t::bf16_k, bf16_reference, 5e-2);
-            suite.run(fmt::format("class_parity/{}/e4m3", name), class_parity<class_>, checkpoint, geometry, pool,
-                      available, precision_t::e4m3_k, e4m3_reference, 1e-1);
+            uform_cpu_class_t const ceiling = static_cast<uform_cpu_class_t>(class_);
+            char const* const name = uform_cpu_class_name(ceiling);
+            suite.run(fmt::format("class_parity/{}/bf16", name), class_parity, path, ceiling, precision_t::bf16_k,
+                      bf16_reference, 5e-2);
+            suite.run(fmt::format("class_parity/{}/e4m3", name), class_parity, path, ceiling, precision_t::e4m3_k,
+                      e4m3_reference, 1e-1);
         }
     };
     (rung.template operator()<classes_>(), ...);
@@ -338,9 +391,6 @@ int main(int argc, char** argv) {
     expected<geometry_t> geometry = geometry_t::from(*checkpoint);
     if (!geometry) return suite.check(false, "geometry: {}", geometry.description_), suite.finish();
 
-    nk_capability_t available = 0;
-    if (nk_capabilities_enabled_cpu(&available) != nk_success_k)
-        return suite.check(false, "no CPU capabilities"), suite.finish();
     expected<executor_t> pool = executor_t::make(4, caller_exclusivity_t::caller_inclusive_k);
     if (!pool) return suite.check(false, "pool: {}", pool.description_), suite.finish();
 
@@ -354,8 +404,7 @@ int main(int argc, char** argv) {
                 nullptr, e4m3_reference))
         return suite.finish();
     suite.run("token_vectors/unit_length", token_vectors_unit_length, bf16_reference, geometry->token_width);
-    run_class_parity(suite, cpu_ladder_t {}, *checkpoint, *geometry, pool->view(), available, bf16_reference,
-                     e4m3_reference);
+    run_class_parity(suite, cpu_ladder_t {}, argv[1], bf16_reference, e4m3_reference);
     per_gpu_array<uform_gpu_device_t> const listed = listed_gpu_devices();
     for (i32_t const device : suite.settings.devices) {
         suite.run(fmt::format("device_parity/{}/bf16", device), device_parity, *checkpoint, *geometry, listed[device],

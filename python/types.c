@@ -43,6 +43,8 @@ static struct {
      "Supplied bytes could not be decoded: a checkpoint, an image, a clip, or a recording."},
     {uform_status_internal_k, "uform.InternalError", NULL,
      "The library reported neither success nor a failure - a defect."},
+    {uform_status_uninitialized_k, "uform.UninitializedError", NULL,
+     "The handle the call operates on is missing, refused before any other check."},
     {uform_status_config_mismatch_k, "uform.ConfigMismatchError", &PyExc_ValueError,
      "The request contradicts a frozen configuration, like resuming a checkpoint of another geometry."},
     {uform_status_contended_k, "uform.ContendedError", NULL, "Another call already holds the executor or the arena."},
@@ -135,15 +137,7 @@ static char const* spell_mood(int value) { return uform_mood_name((uform_mood_t)
 static char const* spell_cpu_class(int value) { return uform_cpu_class_name((uform_cpu_class_t)value); }
 static char const* spell_gpu_class(int value) { return uform_gpu_class_name((uform_gpu_class_t)value); }
 
-/** The C interface spells no vendor, so the binding names the three it lists. */
-static char const* spell_gpu_vendor(int value) {
-    switch (value) {
-    case uform_gpu_vendor_nvidia_k: return "nvidia";
-    case uform_gpu_vendor_amd_k: return "amd";
-    case uform_gpu_vendor_apple_k: return "apple";
-    default: return NULL;
-    }
-}
+static char const* spell_gpu_vendor(int value) { return uform_gpu_vendor_name((uform_gpu_vendor_t)value); }
 
 uform_py_enum_t uform_py_status = {.name = "Status",
                                    .base = "IntEnum",
@@ -376,6 +370,10 @@ PyObject* uform_py_struct_sequence_steal(PyTypeObject* type, PyObject** fields, 
     return result;
 }
 
+PyObject* uform_py_size_getter(PyObject* self, void* closure) {
+    return PyLong_FromSize_t(*(size_t const*)(void const*)((char const*)self + (size_t)closure));
+}
+
 #pragma endregion Arguments
 
 #pragma region Keyword Structures
@@ -562,8 +560,9 @@ void* uform_py_call_open(uform_py_receiver_t const* receiver, uform_py_verb_t co
         if (!deferred) return NULL;
         deferred->verb = verb;
         deferred->origin = Py_NewRef(receiver->origin);
-        deferred->answer = NULL;
-        deferred->raised = NULL;
+        atomic_init(&deferred->answering, 0);
+        atomic_init(&deferred->answer, NULL);
+        atomic_init(&deferred->raised, NULL);
         call = deferred->call;
         memset(call, 0, verb->call_bytes);
         PyObject_GC_Track(deferred);
@@ -573,16 +572,9 @@ void* uform_py_call_open(uform_py_receiver_t const* receiver, uform_py_verb_t co
     return call;
 }
 
-/** Answers a final @p call: a callback's first exception, else the outcome's failure, else
- *  the verb's answer. */
+/** Answers a final @p call: the outcome's failure, else the verb's answer. */
 static PyObject* call_answer(uform_py_verb_t const* verb, void* call) {
-    uform_py_call_t* const header = (uform_py_call_t*)call;
-    if (header->raised) {
-        PyErr_SetRaisedException(header->raised);
-        header->raised = NULL;
-        return NULL;
-    }
-    return uform_py_raise_on_outcome(&header->outcome) == 0 ? verb->answer(call) : NULL;
+    return uform_py_raise_on_outcome(&((uform_py_call_t*)call)->outcome) == 0 ? verb->answer(call) : NULL;
 }
 
 /** Lets go of what @p call gathered, keeping whatever exception is set. */
@@ -606,7 +598,7 @@ PyObject* uform_py_call_discard(uform_py_receiver_t const* receiver, uform_py_ve
     call_release(verb, call);
     if (receiver->completion == uform_completion_blocking_k) return NULL;
     Deferred* const deferred = deferred_of(call);
-    deferred->verb = NULL;
+    atomic_store(&deferred->answering, 1); // never submitted, so nothing is left to answer or let go
     PyObject* const raised = PyErr_GetRaisedException();
     Py_DECREF(deferred);
     PyErr_SetRaisedException(raised);
@@ -615,72 +607,56 @@ PyObject* uform_py_call_discard(uform_py_receiver_t const* receiver, uform_py_ve
 
 void uform_py_call_release(void* call) {
     uform_py_call_t* const header = (uform_py_call_t*)call;
-    Py_CLEAR(header->raised);
-    if (header->arena) uform_py_arena_unclaim(header->arena);
-    header->arena = NULL;
+    Py_CLEAR(header->arena);
+    Py_CLEAR(header->result);
 }
 
-PyObject* uform_py_call_answer_none(void* call) { Py_RETURN_NONE; }
+void* uform_py_call_result(uform_py_call_t* call, PyTypeObject* type) {
+    call->result = type->tp_alloc(type, 0);
+    return call->result;
+}
 
-int uform_py_callback_from_object(PyObject* object, char const* field, uform_py_call_t* call,
-                                  uform_py_callback_t* callback) {
-    callback->call = call;
-    callback->callable = NULL;
+PyObject* uform_py_call_answer_result(void* call) {
+    PyObject* const result = ((uform_py_call_t*)call)->result;
+    return Py_NewRef(result ? result : Py_None);
+}
+
+int uform_py_callable_from_object(PyObject* object, char const* field, PyObject** callable) {
+    *callable = NULL;
     if (!object || object == Py_None) return 0;
     if (!PyCallable_Check(object)) {
         PyErr_Format(PyExc_TypeError, "the '%s' handler must be callable, got %S", field, Py_TYPE(object));
         return -1;
     }
-    callback->callable = Py_NewRef(object);
+    *callable = Py_NewRef(object);
     return 0;
-}
-
-/** Moves the exception the calling thread holds into @p call unless an earlier one is there, a
- *  store that is the fence a later report reads; the GIL is held. */
-static void callback_latch(uform_py_call_t* call) {
-    PyObject* const raised = PyErr_GetRaisedException();
-    PyObject* expected = NULL;
-    if (raised && !atomic_compare_exchange_strong((_Atomic(PyObject*)*)&call->raised, &expected, raised))
-        Py_DECREF(raised);
-}
-
-/** Whether a callback of @p call already raised, so a later one returns at once. */
-static int callback_raised(uform_py_call_t* call) {
-    return atomic_load_explicit((_Atomic(PyObject*)*)&call->raised, memory_order_acquire) != NULL;
 }
 
 /**
  *  @brief Re-enters Python for one progress report, from the thread running the call.
  *
  *  Reports are serialized, but a deferred call runs on the executor's thread 0, not on its caller,
- *  so the GIL is taken here rather than assumed. A handler answering @c None carries on, and one
- *  that raises also stops the call, so it unwinds at the next slice instead of running on.
+ *  so the GIL is taken here rather than assumed. A handler answering None carries on and a falsy
+ *  one cancels; one that raises reports through the unraisable hook and cancels.
  */
 static uform_continuation_t progress_trampoline(size_t completed, size_t total, void* state) {
-    uform_py_callback_t const* const callback = (uform_py_callback_t const*)state;
-    if (callback_raised(callback->call)) return uform_cancel_k;
+    PyObject* const callable = (PyObject*)state;
     PyGILState_STATE const gil_state = PyGILState_Ensure();
-    uform_continuation_t continuation = uform_cancel_k;
     PyObject* const completed_object = PyLong_FromSize_t(completed);
     PyObject* const total_object = completed_object ? PyLong_FromSize_t(total) : NULL;
     PyObject* const arguments[2] = {completed_object, total_object};
-    PyObject* const verdict = total_object ? PyObject_Vectorcall(callback->callable, arguments, 2, NULL) : NULL;
-    if (verdict) {
-        int const truth = verdict == Py_None ? 1 : PyObject_IsTrue(verdict);
-        continuation = truth > 0 ? uform_continue_k : uform_cancel_k;
-        Py_DECREF(verdict);
-    }
+    PyObject* const verdict = total_object ? PyObject_Vectorcall(callable, arguments, 2, NULL) : NULL;
+    int const truth = !verdict ? -1 : verdict == Py_None ? 1 : PyObject_IsTrue(verdict);
+    Py_XDECREF(verdict);
     Py_XDECREF(total_object);
     Py_XDECREF(completed_object);
-    if (PyErr_Occurred()) callback_latch(callback->call);
+    if (truth < 0) PyErr_WriteUnraisable(callable);
     PyGILState_Release(gil_state);
-    return continuation;
+    return truth > 0 ? uform_continue_k : uform_cancel_k;
 }
 
-uform_progress_t uform_py_progress_registered(uform_py_callback_t* callback, size_t steps) {
-    return (uform_progress_t) {.callback = callback->callable ? progress_trampoline : NULL,
-                               .state = callback,
-                               .steps = steps};
+uform_progress_t uform_py_progress_registered(PyObject* callable, size_t steps) {
+    return (uform_progress_t) {.callback = callable ? progress_trampoline : NULL, .state = callable, .steps = steps};
 }
 
 #pragma endregion Calls
@@ -767,6 +743,24 @@ static PyObject* On_repr(On* self) {
                                 self->executor);
 }
 
+/** Binds the verb @p name of the target the receiver holds, from the tables its type shares with
+ *  its receivers; anything else resolves as on any object. */
+static PyObject* On_getattro(PyObject* self, PyObject* name) {
+    PyMethodDef* const model_tables[] = {uform_py_model_verbs, uform_py_encode_verbs, NULL};
+    PyMethodDef* const trainer_tables[] = {uform_py_trainer_verbs, NULL};
+    PyMethodDef* const* tables = Py_IS_TYPE(((On*)self)->target, &ModelType) ? model_tables : trainer_tables;
+    for (; PyUnicode_Check(name) && *tables; ++tables)
+        for (PyMethodDef* verb = *tables; verb->ml_name; ++verb)
+            if (PyUnicode_CompareWithASCIIString(name, verb->ml_name) == 0) return PyCFunction_New(verb, self);
+    return PyObject_GenericGetAttr(self, name);
+}
+
+static PyMethodDef On_methods[] = {
+    {"__class_getitem__", Py_GenericAlias, METH_O | METH_CLASS,
+     "Names the target the receiver addresses, as `On[Model]` or `DeferredOn[Trainer]`."},
+    {NULL, NULL, 0, NULL},
+};
+
 PyTypeObject OnType = {
     PyVarObject_HEAD_INIT(NULL, 0) //
         .tp_name = "uform.On",
@@ -776,6 +770,8 @@ PyTypeObject OnType = {
     .tp_new = On_tp_new,
     .tp_dealloc = (destructor)On_dealloc,
     .tp_repr = (reprfunc)On_repr,
+    .tp_getattro = On_getattro,
+    .tp_methods = On_methods,
 };
 
 PyTypeObject DeferredOnType = {
@@ -787,6 +783,8 @@ PyTypeObject DeferredOnType = {
     .tp_new = On_tp_new,
     .tp_dealloc = (destructor)On_dealloc,
     .tp_repr = (reprfunc)On_repr,
+    .tp_getattro = On_getattro,
+    .tp_methods = On_methods,
 };
 
 static char const doc_Deferred[] =                                                              //
@@ -797,8 +795,9 @@ static char const doc_Deferred[] =                                              
     "`await` suspends the coroutine until the call is final, and `wait()` blocks the thread\n"  //
     "instead. Either answers what the blocking verb would have answered, or raises what it\n"   //
     "would have raised, as many times as it is asked; `status` polls without waiting. It\n"     //
-    "holds the call and the buffers it reads until the call is final, so dropping it\n"         //
-    "waits, and holds its arena as the blocking verb would.\n"                                  //
+    "holds the call and the buffers it reads until the call is final, so dropping it waits,\n"  //
+    "and holds its arena as the blocking verb would. `await` polls `status` between turns\n"    //
+    "of the running event loop, so no thread waits for it.\n"                                   //
     "\n"                                                                                        //
     "Example:\n"                                                                                //
     "  >>> import asyncio\n"                                                                    //
@@ -828,55 +827,27 @@ static void deferred_block(Deferred* deferred) {
 }
 
 /**
- *  @brief Finishes a final @p self exactly once: the thread taking its verb answers, publishes,
- *      then lets go of its inputs.
+ *  @brief Answers what a final @p self finished with.
  *
- *  Answering may run Python, which lets another thread in even under the GIL, so the verb is taken
- *  before answering and the answer published after it, never one check spanning both.
+ *  The one thread taking the call answers it, lets go of its inputs and publishes; a thread asking
+ *  while that one still answers is refused as contended rather than made to wait.
  */
-static void deferred_finish(Deferred* self) {
-    uform_py_verb_t const* finishing = NULL;
-#if PY_VERSION_HEX >= 0x030D0000
-    Py_BEGIN_CRITICAL_SECTION(self);
-#endif
-    finishing = self->verb;
-    self->verb = NULL;
-#if PY_VERSION_HEX >= 0x030D0000
-    Py_END_CRITICAL_SECTION();
-#endif
-    if (!finishing) return;
-    PyObject* const answer = call_answer(finishing, self->call);
-    PyObject* const raised = answer ? NULL : PyErr_GetRaisedException();
-#if PY_VERSION_HEX >= 0x030D0000
-    Py_BEGIN_CRITICAL_SECTION(self);
-#endif
-    self->answer = answer;
-    self->raised = raised;
-#if PY_VERSION_HEX >= 0x030D0000
-    Py_END_CRITICAL_SECTION();
-#endif
-    call_release(finishing, self->call);
-}
-
-/** Answers what a final @p self finished with, finishing it first when nobody has. */
 static PyObject* deferred_answer(Deferred* self) {
-    deferred_finish(self);
-    for (;;) {
-        PyObject* answer = NULL;
-        int published = 0;
-#if PY_VERSION_HEX >= 0x030D0000
-        Py_BEGIN_CRITICAL_SECTION(self);
-#endif
-        published = self->answer || self->raised;
-        if (self->raised) PyErr_SetRaisedException(Py_NewRef(self->raised));
-        else if (self->answer) answer = Py_NewRef(self->answer);
-#if PY_VERSION_HEX >= 0x030D0000
-        Py_END_CRITICAL_SECTION();
-#endif
-        if (published) return answer;
-        Py_BEGIN_ALLOW_THREADS; // another thread is still answering, so this one yields until it publishes
-        Py_END_ALLOW_THREADS;
+    if (!atomic_exchange(&self->answering, 1)) {
+        PyObject* const answer = call_answer(self->verb, self->call);
+        PyObject* const raised = answer ? NULL : PyErr_GetRaisedException();
+        call_release(self->verb, self->call);
+        if (answer) atomic_store_explicit(&self->answer, answer, memory_order_release);
+        else atomic_store_explicit(&self->raised, raised, memory_order_release);
     }
+    PyObject* const raised = atomic_load_explicit(&self->raised, memory_order_acquire);
+    if (raised) {
+        PyErr_SetRaisedException(Py_NewRef(raised));
+        return NULL;
+    }
+    PyObject* const answer = atomic_load_explicit(&self->answer, memory_order_acquire);
+    if (answer) return Py_NewRef(answer);
+    return uform_py_raise(uform_status_contended_k, "another thread is answering this call"), NULL;
 }
 
 static char const doc_Deferred_status[] =                                                        //
@@ -884,9 +855,7 @@ static char const doc_Deferred_status[] =                                       
     "`Status.SUCCESS`. Calls `uform_outcome_status`.";
 
 static PyObject* Deferred_get_status(Deferred* self, void* closure) {
-    uform_status_t const status = deferred_status(self);
-    if (status != uform_status_deferred_k) deferred_finish(self); // lets go of the inputs, as a poller never waits
-    return uform_py_enum_to_object(&uform_py_status, (int)status);
+    return uform_py_enum_to_object(&uform_py_status, (int)deferred_status(self));
 }
 
 static char const doc_Deferred_wait[] =                                                      //
@@ -898,7 +867,7 @@ static char const doc_Deferred_wait[] =                                         
     "\n"                                                                                     //
     "Raises:\n"                                                                              //
     "  Error: What the blocking verb would have raised, `ContendedError` included when\n"    //
-    "    another call held the executor.";
+    "    another call held the executor or another thread is answering this one.";
 
 static PyObject* Deferred_wait(Deferred* self, PyObject* unused) {
     deferred_block(self);
@@ -916,29 +885,123 @@ static PyObject* method_call(PyObject* self, char const* name, PyObject* first, 
     return result;
 }
 
-/** Answers the iterator of an `asyncio.Future` that `wait()` resolves on the running
- *  loop's default executor. */
+/** One @c await of a @c Deferred, which its coroutine drives: it polls the outcome between pauses
+ *  of the running event loop, so no thread ever waits on the library. */
+typedef struct Awaiting {
+    PyObject ob_base;
+
+    /** The @c Deferred awaited, held. */
+    PyObject* deferred;
+
+    /** @c asyncio.sleep, held. */
+    PyObject* sleep;
+
+    /** The iterator of the pause in progress, or NULL between pauses. */
+    PyObject* pause;
+
+    /** The seconds the next pause sleeps: 0 yields to the loop, then 1 µs doubling to 1 ms. */
+    double backoff;
+} Awaiting;
+
+/** The seconds of the first pause that sleeps, and of the longest. */
+static double const awaiting_backoff_first_k = 1e-6, awaiting_backoff_last_k = 1e-3;
+
+/** Ends the @c await with @p answer as its value, stolen; a tuple travels whole, wrapped in the
+ *  @c StopIteration it raises. */
+static PyObject* awaiting_finish(PyObject* answer) {
+    if (!answer) return NULL;
+    PyObject* const stop = PyObject_CallOneArg(PyExc_StopIteration, answer);
+    Py_DECREF(answer);
+    if (stop) {
+        PyErr_SetObject(PyExc_StopIteration, stop);
+        Py_DECREF(stop);
+    }
+    return NULL;
+}
+
+static PyObject* Awaiting_next(Awaiting* self) {
+    for (;;) {
+        if (self->pause) {
+            PyObject* const yielded = PyIter_Next(self->pause);
+            if (yielded) return yielded; // the loop's own future, or None to come back at once
+            Py_CLEAR(self->pause);
+            if (PyErr_Occurred()) return NULL;
+        }
+        Deferred* const deferred = (Deferred*)self->deferred;
+        if (deferred_status(deferred) != uform_status_deferred_k) return awaiting_finish(deferred_answer(deferred));
+        PyObject* const delay = PyFloat_FromDouble(self->backoff);
+        PyObject* const coroutine = delay ? PyObject_CallOneArg(self->sleep, delay) : NULL;
+        Py_XDECREF(delay);
+        self->pause = coroutine ? method_call(coroutine, "__await__", NULL, NULL) : NULL;
+        Py_XDECREF(coroutine);
+        if (!self->pause) return NULL;
+        double const doubled = self->backoff * 2;
+        self->backoff = doubled < awaiting_backoff_first_k  ? awaiting_backoff_first_k
+                        : doubled < awaiting_backoff_last_k ? doubled
+                                                            : awaiting_backoff_last_k;
+    }
+}
+
+static int Awaiting_traverse(Awaiting* self, visitproc visit, void* arg) {
+    Py_VISIT(self->deferred);
+    Py_VISIT(self->sleep);
+    Py_VISIT(self->pause);
+    return 0;
+}
+
+static int Awaiting_clear(Awaiting* self) {
+    Py_CLEAR(self->pause);
+    Py_CLEAR(self->sleep);
+    Py_CLEAR(self->deferred);
+    return 0;
+}
+
+static void Awaiting_dealloc(Awaiting* self) {
+    PyObject_GC_UnTrack(self);
+    Awaiting_clear(self);
+    Py_TYPE(self)->tp_free((PyObject*)self);
+}
+
+PyTypeObject AwaitingType = {
+    PyVarObject_HEAD_INIT(NULL, 0) //
+        .tp_name = "uform.Awaiting",
+    .tp_doc = "The iterator `await` drives over a `Deferred`, polling `uform_outcome_status` between pauses.",
+    .tp_basicsize = sizeof(Awaiting),
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+    .tp_dealloc = (destructor)Awaiting_dealloc,
+    .tp_traverse = (traverseproc)Awaiting_traverse,
+    .tp_clear = (inquiry)Awaiting_clear,
+    .tp_iter = PyObject_SelfIter,
+    .tp_iternext = (iternextfunc)Awaiting_next,
+};
+
+/** Answers the iterator @c await drives, polling the outcome through the running event loop. */
 static PyObject* Deferred_await(PyObject* self) {
     PyObject* const asyncio = PyImport_ImportModule("asyncio");
-    PyObject* const loop = asyncio ? method_call(asyncio, "get_running_loop", NULL, NULL) : NULL;
+    PyObject* const sleep = asyncio ? PyObject_GetAttrString(asyncio, "sleep") : NULL;
     Py_XDECREF(asyncio);
-    PyObject* const wait = loop ? PyObject_GetAttrString(self, "wait") : NULL;
-    PyObject* const future = wait ? method_call(loop, "run_in_executor", Py_None, wait) : NULL;
-    Py_XDECREF(wait);
-    Py_XDECREF(loop);
-    PyObject* const awaiting = future ? method_call(future, "__await__", NULL, NULL) : NULL;
-    Py_XDECREF(future);
-    return awaiting;
+    Awaiting* const awaiting = sleep ? PyObject_GC_New(Awaiting, &AwaitingType) : NULL;
+    if (!awaiting) {
+        Py_XDECREF(sleep);
+        return NULL;
+    }
+    awaiting->deferred = Py_NewRef(self);
+    awaiting->sleep = sleep;
+    awaiting->pause = NULL;
+    awaiting->backoff = 0;
+    PyObject_GC_Track(awaiting);
+    return (PyObject*)awaiting;
 }
 
 static void Deferred_dealloc(Deferred* self) {
     PyObject_GC_UnTrack(self);
-    if (self->verb) { // the library writes into the call and reads its borrowed inputs until it is final
+    // The library writes into the held call and reads its inputs until the call is final
+    if (!atomic_load(&self->answering)) {
         deferred_block(self);
         call_release(self->verb, self->call);
     }
-    Py_XDECREF(self->answer);
-    Py_XDECREF(self->raised);
+    Py_XDECREF(atomic_load(&self->answer));
+    Py_XDECREF(atomic_load(&self->raised));
     Py_XDECREF(self->origin);
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
@@ -947,13 +1010,15 @@ static void Deferred_dealloc(Deferred* self) {
  *  through them waits for a later collection rather than being cleared while the library
  *  still reads them. */
 static int Deferred_traverse(Deferred* self, visitproc visit, void* arg) {
+    PyObject* const answer = atomic_load_explicit(&self->answer, memory_order_relaxed);
+    PyObject* const raised = atomic_load_explicit(&self->raised, memory_order_relaxed);
     Py_VISIT(self->origin);
-    Py_VISIT(self->answer);
-    Py_VISIT(self->raised);
-    if (!self->verb || deferred_status(self) == uform_status_deferred_k) return 0;
+    Py_VISIT(answer);
+    Py_VISIT(raised);
+    if (atomic_load(&self->answering) || deferred_status(self) == uform_status_deferred_k) return 0;
     uform_py_call_t const* const header = (uform_py_call_t const*)(void const*)self->call;
-    Py_VISIT(header->raised);
     Py_VISIT(header->arena);
+    Py_VISIT(header->result);
     return self->verb->traverse ? self->verb->traverse(self->call, visit, arg) : 0;
 }
 
@@ -961,11 +1026,9 @@ static int Deferred_traverse(Deferred* self, visitproc visit, void* arg) {
  *  traversal hid the cycle. */
 static int Deferred_clear(Deferred* self) {
     if (deferred_status(self) == uform_status_deferred_k) return 0;
-    uform_py_verb_t const* const releasing = self->verb;
-    self->verb = NULL;
-    if (releasing) call_release(releasing, self->call);
-    Py_CLEAR(self->answer);
-    Py_CLEAR(self->raised);
+    if (!atomic_exchange(&self->answering, 1)) call_release(self->verb, self->call);
+    Py_XDECREF(atomic_exchange(&self->answer, NULL));
+    Py_XDECREF(atomic_exchange(&self->raised, NULL));
     Py_CLEAR(self->origin);
     return 0;
 }
@@ -1037,7 +1100,9 @@ static PyObject* executor_adopt(PyTypeObject* type, uform_executor_t handle) {
         uform_executor_free(handle);
         return NULL;
     }
-    executor->handle = handle;
+    atomic_init(&executor->handle, handle);
+    executor->owned = handle;
+    atomic_init(&executor->holds, 1);
     return (PyObject*)executor;
 }
 
@@ -1046,60 +1111,18 @@ static PyObject* Executor_tp_new(PyTypeObject* type, PyObject* args, PyObject* k
     return NULL;
 }
 
-/** Frees @p handle, waiting in C for every deferred call naming it; NULL is safe. */
-static void executor_free(uform_executor_t handle) {
-    if (!handle) return;
+/** Drops one hold on @p executor, the last freeing its handle, waiting in C for every deferred
+ *  call naming it. */
+static void executor_release(Executor* executor) {
+    if (atomic_fetch_sub(&executor->holds, 1) != 1) return;
     Py_BEGIN_ALLOW_THREADS;
-    uform_executor_free(handle);
+    uform_executor_free(executor->owned);
     Py_END_ALLOW_THREADS;
 }
 
-/** Closes @p executor once, fenced against a concurrent close; while a GPU arena it made is alive,
- *  the handle is left for the last of them to free. */
+/** Closes @p executor once, so verbs refuse it and its handle goes with its last hold. */
 static void executor_close(Executor* executor) {
-    uform_executor_t handle = NULL;
-#if PY_VERSION_HEX >= 0x030D0000
-    Py_BEGIN_CRITICAL_SECTION(executor);
-#endif
-    handle = executor->handle;
-    executor->handle = NULL;
-    if (handle && executor->arenas) {
-        executor->retained = handle;
-        handle = NULL;
-    }
-#if PY_VERSION_HEX >= 0x030D0000
-    Py_END_CRITICAL_SECTION();
-#endif
-    executor_free(handle);
-}
-
-/** Takes a GPU arena's hold on @p executor, whose handle must outlive the arena. */
-static PyObject* executor_hold(PyObject* executor) {
-#if PY_VERSION_HEX >= 0x030D0000
-    Py_BEGIN_CRITICAL_SECTION(executor);
-#endif
-    ++((Executor*)executor)->arenas;
-#if PY_VERSION_HEX >= 0x030D0000
-    Py_END_CRITICAL_SECTION();
-#endif
-    return Py_NewRef(executor);
-}
-
-/** Drops a GPU arena's hold on @p executor, freeing the handle a close left to the last of them. */
-static void executor_release(PyObject* executor) {
-    uform_executor_t retained = NULL;
-#if PY_VERSION_HEX >= 0x030D0000
-    Py_BEGIN_CRITICAL_SECTION(executor);
-#endif
-    if (!--((Executor*)executor)->arenas) {
-        retained = ((Executor*)executor)->retained;
-        ((Executor*)executor)->retained = NULL;
-    }
-#if PY_VERSION_HEX >= 0x030D0000
-    Py_END_CRITICAL_SECTION();
-#endif
-    executor_free(retained);
-    Py_DECREF(executor);
+    if (atomic_exchange(&executor->handle, NULL)) executor_release(executor);
 }
 
 static void Executor_dealloc(Executor* executor) {
@@ -1119,13 +1142,7 @@ int uform_py_executor_from_object(PyObject* object, uform_executor_t* executor) 
         PyErr_Format(PyExc_TypeError, "expected an Executor, got %S", Py_TYPE(object));
         return -1;
     }
-#if PY_VERSION_HEX >= 0x030D0000
-    Py_BEGIN_CRITICAL_SECTION(object);
-#endif
-    *executor = ((Executor*)object)->handle;
-#if PY_VERSION_HEX >= 0x030D0000
-    Py_END_CRITICAL_SECTION();
-#endif
+    *executor = atomic_load(&((Executor*)object)->handle);
     if (!*executor) // a null executor would quietly run the call on the calling thread
         return uform_py_raise(uform_status_invalid_argument_k, "the executor was closed");
     return 0;
@@ -1136,22 +1153,23 @@ int uform_py_executor_optional(PyObject* object, uform_executor_t* executor) {
     return !object || object == Py_None ? 0 : uform_py_executor_from_object(object, executor);
 }
 
-static char const doc_Executor_for_ram[] =                                                      //
-    "for_ram(threads=0, *, memory_domains=None, cpu_class=None) -> Executor\n"                  //
-    "\n"                                                                                        //
-    "Creates an executor of host threads for RAM-resident models, interleaved across the\n"     //
-    "compute domains local to the named memory domains.\n"                                      //
-    "Calls `uform_executor_for_ram`.\n"                                                         //
-    "\n"                                                                                        //
-    "Args:\n"                                                                                   //
-    "  threads (int, optional): Threads to spawn; 0 takes 7/8 of the cores the domains\n"       //
-    "    carry.\n"                                                                              //
-    "  memory_domains (Sequence[int], optional): NUMA node IDs of the models it will\n"         //
-    "    drive; None derives every node the process may allocate on.\n"                         //
-    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.\n" //
-    "\n"                                                                                        //
-    "Example:\n"                                                                                //
-    "  >>> with uform.Executor.for_ram(threads=8) as executor:\n"                               //
+static char const doc_Executor_for_ram[] =                                                        //
+    "for_ram(threads=0, *, memory_domains=None, cpu_class_ceiling=None) -> Executor\n"            //
+    "\n"                                                                                          //
+    "Creates an executor of host threads for RAM-resident models, interleaved across the\n"       //
+    "compute domains local to the named memory domains.\n"                                        //
+    "Calls `uform_executor_for_ram`.\n"                                                           //
+    "\n"                                                                                          //
+    "Args:\n"                                                                                     //
+    "  threads (int, optional): Threads to spawn; 0 takes 7/8 of the cores the domains\n"         //
+    "    carry.\n"                                                                                //
+    "  memory_domains (Sequence[int], optional): NUMA node IDs of the models it will\n"           //
+    "    drive; None derives every node the process may allocate on.\n"                           //
+    "  cpu_class_ceiling (CPUClass, optional): The newest class to dispatch as, capped by what\n" //
+    "    the CPU runs; None sets no ceiling.\n"                                                   //
+    "\n"                                                                                          //
+    "Example:\n"                                                                                  //
+    "  >>> with uform.Executor.for_ram(threads=8) as executor:\n"                                 //
     "  ...     executor.drain()";
 
 static PyObject* Executor_for_ram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
@@ -1160,16 +1178,17 @@ static PyObject* Executor_for_ram(PyTypeObject* type, PyObject* const* args, Py_
     uform_py_argument_t const arguments[] = {
         {"threads", &threads_object},
         {"memory_domains", &memory_domains_object},
-        {"cpu_class", &cpu_class_object},
+        {"cpu_class_ceiling", &cpu_class_object},
     };
     size_t threads = 0;
-    int cpu_class = 0;
+    int cpu_class_ceiling = 0;
     int32_t* memory_domains = NULL;
     size_t memory_domains_count = 0;
     if (uform_py_arguments_parse("for_ram", args, positional_args_count, args_names_tuple, 0, 1, arguments,
                                  sizeof(arguments) / sizeof(*arguments)) != 0 ||
         uform_py_size_from_object(threads_object, "threads", &threads) != 0 ||
-        uform_py_class_from_object(cpu_class_object, "cpu_class", &uform_py_cpu_class, &cpu_class) != 0 ||
+        uform_py_class_from_object(cpu_class_object, "cpu_class_ceiling", &uform_py_cpu_class, &cpu_class_ceiling) !=
+            0 ||
         uform_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
                                       &memory_domains_count) != 0)
         return NULL;
@@ -1179,7 +1198,7 @@ static PyObject* Executor_for_ram(PyTypeObject* type, PyObject* const* args, Py_
     uform_executor_for_ram_t executor_arguments = {
         .executor = &handle,
         .outcome = &outcome,
-        .ram = {memory_domains, memory_domains_count, (uform_cpu_class_t)cpu_class},
+        .ram = {memory_domains, memory_domains_count, (uform_cpu_class_t)cpu_class_ceiling},
         .threads = threads};
     Py_BEGIN_ALLOW_THREADS;
     uform_executor_for_ram(&executor_arguments);
@@ -1190,21 +1209,22 @@ static PyObject* Executor_for_ram(PyTypeObject* type, PyObject* const* args, Py_
     return executor_adopt(type, handle);
 }
 
-static char const doc_Executor_on_pool[] =                                                     //
-    "on_pool(pool, /, *, memory_domains=None, cpu_class=None) -> Executor\n"                   //
-    "\n"                                                                                       //
-    "Drives RAM-resident models on a ForkUnion pool another library already spawned, so\n"     //
-    "UForm, USearch and UStore in one process share one set of threads while each keeps its\n" //
-    "own scratch. Borrowing is not designed across projects yet, so it raises\n"               //
-    "`UnsupportedError` until it is.\n"                                                        //
-    "Calls `uform_executor_on_pool`.\n"                                                        //
-    "\n"                                                                                       //
-    "Args:\n"                                                                                  //
-    "  pool (int): The address of the `fu_pool_t` to borrow, as `ctypes` and `cffi` hand\n"    //
-    "    pointers over; the pool must outlive the executor.\n"                                 //
-    "  memory_domains (Sequence[int], optional): NUMA node IDs of the models it will\n"        //
-    "    drive; None derives every node the process may allocate on.\n"                        //
-    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.";
+static char const doc_Executor_on_pool[] =                                                        //
+    "on_pool(pool, /, *, memory_domains=None, cpu_class_ceiling=None) -> Executor\n"              //
+    "\n"                                                                                          //
+    "Drives RAM-resident models on a ForkUnion pool another library already spawned, so\n"        //
+    "UForm, USearch and UStore in one process share one set of threads while each keeps its\n"    //
+    "own scratch. Borrowing is not designed across projects yet, so it raises\n"                  //
+    "`UnsupportedError` until it is.\n"                                                           //
+    "Calls `uform_executor_on_pool`.\n"                                                           //
+    "\n"                                                                                          //
+    "Args:\n"                                                                                     //
+    "  pool (int): The address of the `fu_pool_t` to borrow, as `ctypes` and `cffi` hand\n"       //
+    "    pointers over; the pool must outlive the executor.\n"                                    //
+    "  memory_domains (Sequence[int], optional): NUMA node IDs of the models it will\n"           //
+    "    drive; None derives every node the process may allocate on.\n"                           //
+    "  cpu_class_ceiling (CPUClass, optional): The newest class to dispatch as, capped by what\n" //
+    "    the CPU runs; None sets no ceiling.";
 
 static PyObject* Executor_on_pool(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                   PyObject* args_names_tuple) {
@@ -1212,12 +1232,12 @@ static PyObject* Executor_on_pool(PyTypeObject* type, PyObject* const* args, Py_
     uform_py_argument_t const arguments[] = {
         {"pool", &pool_object},
         {"memory_domains", &memory_domains_object},
-        {"cpu_class", &cpu_class_object},
+        {"cpu_class_ceiling", &cpu_class_object},
     };
-    int cpu_class = 0;
+    int cpu_class_ceiling = 0;
     if (uform_py_arguments_parse("on_pool", args, positional_args_count, args_names_tuple, 1, 1, arguments,
                                  sizeof(arguments) / sizeof(*arguments)) != 0 ||
-        uform_py_class_from_object(cpu_class_object, "cpu_class", &uform_py_cpu_class, &cpu_class) != 0)
+        uform_py_class_from_object(cpu_class_object, "cpu_class_ceiling", &uform_py_cpu_class, &cpu_class_ceiling) != 0)
         return NULL;
 
     PyObject* const address = PyNumber_Index(pool_object);
@@ -1237,7 +1257,7 @@ static PyObject* Executor_on_pool(PyTypeObject* type, PyObject* const* args, Py_
     uform_executor_on_pool_t executor_arguments = {
         .executor = &handle,
         .outcome = &outcome,
-        .ram = {memory_domains, memory_domains_count, (uform_cpu_class_t)cpu_class},
+        .ram = {memory_domains, memory_domains_count, (uform_cpu_class_t)cpu_class_ceiling},
         .pool = pool};
     Py_BEGIN_ALLOW_THREADS;
     uform_executor_on_pool(&executor_arguments);
@@ -1248,47 +1268,50 @@ static PyObject* Executor_on_pool(PyTypeObject* type, PyObject* const* args, Py_
     return executor_adopt(type, handle);
 }
 
-static char const doc_Executor_for_vram[] =                                                     //
-    "for_vram(devices=None, *, scratch_limit=0, gpu_class=None, "                               //
-    "memory_domains=None, cpu_class=None) -> Executor\n"                                        //
-    "\n"                                                                                        //
-    "Opens one submission stream on every named device, all of them driven by the host\n"       //
-    "thread running the call, and spawns the host threads that decode what the devices\n"       //
-    "cannot.\n"                                                                                 //
-    "Calls `uform_executor_for_vram`.\n"                                                        //
-    "\n"                                                                                        //
-    "Args:\n"                                                                                   //
-    "  devices (Sequence[int], optional): Positions in `gpu_devices()` to drive; None\n"        //
-    "    derives one free device.\n"                                                            //
-    "  scratch_limit (int, optional): The ceiling on scratch bytes per device; 0 lets\n"        //
-    "    scratch grow as batches ask, and a batch larger than the ceiling runs in passes.\n"    //
-    "  gpu_class (GPUClass, optional): The class every device dispatches as; None derives\n"    //
-    "    the devices' own, which must agree.\n"                                                 //
-    "  memory_domains (Sequence[int], optional): NUMA node IDs whose cores the host\n"          //
-    "    decoders take; None derives every node the process may allocate on.\n"                 //
-    "  cpu_class (CPUClass, optional): The class the host decoders dispatch as; None derives\n" //
-    "    the CPU's own.\n"                                                                      //
-    "\n"                                                                                        //
-    "Example:\n"                                                                                //
+static char const doc_Executor_for_vram[] =                                                        //
+    "for_vram(devices=None, *, scratch_limit=0, gpu_class_ceiling=None, "                          //
+    "memory_domains=None, cpu_class_ceiling=None) -> Executor\n"                                   //
+    "\n"                                                                                           //
+    "Opens one submission stream on every named device, all of them driven by the host\n"          //
+    "thread running the call, and spawns the host threads that decode what the devices\n"          //
+    "cannot.\n"                                                                                    //
+    "Calls `uform_executor_for_vram`.\n"                                                           //
+    "\n"                                                                                           //
+    "Args:\n"                                                                                      //
+    "  devices (Sequence[int], optional): Positions in `gpu_devices()` to drive; None\n"           //
+    "    derives one free device.\n"                                                               //
+    "  scratch_limit (int, optional): The ceiling on scratch bytes per device; 0 lets\n"           //
+    "    scratch grow as batches ask, and a batch larger than the ceiling runs in passes.\n"       //
+    "  gpu_class_ceiling (GPUClass, optional): The newest class every device dispatches as, the\n" //
+    "    best class all of them load under it; None sets no ceiling.\n"                            //
+    "  memory_domains (Sequence[int], optional): NUMA node IDs whose cores the host\n"             //
+    "    decoders take; None derives every node the process may allocate on.\n"                    //
+    "  cpu_class_ceiling (CPUClass, optional): The newest class the host decoders dispatch as;\n"  //
+    "    None sets no ceiling.\n"                                                                  //
+    "\n"                                                                                           //
+    "Example:\n"                                                                                   //
     "  >>> executor = uform.Executor.for_vram([0, 1])   # doctest: +SKIP";
 
 static PyObject* Executor_for_vram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
                                    PyObject* args_names_tuple) {
     PyObject *devices_object, *scratch_limit_object, *gpu_class_object, *memory_domains_object, *cpu_class_object;
     uform_py_argument_t const arguments[] = {
-        {"devices", &devices_object},     {"scratch_limit", &scratch_limit_object},
-        {"gpu_class", &gpu_class_object}, {"memory_domains", &memory_domains_object},
-        {"cpu_class", &cpu_class_object},
+        {"devices", &devices_object},
+        {"scratch_limit", &scratch_limit_object},
+        {"gpu_class_ceiling", &gpu_class_object},
+        {"memory_domains", &memory_domains_object},
+        {"cpu_class_ceiling", &cpu_class_object},
     };
     size_t scratch_limit = 0;
-    int gpu_class = 0, cpu_class = 0;
+    int gpu_class_ceiling = 0, cpu_class_ceiling = 0;
     int32_t *devices = NULL, *memory_domains = NULL;
     size_t devices_count = 0, memory_domains_count = 0;
     if (uform_py_arguments_parse("for_vram", args, positional_args_count, args_names_tuple, 0, 1, arguments,
                                  sizeof(arguments) / sizeof(*arguments)) != 0 ||
         uform_py_size_from_object(scratch_limit_object, "scratch_limit", &scratch_limit) != 0 ||
-        uform_py_class_from_object(gpu_class_object, "gpu_class", &uform_py_gpu_class, &gpu_class) != 0 ||
-        uform_py_class_from_object(cpu_class_object, "cpu_class", &uform_py_cpu_class, &cpu_class) != 0)
+        uform_py_class_from_object(gpu_class_object, "gpu_class_ceiling", &uform_py_gpu_class, &gpu_class_ceiling) !=
+            0 ||
+        uform_py_class_from_object(cpu_class_object, "cpu_class_ceiling", &uform_py_cpu_class, &cpu_class_ceiling) != 0)
         return NULL;
     if (uform_py_ordinals_from_object(devices_object, "devices", &devices, &devices_count) != 0) return NULL;
     if (uform_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
@@ -1302,8 +1325,8 @@ static PyObject* Executor_for_vram(PyTypeObject* type, PyObject* const* args, Py
     uform_executor_for_vram_t executor_arguments = {
         .executor = &handle,
         .outcome = &outcome,
-        .vram = {devices, devices_count, (uform_gpu_class_t)gpu_class},
-        .ram = {memory_domains, memory_domains_count, (uform_cpu_class_t)cpu_class},
+        .vram = {devices, devices_count, (uform_gpu_class_t)gpu_class_ceiling},
+        .ram = {memory_domains, memory_domains_count, (uform_cpu_class_t)cpu_class_ceiling},
         .scratch_limit = scratch_limit};
     Py_BEGIN_ALLOW_THREADS;
     uform_executor_for_vram(&executor_arguments);
@@ -1353,7 +1376,7 @@ static PyObject* Executor_drain(Executor* executor, PyObject* const* args, Py_ss
 }
 
 static PyObject* Executor_repr(Executor* executor) {
-    return PyUnicode_FromFormat("uform.Executor(at=%p)", (void*)executor->handle);
+    return PyUnicode_FromFormat("uform.Executor(at=%p)", (void*)atomic_load(&executor->handle));
 }
 
 static PyMethodDef Executor_methods[] = {
@@ -1573,13 +1596,12 @@ static char const doc_Arena[] =                                                 
     "\n"                                                                                       //
     "The executor makes it where its calls compute, host pages or the memory of its GPU,\n"    //
     "and none makes host pages for calls on the calling thread. Results are zero-copy views\n" //
-    "over it. Like a `bytearray`, it refuses to rewind with `ContendedError` while a buffer\n" //
-    "over its outputs is exported, and a result read after a later call rewound it raises\n"   //
-    "`InvalidArgumentError`. A deferred call holds it as a blocking one does, until it is\n"   //
-    "waited on or dropped. Results over device memory export `__dlpack__`, and host reads\n"   //
-    "of them raise `DeviceError`. A GPU arena serves only calls on the executor that made\n"   //
-    "it and holds that executor until it is freed, so an executor closed first keeps its\n"    //
-    "streams until then.\n"                                                                    //
+    "over it, valid until the next call handed it rewinds it, as a C view is. It serves one\n" //
+    "call at a time, and a call finding another one holding it raises `ContendedError`. A\n"   //
+    "deferred call holds it until it is final. Results over device memory export\n"            //
+    "`__dlpack__`, and host reads of them raise `DeviceError`. A GPU arena serves only\n"      //
+    "calls on the executor that made it and holds that executor until it is freed, so an\n"    //
+    "executor closed first keeps its streams until then.\n"                                    //
     "Calls `uform_arena_init`.\n"                                                              //
     "\n"                                                                                       //
     "Args:\n"                                                                                  //
@@ -1589,8 +1611,7 @@ static char const doc_Arena[] =                                                 
     "Example:\n"                                                                               //
     "  >>> model = uform.Model.load_ram_buffer(b'any bytes the stub accepts')\n"               //
     "  >>> arena = uform.Arena()\n"                                                            //
-    "  >>> first = memoryview(model.text_encode(['first'], arena).embeddings)\n"               //
-    "  >>> first.release()\n"                                                                  //
+    "  >>> first = model.text_encode(['first'], arena)  # its views die at the next call\n"    //
     "  >>> memoryview(model.text_encode(['second'], arena).embeddings).shape\n"                //
     "  (1, 64)";
 
@@ -1621,8 +1642,10 @@ static PyObject* Arena_tp_new(PyTypeObject* type, PyObject* args, PyObject* keyw
         Py_DECREF(arena);
         return NULL;
     }
-    if (description.residency == uform_residency_vram_k) // a GPU arena frees on its executor's first stream
-        arena->executor = executor_hold(executor_object);
+    if (description.residency == uform_residency_vram_k) { // a GPU arena frees on its executor's first stream
+        atomic_fetch_add(&((Executor*)executor_object)->holds, 1);
+        arena->executor = Py_NewRef(executor_object);
+    }
     return (PyObject*)arena;
 }
 
@@ -1630,7 +1653,8 @@ static void Arena_dealloc(Arena* self) {
     Py_BEGIN_ALLOW_THREADS;
     uform_arena_free(self->handle);
     Py_END_ALLOW_THREADS;
-    if (self->executor) executor_release(self->executor);
+    if (self->executor) executor_release((Executor*)self->executor);
+    Py_XDECREF(self->executor);
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
@@ -1644,40 +1668,13 @@ PyTypeObject ArenaType = {
     .tp_dealloc = (destructor)Arena_dealloc,
 };
 
-int uform_py_arena_claim(PyObject* object, PyObject** arena) {
+int uform_py_call_hold_arena(uform_py_call_t* call, PyObject* object) {
     if (!PyObject_TypeCheck(object, &ArenaType)) {
         PyErr_Format(PyExc_TypeError, "the 'arena' argument must be an Arena, got %S", Py_TYPE(object));
         return -1;
     }
-    Arena* const claimed = (Arena*)object;
-    Py_ssize_t held = 0;
-#if PY_VERSION_HEX >= 0x030D0000
-    Py_BEGIN_CRITICAL_SECTION(object);
-#endif
-    held = claimed->exports;
-    if (!held) {
-        claimed->exports = 1;
-        ++claimed->generation;
-    }
-#if PY_VERSION_HEX >= 0x030D0000
-    Py_END_CRITICAL_SECTION();
-#endif
-    if (held)
-        return uform_py_raise(uform_status_contended_k,
-                              "the arena serves a call or exports a buffer over its outputs; release it first");
-    *arena = Py_NewRef(object);
+    call->arena = Py_NewRef(object);
     return 0;
-}
-
-void uform_py_arena_unclaim(PyObject* arena) {
-#if PY_VERSION_HEX >= 0x030D0000
-    Py_BEGIN_CRITICAL_SECTION(arena);
-#endif
-    --((Arena*)arena)->exports;
-#if PY_VERSION_HEX >= 0x030D0000
-    Py_END_CRITICAL_SECTION();
-#endif
-    Py_DECREF(arena);
 }
 
 /** The rank of every output in an arena: rows by columns. */
@@ -1690,10 +1687,6 @@ typedef struct ArenaBuffer {
 
     /** The arena the output lives in, kept alive so the memory outlives every other name for it. */
     PyObject* arena;
-
-    /** The arena's generation when the call wrote the output; any later one means a
-     *  call rewound it. */
-    size_t generation;
 
     void const* data;
     char const* format;
@@ -1721,56 +1714,21 @@ static int arena_buffer_describe(ArenaBuffer const* buffer, uform_arena_descript
     return uform_py_raise_on_outcome(&outcome);
 }
 
-/** Raises @c InvalidArgumentError unless the call that wrote @p buffer is still the last to claim
- *  its arena; returns 0 or -1. */
-static int arena_buffer_fresh(ArenaBuffer const* buffer, size_t generation) {
-    if (generation == buffer->generation) return 0;
-    return uform_py_raise(uform_status_invalid_argument_k, "a later call rewound the arena this output lived in");
-}
-
-/** Holds the arena of @p buffer against a rewind as one more export; 0, or -1 with an
- *  @c InvalidArgumentError set when a later call rewound it. */
-static int arena_buffer_hold(ArenaBuffer const* buffer) {
-    Arena* const arena = (Arena*)buffer->arena;
-    size_t generation = 0;
-#if PY_VERSION_HEX >= 0x030D0000
-    Py_BEGIN_CRITICAL_SECTION(arena);
-#endif
-    generation = arena->generation;
-    if (generation == buffer->generation) ++arena->exports;
-#if PY_VERSION_HEX >= 0x030D0000
-    Py_END_CRITICAL_SECTION();
-#endif
-    return arena_buffer_fresh(buffer, generation);
-}
-
-/** Lets go of one export @c arena_buffer_hold took on the arena of @p buffer. */
-static void arena_buffer_unhold(ArenaBuffer const* buffer) {
-#if PY_VERSION_HEX >= 0x030D0000
-    Py_BEGIN_CRITICAL_SECTION(buffer->arena);
-#endif
-    --((Arena*)buffer->arena)->exports;
-#if PY_VERSION_HEX >= 0x030D0000
-    Py_END_CRITICAL_SECTION();
-#endif
-}
-
 /**
- *  @brief Holds the arena of @p buffer against a rewind while the host reads it, as one export.
- *  @return 0 on success, -1 with a @c DeviceError set when the output is on a device, or an
- *      @c InvalidArgumentError when a later call rewound it.
+ *  @brief Refuses a host read of @p buffer when its output lives on a device.
+ *  @return 0 on success, -1 with a @c DeviceError set when the output is on a device.
  */
-static int arena_buffer_pin(ArenaBuffer const* buffer) {
+static int arena_buffer_on_host(ArenaBuffer const* buffer) {
     uform_arena_description_t description = {0};
     if (arena_buffer_describe(buffer, &description) != 0) return -1;
     if (description.residency == uform_residency_vram_k)
         return uform_py_raise(uform_status_device_k, "the output lives in device memory; read `__dlpack__`");
-    return arena_buffer_hold(buffer);
+    return 0;
 }
 
 static int ArenaBuffer_getbuffer(ArenaBuffer* self, Py_buffer* view, int flags) {
     view->obj = NULL;
-    if (arena_buffer_pin(self) != 0) return -1;
+    if (arena_buffer_on_host(self) != 0) return -1;
     Py_ssize_t bytes = self->item_bytes;
     for (int axis = 0; axis != self->rank; ++axis) bytes *= self->shape[axis];
     view->obj = Py_NewRef((PyObject*)self);
@@ -1786,8 +1744,6 @@ static int ArenaBuffer_getbuffer(ArenaBuffer* self, Py_buffer* view, int flags) 
     view->internal = NULL;
     return 0;
 }
-
-static void ArenaBuffer_releasebuffer(ArenaBuffer* self, Py_buffer* view) { arena_buffer_unhold(self); }
 
 /** A tuple of the first @p rank of @p extents; a new reference, or NULL. */
 static PyObject* extents_to_tuple(Py_ssize_t const* extents, int rank) {
@@ -1810,15 +1766,6 @@ static PyObject* ArenaBuffer_get_cuda_array_interface(ArenaBuffer* self, void* c
         PyErr_SetString(PyExc_AttributeError, "the output lives in host memory; read it through the buffer protocol");
         return NULL;
     }
-    size_t generation = 0;
-#if PY_VERSION_HEX >= 0x030D0000
-    Py_BEGIN_CRITICAL_SECTION(self->arena);
-#endif
-    generation = ((Arena*)self->arena)->generation;
-#if PY_VERSION_HEX >= 0x030D0000
-    Py_END_CRITICAL_SECTION();
-#endif
-    if (arena_buffer_fresh(self, generation) != 0) return NULL;
     char const kind = *self->format == 'b' ? 'i' : strchr("efd", *self->format) ? 'f' : 'u';
     char const typestr[3] = {self->item_bytes == 1 ? '|' : '<', kind, (char)('0' + self->item_bytes)};
     PyObject* const address = PyLong_FromVoidPtr((void*)self->data);
@@ -1883,7 +1830,6 @@ typedef struct dlpack_export_t {
 /** Releases an export from whichever thread its consumer drops it on, taking the GIL itself. */
 static void dlpack_export_release(dlpack_export_t* exported) {
     PyGILState_STATE const state = PyGILState_Ensure();
-    arena_buffer_unhold(exported->buffer);
     Py_DECREF(exported->buffer);
     PyMem_Free(exported);
     PyGILState_Release(state);
@@ -1948,10 +1894,6 @@ static PyObject* ArenaBuffer_dlpack(ArenaBuffer* self, PyObject* const* args, Py
 
     dlpack_export_t* const exported = (dlpack_export_t*)PyMem_Calloc(1, sizeof(dlpack_export_t));
     if (!exported) return PyErr_NoMemory();
-    if (arena_buffer_hold(self) != 0) {
-        PyMem_Free(exported);
-        return NULL;
-    }
     exported->buffer = (ArenaBuffer*)Py_NewRef((PyObject*)self);
     for (int axis = 0; axis != self->rank; ++axis) {
         exported->shape[axis] = self->shape[axis];
@@ -1990,7 +1932,7 @@ static char const doc_ArenaBuffer_dlpack[] =                                    
     "__dlpack__(*, stream=None, max_version=None, dl_device=None, copy=None) -> PyCapsule\n" //
     "\n"                                                                                     //
     "Exports the output in place as a DLPack capsule, on host pages or the GPU its arena\n"  //
-    "lives on; the arena refuses to rewind until the consumer lets go. A `max_version` of\n" //
+    "lives on, valid until the next call handed the arena rewinds it. A `max_version` of\n"  //
     "1 or more asks for a versioned capsule.";
 
 static char const doc_ArenaBuffer_dlpack_device[] = //
@@ -2016,7 +1958,6 @@ static PySequenceMethods ArenaBuffer_as_sequence = {.sq_length = (lenfunc)ArenaB
 
 static PyBufferProcs ArenaBuffer_as_buffer = {
     .bf_getbuffer = (getbufferproc)ArenaBuffer_getbuffer,
-    .bf_releasebuffer = (releasebufferproc)ArenaBuffer_releasebuffer,
 };
 
 static PyGetSetDef ArenaBuffer_getset[] = {
@@ -2089,7 +2030,7 @@ static struct {
     {uform_scalar_i32_k, "i", 4}, {uform_scalar_i8_k, "b", 1},  {uform_scalar_u8_k, "B", 1},
 };
 
-/** A new @c ArenaBuffer of @p type over @p data inside the claimed @p arena, C-contiguous;
+/** A new @c ArenaBuffer of @p type over @p data inside the held @p arena, C-contiguous;
  *  NULL on failure. */
 static ArenaBuffer* arena_buffer_new(PyTypeObject* type, PyObject* arena, void const* data, char const* format,
                                      Py_ssize_t item_bytes, Py_ssize_t const* shape, int rank) {
@@ -2097,7 +2038,6 @@ static ArenaBuffer* arena_buffer_new(PyTypeObject* type, PyObject* arena, void c
     ArenaBuffer* const exporter = (ArenaBuffer*)type->tp_alloc(type, 0);
     if (!exporter) return NULL;
     exporter->arena = Py_NewRef(arena);
-    exporter->generation = ((Arena*)arena)->generation; // built while the writing call still holds the arena
     exporter->data = data ? data : &empty_output;
     exporter->format = format;
     exporter->item_bytes = item_bytes;
@@ -2386,21 +2326,53 @@ PyObject* api_capabilities_available(PyObject* self, PyObject* unused) {
     return PyUnicode_FromString(uform_capabilities_available());
 }
 
-static PyStructSequence_Field GPUDevice_fields[] = {
-    {"vendor", "The `GPUVendor` whose runtime drives the device."},
-    {"vendor_ordinal", "The device's ordinal in its vendor's runtime, as nvidia-smi or rocm-smi list it."},
-    {"gpu_class", "The `GPUClass` whose kernels run on it, or None."},
-    {"compute_units", "Streaming multiprocessors or compute units."},
-    {"memory_bytes", "Device memory in bytes."},
-    {"name", "The vendor's own name for the device."},
-    {NULL, NULL},
+/** One GPU this process can drive, as @c uform_gpu_devices listed it. */
+typedef struct GPUDevice {
+    PyObject ob_base;
+    uform_gpu_device_t device;
+} GPUDevice;
+
+static PyObject* GPUDevice_get_vendor(GPUDevice* self, void* closure) {
+    return uform_py_enum_to_object(&uform_py_gpu_vendor, (int)self->device.vendor);
+}
+
+static PyObject* GPUDevice_get_gpu_class(GPUDevice* self, void* closure) {
+    return uform_py_class_to_object(&uform_py_gpu_class, (int)self->device.gpu_class);
+}
+
+static PyObject* GPUDevice_get_name(GPUDevice* self, void* closure) { return PyUnicode_FromString(self->device.name); }
+
+static PyMemberDef GPUDevice_members[] = {
+    {"vendor_ordinal", Py_T_UINT, offsetof(GPUDevice, device.vendor_ordinal), Py_READONLY,
+     "The device's ordinal in its vendor's runtime, as nvidia-smi or rocm-smi list it."},
+    {"compute_units", Py_T_UINT, offsetof(GPUDevice, device.compute_units), Py_READONLY,
+     "Streaming multiprocessors or compute units."},
+    {"memory_bytes", Py_T_ULONGLONG, offsetof(GPUDevice, device.memory_bytes), Py_READONLY, "Device memory in bytes."},
+    {NULL, 0, 0, 0, NULL},
 };
 
-PyStructSequence_Desc uform_py_gpu_device_desc = {
-    "uform.GPUDevice", "One GPU this process can drive, its position in `gpu_devices()` being its ordinal.",
-    GPUDevice_fields, 6};
+static PyGetSetDef GPUDevice_getset[] = {
+    {"vendor", (getter)GPUDevice_get_vendor, NULL, "The `GPUVendor` whose runtime drives the device.", NULL},
+    {"gpu_class", (getter)GPUDevice_get_gpu_class, NULL, "The `GPUClass` whose kernels run on it, or None.", NULL},
+    {"name", (getter)GPUDevice_get_name, NULL, "The vendor's own name for the device.", NULL},
+    {NULL, NULL, NULL, NULL, NULL},
+};
 
-PyTypeObject GPUDeviceType;
+static PyObject* GPUDevice_repr(GPUDevice* self) {
+    return PyUnicode_FromFormat("GPUDevice(name='%s', vendor_ordinal=%u, memory_bytes=%llu)", self->device.name,
+                                (unsigned)self->device.vendor_ordinal, (unsigned long long)self->device.memory_bytes);
+}
+
+PyTypeObject GPUDeviceType = {
+    PyVarObject_HEAD_INIT(NULL, 0) //
+        .tp_name = "uform.GPUDevice",
+    .tp_doc = "One GPU this process can drive, its position in `gpu_devices()` being its ordinal.",
+    .tp_basicsize = sizeof(GPUDevice),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_repr = (reprfunc)GPUDevice_repr,
+    .tp_members = GPUDevice_members,
+    .tp_getset = GPUDevice_getset,
+};
 
 char const doc_gpu_devices[] =                                                                   //
     "gpu_devices() -> tuple[GPUDevice, ...]\n"                                                   //
@@ -2433,17 +2405,10 @@ PyObject* api_gpu_devices(PyObject* self, PyObject* unused) {
     Py_ssize_t const listed = gpu_devices_list(devices, (size_t)counted);
     PyObject* tuple = listed < 0 ? NULL : PyTuple_New(listed < counted ? listed : counted);
     for (Py_ssize_t index = 0; tuple && index != PyTuple_GET_SIZE(tuple); ++index) {
-        uform_gpu_device_t const* const device = &devices[index];
-        PyObject* fields[6] = {NULL, NULL, NULL, NULL, NULL, NULL};
-        (void)((fields[0] = uform_py_enum_to_object(&uform_py_gpu_vendor, (int)device->vendor)) &&
-               (fields[1] = PyLong_FromUnsignedLong(device->vendor_ordinal)) &&
-               (fields[2] = uform_py_class_to_object(&uform_py_gpu_class, (int)device->gpu_class)) &&
-               (fields[3] = PyLong_FromUnsignedLong(device->compute_units)) &&
-               (fields[4] = PyLong_FromUnsignedLongLong(device->memory_bytes)) &&
-               (fields[5] = PyUnicode_FromString(device->name)));
-        PyObject* const entry = uform_py_struct_sequence_steal(&GPUDeviceType, fields, 6);
+        GPUDevice* const entry = (GPUDevice*)GPUDeviceType.tp_alloc(&GPUDeviceType, 0);
+        if (entry) entry->device = devices[index];
         if (!entry) Py_CLEAR(tuple);
-        else PyTuple_SET_ITEM(tuple, index, entry);
+        else PyTuple_SET_ITEM(tuple, index, (PyObject*)entry);
     }
     PyMem_Free(devices);
     return tuple;

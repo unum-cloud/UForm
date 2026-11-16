@@ -83,6 +83,28 @@ using namespace uu;
     return {};
 }
 
+/** Copy every string pair of the @c __metadata__ object @p metadata into @p pairs , skipping the
+ *  values that are not strings. */
+[[nodiscard]] static expected_t read_metadata_(yyjson_val* metadata,
+                                               st::basic_vector<checkpoint_metadata_t>& pairs) noexcept {
+    yyjson_obj_iter iterator;
+    if (!yyjson_obj_iter_init(metadata, &iterator))
+        return expected_t::fail(status_t::invalid_argument_k, "__metadata__ is not an object");
+    yyjson_val* key = nullptr;
+    while ((key = yyjson_obj_iter_next(&iterator)) != nullptr) {
+        yyjson_val* value = yyjson_obj_iter_get_val(key);
+        char const* value_chars = yyjson_get_str(value); // null for non-strings, skipped
+        if (value_chars == nullptr) continue;
+        checkpoint_metadata_t pair;
+        expected_t owned = own_text_(pair.key, {yyjson_get_str(key), yyjson_get_len(key)});
+        if (owned) owned = own_text_(pair.value, {value_chars, yyjson_get_len(value)});
+        if (!owned) return owned;
+        if (st::failed(pairs.push_back(std::move(pair))))
+            return expected_t::fail(status_t::bad_alloc_k, "metadata table growth failed");
+    }
+    return {};
+}
+
 /** The mirror of @ref write_header_ : parse the @p header text inside @p pool , index every BF16
  *  and F32 record into @p entries — shapes tolerated as rank-1 @c [cols] or rank-2 @c [rows,cols] ,
  *  offsets validated against @p payload_bytes — and every string metadata pair into @p pairs .
@@ -102,21 +124,7 @@ using namespace uu;
         yyjson_val* value = yyjson_obj_iter_get_val(key);
         sz::string_view_t const key_text {yyjson_get_str(key), yyjson_get_len(key)};
         if (key_text == "__metadata__") {
-            yyjson_obj_iter metadata_iterator;
-            if (!yyjson_obj_iter_init(value, &metadata_iterator))
-                return expected_t::fail(status_t::invalid_argument_k, "__metadata__ is not an object");
-            yyjson_val* metadata_key = nullptr;
-            while ((metadata_key = yyjson_obj_iter_next(&metadata_iterator)) != nullptr) {
-                yyjson_val* metadata_value = yyjson_obj_iter_get_val(metadata_key);
-                char const* value_chars = yyjson_get_str(metadata_value); // null for non-strings, skipped
-                if (value_chars == nullptr) continue;
-                checkpoint_metadata_t pair;
-                expected_t owned = own_text_(pair.key, {yyjson_get_str(metadata_key), yyjson_get_len(metadata_key)});
-                if (owned) owned = own_text_(pair.value, {value_chars, yyjson_get_len(metadata_value)});
-                if (!owned) return owned;
-                if (st::failed(pairs.push_back(std::move(pair))))
-                    return expected_t::fail(status_t::bad_alloc_k, "metadata table growth failed");
-            }
+            if (expected_t read = read_metadata_(value, pairs); !read) return read;
             continue;
         }
         yyjson_val* dtype = yyjson_obj_get(value, "dtype");

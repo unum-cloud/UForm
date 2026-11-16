@@ -4,18 +4,20 @@
  *  @date July 5, 2026
  *  @brief Shared checks for the C++ and CUDA suites: failure counts, skips, settings and totals.
  *
- *  A suite's @c main makes one @ref test_suite_t and passes it by reference into every case
- *  through @ref test_suite_t::run , which prints one result line per case and a rerun line under
- *  each failure; there is no file-scope counter and no singleton. @ref test_suite_t::check
- *  mirrors @ref expected::fail , a format string plus its operands with the call site captured
- *  through @ref format_at_t , so a failing check names its file, line and values, and a passing
- *  one is silent.
+ *  A suite's @c main makes one @ref test_suite_t and passes it by reference into every case through
+ *  @ref test_suite_t::run , which prints one verdict line per case and a rerun line on stderr under
+ *  each failure; there is no file-scope counter and no singleton. @ref test_suite_t::check mirrors
+ *  @ref expected::fail , a format string plus its operands with the call site captured through
+ *  @ref format_at_t , so a failing check names its file, line and values, and a passing one prints
+ *  nothing at all.
  *
  *  Every suite reads its settings once, in @ref test_suite_t::make :
  *
  *  @verbatim
  *  Variable           Default  Meaning
  *  UFORM_SEED         42       Seed the suite's draws derive from, an unsigned integer or random
+ *  UFORM_MULTIPLIER   1        Scales sweeps and iteration counts: 0.1 for a smoke run, 10 for a
+ *                              thorough one; every rerun line repeats it
  *  UFORM_FILTER       none     Cases to run, by name, as an ECMAScript regex or else as a substring
  *  UFORM_TEST_FILTER  none     The same filter, read when UFORM_FILTER is unset
  *  UFORM_DEVICES      derived  Comma-separated UForm device ordinals the GPU cases run on; unset takes
@@ -26,10 +28,10 @@
 
 #include <cmath>   // `std::fabs`, `std::fmax`
 #include <cstdio>  // `std::setvbuf`, `stdout`
-#include <cstdlib> // `std::getenv`, `std::exit`
+#include <cstdlib> // `std::getenv`, `std::exit`, `std::strtod`
 
 #include <charconv>    // `std::from_chars`
-#include <chrono>      // `std::chrono::milliseconds` — the pause between two polls of a mesh exchange
+#include <chrono>      // `std::chrono::seconds`, `std::chrono::milliseconds` — the wait limit, the poll pause
 #include <format>      // `std::vformat_to`, `std::make_format_args`
 #include <random>      // `std::random_device`
 #include <regex>       // `std::regex`, `std::regex_search`
@@ -71,6 +73,13 @@ using namespace unum::uform::utilities;
 
 /** The reason every case needing a GPU skips with on a machine that shows none. */
 inline constexpr char const* no_cuda_device_k = "no CUDA device detected";
+
+/** How long a check waits for what it expects to happen. A passing case never waits it out, so it
+ *  bounds hangs rather than speed, and leaves room for sanitizers and emulated CPUs. */
+inline constexpr std::chrono::seconds wait_limit_k {120};
+
+/** @ref wait_limit_k as the seconds every library timeout takes. */
+inline constexpr f64_t wait_limit_seconds_k = std::chrono::duration<f64_t>(wait_limit_k).count();
 
 /** Pauses 50 ms between two polls of a mesh exchange directory, as the trainer does. */
 inline void pause_between_polls() noexcept { std::this_thread::sleep_for(std::chrono::milliseconds {50}); }
@@ -125,6 +134,9 @@ struct settings_t {
     /** Seed every draw of the suite descends from. */
     u64_t seed = 42;
 
+    /** Scale of the suite's sweeps and iteration counts. */
+    f64_t multiplier = 1.0;
+
     /** UForm device ordinals the GPU cases run on, positions in @c uform_gpu_devices . */
     per_gpu_array<i32_t> devices {};
 };
@@ -173,8 +185,8 @@ struct settings_t {
     return devices;
 }
 
-/** Reads every @ref settings_t variable, exiting with status 1 on a malformed @c UFORM_SEED or
- *  @c UFORM_DEVICES . */
+/** Reads every @ref settings_t variable, exiting with status 1 on a malformed @c UFORM_SEED ,
+ *  @c UFORM_MULTIPLIER or @c UFORM_DEVICES . */
 [[nodiscard]] inline settings_t read_settings() noexcept {
     settings_t settings;
     std::string_view filter_text = environment_text("UFORM_FILTER");
@@ -187,6 +199,16 @@ struct settings_t {
         auto const [parsed_end, parse_status] = std::from_chars(seed_text.data(), seed_end, settings.seed);
         if (parse_status != std::errc {} || parsed_end != seed_end) {
             fmt::println(stderr, "UFORM_SEED=\"{}\" does not parse, expected an unsigned integer or random", seed_text);
+            std::exit(1);
+        }
+    }
+    std::string_view const multiplier_text = environment_text("UFORM_MULTIPLIER");
+    if (!multiplier_text.empty()) {
+        char* multiplier_end = nullptr;
+        settings.multiplier = std::strtod(multiplier_text.data(), &multiplier_end);
+        if (multiplier_end != multiplier_text.data() + multiplier_text.size() || !(settings.multiplier > 0)) {
+            fmt::println(stderr, "UFORM_MULTIPLIER=\"{}\" does not parse, expected a positive number like 0.1",
+                         multiplier_text);
             std::exit(1);
         }
     }
@@ -234,6 +256,7 @@ struct test_suite_t {
         fmt::println("- Compiled for: {}", uform_capabilities_compiled());
         fmt::println("- This machine: {}", uform_capabilities_available());
         fmt::println("- Seed: {}", suite.settings.seed);
+        fmt::println("- Multiplier: {}", suite.settings.multiplier);
         std::string_view const filter = suite.settings.filter.text;
         fmt::println("- Filter: {}", filter.empty() ? std::string_view {"none"} : filter);
         if (suite.settings.devices.size() == 0) fmt::println("- Devices: none");
@@ -243,7 +266,7 @@ struct test_suite_t {
 
     /**
      *  @brief Runs @p case_function on @p arguments when the filter selects @p name , then prints
-     *      its result line, and a rerun line under a failure.
+     *      its verdict line, and a rerun line on stderr under a failure.
      *
      *  Takes a function pointer rather than any callable, so a case whose signature drifts fails to
      *  compile here instead of hiding behind a lambda at every call site.
@@ -258,13 +281,14 @@ struct test_suite_t {
         u32_t const case_failures = failures - failures_before;
         if (case_failures != 0) {
             ++failed;
-            fmt::println("FAILED  {:<32} : {} failures", name, case_failures);
-            fmt::println(stderr, "  rerun: UFORM_SEED={} UFORM_FILTER='^{}$' {}", settings.seed, name, program);
+            fmt::println("FAILED  {:<44} : {} failures", name, case_failures);
+            fmt::println(stderr, "  rerun: UFORM_SEED={} UFORM_MULTIPLIER={} UFORM_FILTER='{}' {}", settings.seed,
+                         settings.multiplier, name, program);
         }
         else if (case_skip_reason != nullptr) skip(name, case_skip_reason);
         else {
             ++passed;
-            fmt::println("passed  {:<32} : 0 failures", name);
+            fmt::println("passed  {:<44} : 0 failures", name);
         }
     }
 
@@ -275,7 +299,7 @@ struct test_suite_t {
     void skip(std::string_view name, char const* reason) noexcept {
         if (!settings.filter.selects(name)) return;
         ++skipped;
-        fmt::println("skipped  {:<32} : {}", name, reason);
+        fmt::println("skipped  {:<44} : {}", name, reason);
     }
 
     /**

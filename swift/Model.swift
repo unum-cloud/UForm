@@ -57,14 +57,14 @@ public final class Model: @unchecked Sendable {
 
     /// Copies a safetensors checkpoint file into host memory on `memoryDomains`, an empty list
     /// deriving every node the process may allocate on, and packs it for the CPU. `quantization` is
-    /// the scalar the blocks run in: `bf16` as stored, or `e4m3` quantized at load. A `cpuClass`
-    /// packs as if the CPU were of that class; nil derives its own. `progress` hears tensors
-    /// placed. Calls `uform_model_load_ram`.
+    /// the scalar the blocks run in: `bf16` as stored, or `e4m3` quantized at load. A
+    /// `cpuClassCeiling` packs for the newest compiled class the CPU runs at or under it; nil sets
+    /// no ceiling. `progress` hears tensors placed. Calls `uform_model_load_ram`.
     public static func loadRam(
         path: String,
         executor: Executor? = nil,
         memoryDomains: [Int32] = [],
-        cpuClass: CPUClass? = nil,
+        cpuClassCeiling: CPUClass? = nil,
         quantization: Scalar = .bf16,
         progress: Progress? = nil,
         progressSteps: Int = 0
@@ -77,7 +77,7 @@ public final class Model: @unchecked Sendable {
             outcome: landing.outcome,
             completion: landing.completion,
             path: landing.lend(path),
-            ram: landing.ram(memoryDomains, cpuClass),
+            ram: landing.ram(memoryDomains, cpuClassCeiling),
             quantization: quantization.raw,
             progress: landing.lend(progress, steps: progressSteps)
         )
@@ -91,7 +91,7 @@ public final class Model: @unchecked Sendable {
         _ buffer: RawSpan,
         executor: Executor? = nil,
         memoryDomains: [Int32] = [],
-        cpuClass: CPUClass? = nil,
+        cpuClassCeiling: CPUClass? = nil,
         quantization: Scalar = .bf16,
         progress: Progress? = nil,
         progressSteps: Int = 0
@@ -105,7 +105,7 @@ public final class Model: @unchecked Sendable {
                 outcome: landing.outcome,
                 completion: landing.completion,
                 buffer: uform_bytes_view_t(bytes),
-                ram: landing.ram(memoryDomains, cpuClass),
+                ram: landing.ram(memoryDomains, cpuClassCeiling),
                 quantization: quantization.raw,
                 progress: landing.lend(progress, steps: progressSteps)
             )
@@ -115,13 +115,13 @@ public final class Model: @unchecked Sendable {
     }
 
     /// Copies a checkpoint file onto the named GPUs, replicated on each, an empty list deriving one
-    /// free device, and packs it there. A `gpuClass` dispatches every device as that class; nil
-    /// derives theirs. Calls `uform_model_load_vram`.
+    /// free device, and packs it there. A `gpuClassCeiling` dispatches every device as the best
+    /// class all of them load at or under it; nil sets no ceiling. Calls `uform_model_load_vram`.
     public static func loadVram(
         path: String,
         executor: Executor? = nil,
         devices: [Int32] = [],
-        gpuClass: GPUClass? = nil,
+        gpuClassCeiling: GPUClass? = nil,
         quantization: Scalar = .bf16,
         progress: Progress? = nil,
         progressSteps: Int = 0
@@ -134,7 +134,7 @@ public final class Model: @unchecked Sendable {
             outcome: landing.outcome,
             completion: landing.completion,
             path: landing.lend(path),
-            vram: landing.vram(devices, gpuClass),
+            vram: landing.vram(devices, gpuClassCeiling),
             quantization: quantization.raw,
             progress: landing.lend(progress, steps: progressSteps)
         )
@@ -148,7 +148,7 @@ public final class Model: @unchecked Sendable {
         _ buffer: RawSpan,
         executor: Executor? = nil,
         devices: [Int32] = [],
-        gpuClass: GPUClass? = nil,
+        gpuClassCeiling: GPUClass? = nil,
         quantization: Scalar = .bf16,
         progress: Progress? = nil,
         progressSteps: Int = 0
@@ -162,7 +162,7 @@ public final class Model: @unchecked Sendable {
                 outcome: landing.outcome,
                 completion: landing.completion,
                 buffer: uform_bytes_view_t(bytes),
-                vram: landing.vram(devices, gpuClass),
+                vram: landing.vram(devices, gpuClassCeiling),
                 quantization: quantization.raw,
                 progress: landing.lend(progress, steps: progressSteps)
             )

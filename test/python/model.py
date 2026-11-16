@@ -9,8 +9,10 @@ Date: October 18, 2026
 """
 
 import asyncio
+import sys
 from enum import IntEnum, IntFlag
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -52,6 +54,7 @@ def test_modes_are_int_enums_of_the_package(name: str):
 def test_enum_values_follow_the_header():
     """Members carry the C values, gaps in the numbering included."""
     assert uform.Status.SHAPE_MISMATCH == 3 and uform.Status.IO == 7 and uform.Status.INVALID_ARGUMENT == 17
+    assert uform.Status.UNINITIALIZED == 12 and issubclass(uform.UninitializedError, uform.Error)
     assert uform.Scalar.BF16 == 3 and uform.Scalar.E4M3 == 6 and uform.Scalar.U1X8 == 22
     assert uform.Modality.AUDIO == 3 and uform.Objective.JOINT == 2 and uform.MultimemTier.PEER_READ == 1
     assert "UNRECOGNIZED" not in uform.Status.__members__
@@ -139,20 +142,19 @@ def test_load_ram_and_describe(checkpoint: Path):
     """A load from a path answers a model whose description carries its geometry."""
     model = uform.Model.load_ram(checkpoint, quantization=uform.Scalar.BF16)
     description = model.describe()
-    dimensions, context, quantization, memory_usage, cpu_class, gpu_class, _, _ = description
-    assert dimensions > 0 and context > 0 and memory_usage > 0
-    assert quantization is uform.Scalar.BF16
-    assert isinstance(cpu_class, uform.CPUClass) and gpu_class is None
+    assert description.dimensions > 0 and description.context > 0 and description.memory_usage > 0
+    assert description.quantization is uform.Scalar.BF16
+    assert isinstance(description.cpu_class, uform.CPUClass) and description.gpu_class is None
 
 
-def test_load_ram_pins_a_class(checkpoint: Path):
-    """A serial pin packs for serial, and a class this CPU cannot run is refused."""
-    serial = uform.Model.load_ram(checkpoint, cpu_class=uform.CPUClass.SERIAL)
+def test_load_ram_caps_the_class(checkpoint: Path):
+    """A serial ceiling packs for serial, and one of a family this CPU does not run falls to serial."""
+    serial = uform.Model.load_ram(checkpoint, cpu_class_ceiling=uform.CPUClass.SERIAL)
     assert serial.describe().cpu_class is uform.CPUClass.SERIAL
-    with pytest.raises(uform.UnsupportedError):
-        uform.Model.load_ram(checkpoint, cpu_class=uform.CPUClass.WASM64_EXTENDED)
+    foreign = uform.Model.load_ram(checkpoint, cpu_class_ceiling=uform.CPUClass.WASM64_EXTENDED)
+    assert foreign.describe().cpu_class is uform.CPUClass.SERIAL
     with pytest.raises(uform.UnknownKindError):
-        uform.Model.load_ram(checkpoint, cpu_class=0)
+        uform.Model.load_ram(checkpoint, cpu_class_ceiling=0)
 
 
 def test_load_ram_buffer_matches_the_path(checkpoint: Path):
@@ -187,14 +189,17 @@ def test_progress_cancels_a_load(checkpoint: Path):
     assert reports and all(0 < completed <= total for completed, total in reports)
 
 
-def test_progress_exception_outranks_the_cancellation(checkpoint: Path):
-    """A handler that raises stops the load, and its own exception reaches the caller."""
+def test_a_raising_handler_reports_and_cancels(checkpoint: Path, monkeypatch: pytest.MonkeyPatch):
+    """A handler that raises goes to `sys.unraisablehook` and stops the load, which raises `CancelledError`."""
 
     def explode(completed: int, total: int) -> bool:
         raise LookupError("from the handler")
 
-    with pytest.raises(LookupError, match="from the handler"):
+    unraised: list[Any] = []
+    monkeypatch.setattr(sys, "unraisablehook", unraised.append)
+    with pytest.raises(uform.CancelledError):
         uform.Model.load_ram(checkpoint, progress=explode)
+    assert len(unraised) == 1 and isinstance(unraised[0].exc_value, LookupError)
 
 
 def test_vram_residency_reports_its_absence(checkpoint: Path):
@@ -212,21 +217,22 @@ def test_vram_residency_reports_its_absence(checkpoint: Path):
 def test_receivers_answer_alike(model: uform.Model, executor: uform.Executor):
     """The model, `on` and `deferred` run one verb with one answer."""
     direct = model.describe()
-    assert model.on(executor).describe() == direct
+    assert model.on(executor).describe().dimensions == direct.dimensions
     call = model.deferred(executor).describe()
     assert isinstance(call, uform.Deferred)
-    assert call.wait() == direct
-    assert call.wait() == direct, "a final call answers as many times as it is asked"
+    answer = call.wait()
+    assert isinstance(answer, uform.ModelDescription) and answer.context == direct.context
+    assert call.wait() is answer, "a final call answers as many times as it is asked"
     assert call.status is uform.Status.SUCCESS
 
 
 def test_deferred_awaits(model: uform.Model, executor: uform.Executor):
-    """`await` runs `wait()` on the event loop's default executor, so the coroutine suspends rather than blocks."""
+    """`await` polls the call between turns of the event loop, so the coroutine suspends and no thread blocks."""
 
     async def describe() -> uform.ModelDescription:
         return await model.deferred(executor).describe()
 
-    assert asyncio.run(describe()) == model.describe()
+    assert asyncio.run(describe()).dimensions == model.describe().dimensions
 
 
 def test_receivers_are_built_through_the_target(model: uform.Model, executor: uform.Executor):

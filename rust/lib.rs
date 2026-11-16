@@ -46,7 +46,7 @@ pub use train::{
     TrainerStepConfig, TrainerStepStats, VideoShape,
 };
 pub use types::{
-    capabilities_available, capabilities_compiled, gpu_devices, version, Arena, ArenaDescription, Blocking, CPUClass,
-    Deferred, Deferring, Element, Error, Executor, GPUClass, GPUDevice, GPUVendor, Mood, On, ProgressCallback,
-    Residency, Result, Rows, RowsTape, Scalar, Status, Tape, Wait,
+    Arena, ArenaDescription, Blocking, CPUClass, Deferred, Deferring, Element, Error, Executor, GPUClass, GPUDevice,
+    GPUVendor, Mood, On, ProgressCallback, Residency, Result, Rows, RowsTape, Scalar, Status, Tape, Wait,
+    capabilities_available, capabilities_compiled, gpu_devices, version,
 };

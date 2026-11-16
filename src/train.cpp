@@ -414,9 +414,10 @@ UFORM_EXPORT void uform_mesh_bootstrap(uform_mesh_bootstrap_t* arguments) {
 
 UFORM_EXPORT void uform_mesh_describe(uform_mesh_describe_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
-    if (!arguments->mesh || !arguments->description)
-        return propagate_error(uform_status_invalid_argument_k, outcome, "The mesh and the output are required"),
-               void();
+    if (!arguments->mesh)
+        return propagate_error(uform_status_uninitialized_k, outcome, "The mesh must not be null"), void();
+    if (!arguments->description)
+        return propagate_error(uform_status_invalid_argument_k, outcome, "The description must not be null"), void();
     wait_named_calls(arguments->mesh->named_calls);
     mesh_topology_t const& topology = arguments->mesh->mesh->topology;
     mesh_shape_t const& shape = topology.shape;
@@ -507,8 +508,9 @@ UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t* arguments) {
     call_outcome_t outcome(*arguments); // lets go of the arena only when this call holds it
     uform_arena_t const requested = arguments->embeddings ? arguments->arena : nullptr;
     uform_trainer_handle_t* const handle = arguments->trainer;
-    if (!handle || handle->executor != arguments->executor)
-        return propagate_error(uform_status_invalid_argument_k, outcome, "The trainer and its executor are required"),
+    if (!handle) return propagate_error(uform_status_uninitialized_k, outcome, "The trainer must not be null"), void();
+    if (handle->executor != arguments->executor)
+        return propagate_error(uform_status_invalid_argument_k, outcome, "The trainer runs on its own executor"),
                void();
     ut::trainer_t& trainer = *handle->trainer;
     ut::trainer_config_t const& config = trainer.config;
@@ -520,6 +522,10 @@ UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t* arguments) {
     if (count && (!arguments->modalities || !contents.data || !contents.offsets))
         return propagate_error(uform_status_invalid_argument_k, outcome, "The items need modalities and contents"),
                void();
+    if (!offsets_ascend(contents, count) || !offsets_ascend(arguments->choices, count) ||
+        !offsets_ascend(arguments->choice_targets, count) || !offsets_ascend(arguments->relations.attract, count) ||
+        !offsets_ascend(arguments->relations.repel, count))
+        return propagate_error(uform_status_invalid_argument_k, outcome, "A tape's offsets descend"), void();
     if (count && contents.scalar != uform_scalar_u8_k)
         return propagate_error(uform_status_unsupported_layout_k, outcome, "Training items are bytes"), void();
     for (std::size_t item = 0; item != count; ++item) {
@@ -608,7 +614,8 @@ UFORM_EXPORT void uform_trainer_save(uform_trainer_save_t* arguments) {
     if (submitted<uform_trainer_save>(arguments)) return;
     call_outcome_t outcome(*arguments);
     uform_trainer_handle_t* const handle = arguments->trainer;
-    if (!handle || handle->executor != arguments->executor || !arguments->path.length)
+    if (!handle) return propagate_error(uform_status_uninitialized_k, outcome, "The trainer must not be null"), void();
+    if (handle->executor != arguments->executor || !arguments->path.length)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The trainer, its executor and a path"),
                void();
     if (holds_nul(arguments->path))

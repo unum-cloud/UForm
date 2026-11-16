@@ -93,13 +93,13 @@ def test_training_enums_spell_the_header():
     assert [member.name for member in uform.LateInteractionSide] == ["NONE", "QUERY", "DOCUMENT", "QUERY_AND_DOCUMENT"]
 
 
-def test_mesh_and_trainer_need_a_gpu(executor: uform.Executor, tmp_path: Path):
+def test_mesh_and_trainer_need_a_gpu(executor: uform.Executor, tmp_path: Path, wait_limit: int):
     """On a build without GPUs, the bootstrap and the trainer report `DeviceError`."""
     if "serial" not in uform.capabilities_compiled():
         pytest.skip("the build carries a GPU backend")
     # A path crosses as the OS's bytes, so one that is not UTF-8 reaches the library too.
     for directory in (tmp_path, bytes(tmp_path) + b"/\xff"):
-        options = uform.MeshOptions(host_domain_count=1, directory=directory, job="run-17", timeout_seconds=1.5)
+        options = uform.MeshOptions(host_domain_count=1, directory=directory, job="run-17", timeout_seconds=wait_limit)
         with pytest.raises(uform.DeviceError):
             uform.Mesh.bootstrap(executor, options)
     with pytest.raises(uform.DeviceError):
