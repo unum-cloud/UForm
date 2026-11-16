@@ -3715,7 +3715,7 @@ stage_release_fixture() { # stage_release_fixture <version> [<relative-path> <se
     IFS=. read -r major minor patch <<< "$core"
     (
         cd "$fixture_directory" || exit 1
-        mkdir -p c/uform src src_stub
+        mkdir -p c/uform src src_stub mojo
         printf '%s\n' "$version" > VERSION
         printf '{\n  "name": "@unum-cloud/uform",\n  "version": "%s",\n}\n' "$version" > package.json
         printf '[package]\nname = "uform"\nversion = "%s"\n' "$version" > Cargo.toml
@@ -3723,7 +3723,8 @@ stage_release_fixture() { # stage_release_fixture <version> [<relative-path> <se
             printf 'char const *uform_version_name(void) { return "%s"; }\n' "$version" > "$library"
         done
         printf 'let release = "https://github.com/unum-cloud/UForm/releases/download/v%s"\n' "$version" > Package.swift
-        printf 'project(\n    uform\n    VERSION %s\n)\n' "$core" > CMakeLists.txt
+        printf '[workspace]\nversion = "%s"\n\n[package]\nversion = "%s"\n' "$version" "$version" > pixi.toml
+        printf '[package]\nversion = "%s"\n' "$version" > mojo/pixi.toml
         printf '#define UFORM_VERSION_MAJOR %s\n#define UFORM_VERSION_MINOR %s\n#define UFORM_VERSION_PATCH %s\n' \
             "$major" "$minor" "$patch" > c/uform/types.h
         [ $# -lt 3 ] || { sed "$3" "$2" > "$2.edited" && mv "$2.edited" "$2"; }
@@ -3777,6 +3778,11 @@ FIXTURE
 
 stage_release_fixture 4.1.0-rc.2 src_stub/types.cpp 's/4.1.0-rc.2/4.1.0-rc.1/'
 assert_message_rejects "release with a stale version site" "src_stub/types.cpp" <<'FIXTURE'
+Release: v4.1.0-rc.2
+FIXTURE
+
+stage_release_fixture 4.1.0-rc.2 pixi.toml '$s/4.1.0-rc.2/4.1.0-rc.1/'
+assert_message_rejects "release with a stale package under a current workspace" "pixi.toml" <<'FIXTURE'
 Release: v4.1.0-rc.2
 FIXTURE
 

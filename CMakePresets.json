@@ -98,6 +98,40 @@
       }
     },
     {
+      "name": "profile",
+      "inherits": "base",
+      "displayName": "Profile - benchmarks under perf",
+      "description": "The profiling tree behind bench/README.md: full optimization, plus the symbols `perf` needs to attribute samples.",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O3 -g -DNDEBUG",
+        "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O3 -g -DNDEBUG",
+        "UFORM_BUILD_BENCH": "ON",
+        "UFORM_BUILD_SHARED": "ON"
+      }
+    },
+    {
+      "name": "tsan",
+      "inherits": "base",
+      "displayName": "TSan - host suites under ThreadSanitizer",
+      "description": "ThreadSanitizer over UForm's own host units in RelWithDebInfo, in a tree of its own because AddressSanitizer cannot share a process with it. Its libraries keep their own flags.",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "UFORM_BUILD_SANITIZERS": "thread",
+        "UFORM_BUILD_SHARED": "ON",
+        "UFORM_BUILD_TEST": "ON"
+      }
+    },
+    {
+      "name": "asan",
+      "inherits": "debug",
+      "displayName": "ASan - host suites under AddressSanitizer",
+      "description": "The debug tree with AddressSanitizer and UndefinedBehaviorSanitizer over UForm's own host units; its libraries keep their own flags.",
+      "cacheVariables": {
+        "UFORM_BUILD_SANITIZERS": "address"
+      }
+    },
+    {
       "name": "cuda",
       "inherits": "release",
       "displayName": "CUDA - every target with the NVIDIA residency",
@@ -249,6 +283,70 @@
         "CMAKE_C_FLAGS": "/DWIN32 /D_WINDOWS /pathmap:${sourceDir}=.",
         "CMAKE_CXX_FLAGS": "/DWIN32 /D_WINDOWS /EHsc /pathmap:${sourceDir}=.",
         "CMAKE_CUDA_FLAGS": null,
+        "UFORM_WITH_CODECS": "OFF"
+      }
+    },
+    {
+      "name": "msvc2026_arm64",
+      "inherits": [
+        "library",
+        "windows"
+      ],
+      "displayName": "Windows ARM64 - the C library with Visual Studio 2026",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "ARM64",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": null,
+        "CMAKE_CXX_COMPILER": null,
+        "CMAKE_CUDA_HOST_COMPILER": null,
+        "CMAKE_C_FLAGS": "/DWIN32 /D_WINDOWS /pathmap:${sourceDir}=.",
+        "CMAKE_CXX_FLAGS": "/DWIN32 /D_WINDOWS /EHsc /pathmap:${sourceDir}=.",
+        "CMAKE_CUDA_FLAGS": null,
+        "UFORM_WITH_CODECS": "OFF"
+      }
+    },
+    {
+      "name": "linux_arm64",
+      "inherits": [
+        "library",
+        "linux"
+      ],
+      "displayName": "Linux ARM64 - the C library through Clang and LLD",
+      "toolchainFile": "${sourceDir}/cmake/toolchain-aarch64-llvm.cmake",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": null,
+        "CMAKE_CXX_COMPILER": null,
+        "CMAKE_CUDA_HOST_COMPILER": null,
+        "UFORM_WITH_CODECS": "OFF"
+      }
+    },
+    {
+      "name": "linux_riscv64",
+      "inherits": [
+        "library",
+        "linux"
+      ],
+      "displayName": "Linux RISC-V 64 - the C library through GCC 16",
+      "toolchainFile": "${sourceDir}/cmake/toolchain-riscv64-gnu.cmake",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": null,
+        "CMAKE_CXX_COMPILER": null,
+        "CMAKE_CUDA_HOST_COMPILER": null,
+        "UFORM_WITH_CODECS": "OFF"
+      }
+    },
+    {
+      "name": "linux_ppc64le",
+      "inherits": [
+        "library",
+        "linux"
+      ],
+      "displayName": "Linux POWER - the C library through GCC 15",
+      "toolchainFile": "${sourceDir}/cmake/toolchain-ppc64le-gnu.cmake",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": null,
+        "CMAKE_CXX_COMPILER": null,
+        "CMAKE_CUDA_HOST_COMPILER": null,
         "UFORM_WITH_CODECS": "OFF"
       }
     },
@@ -455,6 +553,18 @@
       "configurePreset": "release"
     },
     {
+      "name": "profile",
+      "configurePreset": "profile"
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan"
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan"
+    },
+    {
       "name": "cuda",
       "configurePreset": "cuda"
     },
@@ -507,6 +617,23 @@
       "configuration": "Release"
     },
     {
+      "name": "msvc2026_arm64",
+      "configurePreset": "msvc2026_arm64",
+      "configuration": "Release"
+    },
+    {
+      "name": "linux_arm64",
+      "configurePreset": "linux_arm64"
+    },
+    {
+      "name": "linux_riscv64",
+      "configurePreset": "linux_riscv64"
+    },
+    {
+      "name": "linux_ppc64le",
+      "configurePreset": "linux_ppc64le"
+    },
+    {
       "name": "xeon4_hopper",
       "configurePreset": "xeon4_hopper"
     },
@@ -521,6 +648,10 @@
     {
       "name": "vera_rubin",
       "configurePreset": "vera_rubin"
+    },
+    {
+      "name": "venice_mi450",
+      "configurePreset": "venice_mi450"
     }
   ],
   "testPresets": [
@@ -552,6 +683,23 @@
       "configurePreset": "release"
     },
     {
+      "name": "tsan",
+      "inherits": "base",
+      "configurePreset": "tsan",
+      "environment": {
+        "TSAN_OPTIONS": "halt_on_error=1 second_deadlock_stack=1"
+      }
+    },
+    {
+      "name": "asan",
+      "inherits": "base",
+      "configurePreset": "asan",
+      "environment": {
+        "ASAN_OPTIONS": "detect_leaks=1 halt_on_error=1",
+        "UBSAN_OPTIONS": "halt_on_error=1 print_stacktrace=1"
+      }
+    },
+    {
       "name": "cuda",
       "inherits": "base",
       "configurePreset": "cuda"
@@ -563,6 +711,23 @@
     }
   ],
   "workflowPresets": [
+    {
+      "name": "debug",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "debug"
+        },
+        {
+          "type": "build",
+          "name": "debug"
+        },
+        {
+          "type": "test",
+          "name": "debug"
+        }
+      ]
+    },
     {
       "name": "check",
       "steps": [
@@ -594,6 +759,23 @@
         {
           "type": "test",
           "name": "release"
+        }
+      ]
+    },
+    {
+      "name": "tsan",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "tsan"
+        },
+        {
+          "type": "build",
+          "name": "tsan"
+        },
+        {
+          "type": "test",
+          "name": "tsan"
         }
       ]
     }

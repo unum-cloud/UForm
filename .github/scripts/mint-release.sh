@@ -19,12 +19,11 @@ assets=$(mktemp -d)
 gh run download "$run" --name swift-xcframework --name swift-artifactbundle --dir "$assets"
 
 IFS=. read -r major minor patch <<< "$core"
-export version core major minor patch
+export version major minor patch
 echo "$version" > VERSION
 perl -pi -e 's/^(  "version": ")[^"]+/$1$ENV{version}/' package.json
-perl -pi -e 's/^(version = ")[^"]+/$1$ENV{version}/' Cargo.toml
+perl -pi -e 's/^(version = ")[^"]+/$1$ENV{version}/' Cargo.toml pixi.toml mojo/pixi.toml
 perl -pi -e 's/(uform_version_name\(void\) \{ return ")[^"]+/$1$ENV{version}/' src/types.cpp src_stub/types.cpp
-perl -pi -e 's/^(    VERSION )[0-9.]+$/$1$ENV{core}/' CMakeLists.txt
 perl -pi -e 's/^(#define UFORM_VERSION_MAJOR )[0-9]+$/$1$ENV{major}/; s/^(#define UFORM_VERSION_MINOR )[0-9]+$/$1$ENV{minor}/; s/^(#define UFORM_VERSION_PATCH )[0-9]+$/$1$ENV{patch}/' c/uform/types.h
 perl -pi -e 's#(releases/download/v)[^"]+#$1$ENV{version}#' Package.swift
 apple=$(sha256sum "$assets"/*/*.xcframework.zip | cut -c -64) portable=$(sha256sum "$assets"/*/*.artifactbundle.zip | cut -c -64)

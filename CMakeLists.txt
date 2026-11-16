@@ -49,12 +49,17 @@
 # capability. `-DUFORM_MULTIVERSIONED=OFF` builds for that floor alone: only the CPU classes it implies exist, and the
 # newest of each lineage replaces its parents, `serial` included. `-DUFORM_CUDA_ARCH=100f` compiles one GPU code as
 # SASS, and with it only the GPU classes it runs, `native` the family code of each visible GPU, and `all` the release
-# set. The `xeon4_hopper`, `xeon6_blackwell`, `grace_hopper` and `vera_rubin` presets set all three for one machine.
+# set. The `xeon4_hopper`, `xeon6_blackwell`, `grace_hopper`, `vera_rubin` and `venice_mi450` presets set all three for
+# one machine.
 cmake_minimum_required(VERSION 3.28)
-
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" uform_version_name_ LIMIT_COUNT 1)
+# `project()` takes the numeric core alone, so a candidate's suffix stays in the name.
+if (NOT uform_version_name_ MATCHES "^([0-9]+\\.[0-9]+\\.[0-9]+)")
+    message(FATAL_ERROR "VERSION must start with MAJOR.MINOR.PATCH, not '${uform_version_name_}'")
+endif ()
 project(
     uform
-    VERSION 4.0.0
+    VERSION ${CMAKE_MATCH_1}
     LANGUAGES C CXX
     DESCRIPTION "Distributed training and inference pipeline for multi-modal perception"
     HOMEPAGE_URL "https://github.com/unum-cloud/UForm"
@@ -94,6 +99,11 @@ option(UFORM_BUILD_TEST "Compile the conformance suites in test/" OFF)
 option(UFORM_BUILD_TOOLS "Compile the trainer in tools/" OFF)
 option(UFORM_BUILD_BENCH "Compile the benchmarks in bench/" OFF)
 option(UFORM_WERROR "Treat compiler warnings as errors" OFF)
+set(UFORM_BUILD_SANITIZERS
+    "off"
+    CACHE STRING "Sanitizers for UForm's own targets: off, address (with undefined) or thread"
+)
+set_property(CACHE UFORM_BUILD_SANITIZERS PROPERTY STRINGS off address thread)
 # WebAssembly takes already-decoded media, so only native builds default to the host codecs.
 if (CMAKE_SYSTEM_PROCESSOR MATCHES "^wasm")
     set(uform_codecs_default_ OFF)
@@ -132,19 +142,10 @@ if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif ()
 
-include(FetchContent)
 include(cmake/find_library.cmake)
 
 include(cmake/uform_siblings.cmake)
-
-set(YYJSON_INSTALL OFF)
-FetchContent_Declare(
-    yyjson
-    GIT_REPOSITORY https://github.com/ibireme/yyjson.git
-    GIT_TAG 0.13.0
-    EXCLUDE_FROM_ALL SYSTEM
-)
-FetchContent_MakeAvailable(yyjson)
+include(cmake/yyjson.cmake)
 if (UFORM_BUILD_TEST
     OR UFORM_BUILD_TOOLS
     OR UFORM_BUILD_BENCH
@@ -152,6 +153,9 @@ if (UFORM_BUILD_TEST
     include(cmake/fmt.cmake)
 endif ()
 
+# MSVC's `native` reads the widest capability NumKong found this host runs.
+set(uform_native_probe_library_ numkong)
+set(uform_native_probe_capabilities_ diamond skylake haswell neonbfdot neonsdot neonhalf)
 include(cmake/uform_platform.cmake)
 
 # UForm's CUDA units take their own copy of the architecture list after the libraries resolved theirs. `all` is the
@@ -218,7 +222,7 @@ set_property(GLOBAL APPEND PROPERTY JOB_POOLS uform_cuda_units=3)
 
 # The suites precede `c/`, whose C tests load the checkpoint fixture `test/` writes.
 set(uform_bundled_files_)
-link_libraries($<BUILD_INTERFACE:uform_warnings>)
+link_libraries($<BUILD_INTERFACE:uform_warnings> $<BUILD_INTERFACE:uform_sanitizers>)
 add_subdirectory(src)
 if (UFORM_BUILD_TEST)
     add_subdirectory(test)
@@ -299,4 +303,12 @@ if (UFORM_BUILD_NODE)
     add_subdirectory(javascript)
 endif ()
 
+# The header package always installs, and the libraries only where the default build compiles them.
+if (UFORM_BUILD_SHARED)
+    set(uform_install_sdk_targets_ uform_header uform_shared)
+    set(uform_install_static_targets_ uform_static)
+else ()
+    set(uform_install_sdk_targets_ uform_header)
+    set(uform_install_static_targets_ "")
+endif ()
 include(cmake/uform_install.cmake)
