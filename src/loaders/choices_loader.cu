@@ -44,22 +44,22 @@ static __global__ void choices_states_kernel_(b8r1_view_t states, u64r1_view_t s
 }
 
 /** Land the device offsets @p offsets on the host into @p landed . */
-[[nodiscard]] static expected_t land_offsets_(u64r1_view_t offsets, st::basic_vector<u64_t> &landed,
-                                              gpu_stream_t &stream) noexcept {
+[[nodiscard]] static expected_t land_offsets_(u64r1_view_t offsets, st::basic_vector<u64_t>& landed,
+                                              gpu_stream_t& stream) noexcept {
     if (st::failed(landed.resize(st::assume_uninitialized, offsets.extent(0))))
         return expected_t::fail(status_t::bad_alloc_k, "offset landing failed ({} entries)", offsets.extent(0));
     return copy_device_to_host(offsets, std::span<u64_t> {landed}, stream);
 }
 
 /** Land the device bytes @p payload on the host into @p landed . */
-[[nodiscard]] static expected_t land_bytes_(b8r1_view_t payload, st::basic_vector<u8_t> &landed,
-                                            gpu_stream_t &stream) noexcept {
+[[nodiscard]] static expected_t land_bytes_(b8r1_view_t payload, st::basic_vector<u8_t>& landed,
+                                            gpu_stream_t& stream) noexcept {
     if (st::failed(landed.resize(st::assume_uninitialized, payload.extent(0))))
         return expected_t::fail(status_t::bad_alloc_k, "byte landing failed ({} bytes)", payload.extent(0));
     return copy_device_to_host<b8_t>(payload, std::as_writable_bytes(std::span<u8_t> {landed}), stream);
 }
 
-expected<choices_loader_parquet_t> choices_loader_parquet_t::make(gpu_direct_storage_session_t &session,
+expected<choices_loader_parquet_t> choices_loader_parquet_t::make(gpu_direct_storage_session_t& session,
                                                                   sz::string_view_t path_or_glob, u64_t seed,
                                                                   choices_loader_parquet_config_t config) noexcept {
     using result_t = expected<choices_loader_parquet_t>;
@@ -74,7 +74,7 @@ expected<choices_loader_parquet_t> choices_loader_parquet_t::make(gpu_direct_sto
         return result_t::fail(status_t::bad_alloc_k, "column name staging failed");
     sz::string_view_t const columns[3] = {config.state, config.choices, config.targets};
     std::size_t groups = 0;
-    for (sz::string_t const &path : paths.value_) {
+    for (sz::string_t const& path : paths.value_) {
         expected<parquet_length_metadata_t> metadata = parquet_file_t::table_metadata(
             session, path, std::span<sz::string_view_t const> {columns});
         if (!metadata) return result_t::fail(std::move(metadata));
@@ -91,7 +91,7 @@ expected<choices_loader_parquet_t> choices_loader_parquet_t::make(gpu_direct_sto
     return result_t {std::move(loader)};
 }
 
-expected_t choices_loader_parquet_t::fill(gpu_stream_t &gpu_stream, u32_t gpu_rank, u32_t training_step,
+expected_t choices_loader_parquet_t::fill(gpu_stream_t& gpu_stream, u32_t gpu_rank, u32_t training_step,
                                           std::span<multimodal_batch_on_gpu_t> batches) noexcept {
     if (batches.empty()) return {};
     std::size_t const unroll = batches.size();
@@ -131,7 +131,7 @@ expected_t choices_loader_parquet_t::fill(gpu_stream_t &gpu_stream, u32_t gpu_ra
         u64_t const offered = choice_offsets[row + 1] - choice_offsets[row];
         if (offered == 0 || offered > width || target_offsets[row + 1] - target_offsets[row] != offered * sizeof(f32_t))
             return false;
-        u8_t const *const bytes = choice_bytes.data() + choice_offsets[row];
+        u8_t const* const bytes = choice_bytes.data() + choice_offsets[row];
         for (u64_t choice = 1; choice < offered; ++choice)
             for (u64_t earlier = 0; earlier != choice; ++earlier)
                 if (bytes[earlier] == bytes[choice]) return false;
@@ -177,7 +177,7 @@ expected_t choices_loader_parquet_t::fill(gpu_stream_t &gpu_stream, u32_t gpu_ra
     nk::tensor_span<token_id_t, 2> const choice_rows {choices.data(), segments, width};
     f32r2_span_t const target_rows {targets.data(), segments, width};
     for (std::size_t batch = 0; batch != unroll; ++batch) {
-        multimodal_batch_on_gpu_t &loaded = batches[batch];
+        multimodal_batch_on_gpu_t& loaded = batches[batch];
         if (loaded.tokens.extent(0) != rows || loaded.segment_lengths.extent(0) != segments ||
             loaded.segment_choices.extent(1) != width)
             return expected_t::fail(status_t::unsupported_k, "batch {} differs from the first", batch);

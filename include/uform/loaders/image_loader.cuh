@@ -95,11 +95,11 @@ struct jpeg_entry_t {
 struct nvjpeg_session_t {
 
     nvjpeg_session_t() noexcept = default;
-    nvjpeg_session_t(nvjpeg_session_t const &) = delete;
-    nvjpeg_session_t &operator=(nvjpeg_session_t const &) = delete;
-    nvjpeg_session_t(nvjpeg_session_t &&other) noexcept
+    nvjpeg_session_t(nvjpeg_session_t const&) = delete;
+    nvjpeg_session_t& operator=(nvjpeg_session_t const&) = delete;
+    nvjpeg_session_t(nvjpeg_session_t&& other) noexcept
         : handle_(std::exchange(other.handle_, nullptr)), jpeg_state_(std::exchange(other.jpeg_state_, nullptr)) {}
-    nvjpeg_session_t &operator=(nvjpeg_session_t &&other) noexcept;
+    nvjpeg_session_t& operator=(nvjpeg_session_t&& other) noexcept;
     ~nvjpeg_session_t() noexcept;
 
     /** Create the nvJPEG handle on a device-bitstream backend and its batched-decode state — once,
@@ -117,7 +117,7 @@ struct nvjpeg_session_t {
      *      the method fills nvJPEG's parallel arrays straight from them at the vendor boundary.
      *  @param[in,out] stream The stream the decode enqueues on.
      */
-    [[nodiscard]] expected_t decode_jpeg_batch(std::span<jpeg_entry_t const> entries, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t decode_jpeg_batch(std::span<jpeg_entry_t const> entries, gpu_stream_t& stream) noexcept;
 
   private:
 
@@ -167,12 +167,12 @@ struct nvjpeg_session_t {
  *      adds one to.
  *  @param[in,out] stream The stream the staging, decode, resize, and copies run on.
  */
-[[nodiscard]] expected_t decode_images(nvjpeg_session_t &jpeg, pool_view_t pool, column_view_t tape,
+[[nodiscard]] expected_t decode_images(nvjpeg_session_t& jpeg, pool_view_t pool, column_view_t tape,
                                        u64r1_view_t drawn_rows, std::span<image_batch_shape_t const> representations,
                                        pixel_patches_span_t pixels, image_shape_span_t shapes,
                                        u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
                                        modality_span_t segment_modality, u32r1_span_t dropped,
-                                       gpu_stream_t &stream) noexcept;
+                                       gpu_stream_t& stream) noexcept;
 
 /** The Parquet image loader's baked knobs — a different config is a different loader. */
 struct image_loader_parquet_config_t {
@@ -204,7 +204,7 @@ struct image_loader_parquet_t {
      *      @c channels ) — the single source of a step's image geometry; it never sees the
      *      sibling modalities' shapes.
      */
-    [[nodiscard]] static expected<image_loader_parquet_t> make(gpu_direct_storage_session_t &session,
+    [[nodiscard]] static expected<image_loader_parquet_t> make(gpu_direct_storage_session_t& session,
                                                                sz::string_view_t path_or_glob, u64_t seed,
                                                                pool_view_t pool, image_batch_shape_t image) noexcept;
 
@@ -229,14 +229,14 @@ struct image_loader_parquet_t {
      *  @param[out] batches Output batches whose @c images grid, @c image_shapes ,
      *      @c segment_offsets/lengths , and @c segment_modality get populated.
      */
-    [[nodiscard]] expected_t fill(gpu_stream_t &gpu_stream, nvjpeg_session_t &decoder,
+    [[nodiscard]] expected_t fill(gpu_stream_t& gpu_stream, nvjpeg_session_t& decoder,
                                   image_loader_parquet_config_t config, u32_t gpu_rank, u32_t training_step,
                                   std::span<multimodal_batch_on_gpu_t> batches) noexcept;
 
   private:
 
     /** The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
-    gpu_direct_storage_session_t *storage_ = nullptr;
+    gpu_direct_storage_session_t* storage_ = nullptr;
 
     /** The run's CPU-decode worker pool — borrowed from the composition root, handed to the
      *  decode's PNG / WebP / progressive-JPEG fallback; never owned, never spawned here. */

@@ -113,16 +113,16 @@ typedef struct uform_js_arena_t {
 
     /** The executor a GPU arena grows, fills and frees on, held until the arena is freed; @c NULL
      *  for host pages, which may outlive theirs. */
-    uform_js_executor_t *executor;
+    uform_js_executor_t* executor;
 
     /** The strong reference keeping @c executor's wrapper alive alongside it. */
     napi_ref executor_reference;
 
     /** The last call the library took naming it, compared and never read; @c NULL once freed. */
-    struct uform_js_call_t const *holder;
+    struct uform_js_call_t const* holder;
 
     /** Weak references to every @c ArrayBuffer viewing the memory since the last rewind. */
-    napi_ref *views;
+    napi_ref* views;
 
     /** References held in @c views. */
     size_t views_count;
@@ -177,7 +177,7 @@ typedef enum uform_js_slot_t {
 } uform_js_slot_t;
 
 /** Builds a verb's answer from a successful call's outputs; @c NULL with an exception pending. */
-typedef napi_value (*uform_js_finish_t)(napi_env env, struct uform_js_call_t *call, napi_value const *slots);
+typedef napi_value (*uform_js_finish_t)(napi_env env, struct uform_js_call_t* call, napi_value const* slots);
 
 /**
  *  @brief One call submitted to the library: its outcome, how its answer is built, what it holds.
@@ -199,10 +199,10 @@ typedef struct uform_js_call_t {
     napi_ref held[uform_js_slots_k];
 
     /** Heap blocks the call reads, freed once it is final. */
-    void *owned[uform_js_owned_k];
+    void* owned[uform_js_owned_k];
 
     /** The arena the call lands its outputs in; @c NULL for none. */
-    uform_js_arena_t *arena;
+    uform_js_arena_t* arena;
 
     /** The environment a progress handler is called in, set only beside @c progress. */
     napi_env env;
@@ -221,53 +221,53 @@ typedef struct uform_js_call_t {
 
 /** Throws @p message with the canonical name of @p status as its @c code; always returns false, so
  *  a caller returns straight through. */
-bool uform_js_throw(napi_env env, uform_status_t status, char const *message);
+bool uform_js_throw(napi_env env, uform_status_t status, char const* message);
 
 /** Throws an @c invalid-argument error saying what @p field expected; always returns false. */
-bool uform_js_throw_field(napi_env env, char const *field, char const *expectation);
+bool uform_js_throw_field(napi_env env, char const* field, char const* expectation);
 
 /**
  *  @brief Throws the mapped JavaScript error when @p outcome carries a failure.
  *  @return @c true when the call succeeded, @c false with an exception pending otherwise.
  */
-bool uform_js_succeeded(napi_env env, uform_outcome_t const *outcome);
+bool uform_js_succeeded(napi_env env, uform_outcome_t const* outcome);
 
 /** Whether @p value is @c undefined or @c null, which every optional argument derives from. */
 bool uform_js_value_absent(napi_env env, napi_value value);
 
 /** Reads a named property of an @b optional options object; an absent one reads @c undefined. */
-napi_value uform_js_property(napi_env env, napi_value object, char const *name);
+napi_value uform_js_property(napi_env env, napi_value object, char const* name);
 
 /** Reads a non-negative integer from a number or a @c BigInt; absent arguments read as zero. */
-bool uform_js_size_from_value(napi_env env, napi_value value, char const *field, size_t *result);
+bool uform_js_size_from_value(napi_env env, napi_value value, char const* field, size_t* result);
 
 /** Reads a finite real; absent arguments read as zero, which every knob derives from. */
-bool uform_js_double_from_value(napi_env env, napi_value value, char const *field, double *result);
+bool uform_js_double_from_value(napi_env env, napi_value value, char const* field, double* result);
 
 /**
  *  @brief Copies a UTF-8 string into a @c malloc-ed block, so a deferred call can borrow it.
  *  @param[out] view The bytes, without the terminator the block also carries.
  *  @return The block the caller frees, or @c NULL with an exception pending.
  */
-char *uform_js_string_from_value(napi_env env, napi_value value, char const *field, uform_bytes_view_t *view);
+char* uform_js_string_from_value(napi_env env, napi_value value, char const* field, uform_bytes_view_t* view);
 
 /** Reads the C @c completion every verb takes beside its executor. */
-bool uform_js_completion_from_value(napi_env env, napi_value value, uform_completion_t *result);
+bool uform_js_completion_from_value(napi_env env, napi_value value, uform_completion_t* result);
 
 /** Reads a scalar kind from the code @c uform_js_scalars published for its canonical spelling. */
-bool uform_js_scalar_from_value(napi_env env, napi_value value, char const *field, uform_scalar_t *result);
+bool uform_js_scalar_from_value(napi_env env, napi_value value, char const* field, uform_scalar_t* result);
 
 /** Maps every scalar kind's canonical spelling to its code once, through the C name tables. */
 napi_value uform_js_scalars(napi_env env);
 
 /** Reads an @b optional CPU class pin through the C name tables; absent derives the CPU's own. */
-bool uform_js_cpu_class_from_value(napi_env env, napi_value value, uform_cpu_class_t *result);
+bool uform_js_cpu_class_from_value(napi_env env, napi_value value, uform_cpu_class_t* result);
 
 /** Reads an @b optional GPU class pin by its C name; absent derives the devices' own. */
-bool uform_js_gpu_class_from_value(napi_env env, napi_value value, uform_gpu_class_t *result);
+bool uform_js_gpu_class_from_value(napi_env env, napi_value value, uform_gpu_class_t* result);
 
 /** Wraps a class's canonical spelling, or answers @c null for the unknown class. */
-napi_value uform_js_class_name(napi_env env, char const *name);
+napi_value uform_js_class_name(napi_env env, char const* name);
 
 /** Maps every modality's canonical spelling to its code once, through the C name tables. */
 napi_value uform_js_modalities(napi_env env);
@@ -282,20 +282,20 @@ size_t uform_js_row_bytes(uform_scalar_t scalar, size_t columns);
  *  @param[out] ordinals Receives a @c free -able array; @c NULL when the value is absent or empty.
  *  @return @c true on success, @c false with an exception pending otherwise.
  */
-bool uform_js_ordinals_from_value(napi_env env, napi_value value, char const *field, int32_t **ordinals, size_t *count);
+bool uform_js_ordinals_from_value(napi_env env, napi_value value, char const* field, int32_t** ordinals, size_t* count);
 
 /**
  *  @brief Borrows the bytes of a numeric @c TypedArray, whatever its element type.
  *  @return @c true on success, @c false with an exception pending otherwise.
  */
-bool uform_js_bytes_from_value(napi_env env, napi_value value, char const *field, void **data, size_t *bytes);
+bool uform_js_bytes_from_value(napi_env env, napi_value value, char const* field, void** data, size_t* bytes);
 
 /**
  *  @brief Borrows a @c TypedArray of exactly @p type, reporting its elements.
  *  @return @c true on success, @c false with an exception pending otherwise.
  */
-bool uform_js_array_from_value(napi_env env, napi_value value, char const *field, napi_typedarray_type type,
-                               void **data, size_t *elements);
+bool uform_js_array_from_value(napi_env env, napi_value value, char const* field, napi_typedarray_type type,
+                               void** data, size_t* elements);
 
 /**
  *  @brief Borrows a ragged batch: its elements in @p data_value and @c count + 1 offsets read as
@@ -306,9 +306,9 @@ bool uform_js_array_from_value(napi_env env, napi_value value, char const *field
  *      their widened copy.
  *  @return @c true on success, @c false with an exception pending otherwise.
  */
-bool uform_js_tape_from_value(napi_env env, napi_value data_value, napi_value offsets_value, char const *field,
-                              napi_typedarray_type element_type, uform_js_call_t *call, size_t *count,
-                              uform_tape_view_t *tape);
+bool uform_js_tape_from_value(napi_env env, napi_value data_value, napi_value offsets_value, char const* field,
+                              napi_typedarray_type element_type, uform_js_call_t* call, size_t* count,
+                              uform_tape_view_t* tape);
 
 /**
  *  @brief Reads offsets: a @c BigUint64Array or a @c Uint32Array as wide as @c size_t is lent
@@ -317,49 +317,49 @@ bool uform_js_tape_from_value(napi_env env, napi_value data_value, napi_value of
  *  @param[out] offsets The lent or widened run, @c NULL when the value is absent.
  *  @param[out] count One less than the offsets read, the entries they bound.
  */
-bool uform_js_offsets_from_value(napi_env env, napi_value value, char const *field, uform_js_call_t *call,
-                                 size_t const **offsets, size_t *count);
+bool uform_js_offsets_from_value(napi_env env, napi_value value, char const* field, uform_js_call_t* call,
+                                 size_t const** offsets, size_t* count);
 
 /** Borrows an @b optional @c Uint32Array of exactly @p count entries, one per item;
  *  @c NULL when absent. */
-bool uform_js_per_item_from_value(napi_env env, napi_value value, char const *field, size_t count,
-                                  uint32_t const **result);
+bool uform_js_per_item_from_value(napi_env env, napi_value value, char const* field, size_t count,
+                                  uint32_t const** result);
 
 /**
  *  @brief Reads an @b optional progress handler, refused beside an executor, whose threads never
  *      own a JavaScript context.
  *  @param[out] progress The C handler and its state, pointing at @p call; zeroed when absent.
  */
-bool uform_js_progress_from_value(napi_env env, napi_value value, uform_executor_t executor, uform_js_call_t *call,
-                                  uform_progress_t *progress);
+bool uform_js_progress_from_value(napi_env env, napi_value value, uform_executor_t executor, uform_js_call_t* call,
+                                  uform_progress_t* progress);
 
 /** Wraps a count the library reported, once its error has been checked. */
 napi_value uform_js_number(napi_env env, size_t value);
 
 /** Wraps a static null-terminated string the library owns. */
-napi_value uform_js_static_string(napi_env env, char const *text);
+napi_value uform_js_static_string(napi_env env, char const* text);
 
 /** The @c undefined every void verb hands back. */
 napi_value uform_js_undefined(napi_env env);
 
 /** Builds an object of @p count named values, or answers @c NULL with an exception pending. */
-napi_value uform_js_object(napi_env env, size_t count, char const *const *names, napi_value const *values);
+napi_value uform_js_object(napi_env env, size_t count, char const* const* names, napi_value const* values);
 
 /** Reads up to @p wanted arguments of a function; missing ones read as @c undefined. */
-bool uform_js_arguments(napi_env env, napi_callback_info info, size_t wanted, napi_value *arguments, napi_value *self);
+bool uform_js_arguments(napi_env env, napi_callback_info info, size_t wanted, napi_value* arguments, napi_value* self);
 
 #pragma endregion Argument Parsing
 
 #pragma region Classes and Calls
 
 /** The addon state holding every class constructor; @c NULL with an exception pending. */
-uform_js_addon_t *uform_js_addon(napi_env env);
+uform_js_addon_t* uform_js_addon(napi_env env);
 
 /** Defines the @c Executor class; the module glue keeps the reference. */
 napi_value uform_js_executor_define(napi_env env);
 
 /** Unwraps the @c executor argument every verb takes; an absent one reads as @c NULL. */
-bool uform_js_executor_from_value(napi_env env, napi_value value, uform_executor_t *handle);
+bool uform_js_executor_from_value(napi_env env, napi_value value, uform_executor_t* handle);
 
 /** Defines the @c Arena class; the module glue keeps the reference. */
 napi_value uform_js_arena_define(napi_env env);
@@ -371,7 +371,7 @@ napi_value uform_js_arena_define(napi_env env);
  *  @c uform_status_contended_k. The views of the previous call are detached once the library took
  *  this one, in @c uform_js_call_answer.
  */
-bool uform_js_arena_from_value(napi_env env, napi_value value, uform_js_call_t *call, uform_arena_t *handle);
+bool uform_js_arena_from_value(napi_env env, napi_value value, uform_js_call_t* call, uform_arena_t* handle);
 
 /**
  *  @brief Views @p bytes an arena holds as a @c TypedArray of @p type, without copying.
@@ -383,44 +383,44 @@ bool uform_js_arena_from_value(napi_env env, napi_value value, uform_js_call_t *
  *
  *  @return The view, or @c NULL with an exception pending.
  */
-napi_value uform_js_arena_view(napi_env env, napi_value arena, napi_typedarray_type type, void const *data,
+napi_value uform_js_arena_view(napi_env env, napi_value arena, napi_typedarray_type type, void const* data,
                                size_t bytes, size_t elements);
 
 /** Views @p count rows a call landed inside @p arena as @c {data, rows,
  *  columns, stride, scalar}. */
-napi_value uform_js_rows_object(napi_env env, napi_value arena, uform_rows_view_t const *rows, size_t count);
+napi_value uform_js_rows_object(napi_env env, napi_value arena, uform_rows_view_t const* rows, size_t count);
 
 /** Views @p count + 1 @c size_t offsets a call landed inside @p arena, as a @c BigUint64Array
  *  on 64-bit hosts. */
-napi_value uform_js_offsets_view(napi_env env, napi_value arena, size_t const *offsets, size_t count);
+napi_value uform_js_offsets_view(napi_env env, napi_value arena, size_t const* offsets, size_t count);
 
 /** Defines the @c CompiledDeferred class; the module glue keeps the reference. */
 napi_value uform_js_deferred_define(napi_env env);
 
 /** Unwraps an instance of the class @p reference holds, or throws naming @p field and
  *  answers @c NULL. */
-void *uform_js_unwrap_instance(napi_env env, napi_value value, napi_ref reference, char const *field,
-                               char const *expectation);
+void* uform_js_unwrap_instance(napi_env env, napi_value value, napi_ref reference, char const* field,
+                               char const* expectation);
 
 /** Reads the native state behind the receiver of a method, and @p wanted arguments beside it. */
-void *uform_js_self(napi_env env, napi_callback_info info, size_t wanted, napi_value *arguments, napi_value *self);
+void* uform_js_self(napi_env env, napi_callback_info info, size_t wanted, napi_value* arguments, napi_value* self);
 
 /** The token constructors check, so only this addon instantiates its own classes. */
-bool uform_js_sealed(napi_env env, napi_callback_info info, napi_value *self);
+bool uform_js_sealed(napi_env env, napi_callback_info info, napi_value* self);
 
 /** Instantiates one of the addon's classes, handing its constructor the seal. */
 napi_value uform_js_instantiate(napi_env env, napi_ref constructor);
 
 /** Defines a class whose constructor only accepts the seal, and whose instances get a
  *  @c [Symbol.dispose] calling their @c free. */
-napi_value uform_js_class_define(napi_env env, char const *name, size_t count,
-                                 napi_property_descriptor const *properties);
+napi_value uform_js_class_define(napi_env env, char const* name, size_t count,
+                                 napi_property_descriptor const* properties);
 
 /**
  *  @brief Opens a call: @p local when blocking, or a zeroed heap block of @p bytes when deferred.
  *  @return The call, or @c NULL with an exception pending.
  */
-uform_js_call_t *uform_js_call_open(napi_env env, uform_completion_t completion, uform_js_call_t *local, size_t bytes);
+uform_js_call_t* uform_js_call_open(napi_env env, uform_completion_t completion, uform_js_call_t* local, size_t bytes);
 
 /**
  *  @brief Readies a deferred call: holds @p slots and wraps the call in a @c CompiledDeferred.
@@ -429,8 +429,8 @@ uform_js_call_t *uform_js_call_open(napi_env env, uform_completion_t completion,
  *
  *  Runs before the submission, so a failure here leaves nothing in flight.
  */
-bool uform_js_call_hold(napi_env env, uform_js_call_t *call, uform_js_call_t const *local, napi_value const *slots,
-                        napi_value *deferred);
+bool uform_js_call_hold(napi_env env, uform_js_call_t* call, uform_js_call_t const* local, napi_value const* slots,
+                        napi_value* deferred);
 
 /**
  *  @brief Answers a submitted call: a blocking one's finished result, a deferred one's wrapper.
@@ -438,22 +438,22 @@ bool uform_js_call_hold(napi_env env, uform_js_call_t *call, uform_js_call_t con
  *  Unless the library refused it as contended, the call rewound its arena, so the views of the call
  *  before it are detached here and the arena remembers this one as its holder.
  */
-napi_value uform_js_call_answer(napi_env env, uform_js_call_t *call, uform_js_call_t const *local,
-                                napi_value const *slots, napi_value deferred);
+napi_value uform_js_call_answer(napi_env env, uform_js_call_t* call, uform_js_call_t const* local,
+                                napi_value const* slots, napi_value deferred);
 
 /** Releases a call that never reached the library, after its arguments failed to parse. */
-void uform_js_call_abandon(uform_js_call_t *call, uform_js_call_t const *local);
+void uform_js_call_abandon(uform_js_call_t* call, uform_js_call_t const* local);
 
 /** Opens the call every instance verb runs through, reading the executor and the completion from
  *  the first two arguments. */
-uform_js_call_t *uform_js_call_open_on(napi_env env, napi_value const *arguments, uform_js_call_t *local, size_t bytes,
-                                       uform_executor_t *executor, uform_completion_t *completion);
+uform_js_call_t* uform_js_call_open_on(napi_env env, napi_value const* arguments, uform_js_call_t* local, size_t bytes,
+                                       uform_executor_t* executor, uform_completion_t* completion);
 
 /** Defines the @c CompiledModel class, its lifecycle verbs and its encode verbs. */
 napi_value uform_js_model_define(napi_env env);
 
 /** Appends the encode verbs to the @c CompiledModel properties @c model.c defines. */
-napi_property_descriptor const *uform_js_encode_properties(size_t *count);
+napi_property_descriptor const* uform_js_encode_properties(size_t* count);
 
 /** Defines the @c CompiledMesh class and its bootstrap. */
 napi_value uform_js_mesh_define(napi_env env);

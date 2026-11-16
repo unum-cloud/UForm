@@ -75,11 +75,11 @@ using e4m3r3_span_t = nk::tensor_span<e4m3_t, 3>;
 /** Failure carrying a CUDA Driver error: @ref expected::fail tagged @c device_error_k , with the
  *  driver's own error string appended to the description and @p cu_error kept in @c cu_error_ . */
 template <typename value_type_ = void, typename... arg_types_>
-[[nodiscard]] expected<value_type_> cuda_failure(CUresult cu_error, format_at_t format, arg_types_ &&...args) noexcept {
+[[nodiscard]] expected<value_type_> cuda_failure(CUresult cu_error, format_at_t format, arg_types_&&... args) noexcept {
     expected<value_type_> result = expected<value_type_>::fail(status_t::device_error_k, format,
                                                                std::forward<arg_types_>(args)...);
     result.cu_error_ = static_cast<i32_t>(cu_error);
-    char const *cu_error_string = nullptr;
+    char const* cu_error_string = nullptr;
     if (cuGetErrorString(cu_error, &cu_error_string) != CUDA_SUCCESS || cu_error_string == nullptr)
         cu_error_string = "unknown";
     (void)result.description_.append(": ");
@@ -89,14 +89,14 @@ template <typename value_type_ = void, typename... arg_types_>
 
 /** The Driver API address of the device @p pointer — the one place a pointer becomes a
  *  @c CUdeviceptr . */
-[[nodiscard]] inline CUdeviceptr device_address(void const *pointer) noexcept {
-    return reinterpret_cast<CUdeviceptr>(pointer);
+[[nodiscard]] inline CUdeviceptr device_address(void const* pointer) noexcept {
+    return reinterpret_cast<CUdeviceptr>(pointer); // vendor-boundary: the driver addresses memory as an integer
 }
 
 /** The typed pointer at the Driver API @p address — the inverse of @ref device_address . */
 template <typename value_type_>
-[[nodiscard]] inline value_type_ *device_pointer(CUdeviceptr address) noexcept {
-    return reinterpret_cast<value_type_ *>(address);
+[[nodiscard]] inline value_type_* device_pointer(CUdeviceptr address) noexcept {
+    return reinterpret_cast<value_type_*>(address); // vendor-boundary: the driver addresses memory as an integer
 }
 
 /** Byte alignment of every arena allocation; matches the 256-byte guarantee of the CUDA allocators,
@@ -212,16 +212,16 @@ struct gpu_arena_t {
     gpu_arena_t() noexcept = default;
 
   public:
-    gpu_arena_t(gpu_arena_t const &) = delete;
-    gpu_arena_t &operator=(gpu_arena_t const &) = delete;
+    gpu_arena_t(gpu_arena_t const&) = delete;
+    gpu_arena_t& operator=(gpu_arena_t const&) = delete;
 
-    gpu_arena_t(gpu_arena_t &&other) noexcept
+    gpu_arena_t(gpu_arena_t&& other) noexcept
         : base_(std::exchange(other.base_, 0)), reserved_bytes_(std::exchange(other.reserved_bytes_, 0)),
           mapped_bytes_(std::exchange(other.mapped_bytes_, 0)), used_bytes_(std::exchange(other.used_bytes_, 0)),
           granularity_(std::exchange(other.granularity_, 0)), device_(std::exchange(other.device_, 0)),
           chunks_(std::move(other.chunks_)), visible_to_(std::move(other.visible_to_)) {}
 
-    gpu_arena_t &operator=(gpu_arena_t &&other) noexcept {
+    gpu_arena_t& operator=(gpu_arena_t&& other) noexcept {
         if (this == &other) return *this;
         destroy_();
         base_ = std::exchange(other.base_, 0);
@@ -307,14 +307,14 @@ struct gpu_arena_t {
     /** Allocate @p bytes at @p alignment off the bump cursor, growing the physical backing when the
      *  mapped prefix is exhausted. Returns @c nullptr when the reservation ceiling is hit or growth
      *  fails — on a bump arena a null can mean nothing else. */
-    [[nodiscard]] std::byte *allocate_bytes(std::size_t bytes, std::size_t alignment = arena_alignment_k) noexcept {
+    [[nodiscard]] std::byte* allocate_bytes(std::size_t bytes, std::size_t alignment = arena_alignment_k) noexcept {
         return allocate_object<std::byte>(bytes, alignment);
     }
 
     /** Allocate @p count elements of @c value_type_ off the bump cursor — the typed sibling of
      *  @ref allocate_bytes , mirroring @c std::pmr::polymorphic_allocator::allocate_object . */
     template <typename value_type_>
-    [[nodiscard]] value_type_ *allocate_object(std::size_t count = 1,
+    [[nodiscard]] value_type_* allocate_object(std::size_t count = 1,
                                                std::size_t alignment = arena_alignment_k) noexcept {
         std::size_t const bytes = count * sizeof(value_type_);
         std::size_t const aligned_cursor = round_up_to_multiple(used_bytes_, alignment);
@@ -336,14 +336,14 @@ struct gpu_arena_t {
      *  returned pointer is granularity-aligned. @c nullptr on ceiling or growth failure, like
      *  @ref allocate_bytes .
      */
-    [[nodiscard]] std::byte *allocate_registrable_bytes(std::size_t bytes) noexcept {
+    [[nodiscard]] std::byte* allocate_registrable_bytes(std::size_t bytes) noexcept {
         return allocate_registrable_object<std::byte>(bytes);
     }
 
     /** Allocate @p count elements of @c value_type_ inside one physical chunk — the typed sibling
      *  of @ref allocate_registrable_bytes . */
     template <typename value_type_>
-    [[nodiscard]] value_type_ *allocate_registrable_object(std::size_t count) noexcept {
+    [[nodiscard]] value_type_* allocate_registrable_object(std::size_t count) noexcept {
         std::size_t const bytes = count * sizeof(value_type_);
         std::size_t const chunk_start = mapped_bytes_;
         if (chunk_start + bytes > reserved_bytes_) return nullptr;
@@ -427,7 +427,7 @@ struct gpu_arena_t {
     void destroy_() noexcept {
         if (base_ == 0) return;
         if (mapped_bytes_ != 0) cuMemUnmap(base_, mapped_bytes_);
-        for (physical_chunk_t const &chunk : chunks_) cuMemRelease(chunk.handle);
+        for (physical_chunk_t const& chunk : chunks_) cuMemRelease(chunk.handle);
         cuMemAddressFree(base_, reserved_bytes_);
         base_ = 0;
         chunks_ = {};
@@ -464,24 +464,24 @@ struct gpu_arena_alloc {
     };
 
     /** The borrowed arena every allocation comes from. */
-    gpu_arena_t *arena_ = nullptr;
+    gpu_arena_t* arena_ = nullptr;
 
     constexpr gpu_arena_alloc() noexcept = default;
-    explicit constexpr gpu_arena_alloc(gpu_arena_t &arena) noexcept : arena_(&arena) {}
+    explicit constexpr gpu_arena_alloc(gpu_arena_t& arena) noexcept : arena_(&arena) {}
     template <typename other_type_>
-    constexpr gpu_arena_alloc(gpu_arena_alloc<other_type_> const &other) noexcept : arena_(other.arena_) {}
+    constexpr gpu_arena_alloc(gpu_arena_alloc<other_type_> const& other) noexcept : arena_(other.arena_) {}
 
     /** Allocate @p count elements off the arena, growing its physical backing if needed; @c nullptr
      *  on exhaustion or when unbound. */
-    [[nodiscard]] value_type *allocate(std::size_t count) noexcept {
+    [[nodiscard]] value_type* allocate(std::size_t count) noexcept {
         return arena_ != nullptr ? arena_->allocate_object<value_type>(count) : nullptr;
     }
 
     /** A no-op: bump-arena memory is reclaimed by
      *  @ref unum::uform::utilities::gpu_arena_t::rewind , never per buffer. */
-    void deallocate(value_type *, std::size_t) noexcept {}
+    void deallocate(value_type*, std::size_t) noexcept {}
 
-    [[nodiscard]] constexpr bool operator==(gpu_arena_alloc const &other) const noexcept {
+    [[nodiscard]] constexpr bool operator==(gpu_arena_alloc const& other) const noexcept {
         return arena_ == other.arena_;
     }
 };
@@ -516,24 +516,24 @@ struct gpu_registrable_alloc {
     };
 
     /** The borrowed arena every allocation comes from. */
-    gpu_arena_t *arena_ = nullptr;
+    gpu_arena_t* arena_ = nullptr;
 
     constexpr gpu_registrable_alloc() noexcept = default;
-    explicit constexpr gpu_registrable_alloc(gpu_arena_t &arena) noexcept : arena_(&arena) {}
+    explicit constexpr gpu_registrable_alloc(gpu_arena_t& arena) noexcept : arena_(&arena) {}
     template <typename other_type_>
-    constexpr gpu_registrable_alloc(gpu_registrable_alloc<other_type_> const &other) noexcept : arena_(other.arena_) {}
+    constexpr gpu_registrable_alloc(gpu_registrable_alloc<other_type_> const& other) noexcept : arena_(other.arena_) {}
 
     /** Allocate @p count elements inside one fresh physical chunk; @c nullptr on exhaustion
      *  or when unbound. */
-    [[nodiscard]] value_type *allocate(std::size_t count) noexcept {
+    [[nodiscard]] value_type* allocate(std::size_t count) noexcept {
         return arena_ != nullptr ? arena_->allocate_registrable_object<value_type>(count) : nullptr;
     }
 
     /** A no-op: bump-arena memory is reclaimed by
      *  @ref unum::uform::utilities::gpu_arena_t::rewind , never per buffer. */
-    void deallocate(value_type *, std::size_t) noexcept {}
+    void deallocate(value_type*, std::size_t) noexcept {}
 
-    [[nodiscard]] constexpr bool operator==(gpu_registrable_alloc const &other) const noexcept {
+    [[nodiscard]] constexpr bool operator==(gpu_registrable_alloc const& other) const noexcept {
         return arena_ == other.arena_;
     }
 };
@@ -571,15 +571,15 @@ struct pinned_alloc {
     explicit constexpr pinned_alloc(fu_memory_domain_id_t memory_domain) noexcept : memory_domain_(memory_domain) {}
 
     template <typename other_type_>
-    constexpr pinned_alloc(pinned_alloc<other_type_> const &other) noexcept : memory_domain_(other.memory_domain()) {}
+    constexpr pinned_alloc(pinned_alloc<other_type_> const& other) noexcept : memory_domain_(other.memory_domain()) {}
 
     /** Pin @p count elements of portable host memory; @c nullptr on failure. */
-    [[nodiscard]] value_type *allocate(std::size_t count) noexcept {
+    [[nodiscard]] value_type* allocate(std::size_t count) noexcept {
         std::size_t const bytes = count * sizeof(value_type);
         if (memory_domain_ < 0) {
-            void *base = nullptr;
+            void* base = nullptr;
             if (cuMemHostAlloc(&base, bytes, CU_MEMHOSTALLOC_PORTABLE) != CUDA_SUCCESS) return nullptr;
-            return static_cast<value_type *>(base);
+            return static_cast<value_type*>(base);
         }
         bytes_span_t const placed = allocate_on_memory_domain(memory_domain_, bytes);
         if (placed.empty()) return nullptr;
@@ -587,24 +587,23 @@ struct pinned_alloc {
             free_on_memory_domain(memory_domain_, placed);
             return nullptr;
         }
-        return static_cast<value_type *>(static_cast<void *>(placed.data()));
+        return nk::as_writable_values<value_type>(placed).data();
     }
 
-    void deallocate(value_type *base, std::size_t count) noexcept { // vendor-boundary: the allocator traits' shape
+    void deallocate(value_type* base, std::size_t count) noexcept { // vendor-boundary: the allocator traits' shape
         if (base == nullptr) return;
         if (memory_domain_ < 0) {
             [[maybe_unused]] CUresult const freed = cuMemFreeHost(base);
             return;
         }
         [[maybe_unused]] CUresult const unregistered = cuMemHostUnregister(base);
-        free_on_memory_domain(memory_domain_,
-                              {static_cast<b8_t *>(static_cast<void *>(base)), count * sizeof(value_type)});
+        free_on_memory_domain(memory_domain_, std::as_writable_bytes(std::span<value_type> {base, count}));
     }
 
     /** The memory domain allocations land on, or -1 wherever the driver places them. */
     [[nodiscard]] constexpr fu_memory_domain_id_t memory_domain() const noexcept { return memory_domain_; }
 
-    [[nodiscard]] constexpr bool operator==(pinned_alloc const &other) const noexcept {
+    [[nodiscard]] constexpr bool operator==(pinned_alloc const& other) const noexcept {
         return memory_domain_ == other.memory_domain_;
     }
 
@@ -652,12 +651,12 @@ struct gpu_alloc {
     constexpr gpu_alloc() noexcept = default;
     explicit constexpr gpu_alloc(CUstream stream) noexcept : stream(stream) {}
     template <typename other_type_>
-    constexpr gpu_alloc(gpu_alloc<other_type_> const &other) noexcept : stream(other.stream) {}
+    constexpr gpu_alloc(gpu_alloc<other_type_> const& other) noexcept : stream(other.stream) {}
 
     /** Stream-ordered allocation from the device's default memory pool; @c nullptr on failure —
      *  matching NumKong's non-throwing allocator contract. The pool's own attributes carry the
      *  usage and high-water marks (see @ref unum::uform::utilities::gpu_memory_report ). */
-    [[nodiscard]] value_type *allocate(std::size_t count) noexcept {
+    [[nodiscard]] value_type* allocate(std::size_t count) noexcept {
         CUdeviceptr pointer = 0;
         if (cuMemAllocAsync(&pointer, count * sizeof(value_type), stream) != CUDA_SUCCESS) return nullptr;
         return device_pointer<value_type>(pointer);
@@ -665,11 +664,11 @@ struct gpu_alloc {
 
     /** Stream-ordered release back to the pool; safe after every enqueued consumer on
      *  @ref stream . */
-    void deallocate(value_type *pointer, std::size_t) noexcept {
+    void deallocate(value_type* pointer, std::size_t) noexcept {
         if (pointer != nullptr) cuMemFreeAsync(device_address(pointer), stream);
     }
 
-    [[nodiscard]] constexpr bool operator==(gpu_alloc const &other) const noexcept { return stream == other.stream; }
+    [[nodiscard]] constexpr bool operator==(gpu_alloc const& other) const noexcept { return stream == other.stream; }
 };
 
 /** The canonical byte-typed stream-ordered-allocator handle — what APIs receive and rebind. */

@@ -28,7 +28,7 @@ struct vram_placer {
 
     /** Copy @p values into @p target , a fresh array in device memory. */
     template <typename value_type_>
-    [[nodiscard]] expected_t place(std::span<value_type_ const> values, placed_array<value_type_> &target,
+    [[nodiscard]] expected_t place(std::span<value_type_ const> values, placed_array<value_type_>& target,
                                    sz::string_view_t what) const noexcept {
         target = placed_array<value_type_> {nk::allocator<value_type_> {allocator}};
         if (values.empty()) return {};
@@ -59,7 +59,7 @@ struct vram_steps {
 
     template <typename body_type_>
     [[nodiscard]] expected_t split(std::size_t tasks, std::size_t, sz::string_view_t what,
-                                   body_type_ const &body) noexcept {
+                                   body_type_ const& body) noexcept {
         return checked(body(0, tasks), what);
     }
 
@@ -76,7 +76,7 @@ struct vram_steps {
         return checked(entries_kit_t::fill_layout(lengths, packed_offsets, pool_offsets, stream_handle), "layout");
     }
 
-    [[nodiscard]] expected_t fill_coords(segment_layout_t const &layout, nk::tensor_view<u16_t, 2> image_shapes,
+    [[nodiscard]] expected_t fill_coords(segment_layout_t const& layout, nk::tensor_view<u16_t, 2> image_shapes,
                                          nk::tensor_view<u16_t, 2> video_shapes, u32_t tube_frames, u32_t frame_stride,
                                          u32_t positions, i16r2_span_t coords) noexcept {
         return checked(entries_kit_t::fill_coords(layout, image_shapes, video_shapes, tube_frames, frame_stride,
@@ -84,19 +84,19 @@ struct vram_steps {
                        "coordinates");
     }
 
-    [[nodiscard]] expected_t gather_bytes(segment_layout_t const &layout, nk::tensor_view<token_id_t, 1> tokens,
+    [[nodiscard]] expected_t gather_bytes(segment_layout_t const& layout, nk::tensor_view<token_id_t, 1> tokens,
                                           bf16r2_view_t table, bf16r2_span_t rows) noexcept {
         return checked(entries_kit_t::gather_bytes(layout, tokens, table, rows, stream_handle), "byte gather");
     }
 
-    [[nodiscard]] expected_t stage_patches(segment_layout_t const &layout, modality_t target,
+    [[nodiscard]] expected_t stage_patches(segment_layout_t const& layout, modality_t target,
                                            nk::tensor_view<pixel_t, 3> pixels, f32r1_view_t mean,
                                            f32r1_view_t inverse_std, bf16r2_span_t patches) noexcept {
         return checked(entries_kit_t::stage_patches(layout, target, pixels, mean, inverse_std, patches, stream_handle),
                        "patch staging");
     }
 
-    [[nodiscard]] expected_t stage_frames(segment_layout_t const &layout, nk::tensor_view<f32_t, 2> samples,
+    [[nodiscard]] expected_t stage_frames(segment_layout_t const& layout, nk::tensor_view<f32_t, 2> samples,
                                           bf16r2_span_t frames) noexcept {
         return checked(entries_kit_t::stage_frames(layout, samples, frames, stream_handle), "frame staging");
     }
@@ -137,8 +137,8 @@ struct vram_tower {
      *  @par Statuses:
      *  - @c status_t::invalid_argument_k A tensor is missing or misshapen.
      */
-    [[nodiscard]] static expected<vram_tower> make(uu::checkpoint_to_load_t const &checkpoint,
-                                                   geometry_t const &geometry, precision_t precision,
+    [[nodiscard]] static expected<vram_tower> make(uu::checkpoint_to_load_t const& checkpoint,
+                                                   geometry_t const& geometry, precision_t precision,
                                                    nk_allocator_t policy, nk_stream_t stream) noexcept {
         vram_placer<entries_kit_type_> const placer {nk::allocator<b8_t> {policy, stream}, stream};
         expected<tower_weights_t> weights = pack_weights<products_kit_type_, staging_kit_type_>(checkpoint, geometry,
@@ -167,7 +167,7 @@ struct vram_tower {
         return encode_steps(steps, weights_, batch, outputs, scratch);
     }
 
-    [[nodiscard]] tower_weights_t const &weights() const noexcept { return weights_; }
+    [[nodiscard]] tower_weights_t const& weights() const noexcept { return weights_; }
 
   private:
     tower_weights_t weights_ {};

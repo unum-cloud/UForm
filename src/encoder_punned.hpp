@@ -37,12 +37,12 @@ struct encoder_verbs {
     /** The GPU class a device variant's kits compile for; unknown on the host. */
     gpu_class_t gpu_class;
 
-    expected<void *> (*create)(checkpoint_to_load_t const &checkpoint, encoder::geometry_t const &geometry,
-                               encoder::precision_t precision, nk_stream_t stream) noexcept;
-    void (*destroy)(void *tower) noexcept;
-    expected<std::size_t> (*scratch_bytes)(void const *tower, std::size_t tokens, std::size_t segments,
+    expected<void*> (*create)(checkpoint_to_load_t const& checkpoint, encoder::geometry_t const& geometry,
+                              encoder::precision_t precision, nk_stream_t stream) noexcept;
+    void (*destroy)(void* tower) noexcept;
+    expected<std::size_t> (*scratch_bytes)(void const* tower, std::size_t tokens, std::size_t segments,
                                            executor_t executor) noexcept;
-    expected_t (*encode)(void const *tower, encoder::multimodal_batch_view_t batch, encoder::outputs_t outputs,
+    expected_t (*encode)(void const* tower, encoder::multimodal_batch_view_t batch, encoder::outputs_t outputs,
                          bytes_span_t scratch, executor_t executor) noexcept;
 };
 
@@ -50,7 +50,7 @@ struct encoder_verbs {
  *  where the class picks nothing its parent does not, so a ladder falls to the next rung. */
 template <vendored_residency_t residency_, auto class_>
 struct encoder_class_tables {
-    static encoder_verbs<residency_> const *find() noexcept;
+    static encoder_verbs<residency_> const* find() noexcept;
 };
 
 /** The vendor's capability group a device residency runs on. */
@@ -68,9 +68,9 @@ using entries_kit_of = std::conditional_t<residency_ == vendored_residency_t::vr
 /** The newest compiled class on @p ladder that fits under @p ceiling, as its verbs, one of which
  *  @ref pick_cpu_ceiling made sure of. */
 template <cpu_class_t... classes_>
-encoder_verbs<vendored_residency_t::ram_k> const *pick_cpu_variant(cpu_ladder<classes_...>,
+encoder_verbs<vendored_residency_t::ram_k> const* pick_cpu_variant(cpu_ladder<classes_...>,
                                                                    cpu_ceiling_t ceiling) noexcept {
-    encoder_verbs<vendored_residency_t::ram_k> const *picked = nullptr;
+    encoder_verbs<vendored_residency_t::ram_k> const* picked = nullptr;
     auto rung = [&]<cpu_class_t class_>() noexcept {
         if constexpr (cpu_class_compiled(class_))
             if (!picked && cpu_rung_fits(class_, ceiling))
@@ -83,9 +83,9 @@ encoder_verbs<vendored_residency_t::ram_k> const *pick_cpu_variant(cpu_ladder<cl
 /** The newest class on @p ladder whose kits a device of @p device_capabilities runs and @p pinned
  *  takes, as its verbs. */
 template <vendored_residency_t residency_, gpu_class_t... classes_>
-encoder_verbs<residency_> const *pick_gpu_variant(gpu_ladder<classes_...>, uform_gpu_class_t pinned,
+encoder_verbs<residency_> const* pick_gpu_variant(gpu_ladder<classes_...>, uform_gpu_class_t pinned,
                                                   nk_capability_t device_capabilities) noexcept {
-    encoder_verbs<residency_> const *picked = nullptr;
+    encoder_verbs<residency_> const* picked = nullptr;
     if constexpr (gpu_vendor_compiled(vendor_of(residency_))) {
         if (!(device_capabilities & vendor_of(residency_))) return picked;
         nk_capability_t const ceiling = pinned == uform_gpu_class_unknown_k
@@ -106,7 +106,7 @@ encoder_verbs<residency_> const *pick_gpu_variant(gpu_ladder<classes_...>, uform
 /** Calls @p visitor with the VRAM residency and the class ladder of the vendor
  *  @p device_capabilities names, so the C verbs never name a vendor. */
 template <typename visitor_type_>
-bool visit_vram_residency(nk_capability_t device_capabilities, visitor_type_ &&visitor) noexcept {
+bool visit_vram_residency(nk_capability_t device_capabilities, visitor_type_&& visitor) noexcept {
     if (device_capabilities & nk_cap_rocm_k)
         return visitor.template operator()<vendored_residency_t::vram_amd_k, amd_ladder_t>();
     return visitor.template operator()<vendored_residency_t::vram_nvidia_k, nvidia_ladder_t>();

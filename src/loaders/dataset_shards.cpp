@@ -67,7 +67,7 @@ struct column_span_t {
 };
 
 /** The @ref column_view_t over @p column 's leaf payload and its @b [elements+1] offsets. */
-[[nodiscard]] static column_view_t view_of_(column_span_t const &column) noexcept {
+[[nodiscard]] static column_view_t view_of_(column_span_t const& column) noexcept {
     return {column.payload, column.offsets};
 }
 
@@ -80,8 +80,8 @@ struct parquet_file_t::state_t {
 };
 
 parquet_file_t::parquet_file_t() noexcept = default;
-parquet_file_t::parquet_file_t(parquet_file_t &&) noexcept = default;
-parquet_file_t &parquet_file_t::operator=(parquet_file_t &&) noexcept = default;
+parquet_file_t::parquet_file_t(parquet_file_t&&) noexcept = default;
+parquet_file_t& parquet_file_t::operator=(parquet_file_t&&) noexcept = default;
 parquet_file_t::~parquet_file_t() = default;
 parquet_file_t::parquet_file_t(std::unique_ptr<state_t> state) noexcept : state_(std::move(state)) {}
 
@@ -113,7 +113,7 @@ struct flat_column_t {
 
 /** The character bytes of the cuDF strings column @p strings — where cuDF's @c char
  *  tape becomes bytes. */
-[[nodiscard]] static bytes_view_t chars_of_(cudf::strings_column_view const &strings,
+[[nodiscard]] static bytes_view_t chars_of_(cudf::strings_column_view const& strings,
                                             cuda::stream_ref stream) noexcept {
     return std::as_bytes(
         std::span<char const> {strings.chars_begin(stream), static_cast<std::size_t>(strings.chars_size(stream))});
@@ -122,7 +122,7 @@ struct flat_column_t {
 /** Flatten the @p name column @p decoded to its payload and offset levels, or a
  *  @c unsupported_k failure naming it when it is not one of @c string , @c list<uint8> , or
  *  @c list<string> . */
-[[nodiscard]] static expected<flat_column_t> flatten_column_(cudf::column_view const &decoded, sz::string_view_t name,
+[[nodiscard]] static expected<flat_column_t> flatten_column_(cudf::column_view const& decoded, sz::string_view_t name,
                                                              cuda::stream_ref stream) noexcept {
     using result_t = expected<flat_column_t>;
     if (decoded.type().id() == cudf::type_id::STRING) {
@@ -135,13 +135,13 @@ struct flat_column_t {
         // list<uint8> — a flat media blob: the child bytes are the payload, the list
         // offsets the leaf.
         if (child.type().id() == cudf::type_id::UINT8 || child.type().id() == cudf::type_id::INT8) {
-            auto const *payload = static_cast<b8_t const *>(child.head());
+            auto const* payload = static_cast<b8_t const*>(child.head());
             return result_t {flat_column_t {{payload, static_cast<std::size_t>(child.size())}, list.offsets(), {}}};
         }
         // list<int32> — row indices, the mined hard negatives: the child values are the payload,
         // and the list offsets count values, not bytes.
         if (child.type().id() == cudf::type_id::INT32) {
-            auto const *payload = static_cast<b8_t const *>(child.head());
+            auto const* payload = static_cast<b8_t const*>(child.head());
             return result_t {
                 flat_column_t {{payload, static_cast<std::size_t>(child.size()) * sizeof(i32_t)}, list.offsets(), {}}};
         }
@@ -164,8 +164,8 @@ struct flat_column_t {
 /** Own a @c u64_t copy of @p offsets — cuDF decodes 32- or 64-bit @b signed offsets, and byte
  *  positions are unsigned sizes, so the one @c cudf::cast to @c UINT64 both widens and unsigns.
  *  Writes the borrow into @p span and the owning column into @p owner . */
-static void widen_offsets_(cudf::column_view const &offsets, cuda::stream_ref stream, std::span<u64_t const> &span,
-                           std::unique_ptr<cudf::column> &owner) { // vendor-boundary: cuDF throws into the caller's try
+static void widen_offsets_(cudf::column_view const& offsets, cuda::stream_ref stream, std::span<u64_t const>& span,
+                           std::unique_ptr<cudf::column>& owner) { // vendor-boundary: cuDF throws into the caller's try
     owner = cudf::cast(offsets, cudf::data_type {cudf::type_id::UINT64}, stream);
     span = {owner->view().data<u64_t>(), static_cast<std::size_t>(offsets.size())};
 }
@@ -189,14 +189,14 @@ inline constexpr char tar_length_column_k[] = "tar_byte_length";
 
 /** Decode a footer statistic's little-endian 64-bit integer into @p value ; false when the
  *  writer kept none. */
-[[nodiscard]] static bool statistic_(auto const &bytes, i64_t &value) noexcept {
+[[nodiscard]] static bool statistic_(auto const& bytes, i64_t& value) noexcept {
     if (!bytes || bytes->size() != sizeof(i64_t)) return false;
     std::memcpy(&value, bytes->data(), sizeof(i64_t));
     return true;
 }
 
 /** The tar beside the Parquet sidecar at @p path : the same stem with a @c .tar suffix. */
-[[nodiscard]] static bool tar_path_of_(sz::string_view_t path, sz::string_t &tar) noexcept {
+[[nodiscard]] static bool tar_path_of_(sz::string_view_t path, sz::string_t& tar) noexcept {
     sz::string_view_t const sidecar_suffix {".parquet"};
     if (path.ends_with(sidecar_suffix)) path.remove_suffix(sidecar_suffix.size());
     return format_into(tar, "{}.tar", path);
@@ -209,7 +209,7 @@ inline constexpr char tar_length_column_k[] = "tar_byte_length";
 [[nodiscard]] static expected<column_span_t> read_tar_members_(
     cudf::column_view byte_offsets, cudf::column_view byte_lengths, sz::string_view_t extension,
     sz::strings_view_t paths, std::span<std::size_t const> rows_per_shard, cuda::stream_ref stream,
-    rmm::device_buffer &payload) { // vendor-boundary: cuDF throws into the caller's try
+    rmm::device_buffer& payload) { // vendor-boundary: cuDF throws into the caller's try
     using result_t = expected<column_span_t>;
     std::size_t const rows = static_cast<std::size_t>(byte_offsets.size());
     st::basic_vector<i64_t> offsets, lengths;
@@ -248,7 +248,7 @@ inline constexpr char tar_length_column_k[] = "tar_byte_length";
         // shard simply lacks the column, which must fail rather than read image bytes as text.
         std::uint8_t member_name[100] = {}; // the USTAR header's name field
         source->host_read(0, sizeof(member_name), member_name);
-        std::uint8_t const *const name_end = std::find(member_name, member_name + sizeof(member_name), 0);
+        std::uint8_t const* const name_end = std::find(member_name, member_name + sizeof(member_name), 0);
         std::size_t const name_bytes = static_cast<std::size_t>(name_end - member_name);
         if (name_bytes <= extension.size() || member_name[name_bytes - extension.size() - 1] != '.' ||
             !std::equal(extension.begin(), extension.end(), name_end - extension.size()))
@@ -287,13 +287,13 @@ inline constexpr char tar_length_column_k[] = "tar_byte_length";
             staged_bytes += run_ends[run] - run_starts[run];
         }
         rmm::device_buffer staging {staged_bytes, stream};
-        std::uint8_t *const staged = static_cast<std::uint8_t *>(staging.data());
+        std::uint8_t* const staged = static_cast<std::uint8_t*>(staging.data());
         for (std::size_t run = 0; run != run_ends.size(); ++run)
             source->device_read(run_starts[run], run_ends[run] - run_starts[run], staged + run_bases[run], stream);
         for (std::size_t row = row_begin; row != row_end; ++row) {
             std::size_t const run = row_runs[row];
             sources[row] = device_address(staged + run_bases[run] + (offsets[row] - run_starts[run]));
-            destinations[row] = device_address(static_cast<b8_t const *>(payload.data()) + bounds[row]);
+            destinations[row] = device_address(static_cast<b8_t const*>(payload.data()) + bounds[row]);
             sizes[row] = static_cast<std::size_t>(lengths[row]);
         }
         // KvikIO writes the next tar from the host, out of stream order, so these copies finish
@@ -311,11 +311,11 @@ inline constexpr char tar_length_column_k[] = "tar_byte_length";
         cudf::data_type {cudf::type_id::UINT64}, static_cast<cudf::size_type>(rows + 1),
         rmm::device_buffer {bounds.data(), (rows + 1) * sizeof(u64_t), stream}, rmm::device_buffer {}, 0);
     column.offsets = {column.widened_offsets->view().data<u64_t>(), rows + 1};
-    column.payload = {static_cast<b8_t const *>(payload.data()), payload.size()};
+    column.payload = {static_cast<b8_t const*>(payload.data()), payload.size()};
     return result_t {std::move(column)};
 }
 
-expected_t row_group_draw_t::append_shard(sz::string_view_t path, parquet_length_metadata_t const &footer) noexcept {
+expected_t row_group_draw_t::append_shard(sz::string_view_t path, parquet_length_metadata_t const& footer) noexcept {
     if ((shard_offsets_.empty() && st::failed(shard_offsets_.push_back(0))) ||
         (group_prefix_.empty() && st::failed(group_prefix_.push_back(0))))
         return expected_t::fail(status_t::bad_alloc_k, "row-group table allocation failed");
@@ -404,15 +404,15 @@ tape_view<u32_t const> row_group_draw_t::picked_groups() const noexcept { return
 
 std::size_t row_group_draw_t::rows() const noexcept { return group_prefix_.empty() ? 0 : group_prefix_.back(); }
 
-expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const &storage, sz::string_view_t path,
-                                              sz::strings_view_t columns, gpu_stream_t &stream) noexcept {
+expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const& storage, sz::string_view_t path,
+                                              sz::strings_view_t columns, gpu_stream_t& stream) noexcept {
     // The single-shard convenience over the concatenating read.
     return make(storage, std::span<sz::string_view_t const> {&path, 1}, columns, {}, stream);
 }
 
-expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const &, sz::strings_view_t paths,
+expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const&, sz::strings_view_t paths,
                                               sz::strings_view_t columns, tape_view<u32_t const> row_groups,
-                                              gpu_stream_t &stream) noexcept {
+                                              gpu_stream_t& stream) noexcept {
     using result_t = expected<parquet_file_t>;
     if (paths.empty() || columns.empty())
         return result_t::fail(status_t::invalid_argument_k, "a read needs at least one shard path and one column");
@@ -438,13 +438,13 @@ expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const
         // A column the sidecar lacks is each row's member of its sibling tar, read through the byte
         // index, whose two columns take its place and the end of the read.
         auto const footer = cudf::io::read_parquet_metadata(cudf::io::source_info {path_texts.front()});
-        auto const &fields = footer.schema().root().children();
+        auto const& fields = footer.schema().root().children();
         auto const has_field = [&](std::string_view name) {
             std::string_view const top = name.substr(0, name.find('.')); // a dotted name selects a struct's leaf
-            return std::any_of(fields.begin(), fields.end(), [&](auto const &field) { return field.name() == top; });
+            return std::any_of(fields.begin(), fields.end(), [&](auto const& field) { return field.name() == top; });
         };
         auto const missing = std::find_if(names.begin(), names.end(),
-                                          [&](auto const &name) { return !has_field(name); });
+                                          [&](auto const& name) { return !has_field(name); });
         std::size_t const tar_column = static_cast<std::size_t>(missing - names.begin());
         if (missing != names.end() && has_field(tar_offset_column_k)) {
             *missing = tar_offset_column_k;
@@ -498,7 +498,7 @@ expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const
         state->table = std::move(whole);
         return result_t {parquet_file_t {std::move(state)}};
     }
-    catch (std::exception const &error) {
+    catch (std::exception const& error) {
         return result_t::fail(status_t::internal_k, "cuDF raised at the firewall: {}", error.what());
     }
     catch (...) {
@@ -506,7 +506,7 @@ expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const
     }
 }
 
-expected<parquet_length_metadata_t> parquet_file_t::table_metadata(gpu_direct_storage_session_t const &,
+expected<parquet_length_metadata_t> parquet_file_t::table_metadata(gpu_direct_storage_session_t const&,
                                                                    sz::string_view_t path,
                                                                    sz::strings_view_t complete_columns) noexcept {
     using result_t = expected<parquet_length_metadata_t>;
@@ -516,7 +516,7 @@ expected<parquet_length_metadata_t> parquet_file_t::table_metadata(gpu_direct_st
             cudf::io::datasource::create(std::string {std::string_view {path}})}; // vendor-boundary
         std::vector<cudf::io::parquet::FileMetaData> footers;                     // vendor-boundary
         footers = cudf::io::read_parquet_footers(sources);
-        cudf::io::parquet::FileMetaData const &footer = footers.front();
+        cudf::io::parquet::FileMetaData const& footer = footers.front();
         std::size_t const groups = footer.row_groups.size();
         parquet_length_metadata_t length {static_cast<std::size_t>(footer.num_rows), 0, {}, {}};
         st::basic_vector<std::size_t> spans;
@@ -529,10 +529,10 @@ expected<parquet_length_metadata_t> parquet_file_t::table_metadata(gpu_direct_st
             complete_columns.begin(), complete_columns.end(), [&](sz::string_view_t column) {
                 return column.empty() ||
                        std::any_of(footer.schema.begin(), footer.schema.end(),
-                                   [&](auto const &element) { return std::string_view {column} == element.name; });
+                                   [&](auto const& element) { return std::string_view {column} == element.name; });
             });
         for (std::size_t group = 0; group != groups; ++group) {
-            cudf::io::parquet::RowGroup const &row_group = footer.row_groups[group];
+            cudf::io::parquet::RowGroup const& row_group = footer.row_groups[group];
             length.group_rows[group] = static_cast<std::size_t>(row_group.num_rows);
             length.group_bytes[group] = 0;
             std::size_t incomplete_rows = 0;
@@ -540,11 +540,11 @@ expected<parquet_length_metadata_t> parquet_file_t::table_metadata(gpu_direct_st
             // member, or the whole tar when the writer kept no statistics.
             i64_t first_member = 0, last_member = 0, longest_member = 0;
             std::size_t statistics = 0;
-            for (cudf::io::parquet::ColumnChunk const &chunk : row_group.columns) {
-                cudf::io::parquet::ColumnChunkMetaData const &chunk_metadata = chunk.meta_data;
+            for (cudf::io::parquet::ColumnChunk const& chunk : row_group.columns) {
+                cudf::io::parquet::ColumnChunkMetaData const& chunk_metadata = chunk.meta_data;
                 length.group_bytes[group] += static_cast<std::size_t>(chunk_metadata.total_uncompressed_size);
                 if (chunk_metadata.path_in_schema.empty()) continue;
-                std::string const &name = chunk_metadata.path_in_schema.front(); // vendor-boundary
+                std::string const& name = chunk_metadata.path_in_schema.front(); // vendor-boundary
                 bool const named = std::any_of(
                     complete_columns.begin(), complete_columns.end(),
                     [&](sz::string_view_t column) { return std::string_view {column} == name; });
@@ -578,7 +578,7 @@ expected<parquet_length_metadata_t> parquet_file_t::table_metadata(gpu_direct_st
             length.group_bytes[group] += fu::min_of(spans[group], *tar_bytes);
         return result_t {std::move(length)};
     }
-    catch (std::exception const &error) {
+    catch (std::exception const& error) {
         return result_t::fail(status_t::internal_k, "cuDF raised at the firewall: {}", error.what());
     }
     catch (...) {
@@ -586,7 +586,7 @@ expected<parquet_length_metadata_t> parquet_file_t::table_metadata(gpu_direct_st
     }
 }
 
-expected<parquet_length_metadata_t> parquet_file_t::column_metadata(gpu_direct_storage_session_t const &,
+expected<parquet_length_metadata_t> parquet_file_t::column_metadata(gpu_direct_storage_session_t const&,
                                                                     sz::string_view_t path,
                                                                     sz::string_view_t column) noexcept {
     using result_t = expected<parquet_length_metadata_t>;
@@ -596,7 +596,7 @@ expected<parquet_length_metadata_t> parquet_file_t::column_metadata(gpu_direct_s
         cudf::io::parquet_metadata const meta = cudf::io::read_parquet_metadata(
             cudf::io::source_info {std::string {path}}); // vendor-boundary
         std::string const name {column};                 // vendor-boundary
-        auto const &sizes = meta.columnchunk_metadata();
+        auto const& sizes = meta.columnchunk_metadata();
         auto const found = sizes.find(name);
         if (found == sizes.end())
             return result_t::fail(status_t::invalid_argument_k, "no column named {} in {}", column, path);
@@ -604,7 +604,7 @@ expected<parquet_length_metadata_t> parquet_file_t::column_metadata(gpu_direct_s
         for (auto const chunk_bytes : found->second) bytes += static_cast<std::size_t>(chunk_bytes);
         return result_t {parquet_length_metadata_t {static_cast<std::size_t>(meta.num_rows()), bytes}};
     }
-    catch (std::exception const &error) {
+    catch (std::exception const& error) {
         return result_t::fail(status_t::internal_k, "cuDF raised at the firewall: {}", error.what());
     }
     catch (...) {
@@ -620,8 +620,8 @@ struct jsonl_file_t::state_t {
 };
 
 jsonl_file_t::jsonl_file_t() noexcept = default;
-jsonl_file_t::jsonl_file_t(jsonl_file_t &&) noexcept = default;
-jsonl_file_t &jsonl_file_t::operator=(jsonl_file_t &&) noexcept = default;
+jsonl_file_t::jsonl_file_t(jsonl_file_t&&) noexcept = default;
+jsonl_file_t& jsonl_file_t::operator=(jsonl_file_t&&) noexcept = default;
 jsonl_file_t::~jsonl_file_t() = default;
 jsonl_file_t::jsonl_file_t(std::unique_ptr<state_t> state) noexcept : state_(std::move(state)) {}
 
@@ -635,8 +635,8 @@ std::span<u64_t const> jsonl_file_t::groups() const noexcept {
     return state_ ? state_->span.groups : std::span<u64_t const> {};
 }
 
-expected<jsonl_file_t> jsonl_file_t::make(gpu_direct_storage_session_t const &, sz::string_view_t path,
-                                          sz::string_view_t field, gpu_stream_t &stream) noexcept {
+expected<jsonl_file_t> jsonl_file_t::make(gpu_direct_storage_session_t const&, sz::string_view_t path,
+                                          sz::string_view_t field, gpu_stream_t& stream) noexcept {
     using result_t = expected<jsonl_file_t>;
     try {
         switch_to_gpu_t gpu_scope {stream}; // cuDF allocates and launches in the current context
@@ -674,7 +674,7 @@ expected<jsonl_file_t> jsonl_file_t::make(gpu_direct_storage_session_t const &, 
         state->span = std::move(span.value_);
         return result_t {jsonl_file_t {std::move(state)}};
     }
-    catch (std::exception const &error) {
+    catch (std::exception const& error) {
         return result_t::fail(status_t::internal_k, "cuDF raised at the firewall: {}", error.what());
     }
     catch (...) {
@@ -682,7 +682,7 @@ expected<jsonl_file_t> jsonl_file_t::make(gpu_direct_storage_session_t const &, 
     }
 }
 
-expected<jsonl_file_t> jsonl_file_t::concat(std::span<jsonl_file_t const> parts, gpu_stream_t &stream) noexcept {
+expected<jsonl_file_t> jsonl_file_t::concat(std::span<jsonl_file_t const> parts, gpu_stream_t& stream) noexcept {
     using result_t = expected<jsonl_file_t>;
     if (parts.empty()) return result_t::fail(status_t::invalid_argument_k, "JSONL concat needs at least one shard");
     try {
@@ -691,7 +691,7 @@ expected<jsonl_file_t> jsonl_file_t::concat(std::span<jsonl_file_t const> parts,
         cuda::stream_ref const cudf_stream {stream.get()};
         std::vector<cudf::column_view> fields; // vendor-boundary: cudf::concatenate takes a column-view list
         fields.reserve(parts.size());
-        for (jsonl_file_t const &part : parts) fields.push_back(part.state_->field->view());
+        for (jsonl_file_t const& part : parts) fields.push_back(part.state_->field->view());
         auto state = std::make_unique<state_t>();
         state->field = cudf::concatenate(fields, cudf_stream); // one copy into a single owned field column
         auto span = adopt_flat_(flatten_column_(state->field->view(), sz::string_view_t {"jsonl", 5}, cudf_stream),
@@ -700,7 +700,7 @@ expected<jsonl_file_t> jsonl_file_t::concat(std::span<jsonl_file_t const> parts,
         state->span = std::move(span.value_);
         return result_t {jsonl_file_t {std::move(state)}};
     }
-    catch (std::exception const &error) {
+    catch (std::exception const& error) {
         return result_t::fail(status_t::internal_k, "cuDF raised at the firewall: {}", error.what());
     }
     catch (...) {
@@ -714,8 +714,8 @@ struct csv_file_t::state_t {
 };
 
 csv_file_t::csv_file_t() noexcept = default;
-csv_file_t::csv_file_t(csv_file_t &&) noexcept = default;
-csv_file_t &csv_file_t::operator=(csv_file_t &&) noexcept = default;
+csv_file_t::csv_file_t(csv_file_t&&) noexcept = default;
+csv_file_t& csv_file_t::operator=(csv_file_t&&) noexcept = default;
 csv_file_t::~csv_file_t() = default;
 csv_file_t::csv_file_t(std::unique_ptr<state_t> state) noexcept : state_(std::move(state)) {}
 
@@ -728,9 +728,9 @@ std::span<u64_t const> csv_file_t::groups() const noexcept {
     return state_ ? state_->span.groups : std::span<u64_t const> {};
 }
 
-expected<csv_file_t> csv_file_t::make(gpu_direct_storage_session_t const &, sz::string_view_t path,
+expected<csv_file_t> csv_file_t::make(gpu_direct_storage_session_t const&, sz::string_view_t path,
                                       sz::string_view_t column, char delimiter, csv_header_t header,
-                                      gpu_stream_t &stream) noexcept {
+                                      gpu_stream_t& stream) noexcept {
     using result_t = expected<csv_file_t>;
     try {
         switch_to_gpu_t gpu_scope {stream}; // cuDF allocates and launches in the current context
@@ -762,7 +762,7 @@ expected<csv_file_t> csv_file_t::make(gpu_direct_storage_session_t const &, sz::
         state->span = std::move(span.value_);
         return result_t {csv_file_t {std::move(state)}};
     }
-    catch (std::exception const &error) {
+    catch (std::exception const& error) {
         return result_t::fail(status_t::internal_k, "cuDF raised at the firewall: {}", error.what());
     }
     catch (...) {
@@ -770,7 +770,7 @@ expected<csv_file_t> csv_file_t::make(gpu_direct_storage_session_t const &, sz::
     }
 }
 
-expected<csv_file_t> csv_file_t::concat(std::span<csv_file_t const> parts, gpu_stream_t &stream) noexcept {
+expected<csv_file_t> csv_file_t::concat(std::span<csv_file_t const> parts, gpu_stream_t& stream) noexcept {
     using result_t = expected<csv_file_t>;
     if (parts.empty()) return result_t::fail(status_t::invalid_argument_k, "CSV concat needs at least one shard");
     try {
@@ -779,7 +779,7 @@ expected<csv_file_t> csv_file_t::concat(std::span<csv_file_t const> parts, gpu_s
         cuda::stream_ref const cudf_stream {stream.get()};
         std::vector<cudf::column_view> columns; // vendor-boundary: cudf::concatenate takes a column-view list
         columns.reserve(parts.size());
-        for (csv_file_t const &part : parts) columns.push_back(part.state_->field->view());
+        for (csv_file_t const& part : parts) columns.push_back(part.state_->field->view());
         auto state = std::make_unique<state_t>();
         state->field = cudf::concatenate(columns, cudf_stream); // one copy into a single owned column
         auto span = adopt_flat_(flatten_column_(state->field->view(), sz::string_view_t {"csv", 3}, cudf_stream),
@@ -788,7 +788,7 @@ expected<csv_file_t> csv_file_t::concat(std::span<csv_file_t const> parts, gpu_s
         state->span = std::move(span.value_);
         return result_t {csv_file_t {std::move(state)}};
     }
-    catch (std::exception const &error) {
+    catch (std::exception const& error) {
         return result_t::fail(status_t::internal_k, "cuDF raised at the firewall: {}", error.what());
     }
     catch (...) {
@@ -806,7 +806,7 @@ expected<std::size_t> ul::file_size_bytes(sz::string_view_t path) noexcept {
 }
 
 /** Whether @p path names a directory once every symlink resolves. */
-[[nodiscard]] static bool is_directory_(sz::string_t const &path) noexcept {
+[[nodiscard]] static bool is_directory_(sz::string_t const& path) noexcept {
     struct ::stat info {}; // vendor-boundary: POSIX stat
     return ::stat(path.c_str(), &info) == 0 && S_ISDIR(info.st_mode);
 }
@@ -860,11 +860,11 @@ expected<st::basic_vector<sz::string_t>> ul::expand_glob(sz::string_view_t path_
         // `**` keeps each prefix and adds every real directory below, as a symlink could loop.
         st::basic_vector<sz::string_t> next_prefixes;
         if (recursive) next_prefixes = std::move(prefixes);
-        st::basic_vector<sz::string_t> const &walked = recursive ? next_prefixes : prefixes;
+        st::basic_vector<sz::string_t> const& walked = recursive ? next_prefixes : prefixes;
         for (std::size_t index = 0; index != walked.size(); ++index) {
-            ::DIR *const handle = ::opendir(walked[index].c_str());
+            ::DIR* const handle = ::opendir(walked[index].c_str());
             if (handle == nullptr) continue; // a forked branch without this component matches nothing
-            for (::dirent const *entry = ::readdir(handle); entry != nullptr; entry = ::readdir(handle)) {
+            for (::dirent const* entry = ::readdir(handle); entry != nullptr; entry = ::readdir(handle)) {
                 if (std::strcmp(entry->d_name, ".") == 0 || std::strcmp(entry->d_name, "..") == 0) continue;
                 if (!recursive && ::fnmatch(pattern_text.c_str(), entry->d_name, 0) != 0) continue;
                 sz::string_t full;

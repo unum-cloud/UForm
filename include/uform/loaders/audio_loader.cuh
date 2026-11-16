@@ -89,7 +89,7 @@ using namespace unum::uform::encoder;
                                        std::span<audio_batch_shape_t const> representations,
                                        audio_samples_span_t audio_samples, u32r1_span_t segment_offsets,
                                        u32r1_span_t segment_lengths, modality_span_t segment_modality,
-                                       u32r1_span_t dropped, gpu_stream_t &stream) noexcept;
+                                       u32r1_span_t dropped, gpu_stream_t& stream) noexcept;
 
 /** The Parquet audio loader's baked knob — just which column; the audio geometry travels on the
  *  loader's @c audio_batch_shape_t (fixed at @ref audio_loader_parquet_t::make ), not here. */
@@ -124,7 +124,7 @@ struct audio_loader_parquet_t {
      *      @c sample_rate ) — the single source, and all this loader needs; it never sees the
      *      sibling modalities' shapes.
      */
-    [[nodiscard]] static expected<audio_loader_parquet_t> make(gpu_direct_storage_session_t &session,
+    [[nodiscard]] static expected<audio_loader_parquet_t> make(gpu_direct_storage_session_t& session,
                                                                sz::string_view_t path_or_glob, u64_t seed,
                                                                pool_view_t pool, audio_batch_shape_t audio) noexcept;
 
@@ -145,13 +145,13 @@ struct audio_loader_parquet_t {
      *  @param[out] batches Output batches whose @c audio_samples grid and segment
      *      geometry get populated.
      */
-    [[nodiscard]] expected_t fill(gpu_stream_t &gpu_stream, audio_loader_parquet_config_t config, u32_t gpu_rank,
+    [[nodiscard]] expected_t fill(gpu_stream_t& gpu_stream, audio_loader_parquet_config_t config, u32_t gpu_rank,
                                   u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept;
 
   private:
 
     /** The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
-    gpu_direct_storage_session_t *storage_ = nullptr;
+    gpu_direct_storage_session_t* storage_ = nullptr;
 
     /** The run's CPU-decode worker pool — borrowed from the composition root, handed to the decode;
      *  never owned, never spawned here. */

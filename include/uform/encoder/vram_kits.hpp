@@ -63,7 +63,7 @@ struct vram_nvidia_entries_kit_t {
 
     /** Reads the name, compute units, memory and compute capability of the vendor's device
      *  @p vendor_ordinal . */
-    static nk_status_t describe(std::size_t vendor_ordinal, device_description_t &description) noexcept;
+    static nk_status_t describe(std::size_t vendor_ordinal, device_description_t& description) noexcept;
 
     /** @p source into @p target , as long, either side in host or device memory. */
     static nk_status_t copy(uu::bytes_span_t target, uu::bytes_view_t source, nk_stream_t stream) noexcept;
@@ -100,7 +100,7 @@ struct vram_nvidia_entries_kit_t {
 /** AMD's twin of @ref vram_nvidia_entries_kit_t , which @c vram_entries_amd.cpp defines. */
 struct vram_amd_entries_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    static nk_status_t describe(std::size_t vendor_ordinal, device_description_t &description) noexcept;
+    static nk_status_t describe(std::size_t vendor_ordinal, device_description_t& description) noexcept;
     static nk_status_t copy(uu::bytes_span_t target, uu::bytes_view_t source, nk_stream_t stream) noexcept;
     static nk_status_t zero(uu::bytes_span_t target, nk_stream_t stream) noexcept;
     static nk_status_t fill_layout(u32r1_view_t lengths, u32r1_span_t packed_offsets, u32r1_span_t pool_offsets,

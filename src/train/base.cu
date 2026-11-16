@@ -203,7 +203,7 @@ struct grid_factor_t {
 
 /** Whether @p matrix projects back into the residual stream: each block's attention
  *  and MLP output. */
-[[nodiscard]] static bool writes_residual_(differentiable_weights_t const &matrix) noexcept {
+[[nodiscard]] static bool writes_residual_(differentiable_weights_t const& matrix) noexcept {
     return matrix.name.view().ends_with(".out") || matrix.name.view().ends_with(".down");
 }
 
@@ -223,15 +223,15 @@ multimodal_batch_shape_t ut::batch_capacity(multimodal_batch_shape_t shape, std:
  *  unit of variance. */
 [[nodiscard]] static std::size_t residual_writers_(std::span<differentiable_weights_t const> list) noexcept {
     std::size_t residual_writers = 0;
-    for (differentiable_weights_t const &matrix : list) residual_writers += writes_residual_(matrix) ? 1u : 0u;
+    for (differentiable_weights_t const& matrix : list) residual_writers += writes_residual_(matrix) ? 1u : 0u;
     return residual_writers;
 }
 
 /** Seed matrix @p weight_index of @p list to its deterministic init, the salt keyed by its
  *  position, so a matrix re-seeded alone matches the one a whole-list seed writes. */
 [[nodiscard]] static expected_t seed_matrix_(std::span<differentiable_weights_t const> list, std::size_t weight_index,
-                                             std::size_t residual_writers, gpu_stream_t &stream) noexcept {
-    differentiable_weights_t const &matrix = list[weight_index];
+                                             std::size_t residual_writers, gpu_stream_t& stream) noexcept {
+    differentiable_weights_t const& matrix = list[weight_index];
     std::size_t const rows = matrix.weights.extent(0), columns = matrix.weights.extent(1);
     // Matrices are [outputs,inputs]; the residual writers split one unit of variance
     // across the stack.
@@ -251,7 +251,7 @@ multimodal_batch_shape_t ut::batch_capacity(multimodal_batch_shape_t shape, std:
     return {};
 }
 
-expected_t ut::seed_weights(st::basic_vector<differentiable_weights_t> const &weights, gpu_stream_t &stream) noexcept {
+expected_t ut::seed_weights(st::basic_vector<differentiable_weights_t> const& weights, gpu_stream_t& stream) noexcept {
     std::span<differentiable_weights_t const> const list {weights};
     std::size_t const residual_writers = residual_writers_(list);
     for (std::size_t weight_index = 0; weight_index != list.size(); ++weight_index)
@@ -271,7 +271,7 @@ f32_t trainer_config_t::learning_rate_for(optimizer_step_t optimizer_step) const
 
 /** The masking corruptor's keyed recipe — the run's knobs, its seed derived once from
  *  the run seed. */
-[[nodiscard]] static masking_recipe_t masking_recipe_(trainer_config_t const &config) noexcept {
+[[nodiscard]] static masking_recipe_t masking_recipe_(trainer_config_t const& config) noexcept {
     masking_recipe_t recipe = config.masking;
     recipe.seed = config.seed * 2654435761u + 17u;
     return recipe;
@@ -292,10 +292,10 @@ struct row_partition_t {
  *  the freedom the real mixer has. Every live modality gets the floor share; the keyed draw rotates
  *  which ones carry the remainder, so every mixture recurs across passes (and a one-row omni batch
  *  deterministically leaves most heads with zero live rows — the dynamic-M edge). */
-[[nodiscard]] static row_partition_t partition_rows_(trainer_config_t const &config,
+[[nodiscard]] static row_partition_t partition_rows_(trainer_config_t const& config,
                                                      u32_t gpu_index_in_colocated_domain,
                                                      data_epoch_t data_epoch) noexcept {
-    multimodal_batch_shape_t const &shape = config.batch;
+    multimodal_batch_shape_t const& shape = config.batch;
     bool const live[4] = {true, shape.contains(modality_t::image_k), shape.contains(modality_t::video_k),
                           shape.contains(modality_t::audio_k)};
     u32_t live_count = 0;
@@ -325,8 +325,8 @@ struct row_partition_t {
  *  envelope, one media entry per live batch slice — the batch shape stays the single source of
  *  modality presence. The rotary tables cover the largest coordinate a row reaches: its column
  *  count, or the absolute source frame the last tube of a one-patch clip starts at. */
-[[nodiscard]] static encoder_tower_config_t tower_config_(trainer_config_t const &config) noexcept {
-    multimodal_batch_shape_t const &batch = config.batch;
+[[nodiscard]] static encoder_tower_config_t tower_config_(trainer_config_t const& config) noexcept {
+    multimodal_batch_shape_t const& batch = config.batch;
     u32_t const max_tokens = batch.max_rows_per_gpu * batch.max_columns_per_row;
     encoder_tower_config_t tower;
     tower.vocabulary = byte_vocabulary_k;
@@ -358,13 +358,13 @@ struct row_partition_t {
     return tower;
 }
 
-expected_t ut::load_weights(checkpoint_to_load_t const &checkpoint,
-                            st::basic_vector<differentiable_weights_t> const &weights, gpu_stream_t &stream) noexcept {
+expected_t ut::load_weights(checkpoint_to_load_t const& checkpoint,
+                            st::basic_vector<differentiable_weights_t> const& weights, gpu_stream_t& stream) noexcept {
     std::span<differentiable_weights_t const> const list {weights};
     std::size_t const residual_writers = residual_writers_(list);
     sz::string_t name_text;
     for (std::size_t weight_index = 0; weight_index != list.size(); ++weight_index) {
-        differentiable_weights_t const &matrix = list[weight_index];
+        differentiable_weights_t const& matrix = list[weight_index];
         name_text.clear();
         if (!format_into(name_text, "model.{}", matrix.name))
             return expected_t::fail(status_t::bad_alloc_k, "matrix name format failed ({})", matrix.name);
@@ -389,20 +389,20 @@ expected_t ut::load_weights(checkpoint_to_load_t const &checkpoint,
     return {};
 }
 
-expected_t ut::save_weights(checkpoint_to_save_t &checkpoint, trainer_config_t const &config,
-                            st::basic_vector<differentiable_weights_t> const &weights, u32_t steps,
-                            gpu_stream_t &stream) noexcept {
+expected_t ut::save_weights(checkpoint_to_save_t& checkpoint, trainer_config_t const& config,
+                            st::basic_vector<differentiable_weights_t> const& weights, u32_t steps,
+                            gpu_stream_t& stream) noexcept {
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed");
     std::span<differentiable_weights_t const> const list {weights};
     u64_t largest_scalars = 0;
-    for (differentiable_weights_t const &matrix : list)
+    for (differentiable_weights_t const& matrix : list)
         if (matrix.weights.numel() > largest_scalars) largest_scalars = matrix.weights.numel();
     st::basic_vector<nk_bf16_t> staging;
     if (st::failed(staging.resize(st::assume_uninitialized, largest_scalars)))
         return expected_t::fail(status_t::bad_alloc_k, "checkpoint staging failed ({} scalars)", largest_scalars);
     sz::string_t name_text;
-    for (differentiable_weights_t const &matrix : list) {
+    for (differentiable_weights_t const& matrix : list) {
         name_text.clear();
         if (!format_into(name_text, "model.{}", matrix.name))
             return expected_t::fail(status_t::bad_alloc_k, "matrix name format failed ({})", matrix.name);
@@ -450,10 +450,10 @@ expected_t ut::save_weights(checkpoint_to_save_t &checkpoint, trainer_config_t c
     return {};
 }
 
-expected<trainer_config_t> trainer_config_t::parse(int argc, char **argv) noexcept {
+expected<trainer_config_t> trainer_config_t::parse(int argc, char** argv) noexcept {
     using result_t = expected<trainer_config_t>;
     trainer_config_t config;
-    trainer_tier_t &tier = config.tier;
+    trainer_tier_t& tier = config.tier;
     f32_t learning_rate = 0.0f;
     for (int arg = 1; arg < argc; ++arg) {
         sz::string_view_t const flag {argv[arg], std::strlen(argv[arg])};
@@ -464,16 +464,16 @@ expected<trainer_config_t> trainer_config_t::parse(int argc, char **argv) noexce
         if (arg + 1 == argc) return result_t::fail(status_t::invalid_argument_k, "{} takes a value", flag);
         ++arg;
         sz::string_view_t const value {argv[arg], std::strlen(argv[arg])};
-        auto number = [&](auto &into) noexcept {
+        auto number = [&](auto& into) noexcept {
             std::from_chars_result const read = std::from_chars(value.data(), value.data() + value.size(), into);
             return read.ec == std::errc {} && read.ptr == value.data() + value.size();
         };
         bool taken = true;
         if (flag == "--steps") taken = number(config.steps);
         else if (flag == "--tier") {
-            trainer_tier_t const *found = std::find_if(
+            trainer_tier_t const* found = std::find_if(
                 std::begin(trainer_tiers_k), std::end(trainer_tiers_k),
-                [&](trainer_tier_t const &known) { return value == known.name; });
+                [&](trainer_tier_t const& known) { return value == known.name; });
             taken = found != std::end(trainer_tiers_k);
             if (taken) tier = *found;
         }
@@ -555,10 +555,10 @@ expected<trainer_config_t> trainer_config_t::parse(int argc, char **argv) noexce
     return result_t {std::move(config)};
 }
 
-expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config_t const &config,
-                                              std::size_t vertices_per_mesh, gpu_numerics_t const &numerics) noexcept {
+expected<base_replica_t> base_replica_t::make(gpu_arena_t& arena, trainer_config_t const& config,
+                                              std::size_t vertices_per_mesh, gpu_numerics_t const& numerics) noexcept {
     using result_t = expected<base_replica_t>;
-    multimodal_batch_shape_t const &shape = config.batch;
+    multimodal_batch_shape_t const& shape = config.batch;
     u32_t const max_tokens = shape.max_rows_per_gpu * shape.max_columns_per_row;
     encoder_tower_config_t const tower_config = tower_config_(config);
     if (tower_config.rope_max_positions > static_cast<u32_t>((std::numeric_limits<i16_t>::max)()))
@@ -715,7 +715,7 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config
     if (audio_live)
         if (expected_t listed = replica.audio.fill("masked_audio", replica.weights); !listed)
             return result_t::fail(std::move(listed));
-    for (f32r1_tensor_arena_t const *pair : replica.summand_pairs_())
+    for (f32r1_tensor_arena_t const* pair : replica.summand_pairs_())
         if (!pair->empty())
             if (CUresult result = cuMemsetD8(device_address(pair->data()), 0, pair->numel() * sizeof(f32_t));
                 result != CUDA_SUCCESS)
@@ -730,9 +730,9 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config
     return result_t {std::move(replica)};
 }
 
-expected_t base_replica_t::draw(trainer_config_t const &config, u32_t gpu_index_in_colocated_domain,
-                                data_epoch_t data_epoch, gpu_stream_t &stream) noexcept {
-    multimodal_batch_shape_t const &shape = config.batch;
+expected_t base_replica_t::draw(trainer_config_t const& config, u32_t gpu_index_in_colocated_domain,
+                                data_epoch_t data_epoch, gpu_stream_t& stream) noexcept {
+    multimodal_batch_shape_t const& shape = config.batch;
     row_partition_t const partition = partition_rows_(config, gpu_index_in_colocated_domain, data_epoch);
     grid_factor_t const factor = square_factor_(shape.max_columns_per_row);
     dim3 const row_grid {shape.max_rows_per_gpu, 1u, 1u};
@@ -794,14 +794,14 @@ expected_t base_replica_t::draw(trainer_config_t const &config, u32_t gpu_index_
     return {};
 }
 
-expected_t base_replica_t::prepare(trainer_config_t const &config, data_epoch_t data_epoch,
-                                   gpu_stream_t &stream) noexcept {
+expected_t base_replica_t::prepare(trainer_config_t const& config, data_epoch_t data_epoch,
+                                   gpu_stream_t& stream) noexcept {
     if (config.report_every != 0 && data_epoch.ordinal % config.report_every == 0) // the step after a report
-        for (f32r1_tensor_arena_t *pair : summand_pairs_())
+        for (f32r1_tensor_arena_t* pair : summand_pairs_())
             if (!pair->empty())
                 if (expected_t zeroed = zero_async(pair->span(), stream); !zeroed) return zeroed;
     if (tokens_summands.empty()) return {}; // masked heads exist only where make allocated the token head's summands
-    multimodal_batch_shape_t const &shape = config.batch;
+    multimodal_batch_shape_t const& shape = config.batch;
     bool const image_live = image_summands.data() != nullptr;
     bool const video_live = video_summands.data() != nullptr;
     bool const audio_live = audio_summands.data() != nullptr;
@@ -868,7 +868,7 @@ expected_t base_replica_t::prepare(trainer_config_t const &config, data_epoch_t 
     return {};
 }
 
-expected_t base_replica_t::forward_region(trainer_config_t const &config, gpu_stream_t &stream) noexcept {
+expected_t base_replica_t::forward_region(trainer_config_t const& config, gpu_stream_t& stream) noexcept {
     // A head is live iff its summand pair was allocated at make.
     bool const reconstructs = tokens_summands.data() != nullptr;
     bool const chooses = choices_summands.data() != nullptr;
@@ -922,11 +922,11 @@ expected_t base_replica_t::forward_region(trainer_config_t const &config, gpu_st
     return {};
 }
 
-expected_t base_replica_t::backward_region(gpu_stream_t &stream) noexcept {
+expected_t base_replica_t::backward_region(gpu_stream_t& stream) noexcept {
     return tower.backward(vertices_grad.view(), normalized_grad.view(), batch, stream, token_vectors_grad.view());
 }
 
-contrastive_recipe_t base_replica_t::recipe(trainer_config_t const &config) const noexcept {
+contrastive_recipe_t base_replica_t::recipe(trainer_config_t const& config) const noexcept {
     contrastive_recipe_t recipe;
     recipe.inverse_temperature = config.contrastive.inverse_temperature;
     recipe.bias = config.contrastive.bias;
@@ -937,7 +937,7 @@ contrastive_recipe_t base_replica_t::recipe(trainer_config_t const &config) cons
     return recipe;
 }
 
-contrastive_recipe_t base_replica_t::token_recipe(trainer_config_t const &config) const noexcept {
+contrastive_recipe_t base_replica_t::token_recipe(trainer_config_t const& config) const noexcept {
     contrastive_recipe_t recipe;
     recipe.inverse_temperature = config.late_interaction.inverse_temperature;
     recipe.bias = config.late_interaction.bias;

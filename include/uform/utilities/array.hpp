@@ -40,15 +40,15 @@ class stack_array {
                   "Elements must be nothrow-move-constructible so container moves stay `noexcept`");
 
     stack_array() noexcept {}
-    stack_array(stack_array const &) = delete;
-    stack_array &operator=(stack_array const &) = delete;
-    stack_array(stack_array &&other) noexcept {
+    stack_array(stack_array const&) = delete;
+    stack_array& operator=(stack_array const&) = delete;
+    stack_array(stack_array&& other) noexcept {
         for (size_type index = 0; index != other.size_; ++index)
             new (pointer_at(index)) value_type(std::move(other[index]));
         size_ = other.size_;
         other.clear();
     }
-    stack_array &operator=(stack_array &&other) noexcept {
+    stack_array& operator=(stack_array&& other) noexcept {
         if (this != &other) {
             clear();
             for (size_type index = 0; index != other.size_; ++index)
@@ -63,14 +63,14 @@ class stack_array {
     [[nodiscard]] static constexpr size_type capacity() noexcept { return capacity_limit_; }
     [[nodiscard]] size_type size() const noexcept { return size_; }
 
-    [[nodiscard]] value_type &operator[](size_type index) noexcept { return *std::launder(pointer_at(index)); }
-    [[nodiscard]] value_type const &operator[](size_type index) const noexcept {
+    [[nodiscard]] value_type& operator[](size_type index) noexcept { return *std::launder(pointer_at(index)); }
+    [[nodiscard]] value_type const& operator[](size_type index) const noexcept {
         return *std::launder(pointer_at(index));
     }
-    [[nodiscard]] value_type *begin() noexcept { return std::launder(pointer_at(0)); }
-    [[nodiscard]] value_type const *begin() const noexcept { return std::launder(pointer_at(0)); }
-    [[nodiscard]] value_type *end() noexcept { return begin() + size_; }
-    [[nodiscard]] value_type const *end() const noexcept { return begin() + size_; }
+    [[nodiscard]] value_type* begin() noexcept { return std::launder(pointer_at(0)); }
+    [[nodiscard]] value_type const* begin() const noexcept { return std::launder(pointer_at(0)); }
+    [[nodiscard]] value_type* end() noexcept { return begin() + size_; }
+    [[nodiscard]] value_type const* end() const noexcept { return begin() + size_; }
     [[nodiscard]] std::span<value_type> span() noexcept { return {begin(), size_}; }
     [[nodiscard]] std::span<value_type const> view() const noexcept { return {begin(), size_}; }
 
@@ -97,8 +97,8 @@ class stack_array {
     }
 
   private:
-    [[nodiscard]] value_type *pointer_at(size_type index) noexcept { return items_ + index; }
-    [[nodiscard]] value_type const *pointer_at(size_type index) const noexcept { return items_ + index; }
+    [[nodiscard]] value_type* pointer_at(size_type index) noexcept { return items_ + index; }
+    [[nodiscard]] value_type const* pointer_at(size_type index) const noexcept { return items_ + index; }
 
     /** A union member, so no element is constructed or destroyed until @ref push_back or
      *  @ref resize says so. */

@@ -23,16 +23,16 @@ using uu::status_t;
 
 /** Parse @p text whole into @p value , integral or floating. */
 template <typename value_type_>
-[[nodiscard]] static bool parse_(sz::string_view_t text, value_type_ &value) noexcept {
-    char const *const end = text.data() + text.size();
+[[nodiscard]] static bool parse_(sz::string_view_t text, value_type_& value) noexcept {
+    char const* const end = text.data() + text.size();
     std::from_chars_result const parsed = std::from_chars(text.data(), end, value);
     return !text.empty() && parsed.ec == std::errc {} && parsed.ptr == end;
 }
 
 /** Read the required metadata @p key into @p value . */
 template <typename value_type_>
-[[nodiscard]] static expected_t read_(checkpoint_to_load_t const &checkpoint, sz::string_view_t key,
-                                      value_type_ &value) noexcept {
+[[nodiscard]] static expected_t read_(checkpoint_to_load_t const& checkpoint, sz::string_view_t key,
+                                      value_type_& value) noexcept {
     sz::string_view_t const text = checkpoint.metadata(key);
     if (text.empty()) return expected_t::fail(status_t::invalid_argument_k, "the checkpoint misses the {} key", key);
     if (!parse_(text, value))
@@ -42,7 +42,7 @@ template <typename value_type_>
 
 /** Read the required comma-separated metadata @p key into exactly as many floats as @p values
  *  holds. */
-[[nodiscard]] static expected_t read_list_(checkpoint_to_load_t const &checkpoint, sz::string_view_t key,
+[[nodiscard]] static expected_t read_list_(checkpoint_to_load_t const& checkpoint, sz::string_view_t key,
                                            std::span<f32_t> values) noexcept {
     sz::string_view_t remaining = checkpoint.metadata(key);
     if (remaining.empty())
@@ -60,7 +60,7 @@ template <typename value_type_>
     return {};
 }
 
-expected<geometry_t> geometry_t::from(checkpoint_to_load_t const &checkpoint) noexcept {
+expected<geometry_t> geometry_t::from(checkpoint_to_load_t const& checkpoint) noexcept {
     using result_t = expected<geometry_t>;
     geometry_t geometry;
     expected_t read = read_(checkpoint, "depth", geometry.depth);

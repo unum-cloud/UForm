@@ -76,10 +76,10 @@ namespace unum::uform::utilities {
 struct gpu_symmetric_arena_t {
 
     gpu_symmetric_arena_t() noexcept = default;
-    gpu_symmetric_arena_t(gpu_symmetric_arena_t const &) = delete;
-    gpu_symmetric_arena_t &operator=(gpu_symmetric_arena_t const &) = delete;
-    gpu_symmetric_arena_t(gpu_symmetric_arena_t &&other) noexcept { swap_(other); }
-    gpu_symmetric_arena_t &operator=(gpu_symmetric_arena_t &&other) noexcept {
+    gpu_symmetric_arena_t(gpu_symmetric_arena_t const&) = delete;
+    gpu_symmetric_arena_t& operator=(gpu_symmetric_arena_t const&) = delete;
+    gpu_symmetric_arena_t(gpu_symmetric_arena_t&& other) noexcept { swap_(other); }
+    gpu_symmetric_arena_t& operator=(gpu_symmetric_arena_t&& other) noexcept {
         if (this != &other) {
             destroy_();
             swap_(other);
@@ -122,7 +122,7 @@ struct gpu_symmetric_arena_t {
 
     /** Import a remote member's slice from the fabric @p handle its owner exported and map it at
      *  domain member @p member 's offset — the peer half of the cross-process symmetric range. */
-    [[nodiscard]] expected_t adopt_peer(std::size_t member, CUmemFabricHandle const &handle) noexcept;
+    [[nodiscard]] expected_t adopt_peer(std::size_t member, CUmemFabricHandle const& handle) noexcept;
 
     /** The whole multimem_domain's member count — the symmetric range's extent; the handle table's
      *  size @b is this, so it is derived, never stored. */
@@ -169,7 +169,7 @@ struct gpu_symmetric_arena_t {
         return properties;
     }
 
-    void swap_(gpu_symmetric_arena_t &other) noexcept {
+    void swap_(gpu_symmetric_arena_t& other) noexcept {
         std::swap(base_, other.base_);
         std::swap(bytes_per_member_, other.bytes_per_member_);
         std::swap(member_stride_, other.member_stride_);
@@ -241,10 +241,10 @@ struct multimem_switch_kernels_t {
 struct multimem_switch_module_t {
 
     multimem_switch_module_t() noexcept = default;
-    multimem_switch_module_t(multimem_switch_module_t const &) = delete;
-    multimem_switch_module_t &operator=(multimem_switch_module_t const &) = delete;
-    multimem_switch_module_t(multimem_switch_module_t &&other) noexcept { swap_(other); }
-    multimem_switch_module_t &operator=(multimem_switch_module_t &&other) noexcept {
+    multimem_switch_module_t(multimem_switch_module_t const&) = delete;
+    multimem_switch_module_t& operator=(multimem_switch_module_t const&) = delete;
+    multimem_switch_module_t(multimem_switch_module_t&& other) noexcept { swap_(other); }
+    multimem_switch_module_t& operator=(multimem_switch_module_t&& other) noexcept {
         if (this != &other) {
             destroy_();
             swap_(other);
@@ -258,10 +258,10 @@ struct multimem_switch_module_t {
     [[nodiscard]] static expected<multimem_switch_module_t> load(i32_t device) noexcept;
 
     /** The kernels, valid in @p device 's primary context for the module's lifetime. */
-    [[nodiscard]] multimem_switch_kernels_t const &kernels() const noexcept { return kernels_; }
+    [[nodiscard]] multimem_switch_kernels_t const& kernels() const noexcept { return kernels_; }
 
   private:
-    void swap_(multimem_switch_module_t &other) noexcept {
+    void swap_(multimem_switch_module_t& other) noexcept {
         std::swap(context_, other.context_);
         std::swap(module_, other.module_);
         std::swap(device_, other.device_);
@@ -313,20 +313,20 @@ struct multimem_tier_choice_t {
 struct multimem_member_t {
 
     /** Multicast base of the Float32 payload — @c multimem loads and stores fan out here. */
-    f32_t *multimem_payload = nullptr; // device-boundary
+    f32_t* multimem_payload = nullptr; // device-boundary
 
     /** Multicast address of the arrival counter. */
-    u32_t *multimem_flag = nullptr; // device-boundary
+    u32_t* multimem_flag = nullptr; // device-boundary
 
     /** Member 0's payload replica, the start of the contiguous symmetric range. */
-    f32_t *replica_payloads = nullptr; // device-boundary
+    f32_t* replica_payloads = nullptr; // device-boundary
 
     /** Member 0's arrival counter. */
-    u32_t *replica_flags = nullptr; // device-boundary
+    u32_t* replica_flags = nullptr; // device-boundary
 
     /** This member's own round scalar (one word above its arrival flag) — read for the barrier
      *  target and self-advanced by the barrier kernels, never touched by any other member. */
-    u32_t *round = nullptr; // device-boundary
+    u32_t* round = nullptr; // device-boundary
 
     /** Distance between adjacent members' replicas, in 4-byte payload scalars or
      *  flag words alike. */
@@ -343,29 +343,29 @@ struct multimem_member_t {
 
     /** Where a trapping kernel of this member records why: its GPU's record in the mesh's
      *  @ref mesh_topology_t::faults ; null for a member another process drives. */
-    gpu_fault_t *fault = nullptr; // device-boundary
+    gpu_fault_t* fault = nullptr; // device-boundary
 
 #if defined(__CUDACC__)
 
     /** Member @p member 's payload replica base. */
-    [[nodiscard]] __device__ f32_t *peer_payload(u32_t member) const noexcept {
+    [[nodiscard]] __device__ f32_t* peer_payload(u32_t member) const noexcept {
         return replica_payloads + member * replica_stride_words;
     }
 
     /** Member @p member 's arrival counter. */
-    [[nodiscard]] __device__ u32_t *peer_flag(u32_t member) const noexcept {
+    [[nodiscard]] __device__ u32_t* peer_flag(u32_t member) const noexcept {
         return replica_flags + member * replica_stride_words;
     }
 
     /** This member's own arrival counter — the address the barrier spins on. */
-    [[nodiscard]] __device__ u32_t const *own_flag() const noexcept { return peer_flag(member_index); }
+    [[nodiscard]] __device__ u32_t const* own_flag() const noexcept { return peer_flag(member_index); }
 #endif
 };
 
 #if defined(__CUDACC__)
 
 /** System-scope acquire load of this member's own arrival counter. */
-[[nodiscard]] __device__ inline u32_t multimem_load_acquire_(u32_t const *own_address) noexcept {
+[[nodiscard]] __device__ inline u32_t multimem_load_acquire_(u32_t const* own_address) noexcept {
     u32_t value;
     asm volatile("ld.acquire.sys.global.u32 %0, [%1];" : "=r"(value) : "l"(own_address) : "memory");
     return value;
@@ -408,10 +408,10 @@ struct multimem_domain_t {
 
     /** The empty domain a composition root places before @ref make fills it. */
     multimem_domain_t() noexcept = default;
-    multimem_domain_t(multimem_domain_t const &) = delete;
-    multimem_domain_t &operator=(multimem_domain_t const &) = delete;
-    multimem_domain_t(multimem_domain_t &&other) noexcept { swap_(other); }
-    multimem_domain_t &operator=(multimem_domain_t &&other) noexcept {
+    multimem_domain_t(multimem_domain_t const&) = delete;
+    multimem_domain_t& operator=(multimem_domain_t const&) = delete;
+    multimem_domain_t(multimem_domain_t&& other) noexcept { swap_(other); }
+    multimem_domain_t& operator=(multimem_domain_t&& other) noexcept {
         if (this != &other) {
             destroy_();
             swap_(other);
@@ -446,7 +446,7 @@ struct multimem_domain_t {
      *      the host staging.
      *  @param[in] timeout_seconds Deadline on the rendezvous and on every later barrier's spin.
      */
-    [[nodiscard]] static expected<multimem_domain_t> make(mesh_topology_t &topology,
+    [[nodiscard]] static expected<multimem_domain_t> make(mesh_topology_t& topology,
                                                           std::span<i32_t const> local_devices,
                                                           std::size_t payload_scalars,
                                                           std::span<gpu_stream_t> local_streams,
@@ -461,7 +461,7 @@ struct multimem_domain_t {
 
     /** Member @p member_index 's switch kernels, in its device's primary context;
      *  switch tier only. */
-    [[nodiscard]] multimem_switch_kernels_t const &switch_kernels(std::size_t member_index) const noexcept {
+    [[nodiscard]] multimem_switch_kernels_t const& switch_kernels(std::size_t member_index) const noexcept {
         return tier_.modules[member_index - member_offset_].kernels();
     }
 
@@ -537,13 +537,13 @@ struct multimem_domain_t {
     /** Enqueue the domain barrier for @p member_index — one arrival, one acquire-spin against the
      *  member's own round scalar, which the kernel self-advances after the spin. On the peer tier
      *  the arrival walks the members through the symmetric range instead. */
-    [[nodiscard]] expected_t barrier(std::size_t member_index, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t barrier(std::size_t member_index, gpu_stream_t& stream) noexcept;
 
     /** Enqueue member @p member_index 's reduce-scatter shard: @p destination receives the
      *  domain-wide sum of @c [shard_begin,shard_begin+destination.extent(0)) . Call after the
      *  barrier proved every member's payload complete. */
     [[nodiscard]] expected_t reduce_scatter(std::size_t member_index, f32r1_span_t destination, std::size_t shard_begin,
-                                            gpu_stream_t &stream) noexcept;
+                                            gpu_stream_t& stream) noexcept;
 
   private:
 
@@ -554,7 +554,7 @@ struct multimem_domain_t {
         return round_up_to_multiple(payload_scalars_ * sizeof(f32_t), cache_line_bytes_k);
     }
 
-    void swap_(multimem_domain_t &other) noexcept {
+    void swap_(multimem_domain_t& other) noexcept {
         std::swap(replicas_, other.replicas_);
         std::swap(tier_, other.tier_);
         std::swap(multimem_handle_, other.multimem_handle_);

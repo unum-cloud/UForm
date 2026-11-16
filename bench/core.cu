@@ -70,7 +70,7 @@ inline constexpr u32_t segments_k = rows_k * segments_per_row_k;
  *  @p launch enqueues one call and answers its @c expected_t ; the first refusal fails the loop.
  */
 template <typename launch_type_>
-static void time_windows(loop_t &loop, CUstream stream, launch_type_ &&launch) noexcept {
+static void time_windows(loop_t& loop, CUstream stream, launch_type_&& launch) noexcept {
     CUevent start = nullptr, stop = nullptr;
     if (cuEventCreate(&start, CU_EVENT_DEFAULT) != CUDA_SUCCESS ||
         cuEventCreate(&stop, CU_EVENT_DEFAULT) != CUDA_SUCCESS)
@@ -102,7 +102,7 @@ static void time_windows(loop_t &loop, CUstream stream, launch_type_ &&launch) n
 }
 
 /** One text-only tower forward to the pooled vertices and its backward from a keyed force. */
-static void tower_forward_backward(loop_t &loop, u64_t seed) {
+static void tower_forward_backward(loop_t& loop, u64_t seed) {
     expected<gpu_stream_t> stream = gpu_stream_t::make(0);
     if (!stream) return loop.fail(stream.description_.view());
     switch_to_gpu_t gpu_scope {*stream};
@@ -155,8 +155,8 @@ static void tower_forward_backward(loop_t &loop, u64_t seed) {
             CUDA_SUCCESS)
         return loop.fail("batch upload failed");
 
-    bf16_t *vertices = arena->allocate_object<bf16_t>(segments_k * hidden_k);
-    bf16_t *vertices_grad = arena->allocate_object<bf16_t>(segments_k * hidden_k);
+    bf16_t* vertices = arena->allocate_object<bf16_t>(segments_k * hidden_k);
+    bf16_t* vertices_grad = arena->allocate_object<bf16_t>(segments_k * hidden_k);
     if (vertices == nullptr || vertices_grad == nullptr) return loop.fail("vertex allocation failed");
     if (expected_t seeded = upload_keyed_({vertices_grad, segments_k * hidden_k}, seed, weights.size()); !seeded)
         return loop.fail(seeded.description_.view());
@@ -170,7 +170,7 @@ static void tower_forward_backward(loop_t &loop, u64_t seed) {
 }
 
 /** One rank-local contrastive loss and its forces over self-edge relations. */
-static void contrastive_loss(loop_t &loop, u64_t seed) {
+static void contrastive_loss(loop_t& loop, u64_t seed) {
     expected<gpu_stream_t> stream = gpu_stream_t::make(0);
     if (!stream) return loop.fail(stream.description_.view());
     switch_to_gpu_t gpu_scope {*stream};
@@ -195,10 +195,10 @@ static void contrastive_loss(loop_t &loop, u64_t seed) {
         return loop.fail(staged.description_.view());
 
     std::size_t const scalars = std::size_t(segments_k) * hidden_k;
-    bf16_t *tower = arena->allocate_object<bf16_t>(scalars);
-    bf16_t *grad = arena->allocate_object<bf16_t>(scalars);
-    f32_t *column_grad = arena->allocate_object<f32_t>(scalars);
-    f32_t *loss_out = arena->allocate_object<f32_t>(1);
+    bf16_t* tower = arena->allocate_object<bf16_t>(scalars);
+    bf16_t* grad = arena->allocate_object<bf16_t>(scalars);
+    f32_t* column_grad = arena->allocate_object<f32_t>(scalars);
+    f32_t* loss_out = arena->allocate_object<f32_t>(1);
     if (tower == nullptr || grad == nullptr || column_grad == nullptr || loss_out == nullptr)
         return loop.fail("vertex allocation failed");
     if (expected_t seeded = upload_keyed_({tower, scalars}, seed, 0); !seeded)
@@ -215,7 +215,7 @@ static void contrastive_loss(loop_t &loop, u64_t seed) {
 }
 
 /** One single-GPU late-interaction loss and its forces at the reranker shape of the plan. */
-static void contrastive_tokens(loop_t &loop, u64_t seed) {
+static void contrastive_tokens(loop_t& loop, u64_t seed) {
     constexpr u32_t queries_k = 256, query_tokens_k = 64, documents_k = 256, document_tokens_k = 1024, width_k = 128;
     constexpr u32_t segments = queries_k + documents_k;
     constexpr u32_t head_rows = queries_k * query_tokens_k + documents_k * document_tokens_k;
@@ -257,11 +257,11 @@ static void contrastive_tokens(loop_t &loop, u64_t seed) {
         repel_offsets[segment + 1u] = 0;
     }
     std::size_t const scalars = std::size_t(head_rows) * width_k;
-    bf16_t *vectors = arena->allocate_object<bf16_t>(scalars);
-    bf16_t *grad = arena->allocate_object<bf16_t>(scalars);
-    u32_t *offsets_device = arena->allocate_object<u32_t>(segments + 1u);
-    late_interaction_side_t *sides_device = arena->allocate_object<late_interaction_side_t>(segments);
-    f32_t *loss_out = arena->allocate_object<f32_t>(1);
+    bf16_t* vectors = arena->allocate_object<bf16_t>(scalars);
+    bf16_t* grad = arena->allocate_object<bf16_t>(scalars);
+    u32_t* offsets_device = arena->allocate_object<u32_t>(segments + 1u);
+    late_interaction_side_t* sides_device = arena->allocate_object<late_interaction_side_t>(segments);
+    f32_t* loss_out = arena->allocate_object<f32_t>(1);
     if (vectors == nullptr || grad == nullptr || offsets_device == nullptr || sides_device == nullptr ||
         loss_out == nullptr)
         return loop.fail("token allocation failed");

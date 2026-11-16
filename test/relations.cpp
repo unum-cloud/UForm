@@ -50,7 +50,7 @@ struct world_columns_t {
     return mixed ^ (mixed >> 31);
 }
 
-static void fill_world_(world_columns_t &world, u32_t world_gpus, u64_t seed) noexcept {
+static void fill_world_(world_columns_t& world, u32_t world_gpus, u64_t seed) noexcept {
     for (u32_t gpu = 0; gpu != world_gpus; ++gpu) {
         u32_t segment = 0, bag = 0;
         u32_t const tail = segments_k - static_cast<u32_t>(mix_(seed, gpu) % 3u);
@@ -71,11 +71,11 @@ static void fill_world_(world_columns_t &world, u32_t world_gpus, u64_t seed) no
 
 /** Build the relations of every GPU @p topology drives into @p relations , indexed by world GPU:
  *  every bag's first segment anchors it and the rest are its positives. */
-[[nodiscard]] static bool relate_process_(mesh_topology_t const &topology, world_columns_t const &world,
-                                          gpu_relations_t *relations) noexcept {
+[[nodiscard]] static bool relate_process_(mesh_topology_t const& topology, world_columns_t const& world,
+                                          gpu_relations_t* relations) noexcept {
     expected<host_edges_t> made = host_edges_t::make(segments_k, max_edges_k);
     if (!made) return false;
-    host_edges_t &edges = made.value_;
+    host_edges_t& edges = made.value_;
     for (u32_t member = 0; member != topology.shape.gpus_per_host_domain; ++member) {
         u32_t const gpu = topology.first_gpu_index() + member;
         segment_role_t roles[segments_k];
@@ -87,7 +87,7 @@ static void fill_world_(world_columns_t &world, u32_t world_gpus, u64_t seed) no
                                           u32r1_view_t {world.lengths[gpu], segments_k}, {}, gpu * segments_k, edges);
         if (!related || edges.repel().ids.extent(0) != 0 || edges.ignore().ids.extent(0) != 0) return false;
         contrastive_edges_view_t const attract = edges.attract();
-        gpu_relations_t &into = relations[gpu];
+        gpu_relations_t& into = relations[gpu];
         into.edges = static_cast<u32_t>(attract.ids.extent(0));
         for (u32_t row = 0; row != segments_k + 1; ++row) into.offsets[row] = attract.offsets[row];
         for (u32_t edge = 0; edge != into.edges; ++edge) into.ids[edge] = attract.ids[edge];
@@ -96,7 +96,7 @@ static void fill_world_(world_columns_t &world, u32_t world_gpus, u64_t seed) no
 }
 
 /** Every process of the @p host , @p multimem , @p colocated mesh against the whole world. */
-static void slices_match_world(test_suite_t &suite, u32_t host, u32_t multimem, u32_t colocated) {
+static void slices_match_world(test_suite_t& suite, u32_t host, u32_t multimem, u32_t colocated) {
     expected<mesh_shape_t> shape = make_mesh_shape(host, multimem, colocated);
     if (!shape) return suite.check(false, "mesh shape: {}", shape.description_);
     world_columns_t world;
@@ -128,7 +128,7 @@ static void slices_match_world(test_suite_t &suite, u32_t host, u32_t multimem, 
                             "GPU {} row {} names vertex {}, off its own GPU's run of the {}-vertex world", gpu, row,
                             partner, world_vertices);
                 bool mirrored = false;
-                gpu_relations_t const &back = sliced[partner / segments_k];
+                gpu_relations_t const& back = sliced[partner / segments_k];
                 u32_t const partner_row = partner % segments_k;
                 for (u32_t back_edge = back.offsets[partner_row]; back_edge != back.offsets[partner_row + 1];
                      ++back_edge)
@@ -145,8 +145,8 @@ static void slices_match_world(test_suite_t &suite, u32_t host, u32_t multimem, 
                                   std::initializer_list<f32_t> weights) noexcept {
     u32_t const begin = set.offsets[row], end = set.offsets[row + 1];
     if (end - begin != ids.size()) return false;
-    u32_t const *const expected_ids = ids.begin();
-    f32_t const *const expected_weights = weights.begin();
+    u32_t const* const expected_ids = ids.begin();
+    f32_t const* const expected_weights = weights.begin();
     for (u32_t index = 0; index != ids.size(); ++index) {
         if (set.ids[begin + index] != expected_ids[index]) return false;
         if (weights.size() != 0 && set.weights[begin + index] != expected_weights[index]) return false;
@@ -158,7 +158,7 @@ static void slices_match_world(test_suite_t &suite, u32_t host, u32_t multimem, 
  *  from vertex 100: the anchor and positives attract each other, the anchor and each negative
  *  repel each other at the negative's weight, every other pair inside the bag is ignored, and no
  *  vertex ever names itself. */
-static void bag_roles(test_suite_t &suite) {
+static void bag_roles(test_suite_t& suite) {
     constexpr u32_t segments = 7, base = 100;
     using role_t = segment_role_t;
     u32_t const bags[segments] = {0, 0, 0, 0, 0, 1, 2};
@@ -168,7 +168,7 @@ static void bag_roles(test_suite_t &suite) {
     f32_t const weights[segments] = {1.0f, 1.0f, 1.0f, 2.0f, 0.5f, 1.0f, 1.0f};
     expected<host_edges_t> made = host_edges_t::make(segments, 16);
     if (!made) return suite.check(false, "edges: {}", made.description_);
-    host_edges_t &edges = made.value_;
+    host_edges_t& edges = made.value_;
     expected_t related = relate_roles(u32r1_view_t {bags, segments}, {roles, segments},
                                       u32r1_view_t {lengths, segments}, f32r1_view_t {weights, segments}, base, edges);
     if (!related) return suite.check(false, "relate: {}", related.description_);
@@ -190,7 +190,7 @@ static void bag_roles(test_suite_t &suite) {
 /** The mixer's two bands: two pairs' media lead, their captions trail, then PAD, from vertex 100.
  *  Each caption still attracts its own pair's media across the bands, in ascending vertex order,
  *  and bags that descend twice are refused. */
-static void bag_bands(test_suite_t &suite) {
+static void bag_bands(test_suite_t& suite) {
     constexpr u32_t segments = 5, base = 100;
     using role_t = segment_role_t;
     u32_t const bags[segments] = {0, 1, 0, 1, 2};
@@ -199,7 +199,7 @@ static void bag_bands(test_suite_t &suite) {
                                     role_t::anchor_k};
     expected<host_edges_t> made = host_edges_t::make(segments, 8);
     if (!made) return suite.check(false, "edges: {}", made.description_);
-    host_edges_t &edges = made.value_;
+    host_edges_t& edges = made.value_;
     expected_t related = relate_roles(u32r1_view_t {bags, segments}, {roles, segments},
                                       u32r1_view_t {lengths, segments}, {}, base, edges);
     if (!related) return suite.check(false, "relate: {}", related.description_);
@@ -215,7 +215,7 @@ static void bag_bands(test_suite_t &suite) {
 
 /** The derived capacity is exact: four bags of an anchor and two positives fill the attract set of
  *  @ref relation_edges_capacity to the last edge, and one edge less is refused loudly. */
-static void bag_capacity(test_suite_t &suite) {
+static void bag_capacity(test_suite_t& suite) {
     constexpr u32_t segments = 12, bag_segments = 3;
     using role_t = segment_role_t;
     u32_t bags[segments], lengths[segments];
@@ -237,7 +237,7 @@ static void bag_capacity(test_suite_t &suite) {
                 "one edge short of the derived capacity is refused");
 }
 
-int main(int, char **argv) {
+int main(int, char** argv) {
     test_suite_t suite = test_suite_t::make(argv[0]);
     suite.run("world/1-1-1", slices_match_world, 1u, 1u, 1u);
     suite.run("world/2-8-16", slices_match_world, 2u, 8u, 16u);

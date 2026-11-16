@@ -69,7 +69,7 @@ using tokens_matrix_span_t = nk::tensor_span<token_id_t, 2>;
 [[nodiscard]] expected_t pack_tokens(column_view_t texts, u64r1_view_t elements, b8r1_view_t prefix,
                                      tokens_matrix_span_t tokens, u32r1_span_t segment_offsets,
                                      u32r1_span_t segment_lengths, modality_span_t segment_modality,
-                                     u32r1_span_t dropped, gpu_stream_t &gpu_stream) noexcept;
+                                     u32r1_span_t dropped, gpu_stream_t& gpu_stream) noexcept;
 
 /** The Parquet tokens loader's baked knobs — a different config is a different loader. */
 struct tokens_base_loader_parquet_config_t {
@@ -96,7 +96,7 @@ struct tokens_loader_parquet_t {
      *  @param[in,out] session GPU Direct Storage session for IO.
      */
     [[nodiscard]] static expected<tokens_loader_parquet_t> make( //
-        gpu_direct_storage_session_t &session, sz::string_view_t path_or_glob, u64_t seed) noexcept;
+        gpu_direct_storage_session_t& session, sz::string_view_t path_or_glob, u64_t seed) noexcept;
 
     /**
      *  @brief Fills the next few @p batches of training data for the MLM objective on one GPU rank.
@@ -117,7 +117,7 @@ struct tokens_loader_parquet_t {
      *      the media modalities.
      */
     [[nodiscard]] expected_t fill(                                            //
-        gpu_stream_t &gpu_stream, tokens_base_loader_parquet_config_t config, //
+        gpu_stream_t& gpu_stream, tokens_base_loader_parquet_config_t config, //
         u32_t gpu_rank, u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept;
 
     /**
@@ -140,7 +140,7 @@ struct tokens_loader_parquet_t {
   private:
 
     /** The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
-    gpu_direct_storage_session_t *storage_ = nullptr;
+    gpu_direct_storage_session_t* storage_ = nullptr;
 
     /** The run seed keying the random file and row draws. */
     u64_t seed_ = 0;
@@ -187,7 +187,7 @@ struct tokens_loader_jsonl_t {
      *  @param[in] seed The training-run specific order-affecting seed.
      */
     [[nodiscard]] static expected<tokens_loader_jsonl_t> make( //
-        gpu_direct_storage_session_t &session, sz::string_view_t path_or_glob, u64_t seed) noexcept;
+        gpu_direct_storage_session_t& session, sz::string_view_t path_or_glob, u64_t seed) noexcept;
 
     /**
      *  @brief Fill the next few @p batches for the MLM objective on one GPU rank.
@@ -204,13 +204,13 @@ struct tokens_loader_jsonl_t {
      *  @param[out] batches Output matrices populated with token segments.
      */
     [[nodiscard]] expected_t fill(                                          //
-        gpu_stream_t &gpu_stream, tokens_base_loader_jsonl_config_t config, //
+        gpu_stream_t& gpu_stream, tokens_base_loader_jsonl_config_t config, //
         u32_t gpu_rank, u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept;
 
   private:
 
     /** The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
-    gpu_direct_storage_session_t *storage_ = nullptr;
+    gpu_direct_storage_session_t* storage_ = nullptr;
 
     /** The dataset's JSONL shard paths — owned, expanded from the glob at @c make . */
     st::basic_vector<sz::string_t> absolute_paths_ {};
@@ -264,7 +264,7 @@ struct tokens_loader_csv_t {
      *  @param[in] seed The training-run specific order-affecting seed.
      */
     [[nodiscard]] static expected<tokens_loader_csv_t> make( //
-        gpu_direct_storage_session_t &session, sz::string_view_t path_or_glob, u64_t seed) noexcept;
+        gpu_direct_storage_session_t& session, sz::string_view_t path_or_glob, u64_t seed) noexcept;
 
     /**
      *  @brief Fill the next few @p batches for the MLM objective on one GPU rank.
@@ -281,13 +281,13 @@ struct tokens_loader_csv_t {
      *  @param[out] batches Output matrices populated with token segments.
      */
     [[nodiscard]] expected_t fill(                                        //
-        gpu_stream_t &gpu_stream, tokens_base_loader_csv_config_t config, //
+        gpu_stream_t& gpu_stream, tokens_base_loader_csv_config_t config, //
         u32_t gpu_rank, u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept;
 
   private:
 
     /** The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
-    gpu_direct_storage_session_t *storage_ = nullptr;
+    gpu_direct_storage_session_t* storage_ = nullptr;
 
     /** The dataset's CSV shard paths — owned, expanded from the glob at @c make . */
     st::basic_vector<sz::string_t> absolute_paths_ {};

@@ -46,7 +46,7 @@ inline constexpr std::size_t probe_tail_bytes_k = 3ull * 1024 * 1024;
  *  @param[in,out] suite The probe suite the checks report into.
  *  @param[in] device The GPU ordinal.
  */
-static void probe_gpu_registration_(test_suite_t &suite, int device) noexcept {
+static void probe_gpu_registration_(test_suite_t& suite, int device) noexcept {
     CUcontext context = nullptr;
     CUdevice handle = 0;
     if (cuDeviceGet(&handle, device) != CUDA_SUCCESS || cuDevicePrimaryCtxRetain(&context, handle) != CUDA_SUCCESS ||
@@ -58,8 +58,8 @@ static void probe_gpu_registration_(test_suite_t &suite, int device) noexcept {
     expected<gpu_arena_t> arena = gpu_arena_t::make(device, probe_reserve_bytes_k);
     suite.check(bool(arena), "probe arena reservation failed (device={})", device);
     if (!arena) return;
-    std::byte *const tail = arena.value_.allocate_bytes(probe_tail_bytes_k);
-    std::byte *const heap = arena.value_.allocate_registrable_bytes(probe_heap_bytes_k);
+    std::byte* const tail = arena.value_.allocate_bytes(probe_tail_bytes_k);
+    std::byte* const heap = arena.value_.allocate_registrable_bytes(probe_heap_bytes_k);
     suite.check(tail != nullptr && heap != nullptr, "probe arena allocation failed (device={})", device);
     if (heap == nullptr) return;
 
@@ -72,14 +72,14 @@ static void probe_gpu_registration_(test_suite_t &suite, int device) noexcept {
 }
 
 /** Registers every one of the @p device_count local GPUs with its same-index NIC. */
-static void probe_gpudirect_(test_suite_t &suite, int device_count) noexcept {
+static void probe_gpudirect_(test_suite_t& suite, int device_count) noexcept {
     if (device_count == 0) return suite.skip(no_cuda_device_k);
     for (int device = 0; device < device_count; ++device) probe_gpu_registration_(suite, device);
 }
 #else
 
 /** Skips the GPUDirect check, which a build without InfiniBand cannot make. */
-static void probe_gpudirect_(test_suite_t &suite, int) noexcept { suite.skip("built without UFORM_WITH_INFINIBAND"); }
+static void probe_gpudirect_(test_suite_t& suite, int) noexcept { suite.skip("built without UFORM_WITH_INFINIBAND"); }
 #endif
 
 /**
@@ -87,8 +87,8 @@ static void probe_gpudirect_(test_suite_t &suite, int) noexcept { suite.skip("bu
  *      by creating and removing a probe file.
  *  @param[in,out] suite The probe suite the check reports into.
  */
-static void probe_exchange_directory_(test_suite_t &suite) noexcept {
-    char const *const exchange_directory = std::getenv("UFORM_EXCHANGE_DIR");
+static void probe_exchange_directory_(test_suite_t& suite) noexcept {
+    char const* const exchange_directory = std::getenv("UFORM_EXCHANGE_DIR");
     if (host_domain_count_from_environment() == 1u) return suite.skip("a single-node run needs no rendezvous");
     suite.check(exchange_directory != nullptr, "UFORM_EXCHANGE_DIR unset in a multi-node world");
     if (exchange_directory == nullptr) return;
@@ -97,7 +97,7 @@ static void probe_exchange_directory_(test_suite_t &suite) noexcept {
         suite.check(false, "probe path formatting failed");
         return;
     }
-    std::FILE *const probe_file = std::fopen(probe_path.c_str(), "w");
+    std::FILE* const probe_file = std::fopen(probe_path.c_str(), "w");
     suite.check(probe_file != nullptr, "exchange directory not writable: {}", exchange_directory);
     if (probe_file != nullptr) {
         std::fclose(probe_file);
@@ -105,7 +105,7 @@ static void probe_exchange_directory_(test_suite_t &suite) noexcept {
     }
 }
 
-int main(int, char **argv) {
+int main(int, char** argv) {
     test_suite_t suite = test_suite_t::make(argv[0]);
     suite.run("exchange_directory", probe_exchange_directory_);
 

@@ -101,7 +101,7 @@ inline constexpr f64_t test_rendezvous_timeout_seconds_k = 60.0;
 /** One width tier: the mesh every cell of the tier builds its trainer over, the devices it drives,
  *  and the kernels they call. */
 struct tier_t {
-    mesh_t &mesh;
+    mesh_t& mesh;
     std::span<i32_t const> devices;
     gpu_numerics_t numerics;
 };
@@ -114,7 +114,7 @@ struct tier_t {
  *  Safe because a single-host topology carries no rendezvous state; the one cross-field invariant
  *  is that @c host_domains sizes to @c shape.host_domain_count() .
  */
-[[nodiscard]] static expected_t narrow_mesh_(mesh_t &placed, mesh_topology_t const &world, u32_t gpus) noexcept {
+[[nodiscard]] static expected_t narrow_mesh_(mesh_t& placed, mesh_topology_t const& world, u32_t gpus) noexcept {
     placed.topology.shape.gpus_per_host_domain = gpus;
     placed.topology.shape.gpus_per_multimem_domain = gpus;
     placed.topology.shape.gpus_per_colocated_domain = gpus;
@@ -146,7 +146,7 @@ struct world_health_t {
 };
 
 /** The reason every case after the first unhealthy detection skips with. */
-inline constexpr char const *world_unhealthy_k = "an earlier case found the world unhealthy";
+inline constexpr char const* world_unhealthy_k = "an earlier case found the world unhealthy";
 
 /**
  *  @brief Probe @p health before a case: report the first poisoned-context or unresponsive-peer
@@ -154,7 +154,7 @@ inline constexpr char const *world_unhealthy_k = "an earlier case found the worl
  *  @param[in,out] suite The suite the one abort line reports into.
  *  @param[in,out] health The world's health record, cleared at the first detection.
  */
-[[nodiscard]] static bool world_still_healthy_(test_suite_t &suite, world_health_t &health) noexcept {
+[[nodiscard]] static bool world_still_healthy_(test_suite_t& suite, world_health_t& health) noexcept {
     if (!health.alive) return false;
     if (health.consecutive_setup_failures >= 2u) {
         health.alive = false;
@@ -169,15 +169,15 @@ inline constexpr char const *world_unhealthy_k = "an earlier case found the worl
 }
 
 /** Build @p placed over @p tier for @p config , tallying bring-up failures into @p health . */
-[[nodiscard]] static expected_t make_trainer_(trainer_t &placed, tier_t tier, trainer_config_t const &config,
-                                              world_health_t &health) noexcept {
+[[nodiscard]] static expected_t make_trainer_(trainer_t& placed, tier_t tier, trainer_config_t const& config,
+                                              world_health_t& health) noexcept {
     expected_t built = trainer_t::make(placed, tier.mesh, config, tier.devices, tier.numerics);
     health.consecutive_setup_failures = built ? 0u : health.consecutive_setup_failures + 1u;
     return built;
 }
 
 /** Enqueue steps @b [begin,end) of the synthetic loop. */
-[[nodiscard]] static expected_t run_steps_(trainer_t &trainer, u32_t begin, u32_t end) noexcept {
+[[nodiscard]] static expected_t run_steps_(trainer_t& trainer, u32_t begin, u32_t end) noexcept {
     synthetic_source_t source;
     step_report_t report;
     for (u32_t ordinal = begin; ordinal != end; ++ordinal)
@@ -189,13 +189,13 @@ inline constexpr char const *world_unhealthy_k = "an earlier case found the worl
 /** DtoH one replica's whole registration list into a byte-comparable host array — the snapshot
  *  behind assertions A, C, and the gradient-propagation check. */
 [[nodiscard]] static expected<st::basic_vector<bf16_t>> snapshot_weights_(
-    st::basic_vector<differentiable_weights_t> const &weights, gpu_stream_t &stream) noexcept {
+    st::basic_vector<differentiable_weights_t> const& weights, gpu_stream_t& stream) noexcept {
     using result_t = expected<st::basic_vector<bf16_t>>;
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "context entry failed");
     std::span<differentiable_weights_t const> const list = weights;
     std::size_t total = 0, largest = 0;
-    for (differentiable_weights_t const &matrix : list) {
+    for (differentiable_weights_t const& matrix : list) {
         std::size_t const scalars = matrix.weights.numel();
         total += scalars;
         largest = fu::max_of(largest, scalars);
@@ -207,7 +207,7 @@ inline constexpr char const *world_unhealthy_k = "an earlier case found the worl
         nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1>::uninitialized({largest}, pinned_alloc<bf16_t> {}).value;
     if (!staging) return result_t::fail(status_t::bad_alloc_k, "pinned staging allocation failed");
     std::size_t cursor = 0;
-    for (differentiable_weights_t const &matrix : list) {
+    for (differentiable_weights_t const& matrix : list) {
         std::size_t const scalars = matrix.weights.numel();
         if (nk::failed(staging.resize({scalars})))
             return result_t::fail(status_t::bad_alloc_k, "staging resize failed");
@@ -223,8 +223,8 @@ inline constexpr char const *world_unhealthy_k = "an earlier case found the worl
 
 /** DtoH the lead replica's shared @c d(normalized) - the score output whose two captured
  *  replays must agree. */
-[[nodiscard]] static expected<st::basic_vector<bf16_t>> snapshot_grad_(base_replica_t &replica,
-                                                                       gpu_stream_t &stream) noexcept {
+[[nodiscard]] static expected<st::basic_vector<bf16_t>> snapshot_grad_(base_replica_t& replica,
+                                                                       gpu_stream_t& stream) noexcept {
     using result_t = expected<st::basic_vector<bf16_t>>;
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "context entry failed");
@@ -244,15 +244,15 @@ inline constexpr char const *world_unhealthy_k = "an earlier case found the worl
 }
 
 /** Bytewise-equal two snapshots, as replicas fed one all-reduced gradient must agree exactly. */
-[[nodiscard]] static bool snapshots_match_(st::basic_vector<bf16_t> const &left,
-                                           st::basic_vector<bf16_t> const &right) noexcept {
+[[nodiscard]] static bool snapshots_match_(st::basic_vector<bf16_t> const& left,
+                                           st::basic_vector<bf16_t> const& right) noexcept {
     return left.size() == right.size() && std::memcmp(left.data(), right.data(), left.size() * sizeof(bf16_t)) == 0;
 }
 
 /** Two snapshots agree within 1% of the first's peak, for runs whose reductions may add
  *  in any order. */
-[[nodiscard]] static bool snapshots_near_(st::basic_vector<bf16_t> const &left,
-                                          st::basic_vector<bf16_t> const &right) noexcept {
+[[nodiscard]] static bool snapshots_near_(st::basic_vector<bf16_t> const& left,
+                                          st::basic_vector<bf16_t> const& right) noexcept {
     if (left.size() != right.size()) return false;
     f32_t largest = 0.0f, worst = 0.0f;
     for (std::size_t index = 0; index != left.size(); ++index) {
@@ -266,7 +266,7 @@ inline constexpr char const *world_unhealthy_k = "an earlier case found the worl
 /** The warmup / cosine policy's own properties, pure host math: a strictly monotone ramp topping
  *  out exactly at the peak, a never-rising decay bounded by @b [floor, peak] , and a tail settling
  *  onto the floor. */
-static void learning_rate_schedule(test_suite_t &suite) {
+static void learning_rate_schedule(test_suite_t& suite) {
     trainer_config_t config;
     config.seed = suite.settings.seed;
     config.learning_rate = 1.0e-3f;
@@ -303,7 +303,7 @@ static void learning_rate_schedule(test_suite_t &suite) {
  *  prefix), derived from @p config and asserted in full order — a @c fill reorder or rename fails
  *  loudly here before it silently re-keys a checkpoint. Piggybacks on an already-built trainer, so
  *  it costs no bring-up of its own. */
-static void check_weight_naming_(test_suite_t &suite, char const *label, trainer_config_t const &config,
+static void check_weight_naming_(test_suite_t& suite, char const* label, trainer_config_t const& config,
                                  std::span<differentiable_weights_t const> weights) {
     std::size_t index = 0;
     auto expect = [&](sz::string_view_t want) {
@@ -343,10 +343,10 @@ static void check_weight_naming_(test_suite_t &suite, char const *label, trainer
  *  the invariants A, B, D, E and F into @p suite ; then an eager trainer of the same seed checks C.
  *  D and E read the ledger's running loss statistics — every local member's sample mass, not a
  *  lead-only coin flip. */
-static void run_base_conformance(test_suite_t &suite, world_health_t &health, char const *label,
-                                 trainer_config_t const &config, tier_t tier) {
+static void run_base_conformance(test_suite_t& suite, world_health_t& health, char const* label,
+                                 trainer_config_t const& config, tier_t tier) {
     if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
-    mesh_topology_t const &topology = tier.mesh.topology;
+    mesh_topology_t const& topology = tier.mesh.topology;
     st::basic_vector<bf16_t> captured_lead;
     {
         trainer_t trainer;
@@ -408,9 +408,9 @@ static void run_base_conformance(test_suite_t &suite, world_health_t &health, ch
                                                                   test_rendezvous_timeout_seconds_k);
                          !arrived)
                     return suite.check(false, "[{}] loss-summand exchange: {}", label, arrived.description_);
-                char const *cursor = text.c_str();
+                char const* cursor = text.c_str();
                 for (u32_t head = 0; head != 4u; ++head) {
-                    char *next = nullptr;
+                    char* next = nullptr;
                     world_mid[head].weighted_sum += std::strtod(cursor, &next); // vendor-boundary: libc parse
                     world_mid[head].weight += std::strtod(next, &next);         // vendor-boundary
                     world_end[head].weighted_sum += std::strtod(next, &next);   // vendor-boundary
@@ -514,7 +514,7 @@ static void run_base_conformance(test_suite_t &suite, world_health_t &health, ch
 /** One sweep cell: bring up an eager trainer, run two steps, then capture and replay two more over
  *  the same trainer — both model-region modes under one mixture — asserting finite losses and the
  *  final-norm extents every head reconstructs against. */
-static void run_sweep_cell_(test_suite_t &suite, world_health_t &health, tier_t tier, sz::string_view_t label,
+static void run_sweep_cell_(test_suite_t& suite, world_health_t& health, tier_t tier, sz::string_view_t label,
                             trainer_config_t config) {
     if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
     config.capture = eager_k;
@@ -569,7 +569,7 @@ static void run_sweep_cell_(test_suite_t &suite, world_health_t &health, tier_t 
  *  at the bootstrapped world's full width, so shape handling composes with the real collectives —
  *  and widens to the multi-node world automatically under the sbatch launcher.
  */
-static void mixture_sweep(test_suite_t &suite, world_health_t &health, tier_t wide, tier_t cheap) {
+static void mixture_sweep(test_suite_t& suite, world_health_t& health, tier_t wide, tier_t cheap) {
     for (u32_t subset = 0; subset != 8u; ++subset)
         for (u32_t rows = 1; rows != 3u; ++rows) {
             sz::string_t label;
@@ -595,7 +595,7 @@ static void mixture_sweep(test_suite_t &suite, world_health_t &health, tier_t wi
 
 /** @ref batch_capacity keeps a segment per row at least and one per cell at most, and otherwise
  *  gives the rows times the density, rounded up. */
-static void segment_budget(test_suite_t &suite) {
+static void segment_budget(test_suite_t& suite) {
     multimodal_batch_shape_t const shape {0u, 0u, 64u};
     suite.check(batch_capacity(shape, 64u, 3.05).max_segments_per_gpu == 196u,
                 "64 rows at 3.05 segments per row hold 196 segments");
@@ -607,7 +607,7 @@ static void segment_budget(test_suite_t &suite) {
 /** The synthetic corpus packs every token row with the segment budget's share of it, so the
  *  envelope probe measures the real batch's density: at three segments per row, each row's
  *  segments cover it exactly once and in order, and the step still trains finitely. */
-static void packed_rows(test_suite_t &suite, world_health_t &health, tier_t tier) {
+static void packed_rows(test_suite_t& suite, world_health_t& health, tier_t tier) {
     if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
     trainer_config_t config = test_geometry_(false, suite.settings.seed);
     config.batch = batch_capacity(config.batch, 2u, 3.0);
@@ -617,7 +617,7 @@ static void packed_rows(test_suite_t &suite, world_health_t &health, tier_t tier
         return suite.check(false, "packed trainer bring-up: {}", built.description_);
     switch_to_gpu_t gpu_scope {trainer.streams[0]};
     if (!gpu_scope.ok()) return suite.check(false, "packed context entry");
-    base_replica_t &lead = trainer.replicas[0];
+    base_replica_t& lead = trainer.replicas[0];
     if (expected_t drawn = lead.draw(config, 0u, data_epoch_t {0u}, trainer.streams[0]); !drawn)
         return suite.check(false, "packed draw: {}", drawn.description_);
     std::size_t const rows = config.batch.max_rows_per_gpu, columns = config.batch.max_columns_per_row;
@@ -650,7 +650,7 @@ static void packed_rows(test_suite_t &suite, world_health_t &health, tier_t tier
 /** The capture contract holds, one forward and one backward replay graph per replica build, and
  *  two forward replays over one fixed eager preamble produce the same shared @c d(normalized) up
  *  to reduction order. */
-static void graph_capture(test_suite_t &suite, world_health_t &health, tier_t tier) {
+static void graph_capture(test_suite_t& suite, world_health_t& health, tier_t tier) {
     if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
     trainer_config_t const config = test_geometry_(false, suite.settings.seed);
     trainer_t trainer;
@@ -664,7 +664,7 @@ static void graph_capture(test_suite_t &suite, world_health_t &health, tier_t ti
 
     switch_to_gpu_t gpu_scope {trainer.streams[0]};
     if (!gpu_scope.ok()) return suite.check(false, "capture context entry");
-    base_replica_t &lead = trainer.replicas[0];
+    base_replica_t& lead = trainer.replicas[0];
     expected_t prepared = lead.draw(config, 0u, data_epoch_t {0u}, trainer.streams[0]);
     if (prepared) prepared = lead.prepare(config, data_epoch_t {0u}, trainer.streams[0]);
     if (!prepared) return suite.check(false, "capture preamble: {}", prepared.description_);
@@ -679,8 +679,8 @@ static void graph_capture(test_suite_t &suite, world_health_t &health, tier_t ti
 }
 
 /** Download one replica's @b [groups] Float32 temperatures, β then bias, into @p host . */
-[[nodiscard]] static bool read_temperatures_(base_replica_t &replica, gpu_stream_t &stream,
-                                             st::basic_vector<f32_t> &host) noexcept {
+[[nodiscard]] static bool read_temperatures_(base_replica_t& replica, gpu_stream_t& stream,
+                                             st::basic_vector<f32_t>& host) noexcept {
     std::size_t const groups = replica.token_inverse_temperatures.numel();
     if (st::failed(host.resize(st::assume_uninitialized, 2u * groups))) return false;
     f32r1_tensor_pinned_t staging = f32r1_tensor_pinned_t::uninitialized({2u * groups}, pinned_alloc<f32_t> {}).value;
@@ -698,7 +698,7 @@ static void graph_capture(test_suite_t &suite, world_health_t &health, tier_t ti
 /** The late-interaction temperatures and their Adafactor moments survive a checkpoint: a
  *  trainer resumed from another's file takes the identical next temperature step, which zeroed
  *  moments would not. */
-static void late_interaction_resume(test_suite_t &suite, world_health_t &health, tier_t tier) {
+static void late_interaction_resume(test_suite_t& suite, world_health_t& health, tier_t tier) {
     if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
     trainer_config_t config = test_geometry_(false, suite.settings.seed);
     config.objective = objective_t::contrastive_k;
@@ -742,7 +742,7 @@ static void late_interaction_resume(test_suite_t &suite, world_health_t &health,
  *  states, each offering two or three legal bytes against a one-hot or soft target, replay eight
  *  captured steps with the masked term weighted out — the choices term reads finite and positive
  *  first, falls by the last step, and the token term stays zero throughout. */
-static void choices_replay(test_suite_t &suite, world_health_t &health, tier_t tier) {
+static void choices_replay(test_suite_t& suite, world_health_t& health, tier_t tier) {
     if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
     trainer_config_t config = test_geometry_(false, suite.settings.seed);
     // Rows as wide as the model: the envelope's one-row probe reads choices off its tokens.
@@ -758,7 +758,10 @@ static void choices_replay(test_suite_t &suite, world_health_t &health, tier_t t
     if (expected_t made = items_source_t::make(source, trainer); !made)
         return suite.check(false, "choices items source: {}", made.description_);
 
-    char const text[] = "2+2=" "is ice cold? " "pick a vowel: " "is fire cold? ";
+    char const text[] = "2+2="           //
+                        "is ice cold? "  //
+                        "pick a vowel: " //
+                        "is fire cold? ";
     std::size_t const offsets[] = {0, 4, 17, 31, sizeof(text) - 1};
     modality_t const modalities[] = {modality_t::text_k, modality_t::text_k, modality_t::text_k, modality_t::text_k};
     std::size_t const choice_offsets[] = {0, 3, 5, 8, 10};
@@ -788,7 +791,7 @@ static void choices_replay(test_suite_t &suite, world_health_t &health, tier_t t
 
 /** The regularizers ride a contrastive step, and a forced gradient spike fails the next step before
  *  the optimizer moves a weight: a threshold far below one makes every second gradient a spike. */
-static void spectrum_spike(test_suite_t &suite, world_health_t &health, tier_t tier) {
+static void spectrum_spike(test_suite_t& suite, world_health_t& health, tier_t tier) {
     if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
     trainer_config_t config = test_geometry_(false, suite.settings.seed);
     config.objective = objective_t::contrastive_k;
@@ -822,9 +825,9 @@ static void spectrum_spike(test_suite_t &suite, world_health_t &health, tier_t t
 
 /** Every rank of a world of two or more GPUs reaches the same coding rate bit for bit, and it
  *  matches one GPU holding every row of the world. */
-static void spectrum_world(test_suite_t &suite, world_health_t &health, tier_t wide, tier_t cheap) {
+static void spectrum_world(test_suite_t& suite, world_health_t& health, tier_t wide, tier_t cheap) {
     if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
-    mesh_topology_t &topology = wide.mesh.topology;
+    mesh_topology_t& topology = wide.mesh.topology;
     std::size_t const gpus = wide.devices.size(), world_gpus = topology.shape.gpus_per_colocated_domain;
     if (world_gpus < 2u) return suite.skip("the world holds one GPU, and the world Gram needs two");
     std::size_t const rows = 24, hidden = 64, world_rows = rows * world_gpus;
@@ -838,9 +841,9 @@ static void spectrum_world(test_suite_t &suite, world_health_t &health, tier_t w
 
     // The coding rate over `devices`, each holding its slice of the world rows from `first_row`,
     // read back from every rank.
-    auto coding_rates = [&](mesh_t &mesh, std::span<i32_t const> devices, gpu_numerics_t const &numerics,
+    auto coding_rates = [&](mesh_t& mesh, std::span<i32_t const> devices, gpu_numerics_t const& numerics,
                             std::size_t rows_per_gpu, std::size_t first_row,
-                            std::vector<f32_t> &rates) noexcept -> expected_t {
+                            std::vector<f32_t>& rates) noexcept -> expected_t {
         pooled_spectrum_config_t config;
         config.rows_per_gpu = static_cast<u32_t>(rows_per_gpu);
         config.hidden = static_cast<u32_t>(hidden);
@@ -912,7 +915,7 @@ static void spectrum_world(test_suite_t &suite, world_health_t &health, tier_t w
                 "the world's coding rate {} against one GPU holding every row {}", world_rates[0], single_rate[0]);
 }
 
-int main(int, char **argv) {
+int main(int, char** argv) {
     // Lazy module loading deadlocks against the InfiniBand doorbell kernels' flag spins: the
     // spinning wait blocks its context, the peer's next launch blocks on module loading behind it,
     // and neither side progresses. Eager loading before `cuInit` front-loads every module — the
@@ -950,9 +953,9 @@ int main(int, char **argv) {
     options.host_domain_index = host_domain_index_from_environment();
     options.host_domain_count = host_domain_count_from_environment();
     options.timeout_seconds = test_rendezvous_timeout_seconds_k;
-    if (char const *directory = std::getenv("UFORM_EXCHANGE_DIR"); directory != nullptr)
+    if (char const* directory = std::getenv("UFORM_EXCHANGE_DIR"); directory != nullptr)
         options.directory = sz::string_view_t {directory, std::strlen(directory)};
-    if (char const *job = std::getenv("UFORM_JOB_ID"); job != nullptr)
+    if (char const* job = std::getenv("UFORM_JOB_ID"); job != nullptr)
         options.job = sz::string_view_t {job, std::strlen(job)};
     if (nk_capabilities_enabled_cuda(0, &options.capabilities) != nk_success_k) {
         suite.check(false, "NumKong cannot query device 0");

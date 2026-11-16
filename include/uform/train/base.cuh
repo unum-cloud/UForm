@@ -132,7 +132,7 @@ struct late_interaction_config_t {
 /** One tier: width and depth, each step of the ladder doubling exactly one, the row widths of
  *  text-only and media runs, and the peak learning rate. */
 struct trainer_tier_t {
-    char const *name = "";
+    char const* name = "";
     u32_t hidden = 0, depth = 0, text_columns = 0, media_columns = 0;
     f32_t learning_rate = 0.0f;
 };
@@ -283,7 +283,7 @@ struct trainer_config_t {
      *  - @c status_t::invalid_argument_k An unknown flag, a flag without its value, or a value
      *    it does not take.
      */
-    [[nodiscard]] static expected<trainer_config_t> parse(int argc, char **argv) noexcept;
+    [[nodiscard]] static expected<trainer_config_t> parse(int argc, char** argv) noexcept;
 
     /** Step @p optimizer_step 's scheduled learning rate: the linear warmup to @ref learning_rate
      *  over @ref warmup_steps , then the cosine decay to @ref min_learning_rate over the rest of
@@ -405,44 +405,44 @@ struct base_replica_t {
      *  @ref weights in the same order on every replica. @p vertices_per_mesh sizes the contrastive
      *  to-vertex column, and every component calls the kernels of @p numerics . Constructs no
      *  stream or arena, and seeds nothing. */
-    [[nodiscard]] static expected<base_replica_t> make(gpu_arena_t &arena, trainer_config_t const &config,
+    [[nodiscard]] static expected<base_replica_t> make(gpu_arena_t& arena, trainer_config_t const& config,
                                                        std::size_t vertices_per_mesh,
-                                                       gpu_numerics_t const &numerics) noexcept;
+                                                       gpu_numerics_t const& numerics) noexcept;
 
     /** Draw the keyed synthetic mixture into @ref batch — row partition and contents, pure
      *  functions of @c config.seed , @p data_epoch , and @p gpu_index_in_colocated_domain ,
      *  the world coordinate, so every world GPU draws distinct data. Pure enqueue onto
      *  @p stream ; never captured. */
-    [[nodiscard]] expected_t draw(trainer_config_t const &config, u32_t gpu_index_in_colocated_domain,
-                                  data_epoch_t data_epoch, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t draw(trainer_config_t const& config, u32_t gpu_index_in_colocated_domain,
+                                  data_epoch_t data_epoch, gpu_stream_t& stream) noexcept;
 
     /** The eager preamble over a filled @ref batch : snapshot every live head's clean
      *  target, and corrupt each modality in place into the tower's distorted input. A no-op
      *  without masked heads. */
-    [[nodiscard]] expected_t prepare(trainer_config_t const &config, data_epoch_t data_epoch,
-                                     gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t prepare(trainer_config_t const& config, data_epoch_t data_epoch,
+                                     gpu_stream_t& stream) noexcept;
 
     /** The captured forward region: tower forward, pooling into @ref vertices when they exist, then
      *  every live head scores its clean target into @ref normalized_grad , and the choices term of
      *  @p config adds its force there. Pure enqueue, shape-stable. */
-    [[nodiscard]] expected_t forward_region(trainer_config_t const &config, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t forward_region(trainer_config_t const& config, gpu_stream_t& stream) noexcept;
 
     /** The captured backward region: the tower's backward from the vertex forces, the masked forces
      *  and the token-vector forces, joined at the final-norm states. Pure enqueue, shape-stable. */
-    [[nodiscard]] expected_t backward_region(gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t backward_region(gpu_stream_t& stream) noexcept;
 
     /** The contrastive recipe over this replica's device temperatures and vertex groups. */
-    [[nodiscard]] contrastive_recipe_t recipe(trainer_config_t const &config) const noexcept;
+    [[nodiscard]] contrastive_recipe_t recipe(trainer_config_t const& config) const noexcept;
 
     /** The late-interaction recipe over this replica's token temperatures and the
      *  same vertex groups. */
-    [[nodiscard]] contrastive_recipe_t token_recipe(trainer_config_t const &config) const noexcept;
+    [[nodiscard]] contrastive_recipe_t token_recipe(trainer_config_t const& config) const noexcept;
 
   private:
 
     /** The four summand pairs in @ref unum::uform::train::modality_t order, then the choices',
      *  absent ones empty. */
-    [[nodiscard]] std::array<f32r1_tensor_arena_t *, 5> summand_pairs_() noexcept {
+    [[nodiscard]] std::array<f32r1_tensor_arena_t*, 5> summand_pairs_() noexcept {
         return {&tokens_summands, &image_summands, &video_summands, &audio_summands, &choices_summands};
     }
 };
@@ -456,8 +456,8 @@ struct base_replica_t {
 /** Re-seed every matrix of @p weights to the identical deterministic init: full matrices from a
  *  keyed hash fill of standard deviation @c 1/√fan_in , the blocks' output projections further by
  *  @c 1/√(2 · depth) , and vector scales exactly one. Identical on every replica. */
-[[nodiscard]] expected_t seed_weights(st::basic_vector<differentiable_weights_t> const &weights,
-                                      gpu_stream_t &stream) noexcept;
+[[nodiscard]] expected_t seed_weights(st::basic_vector<differentiable_weights_t> const& weights,
+                                      gpu_stream_t& stream) noexcept;
 
 /**
  *  @brief Upload every matrix of @p weights from @p checkpoint by name, all or nothing, on
@@ -470,15 +470,15 @@ struct base_replica_t {
  *  - @c status_t::invalid_argument_k A matrix the checkpoint misses.
  *  - @c status_t::unsupported_k A matrix of another shape.
  */
-[[nodiscard]] expected_t load_weights(checkpoint_to_load_t const &checkpoint,
-                                      st::basic_vector<differentiable_weights_t> const &weights,
-                                      gpu_stream_t &stream) noexcept;
+[[nodiscard]] expected_t load_weights(checkpoint_to_load_t const& checkpoint,
+                                      st::basic_vector<differentiable_weights_t> const& weights,
+                                      gpu_stream_t& stream) noexcept;
 
 /** Snapshot @p weights into @p checkpoint as @c model.* , with @p steps and the geometry a reader
  *  rebuilds the tower from. */
-[[nodiscard]] expected_t save_weights(checkpoint_to_save_t &checkpoint, trainer_config_t const &config,
-                                      st::basic_vector<differentiable_weights_t> const &weights, u32_t steps,
-                                      gpu_stream_t &stream) noexcept;
+[[nodiscard]] expected_t save_weights(checkpoint_to_save_t& checkpoint, trainer_config_t const& config,
+                                      st::basic_vector<differentiable_weights_t> const& weights, u32_t steps,
+                                      gpu_stream_t& stream) noexcept;
 
 /** Print one line to standard output, newline-terminated. */
 void report_line(sz::string_view_t line) noexcept;

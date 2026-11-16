@@ -190,12 +190,12 @@ struct masked_tokens_t {
 
     /** Allocate the decoder, its NumKong packs, and every scratch — once, at setup — calling the
      *  kernels of @p numerics . */
-    [[nodiscard]] static expected<masked_tokens_t> make(gpu_arena_t &arena, masked_tokens_config_t config,
-                                                        gpu_numerics_t const &numerics) noexcept;
+    [[nodiscard]] static expected<masked_tokens_t> make(gpu_arena_t& arena, masked_tokens_config_t config,
+                                                        gpu_numerics_t const& numerics) noexcept;
 
     /** Pack the decoder for NumKong's products — pure enqueue, capture-safe. Call once per optimizer
      *  step, after the weights change and before the first @ref operator() . */
-    [[nodiscard]] expected_t pack_weights(gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t pack_weights(gpu_stream_t& stream) noexcept;
 
     /**
      *  @brief Corrupt @p clean into @p distorted and emit the per-position @p loss_weights — pure enqueue.
@@ -222,7 +222,7 @@ struct masked_tokens_t {
     [[nodiscard]] expected_t corrupt(tokens_view_t clean, tokens_span_t distorted, u32r1_span_t loss_weights,
                                      u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
                                      modality_view_t segment_modality, nk::tensor_view<token_id_t, 2> segment_choices,
-                                     masking_recipe_t recipe, data_epoch_t data_epoch, gpu_stream_t &stream) noexcept;
+                                     masking_recipe_t recipe, data_epoch_t data_epoch, gpu_stream_t& stream) noexcept;
 
     /**
      *  @brief Forward + backward over every token, gated by its loss weight — pure enqueue on @p stream .
@@ -237,7 +237,7 @@ struct masked_tokens_t {
      */
     [[nodiscard]] expected_t operator()(bf16r2_view_t normalized, tokens_view_t clean_targets,
                                         u32r1_view_t loss_weights, f32r1_span_t loss_summands,
-                                        bf16r2_span_t normalized_grad, gpu_stream_t &stream) noexcept;
+                                        bf16r2_span_t normalized_grad, gpu_stream_t& stream) noexcept;
 
     /**
      *  @brief Soft-target cross-entropy plus the Brier term over each choice segment's legal bytes,
@@ -257,13 +257,13 @@ struct masked_tokens_t {
      *  @param[in,out] normalized_grad @b [tokens,hidden] @c d(normalized) , added onto at the
      *      answer rows.
      */
-    [[nodiscard]] expected_t choose(bf16r2_view_t normalized, multimodal_batch_view_t const &batch,
+    [[nodiscard]] expected_t choose(bf16r2_view_t normalized, multimodal_batch_view_t const& batch,
                                     choices_config_t config, f32r1_span_t loss_summands, bf16r2_span_t normalized_grad,
-                                    gpu_stream_t &stream) noexcept;
+                                    gpu_stream_t& stream) noexcept;
 
     /** Append the decoder weight to @p weights under the checkpoint name @p name — the owning
      *  replica spells the instance name, since one head class may serve several modalities. */
-    [[nodiscard]] expected_t fill(sz::string_view_t name, st::basic_vector<differentiable_weights_t> &weights) noexcept;
+    [[nodiscard]] expected_t fill(sz::string_view_t name, st::basic_vector<differentiable_weights_t>& weights) noexcept;
 
     /** The decoder weights @b [vocabulary·hidden] — the checkpoint enumerator's handle. */
     [[nodiscard]] nk::tensor_span<bf16_t, 1> decoder_weights() noexcept { return decoder_weight_.span().flatten<1>(); }
@@ -334,12 +334,12 @@ struct masked_patches_t {
 
     /** Allocate the recon head, its NumKong packs, and every scratch — once, at setup — calling the
      *  kernels of @p numerics . */
-    [[nodiscard]] static expected<masked_patches_t> make(gpu_arena_t &arena, masked_patches_config_t config,
-                                                         gpu_numerics_t const &numerics) noexcept;
+    [[nodiscard]] static expected<masked_patches_t> make(gpu_arena_t& arena, masked_patches_config_t config,
+                                                         gpu_numerics_t const& numerics) noexcept;
 
     /** Pack the recon head for NumKong's products — pure enqueue, capture-safe. Call once per optimizer
      *  step, after the weights change and before the first @ref operator() . */
-    [[nodiscard]] expected_t pack_weights(gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t pack_weights(gpu_stream_t& stream) noexcept;
 
     /**
      *  @brief Sample the patch mask into @c mask_ — pure enqueue, nothing else.
@@ -351,7 +351,7 @@ struct masked_patches_t {
      */
     [[nodiscard]] expected_t sample_mask(masking_recipe_t recipe, data_epoch_t data_epoch, u32r1_view_t segment_offsets,
                                          u32r1_view_t segment_lengths, modality_view_t segment_modality,
-                                         gpu_stream_t &stream) noexcept;
+                                         gpu_stream_t& stream) noexcept;
 
     /**
      *  @brief Corrupt the raw batch media in place — pure enqueue. Zeros every raw patch row whose @c mask_
@@ -361,7 +361,7 @@ struct masked_patches_t {
      *  @param[in,out] raw_patches The batch's image / video patches @b [patches,patch_scalars] of
      *      raw @ref pixel_t — @c batch.images / @c batch.videos flattened to one row per patch.
      */
-    [[nodiscard]] expected_t corrupt_raw(nk::tensor_span<pixel_t, 2> raw_patches, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t corrupt_raw(nk::tensor_span<pixel_t, 2> raw_patches, gpu_stream_t& stream) noexcept;
 
     /**
      *  @brief Reconstruct and score the masked patches — pure enqueue on @p stream .
@@ -375,11 +375,11 @@ struct masked_patches_t {
      */
     [[nodiscard]] expected_t operator()(bf16r2_view_t normalized, bf16r2_view_t clean_patches,
                                         f32r1_span_t loss_summands, bf16r2_span_t normalized_grad,
-                                        gpu_stream_t &stream) noexcept;
+                                        gpu_stream_t& stream) noexcept;
 
     /** Append the recon weight to @p weights under the checkpoint name @p name — the owning
      *  replica spells the instance name, since one head class may serve several modalities. */
-    [[nodiscard]] expected_t fill(sz::string_view_t name, st::basic_vector<differentiable_weights_t> &weights) noexcept;
+    [[nodiscard]] expected_t fill(sz::string_view_t name, st::basic_vector<differentiable_weights_t>& weights) noexcept;
 
     /** The recon weights @b [patch_pixels·hidden] — the checkpoint enumerator's handle. */
     [[nodiscard]] nk::tensor_span<bf16_t, 1> recon_weights() noexcept { return recon_weight_.span().flatten<1>(); }
@@ -439,12 +439,12 @@ struct masked_frames_t {
 
     /** Allocate the recon head, its NumKong packs, and every scratch — once, at setup — calling the
      *  kernels of @p numerics . */
-    [[nodiscard]] static expected<masked_frames_t> make(gpu_arena_t &arena, masked_frames_config_t config,
-                                                        gpu_numerics_t const &numerics) noexcept;
+    [[nodiscard]] static expected<masked_frames_t> make(gpu_arena_t& arena, masked_frames_config_t config,
+                                                        gpu_numerics_t const& numerics) noexcept;
 
     /** Pack the recon head for NumKong's products — pure enqueue, capture-safe. Call once per optimizer
      *  step, after the weights change and before the first @ref operator() . */
-    [[nodiscard]] expected_t pack_weights(gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t pack_weights(gpu_stream_t& stream) noexcept;
 
     /**
      *  @brief Sample the frame mask into @c mask_ — pure enqueue, nothing else.
@@ -454,7 +454,7 @@ struct masked_frames_t {
      */
     [[nodiscard]] expected_t sample_mask(masking_recipe_t recipe, data_epoch_t data_epoch, u32r1_view_t segment_offsets,
                                          u32r1_view_t segment_lengths, modality_view_t segment_modality,
-                                         gpu_stream_t &stream) noexcept;
+                                         gpu_stream_t& stream) noexcept;
 
     /**
      *  @brief Corrupt the raw batch media in place — pure enqueue. Zeros every raw waveform frame whose
@@ -464,7 +464,7 @@ struct masked_frames_t {
      *  @param[in,out] raw_frames The batch's audio frames @b [frames,chunk_samples] Float32 —
      *      @c audio_samples flattened to one row per frame.
      */
-    [[nodiscard]] expected_t corrupt_raw(f32r2_span_t raw_frames, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t corrupt_raw(f32r2_span_t raw_frames, gpu_stream_t& stream) noexcept;
 
     /**
      *  @brief Reconstruct and score the masked frames — pure enqueue on @p stream .
@@ -477,11 +477,11 @@ struct masked_frames_t {
      *      it.
      */
     [[nodiscard]] expected_t operator()(bf16r2_view_t normalized, f32r2_view_t clean_frames, f32r1_span_t loss_summands,
-                                        bf16r2_span_t normalized_grad, gpu_stream_t &stream) noexcept;
+                                        bf16r2_span_t normalized_grad, gpu_stream_t& stream) noexcept;
 
     /** Append the recon weight to @p weights under the checkpoint name @p name — the owning
      *  replica spells the instance name, since one head class may serve several modalities. */
-    [[nodiscard]] expected_t fill(sz::string_view_t name, st::basic_vector<differentiable_weights_t> &weights) noexcept;
+    [[nodiscard]] expected_t fill(sz::string_view_t name, st::basic_vector<differentiable_weights_t>& weights) noexcept;
 
     /** The recon weights @b [chunk_samples·hidden] — the checkpoint enumerator's handle. */
     [[nodiscard]] nk::tensor_span<bf16_t, 1> recon_weights() noexcept { return recon_weight_.span().flatten<1>(); }

@@ -52,7 +52,7 @@
 /** Prints a StringZilla view as the text it spans. */
 template <>
 struct fmt::formatter<ashvardanian::stringzilla::string_view_t> : fmt::formatter<std::string_view> {
-    auto format(std::string_view text, fmt::format_context &context) const {
+    auto format(std::string_view text, fmt::format_context& context) const {
         return fmt::formatter<std::string_view>::format(text, context);
     }
 };
@@ -60,7 +60,7 @@ struct fmt::formatter<ashvardanian::stringzilla::string_view_t> : fmt::formatter
 /** Prints an owning StringZilla string as the text it holds. */
 template <>
 struct fmt::formatter<ashvardanian::stringzilla::string_t> : fmt::formatter<std::string_view> {
-    auto format(std::string_view text, fmt::format_context &context) const {
+    auto format(std::string_view text, fmt::format_context& context) const {
         return fmt::formatter<std::string_view>::format(text, context);
     }
 };
@@ -70,7 +70,7 @@ namespace unum::uform::test {
 using namespace unum::uform::utilities;
 
 /** The reason every case needing a GPU skips with on a machine that shows none. */
-inline constexpr char const *no_cuda_device_k = "no CUDA device detected";
+inline constexpr char const* no_cuda_device_k = "no CUDA device detected";
 
 /** Pauses 50 ms between two polls of a mesh exchange directory, as the trainer does. */
 inline void pause_between_polls() noexcept { std::this_thread::sleep_for(std::chrono::milliseconds {50}); }
@@ -82,8 +82,8 @@ inline void pause_between_polls() noexcept { std::this_thread::sleep_for(std::ch
 }
 
 /** The text of the environment variable @p name , empty when it is unset. */
-[[nodiscard]] inline std::string_view environment_text(char const *name) noexcept {
-    char const *const text = std::getenv(name);
+[[nodiscard]] inline std::string_view environment_text(char const* name) noexcept {
+    char const* const text = std::getenv(name);
     return text == nullptr ? std::string_view {} : std::string_view {text};
 }
 
@@ -104,7 +104,7 @@ struct filter_t {
             filter.pattern.assign(text.begin(), text.end(),
                                   std::regex_constants::ECMAScript | std::regex_constants::nosubs);
         }
-        catch (std::regex_error const &) {
+        catch (std::regex_error const&) {
         }
         return filter;
     }
@@ -183,7 +183,7 @@ struct settings_t {
     std::string_view const seed_text = environment_text("UFORM_SEED");
     if (seed_text == "random") settings.seed = std::random_device {}();
     else if (!seed_text.empty()) {
-        char const *const seed_end = seed_text.data() + seed_text.size();
+        char const* const seed_end = seed_text.data() + seed_text.size();
         auto const [parsed_end, parse_status] = std::from_chars(seed_text.data(), seed_end, settings.seed);
         if (parse_status != std::errc {} || parsed_end != seed_end) {
             fmt::println(stderr, "UFORM_SEED=\"{}\" does not parse, expected an unsigned integer or random", seed_text);
@@ -221,10 +221,10 @@ struct test_suite_t {
     u32_t failures = 0;
 
     /** Why the running case stopped short, or null while it runs. */
-    char const *case_skip_reason = nullptr;
+    char const* case_skip_reason = nullptr;
 
     /** Reads the settings, then prints the version, capabilities and settings, one a line. */
-    [[nodiscard]] static test_suite_t make(char const *program) noexcept {
+    [[nodiscard]] static test_suite_t make(char const* program) noexcept {
         // MSVC lacks line buffering; unbuffered keeps each case line beside its failures
         std::setvbuf(stdout, nullptr, _IONBF, 0);
         test_suite_t suite;
@@ -249,7 +249,7 @@ struct test_suite_t {
      *  compile here instead of hiding behind a lambda at every call site.
      */
     template <typename... parameters_types_>
-    void run(std::string_view name, void (*case_function)(test_suite_t &, parameters_types_...),
+    void run(std::string_view name, void (*case_function)(test_suite_t&, parameters_types_...),
              std::type_identity_t<parameters_types_>... arguments) noexcept {
         if (!settings.filter.selects(name)) return;
         u32_t const failures_before = failures;
@@ -269,25 +269,25 @@ struct test_suite_t {
     }
 
     /** Stops the running case short for @p reason , so it reports skipped unless it failed. */
-    void skip(char const *reason) noexcept { case_skip_reason = reason; }
+    void skip(char const* reason) noexcept { case_skip_reason = reason; }
 
     /** Reports the case @p name skipped for @p reason without running it, if selected. */
-    void skip(std::string_view name, char const *reason) noexcept {
+    void skip(std::string_view name, char const* reason) noexcept {
         if (!settings.filter.selects(name)) return;
         ++skipped;
         fmt::println("skipped  {:<32} : {}", name, reason);
     }
 
     /**
-     *  @brief Counts one failure when @p condition is false, formatting @p message and @p args the
+     *  @brief Counts one failure when @p is_met is false, formatting @p message and @p args the
      *      way @ref expected::fail does and printing them under the call site. A pass is silent.
      *
      *  The @ref format_at_t parameter captures the caller's @c std::source_location behind the
      *  variadic pack, so a check reads `check(got == want, "peer: got {} want {}", got, want)`.
      */
     template <typename... arg_types_>
-    void check(bool condition, format_at_t message, arg_types_ &&...args) noexcept {
-        if (condition) return;
+    void check(bool is_met, format_at_t message, arg_types_&&... args) noexcept {
+        if (is_met) return;
         sz::string_t text;
         std::vformat_to(format_into_t {&text}, message.format, std::make_format_args(args...));
         report_failure_(message, text);
@@ -295,8 +295,8 @@ struct test_suite_t {
 
     /** Counts one failure when @p actual differs from @p wanted , printing both after @p label . */
     template <typename actual_type_, typename wanted_type_, typename... arg_types_>
-    void check_equal(actual_type_ const &actual, wanted_type_ const &wanted, format_at_t label,
-                     arg_types_ &&...args) noexcept {
+    void check_equal(actual_type_ const& actual, wanted_type_ const& wanted, format_at_t label,
+                     arg_types_&&... args) noexcept {
         if (actual == wanted) return;
         sz::string_t text;
         std::vformat_to(format_into_t {&text}, label.format, std::make_format_args(args...));
@@ -307,7 +307,7 @@ struct test_suite_t {
     /** Counts one failure when @p actual and @p wanted differ by more than @p tolerance times the
      *  larger of their magnitudes and 1, printing both and the difference after @p label . */
     template <typename... arg_types_>
-    void check_near(f64_t actual, f64_t wanted, f64_t tolerance, format_at_t label, arg_types_ &&...args) noexcept {
+    void check_near(f64_t actual, f64_t wanted, f64_t tolerance, format_at_t label, arg_types_&&... args) noexcept {
         f64_t const difference = std::fabs(actual - wanted);
         if (difference <= tolerance * std::fmax(std::fmax(std::fabs(actual), std::fabs(wanted)), 1.0)) return;
         sz::string_t text;
@@ -332,7 +332,7 @@ struct test_suite_t {
   private:
 
     /** Counts the failure and prints the formatted @p text under the call site of @p site . */
-    void report_failure_(format_at_t const &site, sz::string_t const &text) noexcept {
+    void report_failure_(format_at_t const& site, sz::string_t const& text) noexcept {
         ++failures;
         fmt::println(stderr, "  check failed at {}:{}: {}", path_basename(site.location.file_name()),
                      site.location.line(), text);
@@ -349,7 +349,7 @@ using f64r4_view_t = nk::tensor_view<f64_t, 4>;
 using f64r4_span_t = nk::tensor_span<f64_t, 4>;
 
 /** ⟨a,b⟩ of two equally long contiguous Float64 runs, compensated by NumKong. */
-[[nodiscard]] inline f64_t dot(auto const &a, auto const &b) noexcept { return nk::dot<nk::f64_t>(a, b).value; }
+[[nodiscard]] inline f64_t dot(auto const& a, auto const& b) noexcept { return nk::dot<nk::f64_t>(a, b).value; }
 
 /** Narrow @p values onto the BFloat16 grid in place, leaving their bit patterns in @p staging for
  *  a device upload. */

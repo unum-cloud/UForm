@@ -22,13 +22,13 @@ namespace ue = unum::uform::encoder;
 
 uform_model_handle_t::~uform_model_handle_t() noexcept {
     std::visit(
-        [&](auto const *verbs) noexcept {
+        [&](auto const* verbs) noexcept {
             if (!verbs) return;
-            if (void *const *const tower = std::get_if<void *>(&towers)) {
+            if (void* const* const tower = std::get_if<void*>(&towers)) {
                 if (*tower) verbs->destroy(*tower);
                 return;
             }
-            for (uf::vram_replica_t &replica : std::get<uf::per_gpu_array<uf::vram_replica_t>>(towers))
+            for (uf::vram_replica_t& replica : std::get<uf::per_gpu_array<uf::vram_replica_t>>(towers))
                 if (replica.tower) verbs->destroy(replica.tower);
         },
         tables);
@@ -43,7 +43,7 @@ enum class load_stage_t : u8_t {
 
 /** Records a failed checkpoint read, geometry read or tower pack at @p stage with a static
  *  message per engine @p status : what the file holds is malformed, not an invalid argument. */
-static bool propagate_load_failure(status_t status, load_stage_t stage, uform_outcome_t *outcome) noexcept {
+static bool propagate_load_failure(status_t status, load_stage_t stage, uform_outcome_t* outcome) noexcept {
     switch (status) {
     case status_t::invalid_argument_k:
         switch (stage) {
@@ -68,7 +68,7 @@ static bool propagate_load_failure(status_t status, load_stage_t stage, uform_ou
 
 /** The precision @p quantization names, false once @p outcome records that the blocks
  *  run in neither. */
-static bool precision_of(uform_scalar_t quantization, ue::precision_t &precision, uform_outcome_t *outcome) noexcept {
+static bool precision_of(uform_scalar_t quantization, ue::precision_t& precision, uform_outcome_t* outcome) noexcept {
     switch (quantization) {
     case uform_scalar_bf16_k: precision = ue::precision_t::bf16_k; return true;
     case uform_scalar_e4m3_k: precision = ue::precision_t::e4m3_k; return true;
@@ -79,7 +79,7 @@ static bool precision_of(uform_scalar_t quantization, ue::precision_t &precision
 /** Bytes one tower of @p geometry holds in @p precision : the block products in its dtype, the
  *  entries, pool and head in BFloat16, the norm gains and pixel statistics widened to Float32, and
  *  the rotary angle grids. */
-static std::size_t tower_bytes(ue::geometry_t const &geometry, ue::precision_t precision) noexcept {
+static std::size_t tower_bytes(ue::geometry_t const& geometry, ue::precision_t precision) noexcept {
     std::size_t const hidden = geometry.hidden, ffn = geometry.ffn();
     std::size_t const product_bytes = precision == ue::precision_t::e4m3_k ? 1 : 2;
     std::size_t const block = (3 * hidden * hidden + hidden * hidden + 2 * ffn * hidden + hidden * ffn) *
@@ -98,8 +98,8 @@ static std::size_t tower_bytes(ue::geometry_t const &geometry, ue::precision_t p
 
 /** Parses the checkpoint @p loaded holds into a model handle in @p precision , its towers still to
  *  be packed; null once @p outcome records why not. */
-static std::unique_ptr<uform_model_handle_t> start_model(expected<checkpoint_to_load_t> const &loaded,
-                                                         ue::precision_t precision, uform_outcome_t *outcome) noexcept {
+static std::unique_ptr<uform_model_handle_t> start_model(expected<checkpoint_to_load_t> const& loaded,
+                                                         ue::precision_t precision, uform_outcome_t* outcome) noexcept {
     if (!loaded) return propagate_load_failure(loaded.status_, load_stage_t::reading_k, outcome), nullptr;
     expected<ue::geometry_t> geometry = ue::geometry_t::from(*loaded);
     if (!geometry) return propagate_load_failure(geometry.status_, load_stage_t::measuring_k, outcome), nullptr;
@@ -109,7 +109,7 @@ static std::unique_ptr<uform_model_handle_t> start_model(expected<checkpoint_to_
     model->precision = precision;
     std::size_t const groups = geometry->choice_temperature_groups;
     nk::tensor_view<f32_t, 2> const stored = loaded->float32("choices.inverse_temperatures");
-    f32_t const *const calibrated = stored.empty() ? nullptr : stored.data();
+    f32_t const* const calibrated = stored.empty() ? nullptr : stored.data();
     if (st::failed(model->choice_inverse_temperatures.resize(st::assume_uninitialized, groups)))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the model"), nullptr;
     for (std::size_t group = 0; group != groups; ++group)
@@ -120,9 +120,9 @@ static std::unique_ptr<uform_model_handle_t> start_model(expected<checkpoint_to_
 /** Packs one tower of @p model from @p checkpoint through @p verbs on @p stream , null on the host;
  *  null once @p outcome records why not. */
 template <vendored_residency_t residency_>
-static void *pack_tower(uform_model_handle_t &model, checkpoint_to_load_t const &checkpoint,
-                        encoder_verbs<residency_> const &verbs, nk_stream_t stream, uform_outcome_t *outcome) noexcept {
-    expected<void *> packed = verbs.create(checkpoint, model.geometry, model.precision, stream);
+static void* pack_tower(uform_model_handle_t& model, checkpoint_to_load_t const& checkpoint,
+                        encoder_verbs<residency_> const& verbs, nk_stream_t stream, uform_outcome_t* outcome) noexcept {
+    expected<void*> packed = verbs.create(checkpoint, model.geometry, model.precision, stream);
     if (!packed) return propagate_load_failure(packed.status_, load_stage_t::packing_k, outcome), nullptr;
     model.memory_usage += tower_bytes(model.geometry, model.precision);
     return *packed;
@@ -130,9 +130,9 @@ static void *pack_tower(uform_model_handle_t &model, checkpoint_to_load_t const 
 
 /** The ceiling a RAM load picks its class under: the class @p pinned names, or else the executor's
  *  ceiling, or the machine's without one; a pin past the executor's ceiling is refused. */
-static bool host_ceiling(uform_executor_t executor, uform_cpu_class_t pinned, cpu_ceiling_t &ceiling,
-                         uform_outcome_t *outcome) noexcept {
-    ram_executor_t const *const ram = executor ? std::get_if<ram_executor_t>(&executor->executor) : nullptr;
+static bool host_ceiling(uform_executor_t executor, uform_cpu_class_t pinned, cpu_ceiling_t& ceiling,
+                         uform_outcome_t* outcome) noexcept {
+    ram_executor_t const* const ram = executor ? std::get_if<ram_executor_t>(&executor->executor) : nullptr;
     if (executor && !ram)
         return propagate_error(uform_status_device_k, outcome, "A RAM load needs a RAM executor or none");
     if (ram && pinned == uform_cpu_class_unknown_k) return ceiling = ram->ceiling, true;
@@ -146,16 +146,16 @@ static bool host_ceiling(uform_executor_t executor, uform_cpu_class_t pinned, cp
 
 /** Packs a RAM model from @p loaded for the class @p ram_options pins, or the newest the CPU runs,
  *  and publishes it into @p output once the handler lets the load finish. */
-static void load_ram(uform_model_t *output, uform_executor_t executor, uform_ram_options_t const &ram_options,
+static void load_ram(uform_model_t* output, uform_executor_t executor, uform_ram_options_t const& ram_options,
                      expected<checkpoint_to_load_t> loaded, ue::precision_t precision, uform_progress_t progress,
-                     uform_outcome_t *outcome) noexcept {
+                     uform_outcome_t* outcome) noexcept {
     cpu_ceiling_t ceiling;
     if (!host_ceiling(executor, ram_options.cpu_class, ceiling, outcome)) return;
-    encoder_verbs<vendored_residency_t::ram_k> const *const verbs = pick_cpu_variant(cpu_ladder_t {}, ceiling);
+    encoder_verbs<vendored_residency_t::ram_k> const* const verbs = pick_cpu_variant(cpu_ladder_t {}, ceiling);
     std::unique_ptr<uform_model_handle_t> model = start_model(loaded, precision, outcome);
     if (!model) return;
     model->tables = verbs;
-    void *&tower = model->towers.emplace<void *>(pack_tower(*model, *loaded, *verbs, nullptr, outcome));
+    void*& tower = model->towers.emplace<void*>(pack_tower(*model, *loaded, *verbs, nullptr, outcome));
     if (!tower) return;
     if (progress_ticks_t {progress, 1}(1) == continuation_t::cancel_k)
         return propagate_error(uform_status_cancelled_k, outcome, "The caller's handler stopped the load"), void();
@@ -166,18 +166,18 @@ static void load_ram(uform_model_t *output, uform_executor_t executor, uform_ram
 /** Packs one replica per device of @p devices that @p vram names through the newest class of
  *  @p ladder_type_ every one of them runs; false once @p outcome records why not. */
 template <vendored_residency_t residency_, typename ladder_type_>
-static bool load_replicas(uform_model_handle_t &model, checkpoint_to_load_t const &checkpoint, vram_executor_t &devices,
-                          uform_vram_options_t const &vram, progress_ticks_t &ticks,
-                          uform_outcome_t *outcome) noexcept {
-    per_gpu_array<vram_replica_t> &replicas = std::get<per_gpu_array<vram_replica_t>>(model.towers);
-    encoder_verbs<residency_> const *verbs = nullptr;
+static bool load_replicas(uform_model_handle_t& model, checkpoint_to_load_t const& checkpoint, vram_executor_t& devices,
+                          uform_vram_options_t const& vram, progress_ticks_t& ticks,
+                          uform_outcome_t* outcome) noexcept {
+    per_gpu_array<vram_replica_t>& replicas = std::get<per_gpu_array<vram_replica_t>>(model.towers);
+    encoder_verbs<residency_> const* verbs = nullptr;
     std::size_t placed = 0;
-    for (vram_device_t &device : devices.devices) {
+    for (vram_device_t& device : devices.devices) {
         std::size_t named = !vram.devices_count;
         for (std::size_t listed = 0; listed != vram.devices_count; ++listed)
             named += device.ordinal == vram.devices[listed];
         if (!named) continue;
-        encoder_verbs<residency_> const *const picked = pick_gpu_variant<residency_>(ladder_type_ {}, vram.gpu_class,
+        encoder_verbs<residency_> const* const picked = pick_gpu_variant<residency_>(ladder_type_ {}, vram.gpu_class,
                                                                                      device.capabilities);
         if (!picked)
             return propagate_error(uform_status_unsupported_k, outcome,
@@ -186,7 +186,7 @@ static bool load_replicas(uform_model_handle_t &model, checkpoint_to_load_t cons
             return propagate_error(uform_status_config_mismatch_k, outcome, "The devices differ in class");
         verbs = picked;
         model.tables = verbs;
-        void *const tower = pack_tower(model, checkpoint, *verbs, device.stream.get(), outcome);
+        void* const tower = pack_tower(model, checkpoint, *verbs, device.stream.get(), outcome);
         if (!tower) return false;
         if (replicas.push_back(vram_replica_t {device.ordinal, tower}) != status_t::success_k)
             return verbs->destroy(tower),
@@ -199,16 +199,16 @@ static bool load_replicas(uform_model_handle_t &model, checkpoint_to_load_t cons
 
 /** Packs a VRAM model from @p loaded on every device of @p executor that @p vram names, all of them
  *  when it names none, and publishes it into @p output . */
-static void load_vram(uform_model_t *output, uform_executor_t executor, uform_vram_options_t const &vram,
+static void load_vram(uform_model_t* output, uform_executor_t executor, uform_vram_options_t const& vram,
                       expected<checkpoint_to_load_t> loaded, ue::precision_t precision, uform_progress_t progress,
-                      uform_outcome_t *outcome) noexcept {
-    vram_executor_t *const devices = executor ? std::get_if<vram_executor_t>(&executor->executor) : nullptr;
+                      uform_outcome_t* outcome) noexcept {
+    vram_executor_t* const devices = executor ? std::get_if<vram_executor_t>(&executor->executor) : nullptr;
     if (!devices) return propagate_error(uform_status_device_k, outcome, "A VRAM load needs a VRAM executor"), void();
     if (vram.devices_count && !vram.devices)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The devices must not be null"), void();
     for (std::size_t listed = 0; listed != vram.devices_count; ++listed) {
         std::size_t matches = 0;
-        for (vram_device_t const &device : devices->devices) matches += device.ordinal == vram.devices[listed];
+        for (vram_device_t const& device : devices->devices) matches += device.ordinal == vram.devices[listed];
         if (!matches)
             return propagate_error(uform_status_device_k, outcome, "A device the load names is not the executor's"),
                    void();
@@ -233,14 +233,13 @@ static expected<checkpoint_to_load_t> map_checkpoint(uform_bytes_view_t path) no
 
 /** Views the checkpoint image @p buffer , borrowed only until the towers are packed. */
 static expected<checkpoint_to_load_t> view_checkpoint(uform_bytes_view_t buffer) noexcept {
-    return checkpoint_to_load_t::view(
-        {static_cast<b8_t const *>(static_cast<void const *>(buffer.data)), buffer.length});
+    return checkpoint_to_load_t::view(std::as_bytes(std::span<u8_t const> {buffer.data, buffer.length}));
 }
 
 /** The refusals every load shares, clearing the output first so a refused load leaves no model. */
 template <typename arguments_type_>
-static bool rejects_load(arguments_type_ const &arguments, uform_bytes_view_t source, ue::precision_t &precision,
-                         uform_outcome_t *outcome) noexcept {
+static bool rejects_load(arguments_type_ const& arguments, uform_bytes_view_t source, ue::precision_t& precision,
+                         uform_outcome_t* outcome) noexcept {
     if (!arguments.model)
         return !propagate_error(uform_status_invalid_argument_k, outcome, "The model output must not be null");
     *arguments.model = nullptr;
@@ -254,7 +253,7 @@ static bool rejects_load(arguments_type_ const &arguments, uform_bytes_view_t so
 
 extern "C" {
 
-UFORM_EXPORT void uform_model_load_ram(uform_model_load_ram_t *arguments) {
+UFORM_EXPORT void uform_model_load_ram(uform_model_load_ram_t* arguments) {
     if (submitted<uform_model_load_ram>(arguments)) return;
     call_outcome_t outcome(*arguments);
     ue::precision_t precision {};
@@ -263,7 +262,7 @@ UFORM_EXPORT void uform_model_load_ram(uform_model_load_ram_t *arguments) {
              arguments->progress, outcome);
 }
 
-UFORM_EXPORT void uform_model_load_ram_buffer(uform_model_load_ram_buffer_t *arguments) {
+UFORM_EXPORT void uform_model_load_ram_buffer(uform_model_load_ram_buffer_t* arguments) {
     if (submitted<uform_model_load_ram_buffer>(arguments)) return;
     call_outcome_t outcome(*arguments);
     ue::precision_t precision {};
@@ -272,7 +271,7 @@ UFORM_EXPORT void uform_model_load_ram_buffer(uform_model_load_ram_buffer_t *arg
              arguments->progress, outcome);
 }
 
-UFORM_EXPORT void uform_model_load_vram(uform_model_load_vram_t *arguments) {
+UFORM_EXPORT void uform_model_load_vram(uform_model_load_vram_t* arguments) {
     if (submitted<uform_model_load_vram>(arguments)) return;
     call_outcome_t outcome(*arguments);
     ue::precision_t precision {};
@@ -281,7 +280,7 @@ UFORM_EXPORT void uform_model_load_vram(uform_model_load_vram_t *arguments) {
               arguments->progress, outcome);
 }
 
-UFORM_EXPORT void uform_model_load_vram_buffer(uform_model_load_vram_buffer_t *arguments) {
+UFORM_EXPORT void uform_model_load_vram_buffer(uform_model_load_vram_buffer_t* arguments) {
     if (submitted<uform_model_load_vram_buffer>(arguments)) return;
     call_outcome_t outcome(*arguments);
     ue::precision_t precision {};
@@ -290,17 +289,17 @@ UFORM_EXPORT void uform_model_load_vram_buffer(uform_model_load_vram_buffer_t *a
               arguments->progress, outcome);
 }
 
-UFORM_EXPORT void uform_model_describe(uform_model_describe_t *arguments) {
+UFORM_EXPORT void uform_model_describe(uform_model_describe_t* arguments) {
     if (submitted<uform_model_describe>(arguments)) return;
     call_outcome_t outcome(*arguments);
     if (!arguments->model || !arguments->description)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The model and description must not be null"),
                void();
-    uform_model_handle_t const &model = *arguments->model;
+    uform_model_handle_t const& model = *arguments->model;
     cpu_class_t picked_cpu = cpu_class_t::unknown_k;
     gpu_class_t picked_gpu = gpu_class_t::unknown_k;
     std::visit(
-        [&](auto const *verbs) noexcept {
+        [&](auto const* verbs) noexcept {
             if (verbs) picked_cpu = verbs->cpu_class, picked_gpu = verbs->gpu_class;
         },
         model.tables);

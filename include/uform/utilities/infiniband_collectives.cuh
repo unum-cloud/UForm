@@ -141,7 +141,7 @@ struct infiniband_coordinates_t {
     u8_t global_identifier[16] = {};
 
     /** Serialize into the line-oriented exchange payload; @c false only on allocation failure. */
-    [[nodiscard]] bool to_text(sz::string_t &text) const noexcept {
+    [[nodiscard]] bool to_text(sz::string_t& text) const noexcept {
         bool built = format_into(text, "lid {}\nqpn {}\npsn {}\nrkey {}\naddr {}\ngid ", local_identifier,
                                  queue_pair_number, packet_sequence_number, remote_key, buffer_address);
         for (u8_t byte : global_identifier) built = built && format_into(text, "{:02x}", byte);
@@ -149,8 +149,8 @@ struct infiniband_coordinates_t {
     }
 
     /** Parse the payload @ref to_text produced; @c false when any field is missing or malformed. */
-    [[nodiscard]] static bool from_text(sz::string_view_t payload, infiniband_coordinates_t &coordinates) noexcept {
-        auto parse_number = [](sz::string_view_t token, auto &value) noexcept {
+    [[nodiscard]] static bool from_text(sz::string_view_t payload, infiniband_coordinates_t& coordinates) noexcept {
+        auto parse_number = [](sz::string_view_t token, auto& value) noexcept {
             std::from_chars_result const result = std::from_chars(token.data(), token.data() + token.size(), value);
             return result.ec == std::errc {} && result.ptr == token.data() + token.size();
         };
@@ -169,7 +169,7 @@ struct infiniband_coordinates_t {
                 gid_parsed = value.size() == 2 * sizeof(coordinates.global_identifier);
                 for (std::size_t byte_index = 0; gid_parsed && byte_index != sizeof(coordinates.global_identifier);
                      ++byte_index) {
-                    char const *pair = value.data() + 2 * byte_index;
+                    char const* pair = value.data() + 2 * byte_index;
                     std::from_chars_result const result = std::from_chars(
                         pair, pair + 2, coordinates.global_identifier[byte_index], 16);
                     gid_parsed = result.ec == std::errc {} && result.ptr == pair + 2;
@@ -182,9 +182,9 @@ struct infiniband_coordinates_t {
 
 /** Publish this rank's @p local coordinates under @p key and await + parse the @p peer_host_domain
  *  's payload under the same key — one QP handshake over the mesh's filesystem rendezvous. */
-[[nodiscard]] inline expected_t exchange_infiniband_coordinates(mesh_topology_t const &topology, sz::string_view_t key,
-                                                                infiniband_coordinates_t const &local,
-                                                                u32_t peer_host_domain, infiniband_coordinates_t &peer,
+[[nodiscard]] inline expected_t exchange_infiniband_coordinates(mesh_topology_t const& topology, sz::string_view_t key,
+                                                                infiniband_coordinates_t const& local,
+                                                                u32_t peer_host_domain, infiniband_coordinates_t& peer,
                                                                 f64_t timeout_seconds) noexcept {
     sz::string_t local_text;
     if (!local.to_text(local_text))
@@ -210,13 +210,13 @@ struct infiniband_queue_handles_t {
 
     /** The big-endian doorbell-record array; the send entry holds the producer counter
      *  the NIC polls. */
-    u32_t *doorbell_record = nullptr;
+    u32_t* doorbell_record = nullptr; // device-boundary
 
     /** The BlueFlame / User-Access-Region doorbell register — NIC BAR / MMIO space. */
-    void *blueflame_register = nullptr;
+    void* blueflame_register = nullptr;
 
     /** Device counter of posted entries (the producer index); atomically claimed per post. */
-    u32_t *producer_index = nullptr;
+    u32_t* producer_index = nullptr; // device-boundary
 
     /** The queue pair number, baked into every control segment. */
     u32_t queue_pair_number = 0;
@@ -242,10 +242,10 @@ struct infiniband_completion_handles_t {
     bytes_span_t ring {};
 
     /** The big-endian completion doorbell record; set-consumer-index at entry 0. */
-    u32_t *doorbell_record = nullptr;
+    u32_t* doorbell_record = nullptr; // device-boundary
 
     /** Device counter of reaped completions (the consumer index), in GPU VRAM. */
-    u32_t *consumer_index = nullptr;
+    u32_t* consumer_index = nullptr; // device-boundary
 
     /** Ring capacity in entries — a power of two; the consumer index masks modulo it. */
     u32_t entry_count = 0;
@@ -316,14 +316,14 @@ struct infiniband_link_t {
 
     /** This rank's monotonic even-step arrival flag (device VRAM) the waiting kernel
      *  acquire-spins on; the odd-step twin is the next @c u32_t . */
-    infiniband_round_t *arrival_flag = nullptr;
+    infiniband_round_t* arrival_flag = nullptr;
 
     /** How long the flag wait and the completion drain spin before they trap. */
     u64_t wait_nanoseconds = 0;
 
     /** Where the flag wait and the completion drain record why they trap: this rank's GPU's record
      *  in @ref mesh_topology_t::faults . */
-    gpu_fault_t *fault = nullptr;
+    gpu_fault_t* fault = nullptr;
 };
 
 #if UFORM_WITH_INFINIBAND
@@ -354,7 +354,7 @@ enum class host_memory_t : bool { dma_k, mmio_k };
 struct host_page_registration_t {
 
     /** The page base; null marks a free table entry reused by the next @c acquire . */
-    void *page = nullptr;
+    void* page = nullptr;
 
     /** Live acquisitions covering this page; the last @c release unregisters an owned page. */
     u32_t references = 0;
@@ -385,15 +385,15 @@ struct host_page_registry_t {
      *  @param[in] memory NIC BAR space (the BlueFlame register) versus ordinary DMA memory.
      *  @param[out] device_address The GPU-dereferenceable address of @p host 's first byte.
      */
-    [[nodiscard]] expected_t acquire(bytes_span_t host, host_memory_t memory, CUdeviceptr &device_address) noexcept {
+    [[nodiscard]] expected_t acquire(bytes_span_t host, host_memory_t memory, CUdeviceptr& device_address) noexcept {
         device_address = 0;
         std::size_t const page_bytes = static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
-        b8_t *const first = cuda::align_down(host.data(), page_bytes);
-        b8_t *const last = cuda::align_up(host.data() + host.size(), page_bytes);
+        b8_t* const first = cuda::align_down(host.data(), page_bytes);
+        b8_t* const last = cuda::align_up(host.data() + host.size(), page_bytes);
         unsigned const flags = CU_MEMHOSTREGISTER_DEVICEMAP |
                                (memory == host_memory_t::mmio_k ? CU_MEMHOSTREGISTER_IOMEMORY : 0u);
-        for (b8_t *page = first; page != last; page += page_bytes) {
-            if (host_page_registration_t *held = find_(page); held != nullptr) {
+        for (b8_t* page = first; page != last; page += page_bytes) {
+            if (host_page_registration_t* held = find_(page); held != nullptr) {
                 ++held->references;
                 continue;
             }
@@ -424,10 +424,10 @@ struct host_page_registry_t {
     void release(bytes_span_t host) noexcept {
         if (host.empty()) return;
         std::size_t const page_bytes = static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
-        b8_t *const first = cuda::align_down(host.data(), page_bytes);
-        b8_t *const last = cuda::align_up(host.data() + host.size(), page_bytes);
-        for (b8_t *page = first; page != last; page += page_bytes) {
-            host_page_registration_t *held = find_(page);
+        b8_t* const first = cuda::align_down(host.data(), page_bytes);
+        b8_t* const last = cuda::align_up(host.data() + host.size(), page_bytes);
+        for (b8_t* page = first; page != last; page += page_bytes) {
+            host_page_registration_t* held = find_(page);
             if (held == nullptr || held->references == 0) continue; // release without acquire — nothing to drop
             if (--held->references == 0) {
                 if (held->owned) cuMemHostUnregister(held->page);
@@ -439,15 +439,15 @@ struct host_page_registry_t {
   private:
 
     /** The live entry for @p page , or null. */
-    [[nodiscard]] host_page_registration_t *find_(void *page) noexcept {
-        for (host_page_registration_t &entry : pages_)
+    [[nodiscard]] host_page_registration_t* find_(void* page) noexcept {
+        for (host_page_registration_t& entry : pages_)
             if (entry.page == page) return &entry;
         return nullptr;
     }
 
     /** Record @p entry in a free table entry, growing the table when none is free. */
     [[nodiscard]] status_t insert_(host_page_registration_t entry) noexcept {
-        for (host_page_registration_t &free_entry : pages_)
+        for (host_page_registration_t& free_entry : pages_)
             if (free_entry.page == nullptr) {
                 free_entry = entry;
                 return status_t::success_k;
@@ -469,9 +469,9 @@ struct host_page_registry_t {
 struct infiniband_nic_t {
 
     infiniband_nic_t() noexcept = default;
-    infiniband_nic_t(infiniband_nic_t const &) = delete;
-    infiniband_nic_t &operator=(infiniband_nic_t const &) = delete;
-    infiniband_nic_t(infiniband_nic_t &&other) noexcept
+    infiniband_nic_t(infiniband_nic_t const&) = delete;
+    infiniband_nic_t& operator=(infiniband_nic_t const&) = delete;
+    infiniband_nic_t(infiniband_nic_t&& other) noexcept
         : device_context_(std::exchange(other.device_context_, nullptr)),
           protection_domain_(std::exchange(other.protection_domain_, nullptr)),
           primary_context_(std::exchange(other.primary_context_, nullptr)), paired_gpu_(other.paired_gpu_),
@@ -479,7 +479,7 @@ struct infiniband_nic_t {
           path_mtu_(other.path_mtu_), port_(other.port_), global_identifier_index_(other.global_identifier_index_) {
         std::memcpy(global_identifier_, other.global_identifier_, sizeof(global_identifier_));
     }
-    infiniband_nic_t &operator=(infiniband_nic_t &&other) noexcept {
+    infiniband_nic_t& operator=(infiniband_nic_t&& other) noexcept {
         if (this != &other) {
             destroy_();
             device_context_ = std::exchange(other.device_context_, nullptr);
@@ -510,10 +510,10 @@ struct infiniband_nic_t {
     [[nodiscard]] static expected<infiniband_nic_t> make(u32_t local_gpu_index, u8_t infiniband_port = 1) noexcept;
 
     /** The opened device context endpoints create queues against — borrowed, still owned here. */
-    [[nodiscard]] ibv_context *context() const noexcept { return device_context_; }
+    [[nodiscard]] ibv_context* context() const noexcept { return device_context_; }
 
     /** The shared protection domain endpoints register regions and queue pairs in. */
-    [[nodiscard]] ibv_pd *protection_domain() const noexcept { return protection_domain_; }
+    [[nodiscard]] ibv_pd* protection_domain() const noexcept { return protection_domain_; }
 
     /** The port's local identifier — the same-subnet InfiniBand route. */
     [[nodiscard]] u32_t local_identifier() const noexcept { return local_identifier_; }
@@ -525,14 +525,14 @@ struct infiniband_nic_t {
     [[nodiscard]] u8_t port() const noexcept { return port_; }
 
     /** The 16-byte port GID every queue pair's global route header names. */
-    [[nodiscard]] u8_t const *global_identifier() const noexcept { return global_identifier_; }
+    [[nodiscard]] u8_t const* global_identifier() const noexcept { return global_identifier_; }
 
     /** The GID table entry @ref global_identifier came from, the source of every route header. */
     [[nodiscard]] u8_t global_identifier_index() const noexcept { return global_identifier_index_; }
 
     /** The NIC's page-registration ledger every mapping on this NIC acquires through — mlx5's
      *  page-shared pools make the reference counting mandatory (see @ref host_page_registry_t ). */
-    [[nodiscard]] host_page_registry_t &page_registry() noexcept { return page_registry_; }
+    [[nodiscard]] host_page_registry_t& page_registry() noexcept { return page_registry_; }
 
   private:
     void destroy_() noexcept {
@@ -545,10 +545,10 @@ struct infiniband_nic_t {
     }
 
     /** The opened mlx5 device. */
-    ibv_context *device_context_ = nullptr;
+    ibv_context* device_context_ = nullptr;
 
     /** The one protection domain every endpoint on this GPU shares. */
-    ibv_pd *protection_domain_ = nullptr;
+    ibv_pd* protection_domain_ = nullptr;
 
     /** The paired GPU's primary context, retained for the NIC's lifetime — the page registrations
      *  below are scoped to it, and a transient wiring stream releasing the last reference would
@@ -594,10 +594,10 @@ struct infiniband_nic_t {
 struct infiniband_endpoint_t {
 
     infiniband_endpoint_t() noexcept = default;
-    infiniband_endpoint_t(infiniband_endpoint_t const &) = delete;
-    infiniband_endpoint_t &operator=(infiniband_endpoint_t const &) = delete;
+    infiniband_endpoint_t(infiniband_endpoint_t const&) = delete;
+    infiniband_endpoint_t& operator=(infiniband_endpoint_t const&) = delete;
 
-    infiniband_endpoint_t(infiniband_endpoint_t &&other) noexcept
+    infiniband_endpoint_t(infiniband_endpoint_t&& other) noexcept
         : completion_queue_(std::exchange(other.completion_queue_, nullptr)),
           queue_pair_(std::exchange(other.queue_pair_, nullptr)),
           memory_region_(std::exchange(other.memory_region_, nullptr)),
@@ -605,7 +605,7 @@ struct infiniband_endpoint_t {
           dmabuf_descriptor_(std::exchange(other.dmabuf_descriptor_, -1)), infiniband_port_(other.infiniband_port_),
           global_identifier_index_(other.global_identifier_index_), path_mtu_(other.path_mtu_),
           local_coordinates_(other.local_coordinates_), peer_coordinates_(other.peer_coordinates_) {}
-    infiniband_endpoint_t &operator=(infiniband_endpoint_t &&other) noexcept {
+    infiniband_endpoint_t& operator=(infiniband_endpoint_t&& other) noexcept {
         if (this != &other) {
             destroy_();
             completion_queue_ = std::exchange(other.completion_queue_, nullptr);
@@ -632,16 +632,16 @@ struct infiniband_endpoint_t {
      *      @b [buffer_bytes] — typically a window over a @ref gpu_arena_t (its chunks
      *      are created GPUDirect-RDMA-capable).
      */
-    [[nodiscard]] static expected<infiniband_endpoint_t> make(infiniband_nic_t &nic, b8r1_span_t gpu_buffer) noexcept;
+    [[nodiscard]] static expected<infiniband_endpoint_t> make(infiniband_nic_t& nic, b8r1_span_t gpu_buffer) noexcept;
 
     /** What this endpoint publishes for the peer's @ref connect . */
-    [[nodiscard]] infiniband_coordinates_t const &local_coordinates() const noexcept { return local_coordinates_; }
+    [[nodiscard]] infiniband_coordinates_t const& local_coordinates() const noexcept { return local_coordinates_; }
 
     /** The queue pair the GDAKI mapping layers onto — borrowed, still owned here. */
-    [[nodiscard]] ibv_qp *queue_pair() const noexcept { return queue_pair_; }
+    [[nodiscard]] ibv_qp* queue_pair() const noexcept { return queue_pair_; }
 
     /** The completion queue the GDAKI mapping layers onto — borrowed, still owned here. */
-    [[nodiscard]] ibv_cq *completion_queue() const noexcept { return completion_queue_; }
+    [[nodiscard]] ibv_cq* completion_queue() const noexcept { return completion_queue_; }
 
     /** The registered memory region's local key — the source authorization every post carries. */
     [[nodiscard]] u32_t local_key() const noexcept { return memory_region_->lkey; }
@@ -654,7 +654,7 @@ struct infiniband_endpoint_t {
      *  Infinite receiver-not-ready retries: a write racing ahead of the peer's posted receive is
      *  retried, never dropped — the host-side handshake needs no strict ordering.
      */
-    [[nodiscard]] expected_t connect(infiniband_coordinates_t const &peer) noexcept;
+    [[nodiscard]] expected_t connect(infiniband_coordinates_t const& peer) noexcept;
 
     /** Host-post one signaled RDMA write of @p length bytes from @c gpu_buffer+local_offset into
      *  the peer's @c buffer_address+remote_offset — the bring-up / smoke-test path; production
@@ -678,7 +678,7 @@ struct infiniband_endpoint_t {
         work_request.send_flags = IBV_SEND_SIGNALED;
         work_request.wr.rdma.remote_addr = peer_coordinates_.buffer_address + remote_offset;
         work_request.wr.rdma.rkey = peer_coordinates_.remote_key;
-        ibv_send_wr *rejected = nullptr;
+        ibv_send_wr* rejected = nullptr;
         if (ibv_post_send(queue_pair_, &work_request, &rejected) != 0)
             return expected_t::fail(status_t::io_k, "posting the RDMA write failed ({} bytes)", length);
         return {};
@@ -687,7 +687,7 @@ struct infiniband_endpoint_t {
     /** Post a zero-scatter receive so a peer's write-with-immediate completion can be consumed. */
     [[nodiscard]] expected_t post_receive() noexcept {
         ibv_recv_wr work_request {};
-        ibv_recv_wr *rejected = nullptr;
+        ibv_recv_wr* rejected = nullptr;
         if (ibv_post_recv(queue_pair_, &work_request, &rejected) != 0)
             return expected_t::fail(status_t::io_k, "posting the receive failed");
         return {};
@@ -719,7 +719,7 @@ struct infiniband_endpoint_t {
 
     /** Register the GPU buffer as a GPUDirect region in @p protection_domain : dmabuf-first,
      *  @c nvidia_peermem fallback. */
-    [[nodiscard]] expected_t register_gpu_memory_(ibv_pd *protection_domain) noexcept;
+    [[nodiscard]] expected_t register_gpu_memory_(ibv_pd* protection_domain) noexcept;
 
     void destroy_() noexcept {
         if (memory_region_ != nullptr) ibv_dereg_mr(std::exchange(memory_region_, nullptr));
@@ -730,13 +730,13 @@ struct infiniband_endpoint_t {
     }
 
     /** This endpoint's completion queue — its own, so drains never cross lanes. */
-    ibv_cq *completion_queue_ = nullptr;
+    ibv_cq* completion_queue_ = nullptr;
 
     /** The Reliable-Connection queue pair — the single-poster concurrency granularity. */
-    ibv_qp *queue_pair_ = nullptr;
+    ibv_qp* queue_pair_ = nullptr;
 
     /** The GPUDirect memory region over @ref gpu_buffer_ . */
-    ibv_mr *memory_region_ = nullptr;
+    ibv_mr* memory_region_ = nullptr;
 
     /** The registered GPU VRAM range peers read and write. */
     b8r1_span_t gpu_buffer_ {};
@@ -773,15 +773,15 @@ struct infiniband_endpoint_t {
 struct infiniband_queue_mapping_t {
 
     infiniband_queue_mapping_t() noexcept = default;
-    infiniband_queue_mapping_t(infiniband_queue_mapping_t const &) = delete;
-    infiniband_queue_mapping_t &operator=(infiniband_queue_mapping_t const &) = delete;
-    infiniband_queue_mapping_t(infiniband_queue_mapping_t &&other) noexcept
+    infiniband_queue_mapping_t(infiniband_queue_mapping_t const&) = delete;
+    infiniband_queue_mapping_t& operator=(infiniband_queue_mapping_t const&) = delete;
+    infiniband_queue_mapping_t(infiniband_queue_mapping_t&& other) noexcept
         : handles_(std::exchange(other.handles_, infiniband_queue_handles_t {})),
           registry_(std::exchange(other.registry_, nullptr)),
           send_queue_range_(std::exchange(other.send_queue_range_, bytes_span_t {})),
           doorbell_range_(std::exchange(other.doorbell_range_, bytes_span_t {})),
           blueflame_range_(std::exchange(other.blueflame_range_, bytes_span_t {})) {}
-    infiniband_queue_mapping_t &operator=(infiniband_queue_mapping_t &&other) noexcept {
+    infiniband_queue_mapping_t& operator=(infiniband_queue_mapping_t&& other) noexcept {
         if (this != &other) {
             destroy_();
             handles_ = std::exchange(other.handles_, infiniband_queue_handles_t {});
@@ -797,8 +797,8 @@ struct infiniband_queue_mapping_t {
     /** Expose @p queue_pair 's raw mlx5 send queue / doorbell / BlueFlame register and map all
      *  three for the GPU through @p registry (pages are shared across queue pairs, so acquisitions
      *  are reference-counted); the producer counter is allocated from @p arena (capture-stable). */
-    [[nodiscard]] static expected<infiniband_queue_mapping_t> make(ibv_qp *queue_pair, gpu_arena_t &arena,
-                                                                   host_page_registry_t &registry) noexcept;
+    [[nodiscard]] static expected<infiniband_queue_mapping_t> make(ibv_qp* queue_pair, gpu_arena_t& arena,
+                                                                   host_page_registry_t& registry) noexcept;
 
     /** A by-value snapshot for kernels and @c infiniband_post_write . */
     [[nodiscard]] infiniband_queue_handles_t device_handles() const noexcept { return handles_; }
@@ -806,7 +806,7 @@ struct infiniband_queue_mapping_t {
   private:
     void destroy_() noexcept {
         if (registry_ != nullptr) {
-            for (bytes_span_t *range : {&blueflame_range_, &doorbell_range_, &send_queue_range_}) {
+            for (bytes_span_t* range : {&blueflame_range_, &doorbell_range_, &send_queue_range_}) {
                 registry_->release(*range);
                 *range = bytes_span_t {};
             }
@@ -818,7 +818,7 @@ struct infiniband_queue_mapping_t {
     infiniband_queue_handles_t handles_ {};
 
     /** The owning NIC's page ledger — borrowed; outlives the mapping like the protection domain. */
-    host_page_registry_t *registry_ = nullptr;
+    host_page_registry_t* registry_ = nullptr;
 
     /** The send queue's acquired range, released through @ref registry_ at teardown. */
     bytes_span_t send_queue_range_ {};
@@ -836,14 +836,14 @@ struct infiniband_queue_mapping_t {
 struct infiniband_completion_mapping_t {
 
     infiniband_completion_mapping_t() noexcept = default;
-    infiniband_completion_mapping_t(infiniband_completion_mapping_t const &) = delete;
-    infiniband_completion_mapping_t &operator=(infiniband_completion_mapping_t const &) = delete;
-    infiniband_completion_mapping_t(infiniband_completion_mapping_t &&other) noexcept
+    infiniband_completion_mapping_t(infiniband_completion_mapping_t const&) = delete;
+    infiniband_completion_mapping_t& operator=(infiniband_completion_mapping_t const&) = delete;
+    infiniband_completion_mapping_t(infiniband_completion_mapping_t&& other) noexcept
         : handles_(std::exchange(other.handles_, infiniband_completion_handles_t {})),
           registry_(std::exchange(other.registry_, nullptr)),
           ring_range_(std::exchange(other.ring_range_, bytes_span_t {})),
           doorbell_range_(std::exchange(other.doorbell_range_, bytes_span_t {})) {}
-    infiniband_completion_mapping_t &operator=(infiniband_completion_mapping_t &&other) noexcept {
+    infiniband_completion_mapping_t& operator=(infiniband_completion_mapping_t&& other) noexcept {
         if (this != &other) {
             destroy_();
             handles_ = std::exchange(other.handles_, infiniband_completion_handles_t {});
@@ -859,8 +859,8 @@ struct infiniband_completion_mapping_t {
      *  @p registry (pages are shared across completion queues, so acquisitions are
      *  reference-counted); the consumer counter is allocated from @p arena . The ring must be a
      *  power of two and uncompressed. */
-    [[nodiscard]] static expected<infiniband_completion_mapping_t> make(ibv_cq *completion_queue, gpu_arena_t &arena,
-                                                                        host_page_registry_t &registry) noexcept;
+    [[nodiscard]] static expected<infiniband_completion_mapping_t> make(ibv_cq* completion_queue, gpu_arena_t& arena,
+                                                                        host_page_registry_t& registry) noexcept;
 
     /** A by-value snapshot for kernels and @ref infiniband_drain_one . */
     [[nodiscard]] infiniband_completion_handles_t device_handles() const noexcept { return handles_; }
@@ -868,7 +868,7 @@ struct infiniband_completion_mapping_t {
   private:
     void destroy_() noexcept {
         if (registry_ != nullptr) {
-            for (bytes_span_t *range : {&doorbell_range_, &ring_range_}) {
+            for (bytes_span_t* range : {&doorbell_range_, &ring_range_}) {
                 registry_->release(*range);
                 *range = bytes_span_t {};
             }
@@ -880,7 +880,7 @@ struct infiniband_completion_mapping_t {
     infiniband_completion_handles_t handles_ {};
 
     /** The owning NIC's page ledger — borrowed; outlives the mapping like the protection domain. */
-    host_page_registry_t *registry_ = nullptr;
+    host_page_registry_t* registry_ = nullptr;
 
     /** The completion ring's acquired range, released through @ref registry_ at teardown. */
     bytes_span_t ring_range_ {};
@@ -905,7 +905,7 @@ struct infiniband_completion_mapping_t {
 
 /** System-scope acquire load of a completion entry's @c op_own byte — observing the flipped owner
  *  bit orders the rest of the entry (written by the NIC before it) as visible. */
-[[nodiscard]] __device__ inline u8_t infiniband_load_acquire_u8(u8_t const *pointer) noexcept {
+[[nodiscard]] __device__ inline u8_t infiniband_load_acquire_u8(u8_t const* pointer) noexcept {
     unsigned value;
     asm volatile("ld.acquire.sys.global.u8 %0, [%1];" : "=r"(value) : "l"(pointer));
     return static_cast<u8_t>(value);
@@ -913,7 +913,7 @@ struct infiniband_completion_mapping_t {
 
 /** System-scope acquire load of an arrival flag — pairs with the partner's flag write so its prior
  *  payload write (ordered before the flag on the same queue pair) is observed first. */
-[[nodiscard]] __device__ inline u32_t infiniband_load_acquire_u32(u32_t const *pointer) noexcept {
+[[nodiscard]] __device__ inline u32_t infiniband_load_acquire_u32(u32_t const* pointer) noexcept {
     u32_t value;
     asm volatile("ld.acquire.sys.global.u32 %0, [%1];" : "=r"(value) : "l"(pointer));
     return value;
@@ -936,18 +936,18 @@ enum class infiniband_signaling_t : bool { unsignaled_k, signaled_k };
  *  on the @b same queue pair makes the flag's arrival the proof the payload landed. Call from
  *  @b one thread.
  */
-__device__ inline void infiniband_post_write(infiniband_queue_handles_t handles, void const *local_source,
+__device__ inline void infiniband_post_write(infiniband_queue_handles_t handles, void const* local_source,
                                              u32_t local_access_key, u64_t remote_address, u32_t remote_access_key,
                                              u32_t byte_count, infiniband_signaling_t signaling,
-                                             void const *inline_four_bytes) noexcept {
+                                             void const* inline_four_bytes) noexcept {
     u32_t const producer_index = cuda::atomic_ref<u32_t, cuda::thread_scope_device> {*handles.producer_index}.fetch_add(
         1u, cuda::std::memory_order_relaxed);
     u32_t const cell_offset = (producer_index % handles.send_queue_entry_count) * handles.send_queue_stride;
-    std::byte *entry_bytes = handles.send_queue.data() + cell_offset;
+    std::byte* entry_bytes = handles.send_queue.data() + cell_offset;
 
-    auto *control = reinterpret_cast<mlx5_wqe_ctrl_seg *>(entry_bytes);
-    auto *remote = reinterpret_cast<mlx5_wqe_raddr_seg *>(entry_bytes + sizeof(mlx5_wqe_ctrl_seg));
-    std::byte *after_remote = entry_bytes + sizeof(mlx5_wqe_ctrl_seg) + sizeof(mlx5_wqe_raddr_seg);
+    auto* control = reinterpret_cast<mlx5_wqe_ctrl_seg*>(entry_bytes); // vendor-boundary: an mlx5 WQE segment
+    auto* remote = reinterpret_cast<mlx5_wqe_raddr_seg*>(entry_bytes + sizeof(mlx5_wqe_ctrl_seg)); // vendor-boundary
+    std::byte* after_remote = entry_bytes + sizeof(mlx5_wqe_ctrl_seg) + sizeof(mlx5_wqe_raddr_seg);
 
     u32_t const opmod_index_opcode = infiniband_byte_swap_32(((producer_index & 0xffffu) << 8) |
                                                              static_cast<u32_t>(MLX5_OPCODE_RDMA_WRITE));
@@ -969,18 +969,18 @@ __device__ inline void infiniband_post_write(infiniband_queue_handles_t handles,
 
     if (inline_four_bytes != nullptr) {
         // Inline data segment: a big-endian header (inline flag | byte count), then the 4 bytes verbatim.
-        auto *inline_header = reinterpret_cast<u32_t *>(after_remote);
+        auto* inline_header = reinterpret_cast<u32_t*>(after_remote); // vendor-boundary: an mlx5 WQE inline header
         *inline_header = infiniband_byte_swap_32(infiniband_inline_data_flag_k | 4u);
-        std::byte const *source = static_cast<std::byte const *>(inline_four_bytes);
+        std::byte const* source = static_cast<std::byte const*>(inline_four_bytes); // vendor-boundary: inline payload
         for (u32_t byte_index = 0; byte_index != 4u; ++byte_index) after_remote[4u + byte_index] = source[byte_index];
     }
     else {
         // Local-data segment: the source range inside this endpoint's registered buffer,
         // under our key.
-        auto *data = reinterpret_cast<mlx5_wqe_data_seg *>(after_remote);
+        auto* data = reinterpret_cast<mlx5_wqe_data_seg*>(after_remote); // vendor-boundary: an mlx5 WQE segment
         data->byte_count = infiniband_byte_swap_32(byte_count);
         data->lkey = infiniband_byte_swap_32(local_access_key);
-        data->addr = infiniband_byte_swap_64(reinterpret_cast<u64_t>(local_source));
+        data->addr = infiniband_byte_swap_64(reinterpret_cast<u64_t>(local_source)); // vendor-boundary
     }
 
     // The entry must be visible in system memory before the NIC observes the
@@ -992,7 +992,7 @@ __device__ inline void infiniband_post_write(infiniband_queue_handles_t handles,
     u64_t const doorbell = static_cast<u64_t>(opmod_index_opcode) | (static_cast<u64_t>(qpn_descriptor_size) << 32);
     // Ring BlueFlame: the control segment's first 8 bytes, one 64-bit MMIO store,
     // halves already big-endian.
-    *static_cast<volatile u64_t *>(handles.blueflame_register) = doorbell;
+    *static_cast<volatile u64_t*>(handles.blueflame_register) = doorbell; // vendor-boundary: the BlueFlame doorbell
     __threadfence_system();
 }
 
@@ -1006,11 +1006,12 @@ __device__ inline void infiniband_post_write(infiniband_queue_handles_t handles,
  *  with one drain.
  */
 __device__ inline void infiniband_drain_one(infiniband_completion_handles_t completion, u64_t wait_nanoseconds,
-                                            gpu_fault_t *fault) noexcept {
+                                            gpu_fault_t* fault) noexcept {
     u32_t const consumer_index = *completion.consumer_index;
     u32_t const cell = consumer_index & (completion.entry_count - 1u);
-    std::byte *cell_bytes = completion.ring.data() + static_cast<std::size_t>(cell) * completion.entry_size;
-    auto *entry = reinterpret_cast<mlx5_cqe64 *>(cell_bytes + (completion.entry_size - sizeof(mlx5_cqe64)));
+    std::byte* cell_bytes = completion.ring.data() + static_cast<std::size_t>(cell) * completion.entry_size;
+    std::byte* const entry_bytes = cell_bytes + (completion.entry_size - sizeof(mlx5_cqe64));
+    auto* entry = reinterpret_cast<mlx5_cqe64*>(entry_bytes); // vendor-boundary: an mlx5 CQE
     u32_t const expected_owner = (completion.initial_owner ^ ((consumer_index >> completion.entry_log_count) & 1u)) &
                                  1u;
 
@@ -1024,7 +1025,7 @@ __device__ inline void infiniband_drain_one(infiniband_completion_handles_t comp
         u32_t const opcode = static_cast<u32_t>(op_own) >> 4;
         if (opcode == static_cast<u32_t>(MLX5_CQE_INVALID)) continue; // owner flipped before the NIC wrote
         if (opcode == static_cast<u32_t>(MLX5_CQE_REQ_ERR)) {
-            auto const *error = reinterpret_cast<mlx5_err_cqe const *>(entry);
+            auto const* error = reinterpret_cast<mlx5_err_cqe const*>(entry); // vendor-boundary: an mlx5 CQE
             trap_with(fault, gpu_fault_code_t::completion_error_k, static_cast<u32_t>(error->syndrome),
                       static_cast<u32_t>(error->vendor_err_synd), completion.completion_queue_number);
         }
@@ -1151,9 +1152,9 @@ struct infiniband_reach_t {
     /** The shared wiring body behind @ref colocated_domain_t : allocate the heap, wire one
      *  endpoint per round on the shared @p nic , exchange coordinates, prove both ends armed, and
      *  stage the links. The @p stream seeds the member's round scalar (ordered after its zero). */
-    [[nodiscard]] static expected<infiniband_reach_t> make_(mesh_topology_t const &topology, u32_t member_index,
-                                                            infiniband_nic_t &nic, gpu_arena_t &arena,
-                                                            gpu_stream_t &stream, heap_layout_t layout,
+    [[nodiscard]] static expected<infiniband_reach_t> make_(mesh_topology_t const& topology, u32_t member_index,
+                                                            infiniband_nic_t& nic, gpu_arena_t& arena,
+                                                            gpu_stream_t& stream, heap_layout_t layout,
                                                             sz::string_view_t key_prefix,
                                                             f64_t timeout_seconds) noexcept;
 
@@ -1174,7 +1175,7 @@ struct infiniband_reach_t {
     /** The one enqueued host write of a step: stage the round into the pinned cell and
      *  enqueue its upload — on @p stream , before this step's collective. A no-op on the
      *  zero-round single-domain identity. */
-    [[nodiscard]] expected_t advance(gpu_stream_t &stream) noexcept {
+    [[nodiscard]] expected_t advance(gpu_stream_t& stream) noexcept {
         if (layout_.rounds == 0) return {};
         return round_.advance(stream);
     }
@@ -1195,7 +1196,7 @@ struct infiniband_reach_t {
      *  post-and-drain, wait, accumulate. Call @ref advance first, once per step. Zero rounds — the
      *  single-domain identity — enqueues nothing.
      */
-    [[nodiscard]] expected_t allreduce_sum(gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t allreduce_sum(gpu_stream_t& stream) noexcept;
 
     /**
      *  @brief Device-initiated inter-domain all-gather of the domain-major blocks inside this
@@ -1205,7 +1206,7 @@ struct infiniband_reach_t {
      *  This domain's own block must already sit at its domain-major cell; after @c log2(D) rounds
      *  every block is filled. Call @ref advance first, once per step.
      */
-    [[nodiscard]] expected_t allgather(gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t allgather(gpu_stream_t& stream) noexcept;
 
     /** This domain's outgoing block for @p destination_domain inside the send region — where the
      *  caller stages what @ref alltoall ships to that domain. @c destination_domain equal to this
@@ -1237,7 +1238,7 @@ struct infiniband_reach_t {
      *  @ref advance first, once per step. Two domains today — one pairwise exchange; beyond two
      *  needs the multi-hop schedule.
      */
-    [[nodiscard]] expected_t alltoall(gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t alltoall(gpu_stream_t& stream) noexcept;
 
   private:
 
@@ -1291,10 +1292,10 @@ struct colocated_domain_t {
     /** Open each local GPU's adapter — @c mlx5_<d> for local ordinal @c d , the box's
      *  GPU↔HCA pairing — once for the process: one per local GPU, however many processes
      *  share the multimem_domain. */
-    [[nodiscard]] static expected<colocated_domain_t> make(mesh_topology_t &topology) noexcept;
+    [[nodiscard]] static expected<colocated_domain_t> make(mesh_topology_t& topology) noexcept;
 
     /** The bootstrapped world this domain was wired against. */
-    [[nodiscard]] mesh_topology_t const &topology() const noexcept { return *topology_; }
+    [[nodiscard]] mesh_topology_t const& topology() const noexcept { return *topology_; }
 
     /** How many multimem_domains the world spans — 1 means no member ever posts. */
     [[nodiscard]] u32_t multimem_domain_count() const noexcept { return topology_->shape.multimem_domain_count(); }
@@ -1335,13 +1336,13 @@ struct colocated_domain_t {
      *  @param[in] timeout_seconds Deadline on the coordinate and armed-peer rendezvous, and on
      *      every device-side flag wait and completion drain of the wired rounds.
      */
-    [[nodiscard]] expected<infiniband_reach_t> reach_(u32_t member_index, gpu_arena_t &arena, gpu_stream_t &stream,
+    [[nodiscard]] expected<infiniband_reach_t> reach_(u32_t member_index, gpu_arena_t& arena, gpu_stream_t& stream,
                                                       infiniband_reach_t::heap_layout_t layout,
                                                       f64_t timeout_seconds) noexcept;
 
     /** The bootstrapped world — borrowed; main owns it for the process lifetime, and every wired
      *  handle claims its rendezvous generation from it. */
-    mesh_topology_t *topology_ = nullptr;
+    mesh_topology_t* topology_ = nullptr;
 
     /** One opened adapter per local GPU, local order: entry @c d serves domain member
      *  @c member_offset+d . */
@@ -1358,9 +1359,9 @@ struct infiniband_all_reduce {
 
     /** Wire the reduce's shared body: heap @b [shard | parity landings | parity flags] , one
      *  endpoint per recursive-doubling round — a single-domain world gets the zero-round identity. */
-    [[nodiscard]] static expected<infiniband_all_reduce> make(colocated_domain_t &domain, u32_t member_index,
-                                                              gpu_arena_t &arena, std::size_t scalars,
-                                                              gpu_stream_t &stream, f64_t timeout_seconds) noexcept {
+    [[nodiscard]] static expected<infiniband_all_reduce> make(colocated_domain_t& domain, u32_t member_index,
+                                                              gpu_arena_t& arena, std::size_t scalars,
+                                                              gpu_stream_t& stream, f64_t timeout_seconds) noexcept {
         using result_t = expected<infiniband_all_reduce>;
         infiniband_reach_t::heap_layout_t layout;
         layout.payload_bytes = scalars * sizeof(value_type_);
@@ -1375,12 +1376,12 @@ struct infiniband_all_reduce {
     /** The typed shard summed in place — the caller stages its contribution here
      *  before each step. */
     [[nodiscard]] nk::tensor_span<value_type_, 1> payload() noexcept {
-        return typed_span<value_type_>(reach_.payload());
+        return nk::as_writable_values<value_type_>(reach_.payload());
     }
 
     /** Advance the round and enqueue the in-place cross-domain sum — one op
      *  per step, capture-safe. */
-    [[nodiscard]] expected_t operator()(gpu_stream_t &stream) noexcept {
+    [[nodiscard]] expected_t operator()(gpu_stream_t& stream) noexcept {
         if (expected_t advanced = reach_.advance(stream); !advanced) return advanced;
         return reach_.allreduce_sum(stream);
     }
@@ -1403,9 +1404,9 @@ struct infiniband_all_gather {
 
     /** Wire the gather's shared body: the domain-major payload @b [domains·block] doubles as the
      *  landing (blocks gather in place) — a single-domain world gets the zero-round identity. */
-    [[nodiscard]] static expected<infiniband_all_gather> make(colocated_domain_t &domain, u32_t member_index,
-                                                              gpu_arena_t &arena, std::size_t block_scalars,
-                                                              gpu_stream_t &stream, f64_t timeout_seconds) noexcept {
+    [[nodiscard]] static expected<infiniband_all_gather> make(colocated_domain_t& domain, u32_t member_index,
+                                                              gpu_arena_t& arena, std::size_t block_scalars,
+                                                              gpu_stream_t& stream, f64_t timeout_seconds) noexcept {
         using result_t = expected<infiniband_all_gather>;
         infiniband_reach_t::heap_layout_t layout;
         layout.payload_bytes = static_cast<std::size_t>(domain.multimem_domain_count()) * block_scalars *
@@ -1420,17 +1421,17 @@ struct infiniband_all_gather {
 
     /** The whole domain-major world buffer — @b [domains·block] , filled after @c operator() . */
     [[nodiscard]] nk::tensor_span<value_type_, 1> payload() noexcept {
-        return typed_span<value_type_>(reach_.payload());
+        return nk::as_writable_values<value_type_>(reach_.payload());
     }
 
     /** This domain's own block — staged here before the gather. */
     [[nodiscard]] nk::tensor_span<value_type_, 1> own_block() noexcept {
-        return typed_span<value_type_>(reach_.own_block());
+        return nk::as_writable_values<value_type_>(reach_.own_block());
     }
 
     /** Advance the round and enqueue the domain-major all-gather — one op
      *  per step, capture-safe. */
-    [[nodiscard]] expected_t operator()(gpu_stream_t &stream) noexcept {
+    [[nodiscard]] expected_t operator()(gpu_stream_t& stream) noexcept {
         if (expected_t advanced = reach_.advance(stream); !advanced) return advanced;
         return reach_.allgather(stream);
     }
@@ -1451,9 +1452,9 @@ struct infiniband_all_to_all {
      *  one parity landing pair per round — a single-domain world gets the zero-round identity.
      *  Recursive doubling reaches every peer only at two domains; beyond that a direct all-to-all
      *  needs the D-1 links (or a multi-hop schedule) the round wiring does not lay down. */
-    [[nodiscard]] static expected<infiniband_all_to_all> make(colocated_domain_t &domain, u32_t member_index,
-                                                              gpu_arena_t &arena, std::size_t block_scalars,
-                                                              gpu_stream_t &stream, f64_t timeout_seconds) noexcept {
+    [[nodiscard]] static expected<infiniband_all_to_all> make(colocated_domain_t& domain, u32_t member_index,
+                                                              gpu_arena_t& arena, std::size_t block_scalars,
+                                                              gpu_stream_t& stream, f64_t timeout_seconds) noexcept {
         using result_t = expected<infiniband_all_to_all>;
         u32_t const domains = domain.multimem_domain_count();
         if (domains > 2u)
@@ -1471,7 +1472,7 @@ struct infiniband_all_to_all {
 
     /** The outgoing block for @p destination_domain — staged before the exchange. */
     [[nodiscard]] nk::tensor_span<value_type_, 1> send_block(u32_t destination_domain) noexcept {
-        return typed_span<value_type_>(reach_.send_block(destination_domain));
+        return nk::as_writable_values<value_type_>(reach_.send_block(destination_domain));
     }
 
     /** The parity of this handle's @b latest exchange — even/odd landings alternate per step,
@@ -1486,11 +1487,11 @@ struct infiniband_all_to_all {
     /** The block received from round @p round 's partner at @p step_parity — valid after the
      *  exchange of that parity; see @ref latest_parity for the eager-only host contract. */
     [[nodiscard]] nk::tensor_span<value_type_, 1> recv_block(u32_t round, u32_t step_parity) noexcept {
-        return typed_span<value_type_>(reach_.recv_block(round, step_parity));
+        return nk::as_writable_values<value_type_>(reach_.recv_block(round, step_parity));
     }
 
     /** Advance the round and enqueue the all-to-all exchange — one op per step, capture-safe. */
-    [[nodiscard]] expected_t operator()(gpu_stream_t &stream) noexcept {
+    [[nodiscard]] expected_t operator()(gpu_stream_t& stream) noexcept {
         if (expected_t advanced = reach_.advance(stream); !advanced) return advanced;
         expected_t exchanged = reach_.alltoall(stream);
         if (exchanged) ++exchanges_;
@@ -1512,10 +1513,10 @@ struct infiniband_all_to_all {
 struct infiniband_reach_t {
     [[nodiscard]] b8r1_span_t payload() noexcept { return {}; }
     [[nodiscard]] b8r1_span_t own_block() noexcept { return {}; }
-    [[nodiscard]] expected_t advance(gpu_stream_t &) noexcept { return {}; }
-    [[nodiscard]] expected_t allreduce_sum(gpu_stream_t &) noexcept { return {}; }
-    [[nodiscard]] expected_t allgather(gpu_stream_t &) noexcept { return {}; }
-    [[nodiscard]] expected_t alltoall(gpu_stream_t &) noexcept { return {}; }
+    [[nodiscard]] expected_t advance(gpu_stream_t&) noexcept { return {}; }
+    [[nodiscard]] expected_t allreduce_sum(gpu_stream_t&) noexcept { return {}; }
+    [[nodiscard]] expected_t allgather(gpu_stream_t&) noexcept { return {}; }
+    [[nodiscard]] expected_t alltoall(gpu_stream_t&) noexcept { return {}; }
     [[nodiscard]] b8r1_span_t send_block(u32_t) noexcept { return {}; }
     [[nodiscard]] b8r1_span_t recv_block(u32_t, u32_t) noexcept { return {}; }
     [[nodiscard]] bool identity() const noexcept { return true; }
@@ -1525,7 +1526,7 @@ struct infiniband_reach_t {
 /** The build-gate stub of the colocated domain: single-domain topologies work (nothing to
  *  wire); multi-domain worlds fail loudly naming the gate. */
 struct colocated_domain_t {
-    [[nodiscard]] static expected<colocated_domain_t> make(mesh_topology_t &topology) noexcept {
+    [[nodiscard]] static expected<colocated_domain_t> make(mesh_topology_t& topology) noexcept {
         if (topology.shape.multimem_domain_count() != 1)
             return expected<colocated_domain_t>::fail(
                 status_t::internal_k,
@@ -1535,11 +1536,11 @@ struct colocated_domain_t {
         domain.topology_ = &topology;
         return expected<colocated_domain_t> {std::move(domain)};
     }
-    [[nodiscard]] mesh_topology_t const &topology() const noexcept { return *topology_; }
+    [[nodiscard]] mesh_topology_t const& topology() const noexcept { return *topology_; }
     [[nodiscard]] u32_t multimem_domain_count() const noexcept { return 1u; }
 
   private:
-    mesh_topology_t *topology_ = nullptr;
+    mesh_topology_t* topology_ = nullptr;
 };
 
 /** Build-gate stubs of the typed collective handles — the zero-round identity: @c make
@@ -1548,37 +1549,37 @@ struct colocated_domain_t {
 template <typename value_type_>
 struct infiniband_all_reduce {
     using value_type = value_type_;
-    [[nodiscard]] static expected<infiniband_all_reduce> make(colocated_domain_t &, u32_t, gpu_arena_t &, std::size_t,
-                                                              gpu_stream_t &, f64_t) noexcept {
+    [[nodiscard]] static expected<infiniband_all_reduce> make(colocated_domain_t&, u32_t, gpu_arena_t&, std::size_t,
+                                                              gpu_stream_t&, f64_t) noexcept {
         return expected<infiniband_all_reduce> {infiniband_all_reduce {}};
     }
     [[nodiscard]] nk::tensor_span<value_type_, 1> payload() noexcept { return {}; }
-    [[nodiscard]] expected_t operator()(gpu_stream_t &) noexcept { return {}; }
+    [[nodiscard]] expected_t operator()(gpu_stream_t&) noexcept { return {}; }
     [[nodiscard]] bool identity() const noexcept { return true; }
     [[nodiscard]] u32_t multimem_domain_count() const noexcept { return 1; }
 };
 template <typename value_type_>
 struct infiniband_all_gather {
     using value_type = value_type_;
-    [[nodiscard]] static expected<infiniband_all_gather> make(colocated_domain_t &, u32_t, gpu_arena_t &, std::size_t,
-                                                              gpu_stream_t &, f64_t) noexcept {
+    [[nodiscard]] static expected<infiniband_all_gather> make(colocated_domain_t&, u32_t, gpu_arena_t&, std::size_t,
+                                                              gpu_stream_t&, f64_t) noexcept {
         return expected<infiniband_all_gather> {infiniband_all_gather {}};
     }
     [[nodiscard]] nk::tensor_span<value_type_, 1> payload() noexcept { return {}; }
     [[nodiscard]] nk::tensor_span<value_type_, 1> own_block() noexcept { return {}; }
-    [[nodiscard]] expected_t operator()(gpu_stream_t &) noexcept { return {}; }
+    [[nodiscard]] expected_t operator()(gpu_stream_t&) noexcept { return {}; }
 };
 template <typename value_type_>
 struct infiniband_all_to_all {
     using value_type = value_type_;
-    [[nodiscard]] static expected<infiniband_all_to_all> make(colocated_domain_t &, u32_t, gpu_arena_t &, std::size_t,
-                                                              gpu_stream_t &, f64_t) noexcept {
+    [[nodiscard]] static expected<infiniband_all_to_all> make(colocated_domain_t&, u32_t, gpu_arena_t&, std::size_t,
+                                                              gpu_stream_t&, f64_t) noexcept {
         return expected<infiniband_all_to_all> {infiniband_all_to_all {}};
     }
     [[nodiscard]] nk::tensor_span<value_type_, 1> send_block(u32_t) noexcept { return {}; }
     [[nodiscard]] u32_t latest_parity() const noexcept { return 0; }
     [[nodiscard]] nk::tensor_span<value_type_, 1> recv_block(u32_t, u32_t) noexcept { return {}; }
-    [[nodiscard]] expected_t operator()(gpu_stream_t &) noexcept { return {}; }
+    [[nodiscard]] expected_t operator()(gpu_stream_t&) noexcept { return {}; }
 };
 
 #endif // UFORM_WITH_INFINIBAND

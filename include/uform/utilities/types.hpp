@@ -20,8 +20,8 @@
 #include <limits>          // `std::numeric_limits`
 #include <utility>         // `std::move`
 #include <span>            // `std::span` — byte runs and tape offsets
-#include <new>             // `std::launder` — typed spans over byte regions
-#include <type_traits>     // `std::is_trivially_copyable_v`, `std::type_identity_t`
+#include <new>             // placement `new` — the value an `expected` holds
+#include <type_traits>     // `std::type_identity_t`
 #include <format>          // `std::vformat_to`, `std::make_format_args`, `std::formatter`
 #include <source_location> // `std::source_location`
 
@@ -36,7 +36,7 @@
  *  no conversion shims at call sites. */
 template <>
 struct std::formatter<ashvardanian::stringzilla::string_view_t> : std::formatter<std::string_view> {
-    auto format(ashvardanian::stringzilla::string_view_t text, std::format_context &context) const noexcept {
+    auto format(ashvardanian::stringzilla::string_view_t text, std::format_context& context) const noexcept {
         return std::formatter<std::string_view>::format(std::string_view {text}, context);
     }
 };
@@ -44,7 +44,7 @@ struct std::formatter<ashvardanian::stringzilla::string_view_t> : std::formatter
 /** @c std::format support for owning StringZilla strings — same bridge, by reference. */
 template <>
 struct std::formatter<ashvardanian::stringzilla::string_t> : std::formatter<std::string_view> {
-    auto format(ashvardanian::stringzilla::string_t const &text, std::format_context &context) const noexcept {
+    auto format(ashvardanian::stringzilla::string_t const& text, std::format_context& context) const noexcept {
         return std::formatter<std::string_view>::format(std::string_view {text}, context);
     }
 };
@@ -99,25 +99,6 @@ using f32r3_span_t = nk::tensor_span<f32_t, 3>;
 using f32r4_view_t = nk::tensor_view<f32_t, 4>;
 using f32r4_span_t = nk::tensor_span<f32_t, 4>;
 
-/** The whole @p value_type_ scalars of @p bytes , a trailing partial scalar dropped — the one place
- *  a byte region takes on a scalar type. The region comes from an allocation, which creates
- *  implicit-lifetime scalars on first access, so laundering the address is all it takes, and it
- *  touches no memory, so device regions qualify. */
-template <typename value_type_>
-[[nodiscard]] inline nk::tensor_span<value_type_, 1> typed_span(b8r1_span_t bytes) noexcept {
-    static_assert(std::is_trivially_copyable_v<value_type_>);
-    std::size_t const count = bytes.extent(0) / sizeof(value_type_);
-    return {std::launder(static_cast<value_type_ *>(static_cast<void *>(bytes.data()))), count};
-}
-
-/** The read-only twin of @ref typed_span . */
-template <typename value_type_>
-[[nodiscard]] inline nk::tensor_view<value_type_, 1> typed_view(b8r1_view_t bytes) noexcept {
-    static_assert(std::is_trivially_copyable_v<value_type_>);
-    std::size_t const count = bytes.extent(0) / sizeof(value_type_);
-    return {std::launder(static_cast<value_type_ const *>(static_cast<void const *>(bytes.data()))), count};
-}
-
 /** Entries end to end and @c count+1 offsets into them, as the C ABI's tapes carry them;
  *  @c elements runs from where every offset counts to the last offset, and an empty tape
  *  holds no entries. */
@@ -139,19 +120,6 @@ using bytes_view_t = std::span<b8_t const>;
 
 /** A writable run of raw bytes. */
 using bytes_span_t = std::span<b8_t>;
-
-/** The bytes the contiguous @p tensor spans, the currency of the byte copy and zero steps. */
-template <typename value_type_, std::size_t rank_>
-[[nodiscard]] inline bytes_span_t bytes_of(nk::tensor_span<value_type_, rank_> tensor) noexcept {
-    return {static_cast<b8_t *>(static_cast<void *>(tensor.byte_data())), tensor.numel() * sizeof(value_type_)};
-}
-
-/** The read-only twin of @ref bytes_of . */
-template <typename value_type_, std::size_t rank_>
-[[nodiscard]] inline bytes_view_t bytes_of(nk::tensor_view<value_type_, rank_> tensor) noexcept {
-    return {static_cast<b8_t const *>(static_cast<void const *>(tensor.byte_data())),
-            tensor.numel() * sizeof(value_type_)};
-}
 
 /** One vocabulary entry's index — the byte-level vocabulary (256 bytes + the special tokens) fits
  *  16 bits, and every token tape, staging cell, and embedding lookup trades in this width. */
@@ -329,7 +297,7 @@ enum class status_t : i32_t {
 };
 
 /** Static-string name for a @ref status_t value (the single name table; no allocation). */
-[[nodiscard]] inline char const *to_string(status_t status) noexcept {
+[[nodiscard]] inline char const* to_string(status_t status) noexcept {
     switch (status) {
     case status_t::success_k: return "success";
     case status_t::bad_alloc_k: return "bad_alloc";
@@ -350,13 +318,13 @@ enum class status_t : i32_t {
 struct format_into_t {
     using difference_type = std::ptrdiff_t;
 
-    sz::string_t *text = nullptr;
-    bool *failed = nullptr;
+    sz::string_t* text = nullptr;
+    bool* failed = nullptr;
 
-    format_into_t &operator*() noexcept { return *this; }
-    format_into_t &operator++() noexcept { return *this; }
+    format_into_t& operator*() noexcept { return *this; }
+    format_into_t& operator++() noexcept { return *this; }
     format_into_t operator++(int) noexcept { return *this; }
-    format_into_t &operator=(char character) noexcept {
+    format_into_t& operator=(char character) noexcept {
         if (sz::failed(text->push_back(character)) && failed != nullptr) *failed = true;
         return *this;
     }
@@ -366,8 +334,8 @@ struct format_into_t {
  *  for every payload and path assembly. @c false only on allocation failure (the text is then
  *  truncated); the format string is compile-time checked. */
 template <typename... arg_types_>
-[[nodiscard]] inline bool format_into(sz::string_t &text, std::format_string<arg_types_...> format_string,
-                                      arg_types_ &&...args) noexcept {
+[[nodiscard]] inline bool format_into(sz::string_t& text, std::format_string<arg_types_...> format_string,
+                                      arg_types_&&... args) noexcept {
     bool failed = false;
     std::vformat_to(format_into_t {&text, &failed}, format_string.get(), std::make_format_args(args...));
     return !failed;
@@ -378,10 +346,10 @@ template <typename... arg_types_>
  *  failure site behind its variadic pack, where a defaulted trailing argument cannot go —
  *  and without a macro. */
 struct format_at_t {
-    char const *format = nullptr;
+    char const* format = nullptr;
     std::source_location location {};
 
-    format_at_t(char const *format, // vendor-boundary: the literal `std::vformat_to` consumes
+    format_at_t(char const* format, // vendor-boundary: the literal `std::vformat_to` consumes
                 std::source_location location = std::source_location::current()) noexcept
         : format(format), location(location) {}
 };
@@ -408,8 +376,8 @@ struct expected {
     std::source_location location_ {};
 
     expected() noexcept = delete;
-    expected(expected const &) noexcept = delete;
-    expected &operator=(expected const &) noexcept = delete;
+    expected(expected const&) noexcept = delete;
+    expected& operator=(expected const&) noexcept = delete;
 
     /** Success: adopts @p value , making the union member live. */
     expected(value_type_ value) noexcept : value_(std::move(value)) {}
@@ -417,12 +385,13 @@ struct expected {
     /** Move: the error channel travels unconditionally; the value is adopted only when @p other is
      *  on the success path, since the union member is live only then. The @c noexcept is the same
      *  compile-time proof that @c value_type_ moves without throwing. */
-    expected(expected &&other) noexcept
+    expected(expected&& other) noexcept
         : status_(other.status_), cu_error_(other.cu_error_), description_(std::move(other.description_)),
           location_(other.location_) {
-        if (status_ == status_t::success_k) ::new (static_cast<void *>(&value_)) value_type_(std::move(other.value_));
+        if (status_ == status_t::success_k)
+            ::new (static_cast<void*>(&value_)) value_type_(std::move(other.value_)); // vendor-boundary
     }
-    expected &operator=(expected &&other) noexcept {
+    expected& operator=(expected&& other) noexcept {
         if (this != &other) {
             if (status_ == status_t::success_k) value_.~value_type_();
             status_ = other.status_;
@@ -430,7 +399,7 @@ struct expected {
             description_ = std::move(other.description_);
             location_ = other.location_;
             if (status_ == status_t::success_k)
-                ::new (static_cast<void *>(&value_)) value_type_(std::move(other.value_));
+                ::new (static_cast<void*>(&value_)) value_type_(std::move(other.value_)); // vendor-boundary
         }
         return *this;
     }
@@ -444,15 +413,15 @@ struct expected {
     /** Reach the held value on the success path, so a consumer writes @c result->field or
      *  @c *result instead of @c result.value_ . Reading it on a failed @ref expected is a logic
      *  error, gated by its @c bool conversion . */
-    [[nodiscard]] value_type_ *operator->() noexcept { return &value_; }
-    [[nodiscard]] value_type_ const *operator->() const noexcept { return &value_; }
-    [[nodiscard]] value_type_ &operator*() noexcept { return value_; }
-    [[nodiscard]] value_type_ const &operator*() const noexcept { return value_; }
+    [[nodiscard]] value_type_* operator->() noexcept { return &value_; }
+    [[nodiscard]] value_type_ const* operator->() const noexcept { return &value_; }
+    [[nodiscard]] value_type_& operator*() noexcept { return value_; }
+    [[nodiscard]] value_type_ const& operator*() const noexcept { return value_; }
 
     /** Failure tagged with a @ref status_t : materializes @p format + @p args into the description
      *  and records the failure site @ref format_at_t captured. */
     template <typename... arg_types_>
-    [[nodiscard]] static expected fail(status_t status, format_at_t format, arg_types_ &&...args) noexcept {
+    [[nodiscard]] static expected fail(status_t status, format_at_t format, arg_types_&&... args) noexcept {
         expected result {failure_t {}, status};
         result.location_ = format.location;
         std::vformat_to(format_into_t {&result.description_}, format.format, std::make_format_args(args...));
@@ -463,7 +432,7 @@ struct expected {
      *  description, and failure site travel @b unchanged — the composition path for helpers, so
      *  forwarding never reformats and never loses the original location. */
     template <typename other_type_>
-    [[nodiscard]] static expected fail(expected<other_type_> &&other) noexcept {
+    [[nodiscard]] static expected fail(expected<other_type_>&& other) noexcept {
         expected result {failure_t {}, other.status_};
         result.cu_error_ = other.cu_error_;
         result.description_ = std::move(other.description_);
@@ -490,11 +459,11 @@ struct expected<void> {
     std::source_location location_ {};
 
     expected() noexcept = default;
-    expected(expected const &) noexcept = delete;
-    expected &operator=(expected const &) noexcept = delete;
+    expected(expected const&) noexcept = delete;
+    expected& operator=(expected const&) noexcept = delete;
 
-    expected(expected &&) noexcept = default;
-    expected &operator=(expected &&) noexcept = default;
+    expected(expected&&) noexcept = default;
+    expected& operator=(expected&&) noexcept = default;
 
     /** @c true iff the action succeeded. */
     [[nodiscard]] explicit operator bool() const noexcept { return status_ == status_t::success_k; }
@@ -502,7 +471,7 @@ struct expected<void> {
     /** Failure tagged with a @ref status_t : materializes @p format + @p args into the description
      *  and records the failure site @ref format_at_t captured. */
     template <typename... arg_types_>
-    [[nodiscard]] static expected fail(status_t status, format_at_t format, arg_types_ &&...args) noexcept {
+    [[nodiscard]] static expected fail(status_t status, format_at_t format, arg_types_&&... args) noexcept {
         expected result;
         result.status_ = status;
         result.location_ = format.location;
@@ -512,7 +481,7 @@ struct expected<void> {
 
     /** Failure adopted from another @ref expected 's error channel, unchanged. */
     template <typename other_type_>
-    [[nodiscard]] static expected fail(expected<other_type_> &&other) noexcept {
+    [[nodiscard]] static expected fail(expected<other_type_>&& other) noexcept {
         expected result;
         result.status_ = other.status_;
         result.cu_error_ = other.cu_error_;
@@ -530,7 +499,7 @@ using expected_t = expected<void>;
 /** @c std::format support for statuses, printing the name @c to_string gives. */
 template <>
 struct std::formatter<unum::uform::utilities::status_t> : std::formatter<std::string_view> {
-    auto format(auto status, std::format_context &context) const noexcept {
+    auto format(auto status, std::format_context& context) const noexcept {
         return std::formatter<std::string_view>::format(to_string(status), context);
     }
 };

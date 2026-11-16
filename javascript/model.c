@@ -24,8 +24,8 @@ typedef struct uform_js_describe_call_t {
     uform_model_description_t description;
 } uform_js_describe_call_t;
 
-static void uform_js_model_finalize(napi_env env, void *data, void *hint) {
-    uform_js_model_t *const model = (uform_js_model_t *)data;
+static void uform_js_model_finalize(napi_env env, void* data, void* hint) {
+    uform_js_model_t* const model = (uform_js_model_t*)data;
     (void)env;
     (void)hint;
     if (!model) return;
@@ -34,11 +34,11 @@ static void uform_js_model_finalize(napi_env env, void *data, void *hint) {
 }
 
 /** Wraps a handle a load just made, or throws its outcome and frees the handle. */
-static napi_value uform_js_model_adopt(napi_env env, uform_outcome_t const *outcome, uform_model_t handle) {
+static napi_value uform_js_model_adopt(napi_env env, uform_outcome_t const* outcome, uform_model_t handle) {
     if (!uform_js_succeeded(env, outcome)) return NULL;
-    uform_js_addon_t *const addon = uform_js_addon(env);
+    uform_js_addon_t* const addon = uform_js_addon(env);
     napi_value const instance = addon ? uform_js_instantiate(env, addon->model_class) : NULL;
-    uform_js_model_t *const model = (uform_js_model_t *)calloc(1, sizeof(uform_js_model_t));
+    uform_js_model_t* const model = (uform_js_model_t*)calloc(1, sizeof(uform_js_model_t));
     if (!instance || !model || napi_wrap(env, instance, model, uform_js_model_finalize, NULL, NULL) != napi_ok) {
         free(model);
         uform_model_free(handle);
@@ -64,17 +64,17 @@ static napi_value uform_js_model_load(napi_env env, napi_callback_info info, ufo
     napi_value arguments[5];
     if (!uform_js_arguments(env, info, 5, arguments, NULL)) return NULL;
     bool const from_path = load == uform_js_load_ram_k || load == uform_js_load_vram_k;
-    char *path = NULL;
-    void *buffer = NULL;
+    char* path = NULL;
+    void* buffer = NULL;
     uform_bytes_view_t bytes = {NULL, 0};
     uform_executor_t executor = NULL;
     uform_scalar_t quantization = uform_scalar_unknown_k;
-    int32_t *ordinals = NULL;
+    int32_t* ordinals = NULL;
     size_t ordinals_count = 0;
-    char const *const field = load >= uform_js_load_vram_k ? "devices" : "memoryDomains";
+    char const* const field = load >= uform_js_load_vram_k ? "devices" : "memoryDomains";
     if (from_path) path = uform_js_string_from_value(env, arguments[0], "path", &bytes);
     else if (uform_js_bytes_from_value(env, arguments[0], "buffer", &buffer, &bytes.length))
-        bytes.data = (uint8_t const *)buffer;
+        bytes.data = (uint8_t const*)buffer;
     uform_cpu_class_t cpu_class = uform_cpu_class_unknown_k;
     uform_gpu_class_t gpu_class = uform_gpu_class_unknown_k;
     bool const read = from_path ? path != NULL : bytes.data != NULL || !bytes.length;
@@ -152,16 +152,16 @@ static napi_value uform_js_model_load_vram_buffer(napi_env env, napi_callback_in
 
 /** @c free() - releases the handle now, waiting for every deferred call naming it; idempotent. */
 static napi_value uform_js_model_release(napi_env env, napi_callback_info info) {
-    uform_js_model_t *const model = (uform_js_model_t *)uform_js_self(env, info, 0, NULL, NULL);
+    uform_js_model_t* const model = (uform_js_model_t*)uform_js_self(env, info, 0, NULL, NULL);
     if (!model) return NULL;
     uform_model_free(model->handle);
     model->handle = NULL;
     return uform_js_undefined(env);
 }
 
-static napi_value uform_js_finish_describe(napi_env env, uform_js_call_t *call, napi_value const *slots) {
-    uform_model_description_t const *const description = &((uform_js_describe_call_t *)call)->description;
-    static char const *const names[] = {"dimensions", "context",  "quantization", "memoryUsage",
+static napi_value uform_js_finish_describe(napi_env env, uform_js_call_t* call, napi_value const* slots) {
+    uform_model_description_t const* const description = &((uform_js_describe_call_t*)call)->description;
+    static char const* const names[] = {"dimensions", "context",  "quantization", "memoryUsage",
                                         "cpuClass",   "gpuClass", "tokenWidth",   "choiceTemperatureGroups"};
     napi_value const values[] = {uform_js_number(env, description->dimensions),
                                  uform_js_number(env, description->context),
@@ -178,12 +178,12 @@ static napi_value uform_js_finish_describe(napi_env env, uform_js_call_t *call, 
 /** @c describe(executor, completion) → the geometry and placement, each read once. */
 static napi_value uform_js_model_describe(napi_env env, napi_callback_info info) {
     napi_value arguments[2], self = NULL, deferred = NULL;
-    uform_js_model_t *const model = (uform_js_model_t *)uform_js_self(env, info, 2, arguments, &self);
+    uform_js_model_t* const model = (uform_js_model_t*)uform_js_self(env, info, 2, arguments, &self);
     if (model && !model->handle) uform_js_throw(env, uform_status_invalid_argument_k, "The model was freed");
     if (!model || !model->handle) return NULL;
     uform_js_describe_call_t local;
     uform_model_describe_t describe = {.model = model->handle};
-    uform_js_describe_call_t *const call = (uform_js_describe_call_t *)uform_js_call_open_on(
+    uform_js_describe_call_t* const call = (uform_js_describe_call_t*)uform_js_call_open_on(
         env, arguments, &local.call, sizeof(local), &describe.executor, &describe.completion);
     if (!call) return NULL;
     napi_value const slots[uform_js_slots_k] = {self, arguments[0]};
@@ -208,7 +208,7 @@ napi_value uform_js_model_define(napi_env env) {
     };
     size_t const lifecycle_count = sizeof(lifecycle) / sizeof(lifecycle[0]);
     size_t encode_count = 0;
-    napi_property_descriptor const *const encode = uform_js_encode_properties(&encode_count);
+    napi_property_descriptor const* const encode = uform_js_encode_properties(&encode_count);
     napi_property_descriptor properties[16];
     if (lifecycle_count + encode_count > sizeof(properties) / sizeof(properties[0])) {
         uform_js_throw(env, uform_status_internal_k, "The CompiledModel has more verbs than room");

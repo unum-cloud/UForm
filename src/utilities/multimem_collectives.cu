@@ -17,7 +17,7 @@ using namespace unum::uform::utilities;
 extern "C" b8_t const uform_multimem_switch_bundle_start[], uform_multimem_switch_bundle_end[];
 
 /** A fabric handle is 64 opaque bytes; the mesh rendezvous carries text, so it travels 128-hex. */
-static bool format_fabric_handle_(sz::string_t &text, CUmemFabricHandle const &handle) noexcept {
+static bool format_fabric_handle_(sz::string_t& text, CUmemFabricHandle const& handle) noexcept {
     bool built = true;
     for (unsigned char const byte : handle.data) built = built && format_into(text, "{:02x}", static_cast<u32_t>(byte));
     return built;
@@ -25,10 +25,10 @@ static bool format_fabric_handle_(sz::string_t &text, CUmemFabricHandle const &h
 
 /** Parse a 128-hex fabric-handle token back into its 64 bytes; @c false on any non-hex
  *  or short token. */
-static bool parse_fabric_handle_(sz::string_view_t token, CUmemFabricHandle &handle) noexcept {
+static bool parse_fabric_handle_(sz::string_view_t token, CUmemFabricHandle& handle) noexcept {
     if (token.size() != 2u * sizeof(handle.data)) return false;
     for (std::size_t index = 0; index != sizeof(handle.data); ++index) {
-        char const *pair = token.data() + 2u * index;
+        char const* pair = token.data() + 2u * index;
         unsigned value = 0;
         std::from_chars_result const result = std::from_chars(pair, pair + 2, value, 16);
         if (result.ec != std::errc {} || result.ptr != pair + 2) return false;
@@ -50,7 +50,7 @@ static __global__ void multimem_barrier_peer_kernel_(multimem_member_t member) {
     if (threadIdx.x != 0u) return;
     u32_t const target = *member.round + member.member_count;
     for (u32_t peer = 0; peer != member.member_count; ++peer) {
-        u32_t *flag = member.peer_flag(peer);
+        u32_t* flag = member.peer_flag(peer);
         asm volatile("red.release.sys.global.add.u32 [%0], %1;" : : "l"(flag), "r"(1u) : "memory");
     }
     u64_t const deadline = global_nanoseconds() + member.wait_nanoseconds;
@@ -76,7 +76,7 @@ static __global__ void multimem_reduce_scatter_peer_kernel_(multimem_member_t me
          index += stride) {
         f32_t total = 0.0f;
         for (u32_t peer = 0; peer != member.member_count; ++peer) {
-            f32_t const *peer_payload = member.peer_payload(peer);
+            f32_t const* peer_payload = member.peer_payload(peer);
             total = __fadd_rn(total, peer_payload[shard_begin + index]);
         }
         destination[index] = total;
@@ -270,7 +270,7 @@ expected<CUmemFabricHandle> gpu_symmetric_arena_t::export_fabric_handle(std::siz
     return result_t {fabric};
 }
 
-expected_t gpu_symmetric_arena_t::adopt_peer(std::size_t member, CUmemFabricHandle const &handle) noexcept {
+expected_t gpu_symmetric_arena_t::adopt_peer(std::size_t member, CUmemFabricHandle const& handle) noexcept {
     CUmemGenericAllocationHandle imported = 0;
     CUmemFabricHandle shared = handle; // the driver takes a writable pointer it only reads through
     if (CUresult result = cuMemImportFromShareableHandle(&imported, &shared, CU_MEM_HANDLE_TYPE_FABRIC);
@@ -285,7 +285,7 @@ expected_t gpu_symmetric_arena_t::adopt_peer(std::size_t member, CUmemFabricHand
     return grant_local_access_(slice, member_stride_, devices_, static_cast<u32_t>(member));
 }
 
-expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t &topology, std::span<i32_t const> local_devices,
+expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t& topology, std::span<i32_t const> local_devices,
                                                     std::size_t payload_scalars, std::span<gpu_stream_t> local_streams,
                                                     f64_t timeout_seconds) noexcept {
     using result_t = expected<multimem_domain_t>;
@@ -298,7 +298,7 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t &topology, s
     // The island's geometry comes from the world, not the local span: it may cross processes. The
     // domain's host_domains are the contiguous run [domain_first_host, +host_domains_per_domain);
     // this process's slices occupy members [member_offset, member_offset+local_count).
-    mesh_shape_t const &shape = topology.shape;
+    mesh_shape_t const& shape = topology.shape;
     u32_t const gpus_per_host = shape.gpus_per_host_domain;
     u32_t const member_count = shape.gpus_per_multimem_domain;
     u32_t const member_offset = shape.index_in_multimem_domain(topology.first_gpu_index());
@@ -489,7 +489,7 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t &topology, s
     return result_t {std::move(domain)};
 }
 
-expected_t multimem_domain_t::barrier(std::size_t member_index, gpu_stream_t &stream) noexcept {
+expected_t multimem_domain_t::barrier(std::size_t member_index, gpu_stream_t& stream) noexcept {
     dim3 const one {1u, 1u, 1u};
     dim3 const warp {warp_size_k, 1u, 1u};
     switch (tier()) {
@@ -502,7 +502,7 @@ expected_t multimem_domain_t::barrier(std::size_t member_index, gpu_stream_t &st
 }
 
 expected_t multimem_domain_t::reduce_scatter(std::size_t member_index, f32r1_span_t destination,
-                                             std::size_t shard_begin, gpu_stream_t &stream) noexcept {
+                                             std::size_t shard_begin, gpu_stream_t& stream) noexcept {
     std::size_t const shard_scalars = destination.extent(0);
     if (shard_begin + shard_scalars > payload_scalars_)
         return expected_t::fail(status_t::unsupported_k, "shard [{},{}) exceeds the domain payload of {} scalars",

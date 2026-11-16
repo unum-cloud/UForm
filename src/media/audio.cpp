@@ -1,8 +1,8 @@
 /**
- *  @brief Host audio decoding — see the header for the contract.
  *  @file src/media/audio.cpp
  *  @author Ash Vardanian
  *  @date July 5, 2026
+ *  @brief Host audio decoding — see the header for the contract.
  *
  *  A firewall over the libav C API: every libav and libswresample error is wrapped and can leave
  *  only as an @ref expected_t .
@@ -43,8 +43,8 @@ struct audio_memory_reader_t {
 };
 
 /** @c AVIOContext read callback: copy up to @p buffer_size bytes, @c AVERROR_EOF at the end. */
-static int audio_memory_read_(void *opaque, u8_t *buffer, int buffer_size) noexcept {
-    auto *reader = static_cast<audio_memory_reader_t *>(opaque);
+static int audio_memory_read_(void* opaque, u8_t* buffer, int buffer_size) noexcept {
+    auto* reader = static_cast<audio_memory_reader_t*>(opaque);
     std::size_t const remaining = reader->bytes.size() - reader->position;
     std::size_t const requested = static_cast<std::size_t>(buffer_size);
     int const to_read = static_cast<int>(requested < remaining ? requested : remaining);
@@ -56,8 +56,8 @@ static int audio_memory_read_(void *opaque, u8_t *buffer, int buffer_size) noexc
 
 /** @c AVIOContext seek callback: honors @c SEEK_SET/CUR/END and the @c AVSEEK_SIZE query, @c -1
  *  out of range. */
-static i64_t audio_memory_seek_(void *opaque, i64_t offset, int whence) noexcept {
-    auto *reader = static_cast<audio_memory_reader_t *>(opaque);
+static i64_t audio_memory_seek_(void* opaque, i64_t offset, int whence) noexcept {
+    auto* reader = static_cast<audio_memory_reader_t*>(opaque);
     i64_t const size = static_cast<i64_t>(reader->bytes.size());
     if (whence == AVSEEK_SIZE) return size;
     i64_t position = 0;
@@ -71,9 +71,11 @@ static i64_t audio_memory_seek_(void *opaque, i64_t offset, int whence) noexcept
 }
 
 /** The untyped planes libswresample writes and reads Float32 samples through. */
-[[nodiscard]] static u8_t *swr_plane_(f32_t *samples) noexcept { return reinterpret_cast<u8_t *>(samples); }
-[[nodiscard]] static u8_t const *swr_plane_(f32_t const *samples) noexcept {
-    return reinterpret_cast<u8_t const *>(samples);
+[[nodiscard]] static u8_t* swr_plane_(f32_t* samples) noexcept {
+    return reinterpret_cast<u8_t*>(samples); // vendor-boundary: FFmpeg planes are `uint8_t`
+}
+[[nodiscard]] static u8_t const* swr_plane_(f32_t const* samples) noexcept {
+    return reinterpret_cast<u8_t const*>(samples); // vendor-boundary: FFmpeg planes are `uint8_t`
 }
 
 /** One clip's demux + decode + resample chain, owned as a unit so its destructor is the single
@@ -86,23 +88,23 @@ struct audio_decoder_ {
     audio_memory_reader_t reader {};
 
     /** The custom in-memory @c AVIOContext feeding the demuxer the clip's bytes. */
-    AVIOContext *avio = nullptr; // vendor-boundary
+    AVIOContext* avio = nullptr; // vendor-boundary
 
     /** The opened demuxer context. */
-    AVFormatContext *format = nullptr; // vendor-boundary
+    AVFormatContext* format = nullptr; // vendor-boundary
 
     /** The audio decoder context bound to the picked stream's codec parameters. */
-    AVCodecContext *decoder = nullptr; // vendor-boundary
+    AVCodecContext* decoder = nullptr; // vendor-boundary
 
     /** The libswresample context converting the decoded audio to mono Float32 at
      *  the target rate. */
-    SwrContext *resampler = nullptr; // vendor-boundary
+    SwrContext* resampler = nullptr; // vendor-boundary
 
     /** The reusable packet the demuxer reads each compressed unit into. */
-    AVPacket *packet = nullptr; // vendor-boundary
+    AVPacket* packet = nullptr; // vendor-boundary
 
     /** The reusable frame the decoder emits each PCM block into. */
-    AVFrame *frame = nullptr; // vendor-boundary
+    AVFrame* frame = nullptr; // vendor-boundary
 
     /** The picked audio stream's index in @c format->streams . */
     int audio_stream_index = -1;
@@ -130,9 +132,9 @@ struct audio_decoder_ {
  *  @param[in] sample_rate The mono rate the resampler converts to.
  *  @param[out] session The session the libav chain is built into.
  */
-[[nodiscard]] static status_t open_audio_(bytes_view_t encoded, u32_t sample_rate, audio_decoder_ &session) noexcept {
+[[nodiscard]] static status_t open_audio_(bytes_view_t encoded, u32_t sample_rate, audio_decoder_& session) noexcept {
     session.reader = audio_memory_reader_t {encoded, 0u};
-    u8_t *avio_buffer = static_cast<u8_t *>(av_malloc(audio_avio_buffer_bytes_k));
+    u8_t* avio_buffer = static_cast<u8_t*>(av_malloc(audio_avio_buffer_bytes_k));
     if (avio_buffer == nullptr) return status_t::bad_alloc_k;
     session.avio = avio_alloc_context(avio_buffer, static_cast<int>(audio_avio_buffer_bytes_k), 0, &session.reader,
                                       &audio_memory_read_, nullptr, &audio_memory_seek_);
@@ -141,7 +143,7 @@ struct audio_decoder_ {
         return status_t::bad_alloc_k;
     }
     session.avio->seekable = AVIO_SEEKABLE_NORMAL; // advertise the seek callback so probing demuxers can rewind
-    AVFormatContext *format = avformat_alloc_context();
+    AVFormatContext* format = avformat_alloc_context();
     if (format == nullptr) return status_t::bad_alloc_k;
     format->pb = session.avio;
     format->flags |= AVFMT_FLAG_CUSTOM_IO;
@@ -158,8 +160,8 @@ struct audio_decoder_ {
         }
     if (session.audio_stream_index < 0) return status_t::invalid_argument_k;
 
-    AVStream *audio_stream = session.format->streams[session.audio_stream_index];
-    AVCodec const *codec = avcodec_find_decoder(audio_stream->codecpar->codec_id);
+    AVStream* audio_stream = session.format->streams[session.audio_stream_index];
+    AVCodec const* codec = avcodec_find_decoder(audio_stream->codecpar->codec_id);
     if (codec == nullptr) return status_t::unsupported_k;
     session.decoder = avcodec_alloc_context3(codec);
     if (session.decoder == nullptr) return status_t::bad_alloc_k;
@@ -217,12 +219,12 @@ struct resample_cursor_t {
  *  @return Whether the resampler may still yield output: always for real input, and for a drain
  *      only while it emitted samples.
  */
-static bool feed_(SwrContext *resampler, u8_t const *const *input, int input_samples, f32r1_span_t out,
-                  resample_cursor_t &cursor) noexcept {
+static bool feed_(SwrContext* resampler, u8_t const* const* input, int input_samples, f32r1_span_t out,
+                  resample_cursor_t& cursor) noexcept {
     std::size_t const capacity = out.extent(0);
     if (cursor.outcome != status_t::success_k || cursor.written >= capacity) return false;
     int const room = static_cast<int>(capacity - cursor.written);
-    u8_t *output_planes[1] = {swr_plane_(out.data() + cursor.written)};
+    u8_t* output_planes[1] = {swr_plane_(out.data() + cursor.written)};
     int const converted = swr_convert(resampler, output_planes, room, input, input != nullptr ? input_samples : 0);
     if (converted < 0) {
         cursor.outcome = status_t::io_k;
@@ -234,7 +236,7 @@ static bool feed_(SwrContext *resampler, u8_t const *const *input, int input_sam
 
 /** Pull every frame the decoder holds and resample each into the clip, until it asks for input or
  *  the clip is full. */
-static void receive_frames_(audio_decoder_ &session, f32r1_span_t out, resample_cursor_t &cursor) noexcept {
+static void receive_frames_(audio_decoder_& session, f32r1_span_t out, resample_cursor_t& cursor) noexcept {
     while (cursor.outcome == status_t::success_k && cursor.written < out.extent(0)) {
         int const received = avcodec_receive_frame(session.decoder, session.frame);
         if (received == AVERROR(EAGAIN) || received == AVERROR_EOF) break;
@@ -300,7 +302,7 @@ expected_t um::resample_mono(std::span<f32_t const> samples, u32_t from_rate, u3
                                 to_rate);
     AVChannelLayout mono {};
     av_channel_layout_default(&mono, 1);
-    SwrContext *resampler = nullptr;
+    SwrContext* resampler = nullptr;
     int const built = swr_alloc_set_opts2(&resampler, &mono, AV_SAMPLE_FMT_FLT, static_cast<int>(to_rate), &mono,
                                           AV_SAMPLE_FMT_FLT, static_cast<int>(from_rate), 0, nullptr);
     av_channel_layout_uninit(&mono);
@@ -309,7 +311,7 @@ expected_t um::resample_mono(std::span<f32_t const> samples, u32_t from_rate, u3
         return expected_t::fail(status_t::io_k, "resampler setup failed ({} → {})", from_rate, to_rate);
     }
     resample_cursor_t cursor;
-    u8_t const *const input[1] = {swr_plane_(samples.data())};
+    u8_t const* const input[1] = {swr_plane_(samples.data())};
     feed_(resampler, input, static_cast<int>(samples.size()), out, cursor);
     while (feed_(resampler, nullptr, 0, out, cursor)) {}
     swr_free(&resampler);

@@ -328,9 +328,9 @@ static __global__ void __launch_bounds__(kernel_block_size_default_k, 1)
 }
 
 expected<distributed_pooled_spectrum_t> distributed_pooled_spectrum_t::make(
-    multimem_domain_t &domain, colocated_domain_t &colocated, std::span<gpu_arena_t> arenas,
+    multimem_domain_t& domain, colocated_domain_t& colocated, std::span<gpu_arena_t> arenas,
     std::span<gpu_stream_t> streams, std::span<differentiable_weights_t const> weights, std::size_t weights_per_rank,
-    pooled_spectrum_config_t config, gpu_numerics_t const &numerics, f64_t timeout_seconds) noexcept {
+    pooled_spectrum_config_t config, gpu_numerics_t const& numerics, f64_t timeout_seconds) noexcept {
     using result_t = expected<distributed_pooled_spectrum_t>;
     std::size_t const gpus = arenas.size();
     std::size_t const rows = config.rows_per_gpu, hidden = config.hidden;
@@ -381,7 +381,7 @@ expected<distributed_pooled_spectrum_t> distributed_pooled_spectrum_t::make(
     for (std::size_t rank = 0; rank != gpus; ++rank) {
         switch_to_gpu_t gpu_scope {streams[rank]};
         if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "context entry failed (rank={})", rank);
-        spectrum_rank_t &state = spectrum.ranks_[rank];
+        spectrum_rank_t& state = spectrum.ranks_[rank];
         gpu_arena_alloc<f32_t> f32_alloc {arenas[rank]};
         gpu_arena_alloc<bf16_t> bf16_alloc {arenas[rank]};
         state.terms = f32r1_tensor_arena_t::uninitialized({2}, f32_alloc).value;
@@ -461,8 +461,8 @@ expected<distributed_pooled_spectrum_t> distributed_pooled_spectrum_t::make(
 }
 
 expected_t distributed_pooled_spectrum_t::world_sum_(std::size_t rank, std::size_t begin,
-                                                     infiniband_all_reduce<f32_t> &world, f32r1_span_t destination,
-                                                     gpu_stream_t &stream) noexcept {
+                                                     infiniband_all_reduce<f32_t>& world, f32r1_span_t destination,
+                                                     gpu_stream_t& stream) noexcept {
     std::size_t const member = domain_->member_offset() + rank, scalars = destination.extent(0);
     expected_t summed = domain_->barrier(member, stream);
     if (world.identity()) {
@@ -488,8 +488,8 @@ expected_t distributed_pooled_spectrum_t::world_sum_(std::size_t rank, std::size
 }
 
 expected_t distributed_pooled_spectrum_t::coding_rate_(std::size_t rank, bf16r2_view_t pooled,
-                                                       gpu_stream_t &stream) noexcept {
-    spectrum_rank_t &state = ranks_[rank];
+                                                       gpu_stream_t& stream) noexcept {
+    spectrum_rank_t& state = ranks_[rank];
     std::size_t const rows = config_.rows_per_gpu, hidden = config_.hidden, tiles = hidden / warp_size_k;
     std::size_t const rows_padded = state.transposed.extent(1);
     f32r1_span_t const payload = domain_->payload(domain_->member_offset() + rank);
@@ -506,9 +506,9 @@ expected_t distributed_pooled_spectrum_t::coding_rate_(std::size_t rank, bf16r2_
         spectrum_tile_block_k, stream, pooled, state.inverse_norms.view(), state.transposed.span());
     if (staged)
         staged = numkong_result(
-            numerics_.symmetric_bf16(numkong_scalars(state.transposed.data()), hidden, rows_padded,
-                                     rows_padded * sizeof(bf16_t), gram.data(), hidden * sizeof(f32_t), 0, hidden,
-                                     nullptr, 0, stream.numkong()),
+            numerics_.symmetric_bf16(nk::as_values<nk_bf16_t>(nk::as_bytes(state.transposed.view())).data(), hidden,
+                                     rows_padded, rows_padded * sizeof(bf16_t), gram.data(), hidden * sizeof(f32_t), 0,
+                                     hidden, nullptr, 0, stream.numkong()),
             "pooled Gram");
     if (staged) staged = world_sum_(rank, window_.offset, gram_reduce_, factor.flatten<1>(), stream);
     if (staged)
@@ -533,7 +533,7 @@ expected_t distributed_pooled_spectrum_t::coding_rate_(std::size_t rank, bf16r2_
 }
 
 expected_t distributed_pooled_spectrum_t::operator()(std::size_t rank, bf16r2_view_t pooled, bf16r2_span_t pooled_grad,
-                                                     gpu_stream_t &stream) noexcept {
+                                                     gpu_stream_t& stream) noexcept {
     std::size_t const rows = config_.rows_per_gpu, hidden = config_.hidden;
     bool const coding_rate = config_.coding_rate_weight > 0.0f, lipschitz = config_.lipschitz_weight > 0.0f;
     if (rank >= ranks_.size())
@@ -547,7 +547,7 @@ expected_t distributed_pooled_spectrum_t::operator()(std::size_t rank, bf16r2_vi
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed ({})", rank);
 
-    spectrum_rank_t &state = ranks_[rank];
+    spectrum_rank_t& state = ranks_[rank];
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const row_grid {static_cast<u32_t>(divide_round_up(rows, std::size_t {spectrum_rows_per_block_k})), 1u, 1u};
     expected_t staged = launch_kernel(&spectrum_inverse_norms_kernel_, row_grid, block_shape, stream, pooled,
@@ -569,14 +569,14 @@ expected_t distributed_pooled_spectrum_t::operator()(std::size_t rank, bf16r2_vi
     return staged;
 }
 
-expected_t distributed_pooled_spectrum_t::measure_gradients(std::size_t rank, gpu_stream_t &stream) noexcept {
+expected_t distributed_pooled_spectrum_t::measure_gradients(std::size_t rank, gpu_stream_t& stream) noexcept {
     if (rank >= ranks_.size())
         return expected_t::fail(status_t::invalid_argument_k, "rank {} of {}", rank, ranks_.size());
     if (!(config_.spike_threshold > 0.0f))
         return expected_t::fail(status_t::invalid_argument_k, "the spike gate is off, so nothing measures gradients");
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed ({})", rank);
-    spectrum_rank_t &state = ranks_[rank];
+    spectrum_rank_t& state = ranks_[rank];
     std::size_t const begin = window_.offset + gram_scalars_(config_);
     f32r1_span_t const payload = domain_->payload(domain_->member_offset() + rank);
     f32r2_span_t const partials = state.energy_partials.span();
@@ -592,7 +592,7 @@ expected_t distributed_pooled_spectrum_t::measure_gradients(std::size_t rank, gp
     return measured;
 }
 
-expected_t distributed_pooled_spectrum_t::admit_gradients(gpu_stream_t &stream) noexcept {
+expected_t distributed_pooled_spectrum_t::admit_gradients(gpu_stream_t& stream) noexcept {
     if (ranks_.size() == 0 || energy_staging_.empty())
         return expected_t::fail(status_t::invalid_argument_k, "the spike gate is off, so nothing admits gradients");
     switch_to_gpu_t gpu_scope {stream};

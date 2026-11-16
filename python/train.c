@@ -14,14 +14,14 @@
 
 #pragma region Enums
 
-static char const *spell_modality(int value) { return uform_modality_name((uform_modality_t)value); }
-static char const *spell_multimem_tier(int value) { return uform_multimem_tier_name((uform_multimem_tier_t)value); }
+static char const* spell_modality(int value) { return uform_modality_name((uform_modality_t)value); }
+static char const* spell_multimem_tier(int value) { return uform_multimem_tier_name((uform_multimem_tier_t)value); }
 
-static char const *spell_objective(int value) { return uform_objective_name((uform_objective_t)value); }
-static char const *spell_negatives(int value) { return uform_negatives_name((uform_negatives_t)value); }
+static char const* spell_objective(int value) { return uform_objective_name((uform_objective_t)value); }
+static char const* spell_negatives(int value) { return uform_negatives_name((uform_negatives_t)value); }
 
 /** The C interface spells no pair-loss form, so the binding names the four it declares. */
-static char const *spell_pair_loss_form(int value) {
+static char const* spell_pair_loss_form(int value) {
     switch (value) {
     case uform_pair_loss_form_derived_k: return "derived";
     case uform_pair_loss_form_balanced_k: return "balanced";
@@ -32,7 +32,7 @@ static char const *spell_pair_loss_form(int value) {
 }
 
 /** The C interface spells no late-interaction side, so the binding names the four it declares. */
-static char const *spell_late_interaction_side(int value) {
+static char const* spell_late_interaction_side(int value) {
     switch (value) {
     case uform_late_interaction_side_none_k: return "none";
     case uform_late_interaction_side_query_k: return "query";
@@ -374,21 +374,21 @@ static char const doc_Mesh[] =                                                  
     "at bootstrap, and the InfiniBand domain joining its NVLink domains. Made once with\n"     //
     "`bootstrap` and borrowed by every trainer, which holds it until the trainer is freed.";
 
-static PyObject *Mesh_tp_new(PyTypeObject *type, PyObject *args, PyObject *keywords) {
+static PyObject* Mesh_tp_new(PyTypeObject* type, PyObject* args, PyObject* keywords) {
     PyErr_SetString(PyExc_TypeError, "Mesh is built through Mesh.bootstrap()");
     return NULL;
 }
 
-static void Mesh_dealloc(Mesh *self) {
+static void Mesh_dealloc(Mesh* self) {
     Py_BEGIN_ALLOW_THREADS;
     uform_mesh_free(self->handle);
     Py_END_ALLOW_THREADS;
-    Py_TYPE(self)->tp_free((PyObject *)self);
+    Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
 /** Reads an optional path field into @p view, keeping its encoding in @p decoded; returns
  *  0 or -1. */
-static int optional_path(PyObject *object, char const *field, uform_bytes_view_t *view, PyObject **decoded) {
+static int optional_path(PyObject* object, char const* field, uform_bytes_view_t* view, PyObject** decoded) {
     *decoded = NULL;
     if (!object || object == Py_None) return 0;
     return uform_py_path_from_object(object, field, view, decoded);
@@ -396,16 +396,16 @@ static int optional_path(PyObject *object, char const *field, uform_bytes_view_t
 
 /** Lends an optional name field, a @c str, as its UTF-8 bytes into @p view, which live as long
  *  as the string; returns 0 or -1. */
-static int optional_name(PyObject *object, char const *field, uform_bytes_view_t *view) {
+static int optional_name(PyObject* object, char const* field, uform_bytes_view_t* view) {
     if (!object || object == Py_None) return 0;
     if (!PyUnicode_Check(object)) {
         PyErr_Format(PyExc_TypeError, "the '%s' option takes a str, got %S", field, Py_TYPE(object));
         return -1;
     }
     Py_ssize_t length = 0;
-    char const *const text = PyUnicode_AsUTF8AndSize(object, &length);
+    char const* const text = PyUnicode_AsUTF8AndSize(object, &length);
     if (!text) return -1;
-    *view = (uform_bytes_view_t) {(uint8_t const *)text, (size_t)length};
+    *view = (uform_bytes_view_t) {(uint8_t const*)text, (size_t)length};
     return 0;
 }
 
@@ -424,8 +424,8 @@ static char const doc_Mesh_bootstrap[] =                                        
     "Example:\n"                                                                                 //
     "  >>> mesh = uform.Mesh.bootstrap(executor, uform.MeshOptions(host_domain_count=1))  # doctest: +SKIP";
 
-static PyObject *Mesh_bootstrap(PyTypeObject *type, PyObject *const *args, Py_ssize_t positional_args_count,
-                                PyObject *args_names_tuple) {
+static PyObject* Mesh_bootstrap(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
+                                PyObject* args_names_tuple) {
     PyObject *executor_object, *options_object, *directory = NULL, *result = NULL;
     uform_py_argument_t const arguments[] = {{"executor", &executor_object}, {"options", &options_object}};
     uform_executor_t executor = NULL;
@@ -453,13 +453,13 @@ static PyObject *Mesh_bootstrap(PyTypeObject *type, PyObject *const *args, Py_ss
         uform_mesh_free(handle);
         goto release;
     }
-    Mesh *const mesh = (Mesh *)type->tp_alloc(type, 0);
+    Mesh* const mesh = (Mesh*)type->tp_alloc(type, 0);
     if (!mesh) {
         uform_mesh_free(handle);
         goto release;
     }
     mesh->handle = handle;
-    result = (PyObject *)mesh;
+    result = (PyObject*)mesh;
 
 release:
     Py_XDECREF(directory);
@@ -489,7 +489,7 @@ static char const doc_Mesh_describe[] =                          //
     "Reports the mesh's shape and this process's place in it.\n" //
     "Calls `uform_mesh_describe`.";
 
-static PyObject *Mesh_describe(Mesh *self, PyObject *unused) {
+static PyObject* Mesh_describe(Mesh* self, PyObject* unused) {
     uform_mesh_description_t description = {0};
     uform_outcome_t outcome = {0};
     uform_mesh_describe_t arguments = {.mesh = self->handle, .outcome = &outcome, .description = &description};
@@ -497,7 +497,7 @@ static PyObject *Mesh_describe(Mesh *self, PyObject *unused) {
     uform_mesh_describe(&arguments);
     Py_END_ALLOW_THREADS;
     if (uform_py_raise_on_outcome(&outcome) != 0) return NULL;
-    PyObject *fields[7] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL};
+    PyObject* fields[7] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL};
     (void)((fields[0] = PyLong_FromSize_t(description.gpus_per_host_domain)) &&
            (fields[1] = PyLong_FromSize_t(description.gpus_per_multimem_domain)) &&
            (fields[2] = PyLong_FromSize_t(description.gpus_per_colocated_domain)) &&
@@ -535,11 +535,11 @@ typedef struct Trainer {
     uform_trainer_t handle;
 
     /** The @c Executor the trainer was created on, held, which its own verbs block on. */
-    PyObject *executor;
+    PyObject* executor;
 
     /** The @c Mesh the trainer borrows until it is freed, held, or NULL for a run
      *  of one process. */
-    PyObject *mesh;
+    PyObject* mesh;
 } Trainer;
 
 static char const doc_Trainer[] =                                                                  //
@@ -553,30 +553,30 @@ static char const doc_Trainer[] =                                               
     "`on(executor)` blocks on another executor of the same devices, and `deferred(executor)`\n"    //
     "submits there and answers a `Deferred`.";
 
-static PyObject *Trainer_tp_new(PyTypeObject *type, PyObject *args, PyObject *keywords) {
+static PyObject* Trainer_tp_new(PyTypeObject* type, PyObject* args, PyObject* keywords) {
     PyErr_SetString(PyExc_TypeError, "Trainer is built through Trainer.init_vram()");
     return NULL;
 }
 
-static void Trainer_dealloc(Trainer *self) {
+static void Trainer_dealloc(Trainer* self) {
     Py_BEGIN_ALLOW_THREADS;
     uform_trainer_free(self->handle);
     Py_END_ALLOW_THREADS;
     Py_XDECREF(self->mesh);
     Py_XDECREF(self->executor);
-    Py_TYPE(self)->tp_free((PyObject *)self);
+    Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
 /** Reads a sequence of positive widths into a @c PyMem array; NULL and zero for None. Returns
  *  0 or -1. */
-static int widths_from_object(PyObject *object, char const *field, size_t **widths, size_t *count) {
+static int widths_from_object(PyObject* object, char const* field, size_t** widths, size_t* count) {
     *widths = NULL;
     *count = 0;
     if (!object || object == Py_None) return 0;
-    PyObject *const sequence = PySequence_Fast(object, "expected a sequence of widths");
+    PyObject* const sequence = PySequence_Fast(object, "expected a sequence of widths");
     if (!sequence) return -1;
     Py_ssize_t const length = PySequence_Fast_GET_SIZE(sequence);
-    *widths = (size_t *)PyMem_Malloc((length ? (size_t)length : 1) * sizeof(size_t));
+    *widths = (size_t*)PyMem_Malloc((length ? (size_t)length : 1) * sizeof(size_t));
     int failed = !*widths;
     if (failed) PyErr_NoMemory();
     for (Py_ssize_t position = 0; !failed && position != length; ++position)
@@ -618,8 +618,8 @@ static char const doc_Trainer_init_vram[] =                                     
     "  progress (callable, optional): Called with (completed, total) tensors placed on a resume.\n"  //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.";
 
-static PyObject *Trainer_init_vram(PyTypeObject *type, PyObject *const *args, Py_ssize_t positional_args_count,
-                                   PyObject *args_names_tuple) {
+static PyObject* Trainer_init_vram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
+                                   PyObject* args_names_tuple) {
     PyObject *executor_object, *mesh_object, *resume_object, *depth_object, *hidden_object, *batch_object,
         *objective_object, *masking_object, *contrastive_object, *late_interaction_object, *choices_object,
         *schedule_object, *seed_object, *progress_object, *progress_steps_object, *resume_decoded = NULL,
@@ -682,7 +682,7 @@ static PyObject *Trainer_init_vram(PyTypeObject *type, PyObject *const *args, Py
     init.outcome = &call.outcome;
     init.objective = (uform_objective_t)objective;
     init.contrastive.matryoshka_dimensions = matryoshka;
-    init.mesh = mesh_object && mesh_object != Py_None ? ((Mesh *)mesh_object)->handle : NULL;
+    init.mesh = mesh_object && mesh_object != Py_None ? ((Mesh*)mesh_object)->handle : NULL;
     init.progress = uform_py_progress_registered(&progress, progress_steps);
     Py_BEGIN_ALLOW_THREADS;
     uform_trainer_init_vram(&init);
@@ -692,7 +692,7 @@ static PyObject *Trainer_init_vram(PyTypeObject *type, PyObject *const *args, Py
         if (call.raised) PyErr_SetRaisedException(call.raised);
         goto release;
     }
-    Trainer *const trainer = (Trainer *)type->tp_alloc(type, 0);
+    Trainer* const trainer = (Trainer*)type->tp_alloc(type, 0);
     if (!trainer) {
         uform_trainer_free(handle);
         goto release;
@@ -700,7 +700,7 @@ static PyObject *Trainer_init_vram(PyTypeObject *type, PyObject *const *args, Py
     trainer->handle = handle;
     trainer->executor = Py_NewRef(executor_object);
     trainer->mesh = init.mesh ? Py_NewRef(mesh_object) : NULL;
-    result = (PyObject *)trainer;
+    result = (PyObject*)trainer;
 
 release:
     PyMem_Free(matryoshka);
@@ -711,15 +711,15 @@ release:
 
 /** Reads the receiver of a trainer verb: the trainer itself blocks on the executor it
  *  was created on. */
-static int trainer_receiver(PyObject *self, uform_py_receiver_t *receiver) {
+static int trainer_receiver(PyObject* self, uform_py_receiver_t* receiver) {
     if (uform_py_receiver_from_object(self, &TrainerType, receiver) != 0) return -1;
     if (receiver->target != self) return 0;
-    return uform_py_executor_from_object(((Trainer *)self)->executor, &receiver->executor);
+    return uform_py_executor_from_object(((Trainer*)self)->executor, &receiver->executor);
 }
 
-static PyObject *Trainer_on(PyObject *self, PyObject *executor) { return uform_py_on_new(&OnType, self, executor); }
+static PyObject* Trainer_on(PyObject* self, PyObject* executor) { return uform_py_on_new(&OnType, self, executor); }
 
-static PyObject *Trainer_deferred(PyObject *self, PyObject *executor) {
+static PyObject* Trainer_deferred(PyObject* self, PyObject* executor) {
     return uform_py_on_new(&DeferredOnType, self, executor);
 }
 
@@ -733,7 +733,7 @@ typedef struct TrainerStepStats {
     uform_trainer_step_stats_t stats;
 } TrainerStepStats;
 
-static PyObject *TrainerStepStats_tp_new(PyTypeObject *type, PyObject *args, PyObject *keywords) {
+static PyObject* TrainerStepStats_tp_new(PyTypeObject* type, PyObject* args, PyObject* keywords) {
     if (PyTuple_GET_SIZE(args) != 0 || (keywords && PyDict_Size(keywords) != 0)) {
         PyErr_SetString(PyExc_TypeError, "TrainerStepStats() takes no arguments");
         return NULL;
@@ -741,15 +741,15 @@ static PyObject *TrainerStepStats_tp_new(PyTypeObject *type, PyObject *args, PyO
     return type->tp_alloc(type, 0);
 }
 
-static void TrainerStepStats_dealloc(TrainerStepStats *self) { Py_TYPE(self)->tp_free((PyObject *)self); }
+static void TrainerStepStats_dealloc(TrainerStepStats* self) { Py_TYPE(self)->tp_free((PyObject*)self); }
 
 /** Reads the @c size_t counter at the byte offset @p closure names inside the report. */
-static PyObject *TrainerStepStats_get_count(TrainerStepStats *self, void *closure) {
+static PyObject* TrainerStepStats_get_count(TrainerStepStats* self, void* closure) {
     size_t value = 0;
 #if PY_VERSION_HEX >= 0x030D0000
     Py_BEGIN_CRITICAL_SECTION(self);
 #endif
-    value = *(size_t const *)(void const *)((char const *)&self->stats + (size_t)closure);
+    value = *(size_t const*)(void const*)((char const*)&self->stats + (size_t)closure);
 #if PY_VERSION_HEX >= 0x030D0000
     Py_END_CRITICAL_SECTION();
 #endif
@@ -757,12 +757,12 @@ static PyObject *TrainerStepStats_get_count(TrainerStepStats *self, void *closur
 }
 
 /** Reads the @c float at the byte offset @p closure names inside the report. */
-static PyObject *TrainerStepStats_get_float(TrainerStepStats *self, void *closure) {
+static PyObject* TrainerStepStats_get_float(TrainerStepStats* self, void* closure) {
     float value = 0;
 #if PY_VERSION_HEX >= 0x030D0000
     Py_BEGIN_CRITICAL_SECTION(self);
 #endif
-    value = *(float const *)(void const *)((char const *)&self->stats + (size_t)closure);
+    value = *(float const*)(void const*)((char const*)&self->stats + (size_t)closure);
 #if PY_VERSION_HEX >= 0x030D0000
     Py_END_CRITICAL_SECTION();
 #endif
@@ -771,31 +771,31 @@ static PyObject *TrainerStepStats_get_float(TrainerStepStats *self, void *closur
 
 static PyGetSetDef TrainerStepStats_getset[] = {
     {"step", (getter)TrainerStepStats_get_count, NULL, "The optimizer step the call applied, counted from one.",
-     (void *)offsetof(uform_trainer_step_stats_t, step)},
+     (void*)offsetof(uform_trainer_step_stats_t, step)},
     {"learning_rate", (getter)TrainerStepStats_get_float, NULL, "The learning rate it applied.",
-     (void *)offsetof(uform_trainer_step_stats_t, learning_rate)},
+     (void*)offsetof(uform_trainer_step_stats_t, learning_rate)},
     {"loss", (getter)TrainerStepStats_get_float, NULL, "The total loss the step minimized, its world mean.",
-     (void *)offsetof(uform_trainer_step_stats_t, loss)},
+     (void*)offsetof(uform_trainer_step_stats_t, loss)},
     {"contrastive_loss", (getter)TrainerStepStats_get_float, NULL, "The contrastive term; 0 when absent.",
-     (void *)offsetof(uform_trainer_step_stats_t, contrastive_loss)},
+     (void*)offsetof(uform_trainer_step_stats_t, contrastive_loss)},
     {"masked_text_loss", (getter)TrainerStepStats_get_float, NULL, "The text reconstruction term, unweighted.",
-     (void *)offsetof(uform_trainer_step_stats_t, masked_text_loss)},
+     (void*)offsetof(uform_trainer_step_stats_t, masked_text_loss)},
     {"masked_image_loss", (getter)TrainerStepStats_get_float, NULL, "The image reconstruction term, unweighted.",
-     (void *)offsetof(uform_trainer_step_stats_t, masked_image_loss)},
+     (void*)offsetof(uform_trainer_step_stats_t, masked_image_loss)},
     {"masked_video_loss", (getter)TrainerStepStats_get_float, NULL, "The video reconstruction term, unweighted.",
-     (void *)offsetof(uform_trainer_step_stats_t, masked_video_loss)},
+     (void*)offsetof(uform_trainer_step_stats_t, masked_video_loss)},
     {"masked_audio_loss", (getter)TrainerStepStats_get_float, NULL, "The audio reconstruction term, unweighted.",
-     (void *)offsetof(uform_trainer_step_stats_t, masked_audio_loss)},
+     (void*)offsetof(uform_trainer_step_stats_t, masked_audio_loss)},
     {"late_interaction_loss", (getter)TrainerStepStats_get_float, NULL, "The late-interaction term, weighted.",
-     (void *)offsetof(uform_trainer_step_stats_t, late_interaction_loss)},
+     (void*)offsetof(uform_trainer_step_stats_t, late_interaction_loss)},
     {"choices_loss", (getter)TrainerStepStats_get_float, NULL,
      "The choices term over the items that made a choice, unweighted.",
-     (void *)offsetof(uform_trainer_step_stats_t, choices_loss)},
+     (void*)offsetof(uform_trainer_step_stats_t, choices_loss)},
     {"truncated", (getter)TrainerStepStats_get_count, NULL, "Items cut at a row's width.",
-     (void *)offsetof(uform_trainer_step_stats_t, truncated)},
+     (void*)offsetof(uform_trainer_step_stats_t, truncated)},
     {"dropped", (getter)TrainerStepStats_get_count, NULL,
      "Segments dropped whole because the batch had no room for them, since the last stats read.",
-     (void *)offsetof(uform_trainer_step_stats_t, dropped)},
+     (void*)offsetof(uform_trainer_step_stats_t, dropped)},
     {NULL, NULL, NULL, NULL, NULL},
 };
 
@@ -821,7 +821,7 @@ typedef struct edges_t {
     Py_buffer offsets, ids, weights;
 } edges_t;
 
-static void edges_release(edges_t *edges) {
+static void edges_release(edges_t* edges) {
     if (edges->offsets.obj) PyBuffer_Release(&edges->offsets);
     if (edges->ids.obj) PyBuffer_Release(&edges->ids);
     if (edges->weights.obj) PyBuffer_Release(&edges->weights);
@@ -829,10 +829,10 @@ static void edges_release(edges_t *edges) {
 
 /** Acquires @p object as a C-contiguous buffer of @p item_bytes items of format @p format; returns
  *  0 or -1. */
-static int edges_buffer(PyObject *object, char const *field, Py_ssize_t item_bytes, char const *formats,
-                        Py_buffer *buffer) {
+static int edges_buffer(PyObject* object, char const* field, Py_ssize_t item_bytes, char const* formats,
+                        Py_buffer* buffer) {
     if (PyObject_GetBuffer(object, buffer, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT) != 0) return -1;
-    char const *format = buffer->format ? buffer->format : "B";
+    char const* format = buffer->format ? buffer->format : "B";
     while (*format == '@' || *format == '=' || *format == '<') ++format;
     if (buffer->itemsize == item_bytes && strchr(formats, *format)) return 0;
     return uform_py_raise(uform_status_unsupported_layout_k, "the '%s' buffer holds items of another type", field);
@@ -843,25 +843,25 @@ static int edges_buffer(PyObject *object, char const *field, Py_ssize_t item_byt
  *      checking every offset stays inside its ids and every weight pairs with one.
  *  @return 0 on success, -1 with an exception set otherwise.
  */
-static int edges_from_object(PyObject *object, char const *field, size_t count, edges_t *edges,
-                             uform_edges_view_t *view) {
+static int edges_from_object(PyObject* object, char const* field, size_t count, edges_t* edges,
+                             uform_edges_view_t* view) {
     if (!object || object == Py_None || uform_py_fields_value(object, edges_offsets_k) == Py_None) return 0;
-    PyObject *const ids = uform_py_fields_value(object, edges_ids_k);
-    PyObject *const weights = uform_py_fields_value(object, edges_weights_k);
+    PyObject* const ids = uform_py_fields_value(object, edges_ids_k);
+    PyObject* const weights = uform_py_fields_value(object, edges_weights_k);
     if (edges_buffer(uform_py_fields_value(object, edges_offsets_k), field, sizeof(size_t), "NQL", &edges->offsets) !=
             0 ||
         edges_buffer(ids, field, sizeof(uint32_t), "I", &edges->ids) != 0 ||
         (weights != Py_None && edges_buffer(weights, field, sizeof(float), "f", &edges->weights) != 0))
         return -1;
-    size_t const *const offsets = (size_t const *)edges->offsets.buf;
+    size_t const* const offsets = (size_t const*)edges->offsets.buf;
     size_t const ids_count = (size_t)edges->ids.len / sizeof(uint32_t);
     if ((size_t)edges->offsets.len != (count + 1) * sizeof(size_t) || offsets[count] > ids_count ||
         (edges->weights.obj && (size_t)edges->weights.len != ids_count * sizeof(float)))
         return uform_py_raise(uform_status_shape_mismatch_k,
                               "the '%s' edges need %zu offsets ending inside their ids, and one weight per id", field,
                               count + 1);
-    *view = (uform_edges_view_t) {offsets, (uint32_t const *)edges->ids.buf,
-                                  edges->weights.obj ? (float const *)edges->weights.buf : NULL};
+    *view = (uform_edges_view_t) {offsets, (uint32_t const*)edges->ids.buf,
+                                  edges->weights.obj ? (float const*)edges->weights.buf : NULL};
     return 0;
 }
 
@@ -871,8 +871,8 @@ static int edges_from_object(PyObject *object, char const *field, size_t count, 
  *      its choice entry.
  *  @return 0 on success, -1 with an exception set otherwise.
  */
-static int choices_from_objects(PyObject *choices_object, PyObject *targets_object, size_t count,
-                                uform_py_tape_t *choices, uform_py_tape_t *targets) {
+static int choices_from_objects(PyObject* choices_object, PyObject* targets_object, size_t count,
+                                uform_py_tape_t* choices, uform_py_tape_t* targets) {
     int const with_choices = choices_object && choices_object != Py_None;
     if (with_choices != (targets_object && targets_object != Py_None))
         return uform_py_raise(uform_status_invalid_argument_k, "pass both 'choices' and 'choice_targets', or neither");
@@ -892,26 +892,26 @@ typedef struct step_call_t {
     uform_py_call_t call;
     uform_trainer_step_t arguments;
     uform_py_tape_t contents, choices, choice_targets;
-    uform_modality_t *modalities;
-    uform_late_interaction_side_t *sides;
+    uform_modality_t* modalities;
+    uform_late_interaction_side_t* sides;
     uform_py_words_t bags, temperature_groups;
     edges_t attract, repel, ignore;
     uform_rows_view_t embeddings;
     uform_trainer_step_stats_t stats;
 
     /** The caller's report the stats are copied into once the call succeeds, held, or NULL. */
-    PyObject *stats_object;
+    PyObject* stats_object;
 } step_call_t;
 
-static void step_submit(void *call) { uform_trainer_step(&((step_call_t *)call)->arguments); }
+static void step_submit(void* call) { uform_trainer_step(&((step_call_t*)call)->arguments); }
 
-static PyObject *step_answer(void *erased) {
-    step_call_t *const call = (step_call_t *)erased;
+static PyObject* step_answer(void* erased) {
+    step_call_t* const call = (step_call_t*)erased;
     if (call->stats_object) {
 #if PY_VERSION_HEX >= 0x030D0000
         Py_BEGIN_CRITICAL_SECTION(call->stats_object);
 #endif
-        ((TrainerStepStats *)call->stats_object)->stats = call->stats;
+        ((TrainerStepStats*)call->stats_object)->stats = call->stats;
 #if PY_VERSION_HEX >= 0x030D0000
         Py_END_CRITICAL_SECTION();
 #endif
@@ -920,8 +920,8 @@ static PyObject *step_answer(void *erased) {
     return uform_py_rows_answer(&ArenaBufferType, call->call.arena, &call->embeddings, call->contents.count);
 }
 
-static void step_release(void *erased) {
-    step_call_t *const call = (step_call_t *)erased;
+static void step_release(void* erased) {
+    step_call_t* const call = (step_call_t*)erased;
     uform_py_tape_release(&call->contents);
     PyMem_Free(call->modalities);
     call->modalities = NULL;
@@ -938,8 +938,8 @@ static void step_release(void *erased) {
     uform_py_call_release(&call->call);
 }
 
-static int step_traverse(void *erased, visitproc visit, void *arg) {
-    Py_VISIT(((step_call_t *)erased)->stats_object);
+static int step_traverse(void* erased, visitproc visit, void* arg) {
+    Py_VISIT(((step_call_t*)erased)->stats_object);
     return 0;
 }
 
@@ -947,14 +947,14 @@ static uform_py_verb_t const step_verb = {sizeof(step_call_t), step_submit, step
 
 /** Gathers one modality per item into a @c PyMem array of @p count; returns 0 or -1 with
  *  an exception set. */
-static int modalities_from_object(PyObject *object, size_t count, uform_modality_t **modalities) {
-    PyObject *const sequence = PySequence_Fast(object, "expected a sequence of uform.Modality");
+static int modalities_from_object(PyObject* object, size_t count, uform_modality_t** modalities) {
+    PyObject* const sequence = PySequence_Fast(object, "expected a sequence of uform.Modality");
     if (!sequence) return -1;
     if ((size_t)PySequence_Fast_GET_SIZE(sequence) != count) {
         Py_DECREF(sequence);
         return uform_py_raise(uform_status_shape_mismatch_k, "the 'modalities' need one entry per item, %zu", count);
     }
-    *modalities = (uform_modality_t *)PyMem_Malloc((count ? count : 1) * sizeof(uform_modality_t));
+    *modalities = (uform_modality_t*)PyMem_Malloc((count ? count : 1) * sizeof(uform_modality_t));
     int failed = !*modalities;
     if (failed) PyErr_NoMemory();
     for (size_t position = 0; !failed && position != count; ++position) {
@@ -969,15 +969,15 @@ static int modalities_from_object(PyObject *object, size_t count, uform_modality
 
 /** Gathers one side per item into a @c PyMem array of @p count; None leaves it NULL.
  *  Returns 0 or -1 with an exception set. */
-static int sides_from_object(PyObject *object, size_t count, uform_late_interaction_side_t **sides) {
+static int sides_from_object(PyObject* object, size_t count, uform_late_interaction_side_t** sides) {
     if (!object || object == Py_None) return 0;
-    PyObject *const sequence = PySequence_Fast(object, "expected a sequence of uform.LateInteractionSide");
+    PyObject* const sequence = PySequence_Fast(object, "expected a sequence of uform.LateInteractionSide");
     if (!sequence) return -1;
     if ((size_t)PySequence_Fast_GET_SIZE(sequence) != count) {
         Py_DECREF(sequence);
         return uform_py_raise(uform_status_shape_mismatch_k, "the 'sides' need one entry per item, %zu", count);
     }
-    *sides = (uform_late_interaction_side_t *)PyMem_Malloc((count ? count : 1) * sizeof(uform_late_interaction_side_t));
+    *sides = (uform_late_interaction_side_t*)PyMem_Malloc((count ? count : 1) * sizeof(uform_late_interaction_side_t));
     int failed = !*sides;
     if (failed) PyErr_NoMemory();
     for (size_t position = 0; !failed && position != count; ++position) {
@@ -1026,8 +1026,8 @@ static char const doc_Trainer_step[] =                                          
     "Returns:\n"                                                                                  //
     "  ArenaBuffer | None: The (count, hidden) embeddings when an arena was given.";
 
-static PyObject *Trainer_step(PyObject *self, PyObject *const *args, Py_ssize_t positional_args_count,
-                              PyObject *args_names_tuple) {
+static PyObject* Trainer_step(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
+                              PyObject* args_names_tuple) {
     PyObject *modalities_object, *contents_object, *bags_object, *temperature_groups_object, *sides_object,
         *choices_object, *choice_targets_object, *relations_object, *arena_object, *outputs_scalar_object,
         *stats_object;
@@ -1063,7 +1063,7 @@ static PyObject *Trainer_step(PyObject *self, PyObject *const *args, Py_ssize_t 
     }
 
     step_call_t stack;
-    step_call_t *const call = uform_py_call_open(&receiver, &step_verb, &stack);
+    step_call_t* const call = uform_py_call_open(&receiver, &step_verb, &stack);
     if (!call) return NULL;
     uform_relations_view_t relations = {{0}};
     int const has_relations = relations_object && relations_object != Py_None;
@@ -1087,7 +1087,7 @@ static PyObject *Trainer_step(PyObject *self, PyObject *const *args, Py_ssize_t 
         return uform_py_call_discard(&receiver, &step_verb, call);
     if (stats_object && stats_object != Py_None) call->stats_object = Py_NewRef(stats_object);
     call->arguments = (uform_trainer_step_t) {
-        .trainer = ((Trainer *)receiver.target)->handle,
+        .trainer = ((Trainer*)receiver.target)->handle,
         .executor = receiver.executor,
         .outcome = &call->call.outcome,
         .completion = receiver.completion,
@@ -1101,7 +1101,7 @@ static PyObject *Trainer_step(PyObject *self, PyObject *const *args, Py_ssize_t 
         .choice_targets = call->choice_targets.view,
         .relations = relations,
         .embeddings = call->call.arena ? &call->embeddings : NULL,
-        .arena = call->call.arena ? ((Arena *)call->call.arena)->handle : NULL,
+        .arena = call->call.arena ? ((Arena*)call->call.arena)->handle : NULL,
         .outputs_scalar = outputs_scalar,
         .stats = call->stats_object ? &call->stats : NULL,
     };
@@ -1112,21 +1112,21 @@ static PyObject *Trainer_step(PyObject *self, PyObject *const *args, Py_ssize_t 
 typedef struct save_call_t {
     uform_py_call_t call;
     uform_trainer_save_t arguments;
-    PyObject *decoded;
+    PyObject* decoded;
     uform_py_callback_t progress;
 } save_call_t;
 
-static void save_submit(void *call) { uform_trainer_save(&((save_call_t *)call)->arguments); }
+static void save_submit(void* call) { uform_trainer_save(&((save_call_t*)call)->arguments); }
 
-static void save_release(void *erased) {
-    save_call_t *const call = (save_call_t *)erased;
+static void save_release(void* erased) {
+    save_call_t* const call = (save_call_t*)erased;
     Py_CLEAR(call->decoded);
     Py_CLEAR(call->progress.callable);
     uform_py_call_release(&call->call);
 }
 
-static int save_traverse(void *erased, visitproc visit, void *arg) {
-    Py_VISIT(((save_call_t *)erased)->progress.callable);
+static int save_traverse(void* erased, visitproc visit, void* arg) {
+    Py_VISIT(((save_call_t*)erased)->progress.callable);
     return 0;
 }
 
@@ -1146,8 +1146,8 @@ static char const doc_Trainer_save[] =                                          
     "  progress (callable, optional): Called with (completed, total) tensors written.\n"        //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.";
 
-static PyObject *Trainer_save(PyObject *self, PyObject *const *args, Py_ssize_t positional_args_count,
-                              PyObject *args_names_tuple) {
+static PyObject* Trainer_save(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
+                              PyObject* args_names_tuple) {
     PyObject *path_object, *progress_object, *progress_steps_object;
     uform_py_argument_t const arguments[] = {
         {"path", &path_object},
@@ -1162,14 +1162,14 @@ static PyObject *Trainer_save(PyObject *self, PyObject *const *args, Py_ssize_t 
         uform_py_size_from_object(progress_steps_object, "progress_steps", &progress_steps) != 0)
         return NULL;
     save_call_t stack;
-    save_call_t *const call = uform_py_call_open(&receiver, &save_verb, &stack);
+    save_call_t* const call = uform_py_call_open(&receiver, &save_verb, &stack);
     if (!call) return NULL;
     uform_bytes_view_t path;
     if (uform_py_path_from_object(path_object, "path", &path, &call->decoded) != 0 ||
         uform_py_callback_from_object(progress_object, "progress", &call->call, &call->progress) != 0)
         return uform_py_call_discard(&receiver, &save_verb, call);
     call->arguments = (uform_trainer_save_t) {
-        .trainer = ((Trainer *)receiver.target)->handle,
+        .trainer = ((Trainer*)receiver.target)->handle,
         .executor = receiver.executor,
         .outcome = &call->call.outcome,
         .completion = receiver.completion,

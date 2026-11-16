@@ -65,7 +65,7 @@ inline constexpr u64_t row_draw_salt_k = 0xD1B54A32D192ED03ull;
 expected_t ul::decode_audios(pool_view_t pool, column_view_t tape, u64r1_view_t drawn_rows,
                              std::span<audio_batch_shape_t const> representations, audio_samples_span_t audio_samples,
                              u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
-                             modality_span_t segment_modality, u32r1_span_t dropped, gpu_stream_t &stream) noexcept {
+                             modality_span_t segment_modality, u32r1_span_t dropped, gpu_stream_t& stream) noexcept {
     std::size_t const clips = drawn_rows.size();
     if (clips == 0) return {};
     if (representations.empty())
@@ -79,7 +79,7 @@ expected_t ul::decode_audios(pool_view_t pool, column_view_t tape, u64r1_view_t 
                                 chunk_samples);
     // The shape is the single source of geometry; each representation must match the
     // grid's chunk width.
-    for (audio_batch_shape_t const &representation : representations)
+    for (audio_batch_shape_t const& representation : representations)
         if (representation.chunk_samples != chunk_samples)
             return expected_t::fail(status_t::unsupported_k,
                                     "representation chunk_samples {} must match the audio grid's {}",
@@ -132,8 +132,8 @@ expected_t ul::decode_audios(pool_view_t pool, column_view_t tape, u64r1_view_t 
                                 waveform_samples);
     for (std::size_t rep = 0; rep != reps_count; ++rep) sample_rates[rep] = representations[rep].sample_rate;
     f32r2_span_t const job_waveforms {waveforms.data(), job_count, clip_samples};
-    i32_t *const status_base = statuses.data();
-    u32_t const *const rate_base = sample_rates.data();
+    i32_t* const status_base = statuses.data();
+    u32_t const* const rate_base = sample_rates.data();
     std::size_t const reps = reps_count;
     // A job is (clip, representation): job j = (clip j/reps, rep j%reps), resampled to that
     // representation's rate and chunked into row j. A clip is decoded once per representation (one
@@ -174,7 +174,7 @@ expected_t ul::decode_audios(pool_view_t pool, column_view_t tape, u64r1_view_t 
     return staged;
 }
 
-expected<audio_loader_parquet_t> audio_loader_parquet_t::make(gpu_direct_storage_session_t &session,
+expected<audio_loader_parquet_t> audio_loader_parquet_t::make(gpu_direct_storage_session_t& session,
                                                               sz::string_view_t path_or_glob, u64_t seed,
                                                               pool_view_t pool, audio_batch_shape_t audio) noexcept {
     using result_t = expected<audio_loader_parquet_t>;
@@ -211,7 +211,7 @@ expected<audio_loader_parquet_t> audio_loader_parquet_t::make(gpu_direct_storage
     return result_t {std::move(loader)};
 }
 
-expected_t audio_loader_parquet_t::fill(gpu_stream_t &gpu_stream, audio_loader_parquet_config_t config, u32_t gpu_rank,
+expected_t audio_loader_parquet_t::fill(gpu_stream_t& gpu_stream, audio_loader_parquet_config_t config, u32_t gpu_rank,
                                         u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept {
     if (batches.empty()) return {};
     std::size_t const unroll = batches.size();
@@ -295,7 +295,7 @@ expected_t audio_loader_parquet_t::fill(gpu_stream_t &gpu_stream, audio_loader_p
     column_view_t const tape {column.payload, std::span<u64_t const> {reservoir_offsets}};
     u64r2_view_t const batch_records {record_indices.data(), unroll, clips_per_batch};
     for (std::size_t batch = 0; batch != unroll; ++batch) {
-        multimodal_batch_on_gpu_t &loaded = batches[batch];
+        multimodal_batch_on_gpu_t& loaded = batches[batch];
         audio_samples_view_t const grid_view = loaded.audio_samples.view();
         if (grid_view.extent(0) != rows || grid_view.extent(1) != columns ||
             clips_per_batch > loaded.segment_lengths.extent(0))

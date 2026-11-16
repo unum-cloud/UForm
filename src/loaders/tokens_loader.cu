@@ -114,7 +114,7 @@ static __global__ void tokens_gather_kernel_(b8r1_view_t reservoir_payload, u64r
 
 expected_t ul::pack_tokens(column_view_t texts, u64r1_view_t elements, b8r1_view_t prefix, tokens_matrix_span_t tokens,
                            u32r1_span_t segment_offsets, u32r1_span_t segment_lengths, modality_span_t segment_modality,
-                           u32r1_span_t dropped, gpu_stream_t &gpu_stream) noexcept {
+                           u32r1_span_t dropped, gpu_stream_t& gpu_stream) noexcept {
     if (elements.extent(0) > segment_lengths.extent(0) || segment_offsets.extent(0) != segment_lengths.extent(0) + 1u ||
         segment_modality.extent(0) != segment_lengths.extent(0))
         return expected_t::fail(status_t::unsupported_k, "{} documents exceed a table of {} segments",
@@ -141,7 +141,7 @@ expected_t ul::pack_tokens(column_view_t texts, u64r1_view_t elements, b8r1_view
  *  enqueue on @p gpu_stream . */
 [[nodiscard]] static expected_t pack_reservoir_(column_view_t reservoir_column, std::size_t pool_rows, u64_t row_key,
                                                 data_epoch_t data_epoch, std::span<multimodal_batch_on_gpu_t> batches,
-                                                gpu_stream_t &gpu_stream) noexcept {
+                                                gpu_stream_t& gpu_stream) noexcept {
     std::size_t const unroll = batches.size();
     std::size_t const documents = batches[0].segment_lengths.extent(0);
     std::size_t const total_segments = unroll * documents;
@@ -163,7 +163,7 @@ expected_t ul::pack_tokens(column_view_t texts, u64r1_view_t elements, b8r1_view
 
     // Each batch packs its own row of the permutation; the rectangle carries its shape.
     for (std::size_t batch = 0; batch != unroll; ++batch) {
-        multimodal_batch_on_gpu_t &loaded = batches[batch];
+        multimodal_batch_on_gpu_t& loaded = batches[batch];
         if (expected_t packed = pack_tokens(reservoir_column, batch_records[batch, nk::slice], {}, loaded.tokens.span(),
                                             loaded.segment_offsets.span(), loaded.segment_lengths.span(),
                                             loaded.segment_modality.span(), loaded.dropped.span(), gpu_stream);
@@ -179,7 +179,7 @@ expected_t ul::pack_tokens(column_view_t texts, u64r1_view_t elements, b8r1_view
     return {};
 }
 
-expected<tokens_loader_parquet_t> tokens_loader_parquet_t::make(gpu_direct_storage_session_t &session,
+expected<tokens_loader_parquet_t> tokens_loader_parquet_t::make(gpu_direct_storage_session_t& session,
                                                                 sz::string_view_t path_or_glob, u64_t seed) noexcept {
     using result_t = expected<tokens_loader_parquet_t>;
 
@@ -195,7 +195,7 @@ expected<tokens_loader_parquet_t> tokens_loader_parquet_t::make(gpu_direct_stora
     // Footer only — host-side, no GPU, column-agnostic: the column is chosen per fill, so a footer
     // naming no column counts every row of a group complete.
     std::size_t groups = 0;
-    for (sz::string_t const &path : paths.value_) {
+    for (sz::string_t const& path : paths.value_) {
         auto metadata = parquet_file_t::table_metadata(session, path);
         if (!metadata) return result_t::fail(std::move(metadata));
         if (metadata->rows == 0) return result_t::fail(status_t::invalid_argument_k, "shard {} is empty", path);
@@ -208,7 +208,7 @@ expected<tokens_loader_parquet_t> tokens_loader_parquet_t::make(gpu_direct_stora
     return result_t {std::move(loader)};
 }
 
-expected_t tokens_loader_parquet_t::fill(gpu_stream_t &gpu_stream, tokens_base_loader_parquet_config_t config,
+expected_t tokens_loader_parquet_t::fill(gpu_stream_t& gpu_stream, tokens_base_loader_parquet_config_t config,
                                          u32_t gpu_rank, u32_t training_step,
                                          std::span<multimodal_batch_on_gpu_t> batches) noexcept {
     if (batches.empty()) return {};
@@ -250,8 +250,8 @@ expected<sz::strings_view_t> tokens_loader_parquet_t::drawn_shards(u32_t gpu_ran
 /** Weigh footerless @p paths by byte size, POSIX @c stat , into @p byte_prefix , the weighted file
  *  draw's running prefix, and charge each file's bytes to @p reservoir . */
 [[nodiscard]] static expected_t weigh_by_bytes_(std::span<sz::string_t const> paths,
-                                                st::basic_vector<std::size_t> &byte_prefix,
-                                                reservoir_bound_t &reservoir) noexcept {
+                                                st::basic_vector<std::size_t>& byte_prefix,
+                                                reservoir_bound_t& reservoir) noexcept {
     if (st::failed(byte_prefix.resize(paths.size() + 1)))
         return expected_t::fail(status_t::bad_alloc_k, "shard prefix allocation failed ({} shards)", paths.size());
     byte_prefix[0] = 0;
@@ -265,7 +265,7 @@ expected<sz::strings_view_t> tokens_loader_parquet_t::drawn_shards(u32_t gpu_ran
     return {};
 }
 
-expected<tokens_loader_jsonl_t> tokens_loader_jsonl_t::make(gpu_direct_storage_session_t &session,
+expected<tokens_loader_jsonl_t> tokens_loader_jsonl_t::make(gpu_direct_storage_session_t& session,
                                                             sz::string_view_t path_or_glob, u64_t seed) noexcept {
     using result_t = expected<tokens_loader_jsonl_t>;
 
@@ -286,7 +286,7 @@ expected<tokens_loader_jsonl_t> tokens_loader_jsonl_t::make(gpu_direct_storage_s
     return result_t {std::move(loader)};
 }
 
-expected_t tokens_loader_jsonl_t::fill(gpu_stream_t &gpu_stream, tokens_base_loader_jsonl_config_t config,
+expected_t tokens_loader_jsonl_t::fill(gpu_stream_t& gpu_stream, tokens_base_loader_jsonl_config_t config,
                                        u32_t gpu_rank, u32_t training_step,
                                        std::span<multimodal_batch_on_gpu_t> batches) noexcept {
     if (batches.empty()) return {};
@@ -333,7 +333,7 @@ expected_t tokens_loader_jsonl_t::fill(gpu_stream_t &gpu_stream, tokens_base_loa
                            data_epoch_t {training_step}, batches, gpu_stream);
 }
 
-expected<tokens_loader_csv_t> tokens_loader_csv_t::make(gpu_direct_storage_session_t &session,
+expected<tokens_loader_csv_t> tokens_loader_csv_t::make(gpu_direct_storage_session_t& session,
                                                         sz::string_view_t path_or_glob, u64_t seed) noexcept {
     using result_t = expected<tokens_loader_csv_t>;
 
@@ -354,7 +354,7 @@ expected<tokens_loader_csv_t> tokens_loader_csv_t::make(gpu_direct_storage_sessi
     return result_t {std::move(loader)};
 }
 
-expected_t tokens_loader_csv_t::fill(gpu_stream_t &gpu_stream, tokens_base_loader_csv_config_t config, u32_t gpu_rank,
+expected_t tokens_loader_csv_t::fill(gpu_stream_t& gpu_stream, tokens_base_loader_csv_config_t config, u32_t gpu_rank,
                                      u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept {
     if (batches.empty()) return {};
     std::size_t const unroll = batches.size();

@@ -142,8 +142,8 @@ struct tower_pool_t {
      *  @c {0,1,…,segments} that give every segment the one query, the K=V pack sized for every segment at
      *  @c max_segment_tokens , the Float32 pooled rows with their log-sum-exps, and the Float32 gradient
      *  rows the backward reads and writes. Uploads the offsets — outside any capture. */
-    [[nodiscard]] static expected<tower_pool_t> make(gpu_arena_t &arena, transformer_block_config_t const &block,
-                                                     gpu_numerics_t const &numerics) noexcept;
+    [[nodiscard]] static expected<tower_pool_t> make(gpu_arena_t& arena, transformer_block_config_t const& block,
+                                                     gpu_numerics_t const& numerics) noexcept;
 
     /**
      *  @brief Pool every segment of @p states — pure enqueue: pack K=V, attend, cast to BFloat16.
@@ -155,7 +155,7 @@ struct tower_pool_t {
      *  @param[in,out] stream The stream every launch enqueues on.
      */
     [[nodiscard]] expected_t forward(bf16r1_view_t query, bf16r2_view_t states, u32r1_view_t segment_offsets,
-                                     u32r1_view_t segment_lengths, bf16r2_span_t pooled, gpu_stream_t &stream) noexcept;
+                                     u32r1_view_t segment_lengths, bf16r2_span_t pooled, gpu_stream_t& stream) noexcept;
 
     /**
      *  @brief Differentiate the last @ref forward — pure enqueue: NumKong recomputes the weights from the
@@ -169,7 +169,7 @@ struct tower_pool_t {
      *  @param[in,out] stream The stream every launch enqueues on.
      */
     [[nodiscard]] expected_t backward(bf16r1_view_t query, bf16r2_view_t pooled_grad, f32r2_span_t key_grad,
-                                      f32r2_span_t value_grad, bf16r1_span_t query_grad, gpu_stream_t &stream) noexcept;
+                                      f32r2_span_t value_grad, bf16r1_span_t query_grad, gpu_stream_t& stream) noexcept;
 
   private:
 
@@ -206,8 +206,8 @@ struct tower_token_head_t {
 
     /** Allocate the weights, their gradients, the packs and every stash off @p arena for @p block
      *  's capacities, calling the kernels of @p numerics . */
-    [[nodiscard]] static expected<tower_token_head_t> make(gpu_arena_t &arena, transformer_block_config_t const &block,
-                                                           u32_t width, gpu_numerics_t const &numerics) noexcept;
+    [[nodiscard]] static expected<tower_token_head_t> make(gpu_arena_t& arena, transformer_block_config_t const& block,
+                                                           u32_t width, gpu_numerics_t const& numerics) noexcept;
 
     /**
      *  @brief Project the late-interaction tokens of @p states — pure enqueue: lay out the compact
@@ -216,8 +216,8 @@ struct tower_token_head_t {
      *  @param[in] batch The step's segment geometry, sides and prefix lengths.
      *  @param[in,out] stream The stream every launch enqueues on.
      */
-    [[nodiscard]] expected_t forward(bf16r2_view_t states, multimodal_batch_view_t const &batch,
-                                     gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t forward(bf16r2_view_t states, multimodal_batch_view_t const& batch,
+                                     gpu_stream_t& stream) noexcept;
 
     /**
      *  @brief Differentiate the last @ref forward , adding the force on the final-norm states into
@@ -231,20 +231,20 @@ struct tower_token_head_t {
      *      products.
      *  @param[in,out] stream The stream every launch enqueues on.
      */
-    [[nodiscard]] expected_t backward(bf16r2_view_t vectors_grad, multimodal_batch_view_t const &batch,
-                                      f32r2_span_t states_grad, transformer_scratch_t &scratch,
-                                      gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t backward(bf16r2_view_t vectors_grad, multimodal_batch_view_t const& batch,
+                                      f32r2_span_t states_grad, transformer_scratch_t& scratch,
+                                      gpu_stream_t& stream) noexcept;
 
     /** Append @c token_head.norm and @c token_head.projection to @p weights . */
-    [[nodiscard]] expected_t fill(st::basic_vector<differentiable_weights_t> &weights) noexcept;
+    [[nodiscard]] expected_t fill(st::basic_vector<differentiable_weights_t>& weights) noexcept;
 
     /** Pack the projection for its forward and data-gradient products, once per optimizer step. */
-    [[nodiscard]] expected_t pack_weights(bf16r1_span_t transposed, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t pack_weights(bf16r1_span_t transposed, gpu_stream_t& stream) noexcept;
 
     /** A copy of this head off @p arena for @p block 's capacities, its projection packed once for
      *  the forward of a twin whose weights never change. */
-    [[nodiscard]] expected<tower_token_head_t> snapshot(gpu_arena_t &arena, transformer_block_config_t const &block,
-                                                        gpu_stream_t &stream) const noexcept;
+    [[nodiscard]] expected<tower_token_head_t> snapshot(gpu_arena_t& arena, transformer_block_config_t const& block,
+                                                        gpu_stream_t& stream) const noexcept;
 
     /** @b [tokens,width] the unit token vectors of the last @ref forward . */
     [[nodiscard]] bf16r2_view_t token_vectors() const noexcept { return vectors_.view(); }
@@ -299,17 +299,17 @@ struct encoder_tower_bf16_t {
     /** Allocate and plan the whole tower off @p arena — token / media entries, @c depth blocks,
      *  the attention pool, and the head — validating each present modality's patch count against
      *  @p shape 's @c max_columns_per_row . Every part calls the kernels of @p numerics . */
-    [[nodiscard]] static expected<encoder_tower_bf16_t> make(gpu_arena_t &arena, encoder_tower_config_t config,
+    [[nodiscard]] static expected<encoder_tower_bf16_t> make(gpu_arena_t& arena, encoder_tower_config_t config,
                                                              multimodal_batch_shape_t shape,
-                                                             gpu_numerics_t const &numerics) noexcept;
+                                                             gpu_numerics_t const& numerics) noexcept;
 
     /** One tower forward over @p batch — pure enqueue; every stash the backward reads is written
      *  along the way, including the per-token rotary @b (t,h,w) coordinates @ref coords_ derives fresh
      *  from @p batch 's own geometry. Empty @p vertices ⇒ masked path (stops after the final norm;
      *  @c normalized exposed). @b [segments,hidden] @p vertices ⇒ contrastive path (attention pool
      *  → head). */
-    [[nodiscard]] expected_t forward(multimodal_batch_on_gpu_t const &batch, bf16r2_span_t vertices,
-                                     gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t forward(multimodal_batch_on_gpu_t const& batch, bf16r2_span_t vertices,
+                                     gpu_stream_t& stream) noexcept;
 
     /** Tower backward from the loss's force to every weight-gradient buffer (and the embedding
      *  table's, deterministically). Populated @p vertices_grad drives the contrastive path; populated
@@ -318,7 +318,7 @@ struct encoder_tower_bf16_t {
      *  another forward in between. A populated @p token_vectors_grad , the gradient of
      *  @ref token_vectors , joins the same Float32 states' gradient through the token head. */
     [[nodiscard]] expected_t backward(bf16r2_view_t vertices_grad, bf16r2_view_t hidden_grad,
-                                      multimodal_batch_on_gpu_t const &batch, gpu_stream_t &stream,
+                                      multimodal_batch_on_gpu_t const& batch, gpu_stream_t& stream,
                                       bf16r2_view_t token_vectors_grad = {}) noexcept;
 
     /** Stage each present media modality's raw pixels into the @b clean per-channel-normalized patch
@@ -328,8 +328,8 @@ struct encoder_tower_bf16_t {
      *  projection and without running @ref forward . A modality is staged only when its projection is
      *  configured, its @p batch tensor is present, and its output span is non-empty; audio is not staged here —
      *  its reconstruction target is the raw @c batch.audio_samples frames the caller reshapes directly. */
-    [[nodiscard]] expected_t patchify_media_targets(multimodal_batch_on_gpu_t const &batch, bf16r2_span_t image_patches,
-                                                    bf16r2_span_t video_patches, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t patchify_media_targets(multimodal_batch_on_gpu_t const& batch, bf16r2_span_t image_patches,
+                                                    bf16r2_span_t video_patches, gpu_stream_t& stream) noexcept;
 
     /** Fill @p weights with every optimizer-facing weight in the canonical reduction order:
      *  entry → media projections → per-layer block weights → final norm → pool query → head.
@@ -340,17 +340,17 @@ struct encoder_tower_bf16_t {
      *  @c pool_query , @c head.norm , @c head.fc1 , and @c head.fc2 , then @c token_head.norm and
      *  @c token_head.projection when the token head is present — the composition root adds only its
      *  @c model. prefix. */
-    [[nodiscard]] expected_t fill(st::basic_vector<differentiable_weights_t> &weights) noexcept;
+    [[nodiscard]] expected_t fill(st::basic_vector<differentiable_weights_t>& weights) noexcept;
 
     /** Pack every block's, head's and media projection's weights for NumKong's products — pure enqueue,
      *  capture-safe. Call once per optimizer step, after the weights change and before the first @ref forward ;
      *  every forward and backward of the step reuses the packs. */
-    [[nodiscard]] expected_t pack_weights(gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t pack_weights(gpu_stream_t& stream) noexcept;
 
     /** Quantize this tower's block stack into the E4M3 inference twin (entries / pool / head stay
      *  BFloat16) — the twin's only constructor. */
-    [[nodiscard]] expected<struct encoder_tower_e4m3_t> quantize_weights(gpu_arena_t &arena,
-                                                                         gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected<struct encoder_tower_e4m3_t> quantize_weights(gpu_arena_t& arena,
+                                                                         gpu_stream_t& stream) noexcept;
 
     /** The per-token final-norm states — the masked head's input on the masked path. */
     [[nodiscard]] bf16r2_view_t normalized() const noexcept { return normalized_.view(); }
@@ -366,10 +366,10 @@ struct encoder_tower_bf16_t {
     [[nodiscard]] u32r1_view_t token_offsets() const noexcept { return token_head_.token_offsets(); }
 
     /** The baked geometry. */
-    [[nodiscard]] encoder_tower_config_t const &config() const noexcept { return config_; }
+    [[nodiscard]] encoder_tower_config_t const& config() const noexcept { return config_; }
 
     /** The block at @p layer_index . */
-    [[nodiscard]] transformer_block_bf16_t const &block(std::size_t layer_index) const noexcept {
+    [[nodiscard]] transformer_block_bf16_t const& block(std::size_t layer_index) const noexcept {
         return blocks_[layer_index];
     }
 
@@ -482,8 +482,8 @@ struct encoder_tower_e4m3_t {
 
     /** One quantized tower forward over @p batch — same dual-mode contract as the training twin,
      *  forward only, deriving its own per-token rotary @b (t,h,w) coordinates into @ref coords_ . */
-    [[nodiscard]] expected_t forward(multimodal_batch_on_gpu_t const &batch, bf16r2_span_t vertices,
-                                     gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t forward(multimodal_batch_on_gpu_t const& batch, bf16r2_span_t vertices,
+                                     gpu_stream_t& stream) noexcept;
 
     /** The per-token final-norm states — the masked head's input on the masked path. */
     [[nodiscard]] bf16r2_view_t normalized() const noexcept { return normalized_.view(); }
@@ -496,7 +496,7 @@ struct encoder_tower_e4m3_t {
     [[nodiscard]] u32r1_view_t token_offsets() const noexcept { return token_head_.token_offsets(); }
 
     /** The baked geometry. */
-    [[nodiscard]] encoder_tower_config_t const &config() const noexcept { return config_; }
+    [[nodiscard]] encoder_tower_config_t const& config() const noexcept { return config_; }
 
   private:
     friend struct encoder_tower_bf16_t;

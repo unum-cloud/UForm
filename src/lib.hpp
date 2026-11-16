@@ -52,7 +52,6 @@ namespace sz = ashvardanian::stringzilla;
 namespace st = ashvardanian::smashtable;
 
 using utilities::b8_t;
-using utilities::bytes_of;
 using utilities::bytes_span_t;
 using utilities::bytes_view_t;
 using utilities::caller_exclusivity_t;
@@ -92,7 +91,7 @@ inline constexpr std::size_t idle_cores_denominator_k = 8;
 
 /** A borrowed byte run of the C interface, a path or a spelling, as the engine's string view. */
 [[nodiscard]] inline sz::string_view_t text_of(uform_bytes_view_t bytes) noexcept {
-    return {static_cast<char const *>(static_cast<void const *>(bytes.data)), bytes.length};
+    return {nk::as_values<char>(std::as_bytes(std::span<u8_t const> {bytes.data, bytes.length})).data(), bytes.length};
 }
 
 /** The @p count entries of a C tape as the engine's typed tape, whose elements reach the last
@@ -100,7 +99,7 @@ inline constexpr std::size_t idle_cores_denominator_k = 8;
 template <typename element_type_>
 [[nodiscard]] tape_view<element_type_> tape_of(uform_tape_view_t tape, std::size_t count) noexcept {
     if (!tape.offsets) return {};
-    return {{static_cast<element_type_ *>(tape.data), tape.data ? tape.offsets[count] : 0}, {tape.offsets, count + 1}};
+    return {{static_cast<element_type_*>(tape.data), tape.data ? tape.offsets[count] : 0}, {tape.offsets, count + 1}};
 }
 
 #pragma region Classes
@@ -750,7 +749,7 @@ constexpr uform_gpu_vendor_t gpu_vendor_of(gpu_class_t gpu_class) noexcept {
 
 /** Whether @p gpu_class runs on @p device: built, of the device's vendor, and its kits all among
  *  those NumKong's loader runs there. */
-inline bool gpu_class_serves(gpu_class_t gpu_class, gpu_device_t const &device) noexcept {
+inline bool gpu_class_serves(gpu_class_t gpu_class, gpu_device_t const& device) noexcept {
     nk_capability_t const kits = numkong_capabilities_of(gpu_class);
     return gpu_class_compiled(gpu_class) && gpu_vendor_of(gpu_class) == device.vendor &&
            (device.compiled & kits) == kits;
@@ -769,7 +768,7 @@ constexpr bool gpu_class_under_pin(gpu_class_t gpu_class, uform_gpu_class_t pinn
 /** The newest class of @p ladder serving @p device at or under @p pinned, or @c unknown_k where
  *  none serves. */
 template <gpu_class_t... classes_>
-gpu_class_t pick_gpu_class(gpu_ladder<classes_...>, gpu_device_t const &device, uform_gpu_class_t pinned) noexcept {
+gpu_class_t pick_gpu_class(gpu_ladder<classes_...>, gpu_device_t const& device, uform_gpu_class_t pinned) noexcept {
     gpu_class_t picked = gpu_class_t::unknown_k;
     auto rung = [&]<gpu_class_t class_>() noexcept {
         if (picked == gpu_class_t::unknown_k && gpu_class_under_pin(class_, pinned) && gpu_class_serves(class_, device))
@@ -785,22 +784,22 @@ struct host_verbs_t {
 
     /** Returns once @p word no longer holds @p seen, reading it through the class's atomic
      *  reference and waiting between reads through the class's waiter. */
-    void (*wait)(u64_t &word, u64_t seen) noexcept;
+    void (*wait)(u64_t& word, u64_t seen) noexcept;
 };
 
 /** The host verbs one class unit compiles, defined in @c encoder_specializations.hpp , which the
  *  class units alone include, so no body compiled for a class reaches a caller of another. */
 template <cpu_class_t cpu_class_>
 struct host_class_tables {
-    static host_verbs_t const *find() noexcept;
-    static void wait(u64_t &word, u64_t seen) noexcept;
+    static host_verbs_t const* find() noexcept;
+    static void wait(u64_t& word, u64_t seen) noexcept;
 };
 
 /** The host verbs of the newest compiled class on @p ladder that fits under @p ceiling, one of
  *  which @ref pick_cpu_ceiling made sure of. */
 template <cpu_class_t... classes_>
-host_verbs_t const *pick_host_verbs(cpu_ladder<classes_...>, cpu_ceiling_t ceiling) noexcept {
-    host_verbs_t const *picked = nullptr;
+host_verbs_t const* pick_host_verbs(cpu_ladder<classes_...>, cpu_ceiling_t ceiling) noexcept {
+    host_verbs_t const* picked = nullptr;
     auto rung = [&]<cpu_class_t class_>() noexcept {
         if constexpr (cpu_class_compiled(class_))
             if (!picked && cpu_rung_fits(class_, ceiling)) picked = host_class_tables<class_>::find();
@@ -832,15 +831,15 @@ host_verbs_t const *pick_host_verbs(cpu_ladder<classes_...>, cpu_ceiling_t ceili
 /** Marks @p outcome as running; no waiter watches for this store, so it is relaxed. The C layer is
  *  compiled once at the baseline, so its shared words go through the standard reference, which
  *  every class's waiter reads. */
-inline void propagate_pending(uform_outcome_t *outcome) noexcept {
+inline void propagate_pending(uform_outcome_t* outcome) noexcept {
     outcome->message = nullptr;
     fu::standard_atomic_ref<uform_status_t> {outcome->status}.store(uform_status_deferred_k, std::memory_order_relaxed);
 }
 
 /** The one final write to @p outcome: the message, then the status every waiter acquires. The call
  *  touches nothing it was passed after this, and the message is null exactly on success. */
-inline bool propagate_error(uform_status_t status, uform_outcome_t *outcome,
-                            char const *message) noexcept { // vendor-boundary: the C outcome's static message
+inline bool propagate_error(uform_status_t status, uform_outcome_t* outcome,
+                            char const* message) noexcept { // vendor-boundary: the C outcome's static message
     bool const succeeded = status == uform_status_success_k;
     outcome->message = succeeded ? nullptr : message;
     fu::standard_atomic_ref<uform_status_t> {outcome->status}.store(status, std::memory_order_release);
@@ -875,8 +874,8 @@ struct slice_t {
 class progress_ticks_t {
   public:
     progress_ticks_t(uform_progress_t progress, std::size_t total) noexcept : progress_(progress), total_(total) {}
-    progress_ticks_t(progress_ticks_t const &) = delete;
-    progress_ticks_t &operator=(progress_ticks_t const &) = delete;
+    progress_ticks_t(progress_ticks_t const&) = delete;
+    progress_ticks_t& operator=(progress_ticks_t const&) = delete;
 
     /** Walks the slices of a batch in order; slice @c i starts at @c ⌈i · total/slices⌉ , so
      *  lengths differ by one at most. */
@@ -885,8 +884,8 @@ class progress_ticks_t {
         iterator(std::size_t index, std::size_t slices, std::size_t total) noexcept
             : index_(index), slices_(slices), total_(total) {}
         slice_t operator*() const noexcept { return {boundary_(index_), boundary_(index_ + 1)}; }
-        iterator &operator++() noexcept { return ++index_, *this; }
-        bool operator!=(iterator const &other) const noexcept { return index_ != other.index_; }
+        iterator& operator++() noexcept { return ++index_, *this; }
+        bool operator!=(iterator const& other) const noexcept { return index_ != other.index_; }
 
       private:
         [[nodiscard]] std::size_t boundary_(std::size_t index) const noexcept {
@@ -959,8 +958,8 @@ class chunked_arena_t {
   public:
     chunked_arena_t(nk_allocator_t policy, nk_stream_t stream, std::size_t limit) noexcept
         : policy_(policy), stream_(stream), limit_(limit) {}
-    chunked_arena_t(chunked_arena_t &&) noexcept = default;
-    chunked_arena_t &operator=(chunked_arena_t &&) = delete;
+    chunked_arena_t(chunked_arena_t&&) noexcept = default;
+    chunked_arena_t& operator=(chunked_arena_t&&) = delete;
     ~chunked_arena_t() noexcept {
         for (bytes_span_t const chunk : chunks_) policy_.free(chunk.data(), chunk.size(), policy_.handle, stream_);
     }
@@ -973,7 +972,7 @@ class chunked_arena_t {
     void rewind() noexcept { current_ = 0, used_ = 0; }
 
     /** Whether @p address lies in memory this arena handed out, which its next rewind reuses. */
-    [[nodiscard]] bool contains(void const *address) const noexcept {
+    [[nodiscard]] bool contains(void const* address) const noexcept {
         for (bytes_span_t const chunk : chunks_)
             if (address >= chunk.data() && address < chunk.data() + chunk.size()) return true;
         return false;
@@ -981,12 +980,12 @@ class chunked_arena_t {
 
     /** Hands out @p bytes aligned for any kernel, growing by a chunk as large as everything held so
      *  far when full, or null when the policy or the limit refuses. */
-    [[nodiscard]] void *allocate(std::size_t bytes) noexcept {
+    [[nodiscard]] void* allocate(std::size_t bytes) noexcept {
         std::size_t const aligned = round_up_to_multiple(bytes, nk_default_alignment_k);
         if (aligned < bytes) return nullptr; // saturated within an alignment of the address space
         for (; current_ != chunks_.size(); ++current_, used_ = 0)
             if (chunks_[current_].size() - used_ >= aligned) {
-                b8_t *const landed = chunks_[current_].data() + used_;
+                b8_t* const landed = chunks_[current_].data() + used_;
                 used_ += aligned;
                 return landed;
             }
@@ -995,7 +994,7 @@ class chunked_arena_t {
         std::size_t const capacity = held > aligned ? held : aligned;
         if (limit_ && capacity > limit_ - held) return nullptr;
         if (!policy_.allocate) return nullptr;
-        b8_t *const allocated = static_cast<b8_t *>(policy_.allocate(capacity, policy_.handle, stream_));
+        b8_t* const allocated = static_cast<b8_t*>(policy_.allocate(capacity, policy_.handle, stream_));
         if (!allocated) return nullptr;
         if (st::failed(chunks_.push_back(bytes_span_t {allocated, capacity})))
             return policy_.free(allocated, capacity, policy_.handle, stream_), nullptr;
@@ -1005,10 +1004,10 @@ class chunked_arena_t {
 
     /** Hands out @p count values of @p value_type_, or null when they cannot be allocated. */
     template <typename value_type_>
-    [[nodiscard]] value_type_ *allocate(std::size_t count) noexcept {
+    [[nodiscard]] value_type_* allocate(std::size_t count) noexcept {
         static_assert(std::is_trivially_copyable_v<value_type_>, "Arenas hold plain outputs only");
         if (count > (std::numeric_limits<std::size_t>::max)() / sizeof(value_type_)) return nullptr;
-        return static_cast<value_type_ *>(allocate(count * sizeof(value_type_)));
+        return static_cast<value_type_*>(allocate(count * sizeof(value_type_)));
     }
 
   private:
@@ -1044,8 +1043,8 @@ struct device_arena_t {
 };
 
 /** The chunks either residency's arena grows. */
-[[nodiscard]] inline chunked_arena_t &chunks_of(std::variant<host_arena_t, device_arena_t> &memory) noexcept {
-    if (host_arena_t *const host = std::get_if<host_arena_t>(&memory)) return host->chunks;
+[[nodiscard]] inline chunked_arena_t& chunks_of(std::variant<host_arena_t, device_arena_t>& memory) noexcept {
+    if (host_arena_t* const host = std::get_if<host_arena_t>(&memory)) return host->chunks;
     return std::get<device_arena_t>(memory).chunks;
 }
 
@@ -1108,8 +1107,8 @@ struct vram_executor_t {
 };
 
 /** The right to dispatch on @p pool , owned or lent. */
-[[nodiscard]] inline pool_view_t view_of(std::variant<executor_t, lent_pool_t> const &pool) noexcept {
-    return std::visit([](auto const &alternative) noexcept { return alternative.view(); }, pool);
+[[nodiscard]] inline pool_view_t view_of(std::variant<executor_t, lent_pool_t> const& pool) noexcept {
+    return std::visit([](auto const& alternative) noexcept { return alternative.view(); }, pool);
 }
 
 #pragma endregion Executors
@@ -1140,14 +1139,14 @@ struct encoder_verbs;
 
 /** The variant a load picked, as its residency's verb table, which alone casts each tower back
  *  to its type. */
-using encoder_residency_tables_t = std::variant<encoder_verbs<vendored_residency_t::ram_k> const *,
-                                                encoder_verbs<vendored_residency_t::vram_nvidia_k> const *,
-                                                encoder_verbs<vendored_residency_t::vram_amd_k> const *>;
+using encoder_residency_tables_t = std::variant<encoder_verbs<vendored_residency_t::ram_k> const*,
+                                                encoder_verbs<vendored_residency_t::vram_nvidia_k> const*,
+                                                encoder_verbs<vendored_residency_t::vram_amd_k> const*>;
 
 /** One copy of a model's tower on one GPU, matched to an executor's device by its UForm ordinal. */
 struct vram_replica_t {
     i32_t ordinal = 0;
-    void *tower = nullptr;
+    void* tower = nullptr;
 };
 
 #pragma endregion Models
@@ -1181,53 +1180,53 @@ struct holding_call_t {
     call_claim_t claim = call_claim_t::free_k;
 
     /** The holding call's arguments; meeting them again, the entry runs the verb's body. */
-    void const *arguments = nullptr;
+    void const* arguments = nullptr;
 
     /** A delegated call's copy of its arguments, which outlives the caller's structure. */
     deferred_arguments_t delegated_arguments;
 
     /** The caller's outcome, published last. */
-    uform_outcome_t *outcome = nullptr;
+    uform_outcome_t* outcome = nullptr;
 
     /** The status the verb body recorded, which @ref end_call publishes. */
     uform_outcome_t recorded {uform_status_internal_k, "The call finished without reporting a status"};
 
     /** The counts of the handles the call names, raised at the entry, lowered at its end. */
-    u64_t *named_calls[named_handles_max_k] {};
+    u64_t* named_calls[named_handles_max_k] {};
 
     /** The body pool thread 0 runs for a delegated call. */
-    void (*delegated_body)(void *) = nullptr;
+    void (*delegated_body)(void*) = nullptr;
 
     /** The kernel ID of the thread running the body, or zero before thread 0 takes it up. */
     u64_t body_thread = 0;
 };
 
 /** Lets go of @p arena when the call whose published outcome is @p call holds it. */
-void release_arena(uform_arena_t arena, uform_outcome_t const *call) noexcept;
+void release_arena(uform_arena_t arena, uform_outcome_t const* call) noexcept;
 
 /** Takes @p executor for one call; false while another call holds it. */
-bool take_call_claim(uform_executor_handle_t &executor) noexcept;
+bool take_call_claim(uform_executor_handle_t& executor) noexcept;
 
 /** Whether a caller-exclusive pool backs @p executor , running deferred calls on its threads. */
-bool delegates(uform_executor_handle_t &executor) noexcept;
+bool delegates(uform_executor_handle_t& executor) noexcept;
 
 /** Starts the held call on the pool's thread 0, which runs @p body and ends the call. */
-uform_status_t delegate_call(uform_executor_handle_t &executor, void (*body)(void *)) noexcept;
+uform_status_t delegate_call(uform_executor_handle_t& executor, void (*body)(void*)) noexcept;
 
 /** Keeps @p recorded , the body's status, for @ref end_call to publish. */
-void record_status(uform_executor_t executor, uform_outcome_t const &recorded) noexcept;
+void record_status(uform_executor_t executor, uform_outcome_t const& recorded) noexcept;
 
 /** Ends the call holding @p executor : the named counts, the claim, then the status. */
-void end_call(uform_executor_handle_t &executor) noexcept;
+void end_call(uform_executor_handle_t& executor) noexcept;
 
 /** Returns once no executor call names the handle whose count is @p named_calls . */
-void wait_named_calls(u64_t &named_calls) noexcept;
+void wait_named_calls(u64_t& named_calls) noexcept;
 
 /** Whether the calling thread runs the body of the call holding @p executor . */
-bool runs_holding_call(uform_executor_handle_t &executor) noexcept;
+bool runs_holding_call(uform_executor_handle_t& executor) noexcept;
 
 /** Returns once no call holds @p executor and its pool finished the last one. */
-void wait_while_claimed(uform_executor_handle_t &executor) noexcept;
+void wait_while_claimed(uform_executor_handle_t& executor) noexcept;
 
 /**
  *  @brief Every verb's entry: claims the call's executor and runs its body, answering true once the
@@ -1239,13 +1238,13 @@ void wait_while_claimed(uform_executor_handle_t &executor) noexcept;
  *  once and is final when it returns.
  */
 template <auto verb_, typename arguments_type_>
-bool submitted(arguments_type_ *arguments) noexcept {
+bool submitted(arguments_type_* arguments) noexcept {
     // Dependent, so the handle's members resolve at instantiation
-    auto *const executor = arguments->executor;
+    auto* const executor = arguments->executor;
     if (!executor || arguments == executor->holding_call.arguments) return false;
     if (!take_call_claim(*executor))
         return propagate_error(uform_status_contended_k, arguments->outcome, "Another call holds the executor"), true;
-    auto &call = executor->holding_call;
+    auto& call = executor->holding_call;
     call.outcome = arguments->outcome;
     call.recorded = {uform_status_internal_k, "The call finished without reporting a status"};
     std::size_t named = 0;
@@ -1269,8 +1268,8 @@ bool submitted(arguments_type_ *arguments) noexcept {
     }
     call.arguments = &call.delegated_arguments.template emplace<arguments_type_>(*arguments);
     using executor_handle_t = std::remove_pointer_t<decltype(arguments->executor)>;
-    uform_status_t const delegated = delegate_call(*executor, [](void *context) noexcept {
-        auto &held = static_cast<executor_handle_t *>(context)->holding_call;
+    uform_status_t const delegated = delegate_call(*executor, [](void* context) noexcept {
+        auto& held = static_cast<executor_handle_t*>(context)->holding_call;
         verb_(std::get_if<arguments_type_>(&held.delegated_arguments));
     });
     if (delegated != uform_status_success_k)
@@ -1290,13 +1289,13 @@ bool submitted(arguments_type_ *arguments) noexcept {
 class call_outcome_t {
   public:
     /** For the verbs that take no executor. */
-    explicit call_outcome_t(uform_outcome_t *published) noexcept : published_(published) {
+    explicit call_outcome_t(uform_outcome_t* published) noexcept : published_(published) {
         propagate_pending(published_);
     }
 
     /** For a verb's call, whose executor, when it names one, publishes the status. */
     template <typename arguments_type_>
-    explicit call_outcome_t(arguments_type_ const &arguments) noexcept
+    explicit call_outcome_t(arguments_type_ const& arguments) noexcept
         : published_(arguments.outcome), executor_(arguments.executor) {
         if constexpr (requires { arguments.arena; }) arena_ = arguments.arena;
         if (!executor_) propagate_pending(published_);
@@ -1307,17 +1306,17 @@ class call_outcome_t {
         if (executor_) record_status(executor_, recorded_);
         else propagate_error(recorded_.status, published_, recorded_.message);
     }
-    call_outcome_t(call_outcome_t const &) = delete;
-    call_outcome_t &operator=(call_outcome_t const &) = delete;
+    call_outcome_t(call_outcome_t const&) = delete;
+    call_outcome_t& operator=(call_outcome_t const&) = delete;
 
     /** The private record every step reports into. */
-    operator uform_outcome_t *() noexcept { return &recorded_; }
+    operator uform_outcome_t*() noexcept { return &recorded_; }
 
     /** The caller's outcome, which identifies the call holding an arena. */
-    [[nodiscard]] uform_outcome_t const *published() const noexcept { return published_; }
+    [[nodiscard]] uform_outcome_t const* published() const noexcept { return published_; }
 
   private:
-    uform_outcome_t *published_;
+    uform_outcome_t* published_;
     uform_executor_t executor_ = nullptr;
     uform_arena_t arena_ = nullptr;
     uform_outcome_t recorded_ {uform_status_internal_k, "The call finished without reporting a status"};
@@ -1332,8 +1331,8 @@ class call_outcome_t {
  *  executor than the one that made it, an arena another call holds, and an input of @p inputs
  *  still inside it.
  */
-uform_arena_t claim_arena(uform_arena_t arena, uform_executor_t executor, std::initializer_list<void const *> inputs,
-                          call_outcome_t &outcome) noexcept;
+uform_arena_t claim_arena(uform_arena_t arena, uform_executor_t executor, std::initializer_list<void const*> inputs,
+                          call_outcome_t& outcome) noexcept;
 
 #pragma endregion Deferred Calls
 
@@ -1350,7 +1349,7 @@ struct uform_executor_handle_t {
 
     /** How its callers wait on what its threads write: the verbs of the CPU class they run, a
      *  static table that outlives the executor. */
-    uf::host_verbs_t const *host_verbs = nullptr;
+    uf::host_verbs_t const* host_verbs = nullptr;
 
     std::variant<uf::ram_executor_t, uf::vram_executor_t> executor;
 };
@@ -1368,7 +1367,7 @@ struct uform_arena_handle_t {
 
     /** The published outcome of the call holding the arena, from its claim until just before its
      *  final store, read through the standard reference since a call may end on a pool thread. */
-    uform_outcome_t const *holder = nullptr;
+    uform_outcome_t const* holder = nullptr;
 
     /** Executor calls naming the arena that have not ended, which its free waits out. */
     uf::u64_t named_calls = 0;
@@ -1394,11 +1393,11 @@ struct uform_model_handle_t {
 
     /** The one host tower, serving any RAM executor, or one replica per GPU the load named, every
      *  one of the picked class. */
-    std::variant<void *, uf::per_gpu_array<uf::vram_replica_t>> towers;
+    std::variant<void*, uf::per_gpu_array<uf::vram_replica_t>> towers;
 
     uform_model_handle_t() noexcept = default;
-    uform_model_handle_t(uform_model_handle_t const &) = delete;
-    uform_model_handle_t &operator=(uform_model_handle_t const &) = delete;
+    uform_model_handle_t(uform_model_handle_t const&) = delete;
+    uform_model_handle_t& operator=(uform_model_handle_t const&) = delete;
 
     /** Executor calls naming the model that have not ended, which its free waits out. */
     uf::u64_t named_calls = 0;

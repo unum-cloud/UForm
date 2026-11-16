@@ -74,7 +74,7 @@ struct choices_loader_parquet_t {
      *  @par Statuses:
      *  - @c status_t::invalid_argument_k A shard is empty, or no row holds all three columns.
      */
-    [[nodiscard]] static expected<choices_loader_parquet_t> make(gpu_direct_storage_session_t &session,
+    [[nodiscard]] static expected<choices_loader_parquet_t> make(gpu_direct_storage_session_t& session,
                                                                  sz::string_view_t path_or_glob, u64_t seed,
                                                                  choices_loader_parquet_config_t config) noexcept;
 
@@ -90,7 +90,7 @@ struct choices_loader_parquet_t {
      *  - @c status_t::unsupported_k The batches carry no choice columns, or the pool holds
      *    no well-formed row.
      */
-    [[nodiscard]] expected_t fill(gpu_stream_t &gpu_stream, u32_t gpu_rank, u32_t training_step,
+    [[nodiscard]] expected_t fill(gpu_stream_t& gpu_stream, u32_t gpu_rank, u32_t training_step,
                                   std::span<multimodal_batch_on_gpu_t> batches) noexcept;
 
     /** The device bytes a fill's reservoir can take outside the arena. */
@@ -102,7 +102,7 @@ struct choices_loader_parquet_t {
   private:
 
     /** The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
-    gpu_direct_storage_session_t *storage_ = nullptr;
+    gpu_direct_storage_session_t* storage_ = nullptr;
 
     /** The state, choices and targets columns. */
     sz::string_t state_ {}, choices_ {}, targets_ {};

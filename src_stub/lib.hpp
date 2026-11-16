@@ -43,7 +43,7 @@ struct uform_arena_handle_t {
 
     /** The outcome of the call holding the arena, null while free; read and written under
      *  the running calls' lock. */
-    uform_outcome_t const *holder = nullptr;
+    uform_outcome_t const* holder = nullptr;
 };
 
 /** What @c uform_model_t owns: the geometry a checkpoint would carry, and the bytes it
@@ -85,7 +85,7 @@ inline constexpr std::size_t chunk_samples_k = 256;
 
 /** The run read as text: a path or a spelling. */
 inline std::string_view as_text(uform_bytes_view_t bytes) {
-    return {static_cast<char const *>(static_cast<void const *>(bytes.data)), bytes.length};
+    return {static_cast<char const*>(static_cast<void const*>(bytes.data)), bytes.length};
 }
 
 /** Whether @p name spells @p spelling exactly, with no terminator assumed on either side. */
@@ -95,7 +95,7 @@ inline bool named(uform_bytes_view_t name, std::string_view spelling) { return a
  *  @c uform_status_invalid_argument_k and writes nothing. */
 template <typename value_type_>
 uform_status_t read_name(uform_bytes_view_t name, std::initializer_list<value_type_> values,
-                         char const *(*spell)(value_type_), value_type_ *output) {
+                         char const* (*spell)(value_type_), value_type_* output) {
     if (!output) return uform_status_invalid_argument_k;
     for (value_type_ const value : values)
         if (named(name, spell(value))) return *output = value, uform_status_success_k;
@@ -103,21 +103,21 @@ uform_status_t read_name(uform_bytes_view_t name, std::initializer_list<value_ty
 }
 
 /** Marks @p outcome deferred, every verb's first act, so a waiter never reads a stale status. */
-inline void propagate_deferred(uform_outcome_t *outcome) {
+inline void propagate_deferred(uform_outcome_t* outcome) {
     if (outcome)
         serial_atomic_ref<uform_status_t> {outcome->status}.store(uform_status_deferred_k, std::memory_order_relaxed);
 }
 
 /** The one final write to @p outcome: the message, then the status with release ordering, which
  *  every waiter acquires. The message is null exactly on success. */
-inline void propagate_error(uform_status_t status, uform_outcome_t *outcome, char const *message) {
+inline void propagate_error(uform_status_t status, uform_outcome_t* outcome, char const* message) {
     if (!outcome) return;
     outcome->message = status == uform_status_success_k ? nullptr : message;
     serial_atomic_ref<uform_status_t> {outcome->status}.store(status, std::memory_order_release);
 }
 
 /** Lets go of @p arena if the call whose outcome is @p call holds it. */
-void release_arena(uform_arena_t arena, uform_outcome_t const *call);
+void release_arena(uform_arena_t arena, uform_outcome_t const* call);
 
 /**
  *  @brief A verb's outcome while it runs: deferred from construction, and published once at
@@ -127,12 +127,12 @@ void release_arena(uform_arena_t arena, uform_outcome_t const *call);
  *  final status lets a waiter free or reuse what the call named.
  */
 class deferred_outcome_t {
-    uform_outcome_t *published_;
+    uform_outcome_t* published_;
     uform_arena_t arena_;
     uform_outcome_t recorded_ {uform_status_success_k, nullptr};
 
   public:
-    explicit deferred_outcome_t(uform_outcome_t *published, uform_arena_t arena = nullptr) noexcept
+    explicit deferred_outcome_t(uform_outcome_t* published, uform_arena_t arena = nullptr) noexcept
         : published_(published), arena_(arena) {
         propagate_deferred(published_);
     }
@@ -140,18 +140,18 @@ class deferred_outcome_t {
         if (arena_) release_arena(arena_, published_);
         propagate_error(recorded_.status, published_, recorded_.message);
     }
-    deferred_outcome_t(deferred_outcome_t const &) = delete;
-    deferred_outcome_t &operator=(deferred_outcome_t const &) = delete;
+    deferred_outcome_t(deferred_outcome_t const&) = delete;
+    deferred_outcome_t& operator=(deferred_outcome_t const&) = delete;
 
     /** The private record every guard writes into, so a verb passes this wherever
      *  an outcome goes. */
-    operator uform_outcome_t *() noexcept { return &recorded_; }
+    operator uform_outcome_t*() noexcept { return &recorded_; }
 };
 
-/** Records @p status when @p wrong, answering whether it did, so a caller reads
+/** Records @p status when @p is_wrong, answering whether it did, so a caller reads
  *  `if (reject_if(...)) return;`. */
-inline bool reject_if(bool wrong, uform_status_t status, char const *message, uform_outcome_t *outcome) {
-    if (!wrong) return false;
+inline bool reject_if(bool is_wrong, uform_status_t status, char const* message, uform_outcome_t* outcome) {
+    if (!is_wrong) return false;
     propagate_error(status, outcome, message);
     return true;
 }
@@ -168,34 +168,34 @@ using call_arguments_t = std::variant<                                          
 struct call_t {
 
     /** The executor the call holds while it runs. */
-    uform_executor_handle_t const *held_executor;
+    uform_executor_handle_t const* held_executor;
 
     /** A copy of the arguments with a null executor, so running them goes straight to
      *  the verb's body. */
     call_arguments_t arguments;
-    void (*verb)(void *);
+    void (*verb)(void*);
 
     /** The call's outcome, its executor, and every model, arena, mesh and trainer it names: the
      *  addresses a wait or a free looks for before it returns. */
-    std::vector<void const *> handles;
+    std::vector<void const*> handles;
 };
 
 /** Runs @p call on the calling thread, listed while it runs so a free of a handle it names waits,
  *  or finishes @p outcome contended while another call holds its executor. */
-void run_holding(call_t call, uform_outcome_t *outcome);
+void run_holding(call_t call, uform_outcome_t* outcome);
 
 /** Returns once no running call names @p handle. */
-void wait_for_calls_using(void const *handle);
+void wait_for_calls_using(void const* handle);
 
 /** Holds @p arena for the call whose outcome is @p call, answering whether that call holds it now.
  *  A null arena holds nothing, left for the verb to refuse. */
-bool hold_arena(uform_arena_t arena, uform_outcome_t const *call);
+bool hold_arena(uform_arena_t arena, uform_outcome_t const* call);
 
 /** Collects @c call_t::handles from a verb's @p arguments, skipping the outputs, which name
  *  no handle yet. */
 template <typename arguments_>
-std::vector<void const *> handles_used_by(arguments_ const &arguments) {
-    std::vector<void const *> handles {arguments.outcome, arguments.executor};
+std::vector<void const*> handles_used_by(arguments_ const& arguments) {
+    std::vector<void const*> handles {arguments.outcome, arguments.executor};
     auto const add = [&](auto handle) {
         if constexpr (!std::is_pointer_v<std::remove_pointer_t<decltype(handle)>>) handles.push_back(handle);
     };
@@ -214,12 +214,12 @@ std::vector<void const *> handles_used_by(arguments_ const &arguments) {
  *  its executor, whatever its completion, as a caller-inclusive executor of the engine runs it.
  */
 template <auto verb_, typename arguments_>
-bool through_executor(arguments_ *arguments) {
-    uform_executor_handle_t *const executor = arguments->executor;
+bool through_executor(arguments_* arguments) {
+    uform_executor_handle_t* const executor = arguments->executor;
     if (!executor) return false;
     arguments_ copy = *arguments;
     copy.executor = nullptr;
-    call_t call {executor, copy, [](void *erased) { verb_(static_cast<arguments_ *>(erased)); },
+    call_t call {executor, copy, [](void* erased) { verb_(static_cast<arguments_*>(erased)); },
                  handles_used_by(*arguments)};
     run_holding(std::move(call), arguments->outcome);
     return true;
@@ -227,14 +227,14 @@ bool through_executor(arguments_ *arguments) {
 
 /** Claims @p arena for the call whose outcome is @p call, refusing a null arena, one another call
  *  holds, and any of @p inputs inside the memory the call is about to rewind. */
-inline uform_arena_handle_t *claim_arena(uform_arena_t arena, uform_outcome_t const *call,
-                                         std::initializer_list<void const *> inputs, uform_outcome_t *outcome) {
+inline uform_arena_handle_t* claim_arena(uform_arena_t arena, uform_outcome_t const* call,
+                                         std::initializer_list<void const*> inputs, uform_outcome_t* outcome) {
     if (reject_if(!arena, uform_status_invalid_argument_k, "The arena must not be null", outcome)) return nullptr;
     if (reject_if(!hold_arena(arena, call), uform_status_contended_k, "The arena serves another call", outcome))
         return nullptr;
-    std::byte const *const begin = arena->memory.get();
-    for (void const *input : inputs) {
-        std::byte const *const at = static_cast<std::byte const *>(input);
+    std::byte const* const begin = arena->memory.get();
+    for (void const* input : inputs) {
+        std::byte const* const at = static_cast<std::byte const*>(input);
         if (reject_if(at && begin && at >= begin && at < begin + arena->capacity, uform_status_invalid_argument_k,
                       "An input lies inside the arena the call rewinds", outcome))
             return nullptr;
@@ -244,7 +244,7 @@ inline uform_arena_handle_t *claim_arena(uform_arena_t arena, uform_outcome_t co
 
 /** Rewinds a claimed @p arena and hands out its first @p bytes, growing it when they outsize its
  *  high-water mark; null once @p outcome records why not. */
-inline void *rewind(uform_arena_handle_t &arena, std::size_t bytes, uform_outcome_t *outcome) {
+inline void* rewind(uform_arena_handle_t& arena, std::size_t bytes, uform_outcome_t* outcome) {
     if (bytes <= arena.capacity && arena.memory) return arena.memory.get();
     std::unique_ptr<std::byte[]> grown(new (std::nothrow) std::byte[bytes ? bytes : 1]);
     if (reject_if(!grown, uform_status_out_of_memory_k, "Failed to grow the arena", outcome)) return nullptr;
@@ -289,14 +289,14 @@ inline std::uint16_t to_f16(float value) {
 
 /** Writes @p value as the @p position -th element of a row of @p scalar, which
  *  @c output_scalar_bytes admits. */
-inline void write_value(std::byte *row, uform_scalar_t scalar, std::size_t position, float value) {
+inline void write_value(std::byte* row, uform_scalar_t scalar, std::size_t position, float value) {
     std::uint16_t const half = scalar == uform_scalar_bf16_k ? to_bf16(value) : to_f16(value);
     if (scalar == uform_scalar_f32_k) std::memcpy(row + position * sizeof(value), &value, sizeof(value));
     else std::memcpy(row + position * sizeof(half), &half, sizeof(half));
 }
 
 /** Continues a 64-bit FNV-1a hash over @p bytes from @p hash. */
-inline std::uint64_t fnv1a(std::byte const *bytes, std::size_t length,
+inline std::uint64_t fnv1a(std::byte const* bytes, std::size_t length,
                            std::uint64_t hash = 0xCBF29CE484222325ull) noexcept {
     for (std::size_t position = 0; position != length; ++position)
         hash = (hash ^ static_cast<std::uint64_t>(bytes[position])) * 0x100000001B3ull;
@@ -304,7 +304,7 @@ inline std::uint64_t fnv1a(std::byte const *bytes, std::size_t length,
 }
 
 /** Fills one row of @c dimensions_k with xorshift draws in [-1, 1) seeded by @p seed. */
-inline void write_row(std::byte *row, uform_scalar_t scalar, std::uint64_t seed) {
+inline void write_row(std::byte* row, uform_scalar_t scalar, std::uint64_t seed) {
     std::uint64_t state = seed ? seed : 0x9E3779B97F4A7C15ull;
     for (std::size_t position = 0; position != dimensions_k; ++position) {
         state ^= state << 13, state ^= state >> 7, state ^= state << 17;

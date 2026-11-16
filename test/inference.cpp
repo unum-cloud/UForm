@@ -47,7 +47,7 @@ using namespace unum::uform;
 using namespace unum::uform::encoder;
 using namespace unum::uform::test;
 
-static char const *const texts_k[] = {"Hello, world!", "UForm encodes bytes.", "a"};
+static char const* const texts_k[] = {"Hello, world!", "UForm encodes bytes.", "a"};
 static constexpr std::size_t items_k = 3;
 
 /** The largest absolute difference relative to the reference's largest magnitude, and the
@@ -79,9 +79,9 @@ static agreement_t compare(f32r2_view_t tower, f32r2_view_t reference) {
     return agreement;
 }
 
-static std::vector<float> read_floats(char const *path) {
+static std::vector<float> read_floats(char const* path) {
     std::vector<float> values;
-    std::FILE *file = std::fopen(path, "rb");
+    std::FILE* file = std::fopen(path, "rb");
     if (!file) return values;
     float value;
     while (std::fread(&value, sizeof(value), 1, file) == 1) values.push_back(value);
@@ -93,15 +93,15 @@ static std::vector<float> read_floats(char const *path) {
  *  for a host variant or a stream for a device one, with the batch and the outputs in memory both
  *  sides address, placed under @p capabilities . */
 template <vendored_residency_t residency_>
-static bool encode(test_suite_t &suite, encoder_verbs<residency_> const &verbs, checkpoint_to_load_t const &checkpoint,
-                   geometry_t const &geometry, precision_t precision, nk_capability_t capabilities,
+static bool encode(test_suite_t& suite, encoder_verbs<residency_> const& verbs, checkpoint_to_load_t const& checkpoint,
+                   geometry_t const& geometry, precision_t precision, nk_capability_t capabilities,
                    typename vendored_residency_executor<residency_>::type executor, nk_stream_t stream,
-                   encoded_t &encoded) {
-    expected<void *> made = verbs.create(checkpoint, geometry, precision, stream);
+                   encoded_t& encoded) {
+    expected<void*> made = verbs.create(checkpoint, geometry, precision, stream);
     if (!made && made.status_ == status_t::unsupported_k && precision == precision_t::e4m3_k)
         return suite.skip("the class has no E4M3 products"), false;
     if (!made) return suite.check(false, "tower: {}", made.description_), false;
-    void *const tower = *made;
+    void* const tower = *made;
 
     bool const on_device = (capabilities & nk_cap_gpus_k) != 0;
     nk_allocator_t shared {}, scratch_policy {};
@@ -163,10 +163,10 @@ static bool encode(test_suite_t &suite, encoder_verbs<residency_> const &verbs, 
 }
 
 /** Checks @p encoded against @p reference within @p tolerance , naming @p who in the message. */
-static void check_agreement(test_suite_t &suite, char const *who, encoded_t const &encoded, encoded_t const &reference,
+static void check_agreement(test_suite_t& suite, char const* who, encoded_t const& encoded, encoded_t const& reference,
                             std::size_t hidden, double tolerance) {
     std::size_t const rows = reference.states.size() / hidden;
-    auto const check = [&](char const *surface, std::vector<float> const &tower, std::vector<float> const &floor,
+    auto const check = [&](char const* surface, std::vector<float> const& tower, std::vector<float> const& floor,
                            std::size_t surface_rows) {
         if (tower.empty() || floor.empty()) return;
         std::size_t const width = floor.size() / surface_rows;
@@ -184,12 +184,12 @@ static void check_agreement(test_suite_t &suite, char const *who, encoded_t cons
 /** Encodes in @p precision through the variant of @p class_ , when this machine runs it and it
  *  advances past its parent, and compares with the serial floor's @p reference . */
 template <cpu_class_t class_>
-static void class_parity(test_suite_t &suite, checkpoint_to_load_t const &checkpoint, geometry_t const &geometry,
-                         pool_view_t pool, nk_capability_t available, precision_t precision, encoded_t const &reference,
+static void class_parity(test_suite_t& suite, checkpoint_to_load_t const& checkpoint, geometry_t const& geometry,
+                         pool_view_t pool, nk_capability_t available, precision_t precision, encoded_t const& reference,
                          double tolerance) {
     if (!cpu_rung_fits(class_, {available, fu::cpu_capabilities()}))
         return suite.skip("this machine does not run the class");
-    encoder_verbs<vendored_residency_t::ram_k> const *const verbs =
+    encoder_verbs<vendored_residency_t::ram_k> const* const verbs =
         encoder_class_tables<vendored_residency_t::ram_k, class_>::find();
     if (!verbs) return suite.skip("the class picks the kits its parent does");
     encoded_t encoded;
@@ -203,10 +203,10 @@ static void class_parity(test_suite_t &suite, checkpoint_to_load_t const &checkp
 /** Encodes in @p precision on @p stream through @p verbs , the variant a device's vendor ladder
  *  picked, and compares with the serial floor's @p reference . */
 template <vendored_residency_t residency_>
-static void check_device_variant(test_suite_t &suite, encoder_verbs<residency_> const *verbs,
-                                 checkpoint_to_load_t const &checkpoint, geometry_t const &geometry,
+static void check_device_variant(test_suite_t& suite, encoder_verbs<residency_> const* verbs,
+                                 checkpoint_to_load_t const& checkpoint, geometry_t const& geometry,
                                  precision_t precision, nk_capability_t capabilities, nk_stream_t stream,
-                                 encoded_t const &reference, double tolerance) {
+                                 encoded_t const& reference, double tolerance) {
     if (!verbs) return suite.skip("this build compiles no variant for the device's vendor");
     encoded_t encoded;
     if (encode(suite, *verbs, checkpoint, geometry, precision, capabilities, stream, stream, encoded))
@@ -216,8 +216,8 @@ static void check_device_variant(test_suite_t &suite, encoder_verbs<residency_> 
 
 /** Encodes in @p precision on @p device through the newest class its vendor's ladder admits, and
  *  compares with the serial floor's @p reference . */
-static void device_parity(test_suite_t &suite, checkpoint_to_load_t const &checkpoint, geometry_t const &geometry,
-                          uform_gpu_device_t device, precision_t precision, encoded_t const &reference,
+static void device_parity(test_suite_t& suite, checkpoint_to_load_t const& checkpoint, geometry_t const& geometry,
+                          uform_gpu_device_t device, precision_t precision, encoded_t const& reference,
                           double tolerance) {
     bool const amd = device.vendor == uform_gpu_vendor_amd_k;
     nk::expected<nk::device_t> const opened = nk::device_t::make(
@@ -243,8 +243,8 @@ static void device_parity(test_suite_t &suite, checkpoint_to_load_t const &check
 
 /** Compares the serial floor's BFloat16 @p reference with the Rust crate's dumps at @p states_path
  *  and @p embeddings_path , which skips without them. */
-static void rust_parity(test_suite_t &suite, char const *states_path, char const *embeddings_path,
-                        encoded_t const &reference, std::size_t hidden) {
+static void rust_parity(test_suite_t& suite, char const* states_path, char const* embeddings_path,
+                        encoded_t const& reference, std::size_t hidden) {
     if (states_path == nullptr || embeddings_path == nullptr) return suite.skip("needs the Rust crate's dumps");
     encoded_t rust {read_floats(states_path), read_floats(embeddings_path)};
     if (rust.states.size() != reference.states.size() || rust.embeddings.size() != reference.embeddings.size())
@@ -255,7 +255,7 @@ static void rust_parity(test_suite_t &suite, char const *states_path, char const
 
 /** Checks every token vector of the serial floor's @p reference has unit length at
  *  the BFloat16 floor. */
-static void token_vectors_unit_length(test_suite_t &suite, encoded_t const &reference, std::size_t width) {
+static void token_vectors_unit_length(test_suite_t& suite, encoded_t const& reference, std::size_t width) {
     if (reference.token_vectors.empty()) return suite.skip("the checkpoint carries no token head");
     f32r2_view_t const vectors {reference.token_vectors.data(), reference.token_vectors.size() / width, width};
     double worst = 0;
@@ -271,14 +271,14 @@ static void token_vectors_unit_length(test_suite_t &suite, encoded_t const &refe
 /** Saves every tensor and metadata pair of @p checkpoint to @p path twice, the second save
  *  replacing the first, and reads them back byte for byte with no @c .tmp sibling left behind.
  *  Float32 entries go first, as the payload packs them ahead of the BFloat16 ones. */
-static void checkpoint_round_trip(test_suite_t &suite, checkpoint_to_load_t const &checkpoint,
-                                  std::string const &path) {
+static void checkpoint_round_trip(test_suite_t& suite, checkpoint_to_load_t const& checkpoint,
+                                  std::string const& path) {
     checkpoint_to_save_t saved;
-    for (checkpoint_metadata_t const &pair : checkpoint.metadata())
+    for (checkpoint_metadata_t const& pair : checkpoint.metadata())
         suite.check(static_cast<bool>(saved.metadata(pair.key.view(), pair.value.view())), "metadata {}",
                     pair.key.view());
     for (checkpoint_dtype_t const dtype : {checkpoint_dtype_t::f32_k, checkpoint_dtype_t::bf16_k})
-        for (checkpoint_entry_t const &entry : checkpoint.entries()) {
+        for (checkpoint_entry_t const& entry : checkpoint.entries()) {
             if (entry.dtype != dtype) continue;
             sz::string_view_t const name = entry.name.view();
             expected_t inserted = dtype == checkpoint_dtype_t::f32_k ? saved.insert(name, checkpoint.float32(name))
@@ -296,12 +296,14 @@ static void checkpoint_round_trip(test_suite_t &suite, checkpoint_to_load_t cons
     if (loaded) {
         suite.check_equal(loaded->size(), checkpoint.size(), "tensors");
         suite.check_equal(loaded->metadata().size(), checkpoint.metadata().size(), "metadata pairs");
-        for (checkpoint_entry_t const &entry : checkpoint.entries()) {
+        for (checkpoint_entry_t const& entry : checkpoint.entries()) {
             sz::string_view_t const name = entry.name.view();
-            bytes_view_t const original = entry.dtype == checkpoint_dtype_t::f32_k ? bytes_of(checkpoint.float32(name))
-                                                                                   : bytes_of(checkpoint[name]);
-            bytes_view_t const reread = entry.dtype == checkpoint_dtype_t::f32_k ? bytes_of(loaded->float32(name))
-                                                                                 : bytes_of((*loaded)[name]);
+            bytes_view_t const original = entry.dtype == checkpoint_dtype_t::f32_k
+                                              ? nk::as_bytes(checkpoint.float32(name)).values().value
+                                              : nk::as_bytes(checkpoint[name]).values().value;
+            bytes_view_t const reread = entry.dtype == checkpoint_dtype_t::f32_k
+                                            ? nk::as_bytes(loaded->float32(name)).values().value
+                                            : nk::as_bytes((*loaded)[name]).values().value;
             suite.check(std::equal(original.begin(), original.end(), reread.begin(), reread.end()), "{} differs", name);
         }
     }
@@ -311,12 +313,12 @@ static void checkpoint_round_trip(test_suite_t &suite, checkpoint_to_load_t cons
 
 /** Runs @ref class_parity for every class of the ladder this build compiled, in both precisions. */
 template <cpu_class_t... classes_>
-static void run_class_parity(test_suite_t &suite, cpu_ladder<classes_...>, checkpoint_to_load_t const &checkpoint,
-                             geometry_t const &geometry, pool_view_t pool, nk_capability_t available,
-                             encoded_t const &bf16_reference, encoded_t const &e4m3_reference) {
+static void run_class_parity(test_suite_t& suite, cpu_ladder<classes_...>, checkpoint_to_load_t const& checkpoint,
+                             geometry_t const& geometry, pool_view_t pool, nk_capability_t available,
+                             encoded_t const& bf16_reference, encoded_t const& e4m3_reference) {
     auto rung = [&]<cpu_class_t class_>() {
         if constexpr (cpu_class_compiled(class_) && class_ != cpu_ladder_floor_k) {
-            char const *const name = uform_cpu_class_name(static_cast<uform_cpu_class_t>(class_));
+            char const* const name = uform_cpu_class_name(static_cast<uform_cpu_class_t>(class_));
             suite.run(fmt::format("class_parity/{}/bf16", name), class_parity<class_>, checkpoint, geometry, pool,
                       available, precision_t::bf16_k, bf16_reference, 5e-2);
             suite.run(fmt::format("class_parity/{}/e4m3", name), class_parity<class_>, checkpoint, geometry, pool,
@@ -326,7 +328,7 @@ static void run_class_parity(test_suite_t &suite, cpu_ladder<classes_...>, check
     (rung.template operator()<classes_>(), ...);
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
     if (argc != 2 && argc != 4)
         return fmt::println(stderr, "Usage: {} <tiny.safetensors> [<states.f32> <embeddings.f32>]", argv[0]), 1;
     test_suite_t suite = test_suite_t::make(argv[0]);
@@ -342,7 +344,7 @@ int main(int argc, char **argv) {
     expected<executor_t> pool = executor_t::make(4, caller_exclusivity_t::caller_inclusive_k);
     if (!pool) return suite.check(false, "pool: {}", pool.description_), suite.finish();
 
-    encoder_verbs<vendored_residency_t::ram_k> const &reference =
+    encoder_verbs<vendored_residency_t::ram_k> const& reference =
         *encoder_class_tables<vendored_residency_t::ram_k, cpu_ladder_floor_k>::find();
     nk_capability_t const reference_capabilities = numkong_capabilities_of(cpu_ladder_floor_k);
     encoded_t bf16_reference, e4m3_reference;

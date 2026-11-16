@@ -78,7 +78,7 @@ enum class copy_t { kept_k, zeroed_k };
 /** One weight's growth: its name past @c model. or @c model.blocks.{i}. , how many equal bands of
  *  rows each repeat in place when widening, zero keeping the rows, its columns, and its copy. */
 struct growth_t {
-    char const *name;
+    char const* name;
     std::size_t row_bands;
     columns_t columns;
     copy_t copy;
@@ -111,7 +111,7 @@ static constexpr growth_t block_growths_k[] = {
 };
 
 /** The geometry keys that pass through unchanged; @c columns is absent from older files. */
-static constexpr char const *kept_metadata_k[] = {
+static constexpr char const* kept_metadata_k[] = {
     "ffn_expansion",      "head_width",       "rms_epsilon",      "rope_temporal",    "rope_height",
     "rope_width",         "rope_base",        "context",          "columns",          "image_patch_side",
     "image_channels",     "image_pixel_mean", "image_pixel_std",  "video_patch_side", "video_tube_frames",
@@ -121,9 +121,9 @@ static constexpr char const *kept_metadata_k[] = {
 
 /** Insert @p source as @p name , widened by @p row_bands and @p columns through @p staging ; zero
  *  bands and kept columns copy it as it is. */
-[[nodiscard]] static expected_t insert_grown_(checkpoint_to_save_t &grown, sz::string_view_t name,
+[[nodiscard]] static expected_t insert_grown_(checkpoint_to_save_t& grown, sz::string_view_t name,
                                               nk::tensor_view<nk_bf16_t, 2> source, std::size_t row_bands,
-                                              columns_t columns, st::basic_vector<nk_bf16_t> &staging) noexcept {
+                                              columns_t columns, st::basic_vector<nk_bf16_t>& staging) noexcept {
     std::size_t const rows = source.extent(0), cols = source.extent(1);
     std::size_t const band = row_bands ? rows / row_bands : rows;
     std::size_t const grown_rows = row_bands ? 2 * rows : rows;
@@ -137,9 +137,9 @@ static constexpr char const *kept_metadata_k[] = {
     nk_f32_t const half = 0.5f, zero = 0.0f;
     for (std::size_t row = 0; row != grown_rows; ++row) {
         std::size_t const source_row = row_bands ? row / (2 * band) * band + row % band : row;
-        nk_bf16_t const *const from = &source[source_row, 0];
+        nk_bf16_t const* const from = &source[source_row, 0];
         for (std::size_t first = 0; first != grown_cols; first += cols) {
-            nk_bf16_t *const to = &target[row, first];
+            nk_bf16_t* const to = &target[row, first];
             if (columns != columns_t::halved_k) std::memcpy(to, from, cols * sizeof(nk_bf16_t));
             else if (nk_each_scale_bf16_best(from, cols, &half, &zero, to, capabilities, nullptr) != nk_success_k)
                 return expected_t::fail(status_t::unsupported_k, "{} halving failed", name);
@@ -149,9 +149,9 @@ static constexpr char const *kept_metadata_k[] = {
 }
 
 /** Insert the zero matrix shaped like @p source as @p name through @p staging . */
-[[nodiscard]] static expected_t insert_zeros_(checkpoint_to_save_t &grown, sz::string_view_t name,
+[[nodiscard]] static expected_t insert_zeros_(checkpoint_to_save_t& grown, sz::string_view_t name,
                                               nk::tensor_view<nk_bf16_t, 2> source,
-                                              st::basic_vector<nk_bf16_t> &staging) noexcept {
+                                              st::basic_vector<nk_bf16_t>& staging) noexcept {
     std::size_t const rows = source.extent(0), cols = source.extent(1);
     if (st::failed(staging.resize(st::assume_uninitialized, rows * cols)))
         return expected_t::fail(status_t::bad_alloc_k, "{} staging failed", name);
@@ -161,18 +161,18 @@ static constexpr char const *kept_metadata_k[] = {
 
 /** Fill @p grown with the weights and geometry of @p source taken one @p step up, refusing a source
  *  tensor this neither grows, carries nor leaves behind. */
-[[nodiscard]] static expected_t grow_(checkpoint_to_load_t const &source, ue::geometry_t const &geometry, step_t step,
-                                      checkpoint_to_save_t &grown) noexcept {
+[[nodiscard]] static expected_t grow_(checkpoint_to_load_t const& source, ue::geometry_t const& geometry, step_t step,
+                                      checkpoint_to_save_t& grown) noexcept {
     std::size_t accounted = 0;
     // The Float32 state goes first, as the payload packs it ahead of the BFloat16 weights.
-    for (char const *carried : {"contrastive.inverse_temperatures", "contrastive.biases",
+    for (char const* carried : {"contrastive.inverse_temperatures", "contrastive.biases",
                                 "late_interaction.inverse_temperatures", "late_interaction.biases"}) {
         f32r2_view_t const values = source.float32(carried);
         if (values.empty()) continue;
         ++accounted;
         if (expected_t inserted = grown.insert(carried, values); !inserted) return inserted;
     }
-    for (char const *moments : {"contrastive.temperature_moments", "late_interaction.temperature_moments"})
+    for (char const* moments : {"contrastive.temperature_moments", "late_interaction.temperature_moments"})
         accounted += !source.float32(moments).empty();
 
     sz::string_t suffix, name;
@@ -183,7 +183,7 @@ static constexpr char const *kept_metadata_k[] = {
         if (format_into(name, "model.{}", suffix.view())) found = source[name.view()];
         if (found.empty()) return found;
         ++accounted;
-        for (char const *part : {"row_moments", "column_moments", "master", "first_moment"}) {
+        for (char const* part : {"row_moments", "column_moments", "master", "first_moment"}) {
             sz::string_t moment;
             if (format_into(moment, "optimizer.{}.{}", suffix.view(), part))
                 accounted += !source.float32(moment.view()).empty();
@@ -192,7 +192,7 @@ static constexpr char const *kept_metadata_k[] = {
     };
     st::basic_vector<nk_bf16_t> staging;
     bool const widened = step == step_t::widen_k;
-    for (growth_t const &growth : tower_growths_k) {
+    for (growth_t const& growth : tower_growths_k) {
         if (sz::failed(suffix.assign(growth.name)))
             return expected_t::fail(status_t::bad_alloc_k, "name staging failed");
         nk::tensor_view<nk_bf16_t, 2> const weights = find();
@@ -204,7 +204,7 @@ static constexpr char const *kept_metadata_k[] = {
     }
     sz::string_t grown_name;
     for (std::size_t block = 0; block != geometry.depth; ++block)
-        for (growth_t const &growth : block_growths_k) {
+        for (growth_t const& growth : block_growths_k) {
             suffix.clear();
             if (!format_into(suffix, "blocks.{}.{}", block, growth.name))
                 return expected_t::fail(status_t::bad_alloc_k, "name staging failed");
@@ -233,7 +233,7 @@ static constexpr char const *kept_metadata_k[] = {
         return expected_t::fail(status_t::invalid_argument_k, "{} of the source's {} tensors have no growth rule",
                                 source.size() - accounted, source.size());
 
-    for (char const *key : kept_metadata_k)
+    for (char const* key : kept_metadata_k)
         if (sz::string_view_t const value = source.metadata(key); !value.empty())
             if (expected_t recorded = grown.metadata(key, value); !recorded) return recorded;
     sz::string_t depth, hidden;
@@ -264,9 +264,9 @@ struct strings_t {
     }
 
     /** Append the whole file at @p path as one string. */
-    [[nodiscard]] bool append_file(char const *path) noexcept {
+    [[nodiscard]] bool append_file(char const* path) noexcept {
         if (offsets.empty() && st::failed(offsets.push_back(std::size_t {0}))) return false;
-        std::FILE *file = std::fopen(path, "rb");
+        std::FILE* file = std::fopen(path, "rb");
         if (!file) return false;
         std::fseek(file, 0, SEEK_END);
         long const length = std::ftell(file);
@@ -335,8 +335,8 @@ struct session_t {
 };
 
 /** Append the @p count Float32 rows @p embeddings holds in VRAM onto @p rows . */
-[[nodiscard]] static bool keep_rows_(uform_rows_view_t const &embeddings, std::size_t count,
-                                     st::basic_vector<float> &rows) noexcept {
+[[nodiscard]] static bool keep_rows_(uform_rows_view_t const& embeddings, std::size_t count,
+                                     st::basic_vector<float>& rows) noexcept {
     std::size_t const columns = embeddings.columns, size = rows.size();
     if (st::failed(rows.resize(st::assume_uninitialized, size + count * columns))) return false;
     CUdeviceptr const data = reinterpret_cast<CUdeviceptr>(embeddings.data);
@@ -349,9 +349,9 @@ struct session_t {
 
 /** Load @p checkpoint into VRAM and append the embeddings of @p captions , then of @p images , onto
  *  @p rows , @p dimensions wide; or print why not. */
-[[nodiscard]] static bool encode_(session_t const &session, std::string_view checkpoint, strings_t const &captions,
-                                  strings_t const &images, std::size_t &dimensions,
-                                  st::basic_vector<float> &rows) noexcept {
+[[nodiscard]] static bool encode_(session_t const& session, std::string_view checkpoint, strings_t const& captions,
+                                  strings_t const& images, std::size_t& dimensions,
+                                  st::basic_vector<float>& rows) noexcept {
     uform_outcome_t outcome {};
     uform_model_t model = nullptr;
     std::int32_t const device = 0;
@@ -359,7 +359,7 @@ struct session_t {
         .model = &model,
         .executor = session.executor,
         .outcome = &outcome,
-        .path = {reinterpret_cast<std::uint8_t const *>(checkpoint.data()), checkpoint.size()},
+        .path = {reinterpret_cast<std::uint8_t const*>(checkpoint.data()), checkpoint.size()},
         .vram = {&device, 1},
         .quantization = uform_scalar_bf16_k};
     uform_model_load_vram(&load_arguments);
@@ -414,13 +414,13 @@ struct worst_t {
 
 /** The item among @p first to @p end whose @p grown embedding's first @p dimensions meet the
  *  @p source one at the lowest cosine. */
-[[nodiscard]] static worst_t worst_(st::basic_vector<float> const &source, st::basic_vector<float> const &grown,
+[[nodiscard]] static worst_t worst_(st::basic_vector<float> const& source, st::basic_vector<float> const& grown,
                                     std::size_t dimensions, std::size_t grown_dimensions, std::size_t first,
                                     std::size_t end) noexcept {
     worst_t worst {first, 1.0f};
     for (std::size_t item = first; item != end; ++item) {
-        float const *left = source.data() + item * dimensions;
-        float const *right = grown.data() + item * grown_dimensions;
+        float const* left = source.data() + item * dimensions;
+        float const* right = grown.data() + item * grown_dimensions;
         float dot = 0, left_squares = 0, right_squares = 0;
         for (std::size_t column = 0; column != dimensions; ++column) {
             dot += left[column] * right[column];
@@ -433,7 +433,7 @@ struct worst_t {
     return worst;
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
     if (argc < 4) {
         fmt::println(stderr, "Usage: uform_grow <in.safetensors> <out.safetensors> --deepen | --widen " //
                              "[--images <dir>]");
@@ -442,9 +442,9 @@ int main(int argc, char **argv) {
     char const *source_path = argv[1], *grown_path = argv[2];
     step_t step = step_t::deepen_k;
     std::size_t steps = 0;
-    char const *images_directory = nullptr;
+    char const* images_directory = nullptr;
     for (int index = 3; index != argc; ++index) {
-        char const *flag = argv[index];
+        char const* flag = argv[index];
         if (!std::strcmp(flag, "--deepen")) step = step_t::deepen_k, ++steps;
         else if (!std::strcmp(flag, "--widen")) step = step_t::widen_k, ++steps;
         else if (!std::strcmp(flag, "--images") && index + 1 != argc) images_directory = argv[++index];
@@ -468,10 +468,10 @@ int main(int argc, char **argv) {
     for (std::string_view caption : captions_k)
         if (!captions.append({caption})) return fmt::println(stderr, "uform_grow: caption staging failed"), 1;
     if (images_directory) {
-        DIR *directory = opendir(images_directory);
+        DIR* directory = opendir(images_directory);
         if (!directory) return fmt::println(stderr, "uform_grow: cannot open {}", images_directory), 1;
         char path[4096];
-        for (dirent *entry = readdir(directory); entry && images.count() != images_count_k;
+        for (dirent* entry = readdir(directory); entry && images.count() != images_count_k;
              entry = readdir(directory)) {
             if (entry->d_name[0] == '.') continue;
             *fmt::format_to_n(path, sizeof(path) - 1, "{}/{}", images_directory, entry->d_name).out = '\0';

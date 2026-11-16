@@ -126,7 +126,7 @@ struct rope_angles_t {
     /** Precompute @c angle[position,pair] = position · base^(−2 · pair/denominator) per axis and
      *  upload — once, at setup, outside any capture. The temporal denominator is the whole head
      *  width (the shape's sum), so text-degenerate coordinates match 1-D RoPE bit for bit. */
-    [[nodiscard]] static expected<rope_angles_t> make(gpu_arena_t &arena, u32_t max_positions, rope_shape_t shape,
+    [[nodiscard]] static expected<rope_angles_t> make(gpu_arena_t& arena, u32_t max_positions, rope_shape_t shape,
                                                       f32_t base) noexcept;
 
     /** The kernel-facing bundle every block borrows. */
@@ -156,7 +156,7 @@ struct tower_scalars_t {
 
     /** A template, so the host pass never instantiates the device-only @c __sincosf . */
     template <typename angle_type_>
-    __host__ __device__ void sincos(angle_type_ angle, f32_t *sine, f32_t *cosine) const noexcept {
+    __host__ __device__ void sincos(angle_type_ angle, f32_t* sine, f32_t* cosine) const noexcept {
         __sincosf(angle, sine, cosine);
     }
 };
@@ -242,10 +242,10 @@ struct transformer_scratch_t {
      *  weight gradients of every entry projecting one of @p entry_inputs scalars per token, of the
      *  tower head over the segments, and of a token head of @p token_width outputs when nonzero;
      *  the NumKong pack and workspace sizes come from @p numerics . */
-    [[nodiscard]] static expected<transformer_scratch_t> make(gpu_arena_t &arena,
-                                                              transformer_block_config_t const &config,
+    [[nodiscard]] static expected<transformer_scratch_t> make(gpu_arena_t& arena,
+                                                              transformer_block_config_t const& config,
                                                               std::span<u32_t const> entry_inputs, u32_t token_width,
-                                                              gpu_numerics_t const &numerics) noexcept;
+                                                              gpu_numerics_t const& numerics) noexcept;
 
     /** Float32 @b [tokens·ffn] the SwiGLU output before its cast, then each data gradient before
      *  the house kernel or cast consuming it. */
@@ -312,15 +312,15 @@ struct transformer_block_bf16_t {
     /** Allocate the weights and their gradients, every stash the backward reads, and the weight
      *  packs; construction validates the config, and every call after it is a pure enqueue,
      *  calling the kernels of @p numerics . */
-    [[nodiscard]] static expected<transformer_block_bf16_t> make(gpu_arena_t &arena, transformer_scratch_t &scratch,
+    [[nodiscard]] static expected<transformer_block_bf16_t> make(gpu_arena_t& arena, transformer_scratch_t& scratch,
                                                                  transformer_block_config_t config,
-                                                                 gpu_numerics_t const &numerics) noexcept;
+                                                                 gpu_numerics_t const& numerics) noexcept;
 
     /** Pack the four weights as the forward's B operands and their transposes as the data
      *  gradients' — pure enqueue, capture-safe. Call once per optimizer step, after the
      *  weights change and before the first @ref forward ; every micro-batch and call of the
      *  step reuses the packs. */
-    [[nodiscard]] expected_t pack_weights(gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t pack_weights(gpu_stream_t& stream) noexcept;
 
     /**
      *  @brief One block forward — pure enqueue, capture-safe; stashes everything
@@ -336,7 +336,7 @@ struct transformer_block_bf16_t {
      */
     [[nodiscard]] expected_t forward(f32r2_view_t input, f32r2_span_t output, u32r1_view_t segment_offsets,
                                      u32r1_view_t segment_lengths, rope_angles_view_t angles, i16r2_view_t coords,
-                                     gpu_stream_t &stream) noexcept;
+                                     gpu_stream_t& stream) noexcept;
 
     /** One block backward, consuming the stashes this block's @ref forward last wrote into the
      *  shared scratch, so it runs right after that forward — pure enqueue, capture-safe. Weight
@@ -344,10 +344,10 @@ struct transformer_block_bf16_t {
      *  token gradient and may not alias @p output_grad . */
     [[nodiscard]] expected_t backward(f32r2_view_t output_grad, f32r2_span_t input_grad, u32r1_view_t segment_offsets,
                                       u32r1_view_t segment_lengths, rope_angles_view_t angles, i16r2_view_t coords,
-                                      gpu_stream_t &stream) noexcept;
+                                      gpu_stream_t& stream) noexcept;
 
     /** The baked geometry. */
-    [[nodiscard]] transformer_block_config_t const &config() const noexcept { return config_; }
+    [[nodiscard]] transformer_block_config_t const& config() const noexcept { return config_; }
 
     /** The input of the last @ref forward , which replaying it before @ref backward starts from. */
     [[nodiscard]] f32r2_view_t input() const noexcept { return input_stash_.view(); }
@@ -375,15 +375,15 @@ struct transformer_block_bf16_t {
     [[nodiscard]] bf16r1_view_t post_norm_scale_grad() const noexcept { return post_norm_scale_grad_.view(); }
 
     /** Quantize this block's weights into the E4M3 inference twin — the twin's only constructor. */
-    [[nodiscard]] expected<struct transformer_block_e4m3_t> quantize_weights(gpu_arena_t &arena,
-                                                                             gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected<struct transformer_block_e4m3_t> quantize_weights(gpu_arena_t& arena,
+                                                                             gpu_stream_t& stream) noexcept;
 
   private:
     friend struct transformer_block_e4m3_t;
 
     /** Pack this block's stashed keys and values into the scratch's @c packed_keys_values . */
     [[nodiscard]] expected_t pack_keys_values_(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
-                                               gpu_stream_t &stream) noexcept;
+                                               gpu_stream_t& stream) noexcept;
 
     /** The baked geometry. */
     transformer_block_config_t config_ {};
@@ -392,7 +392,7 @@ struct transformer_block_bf16_t {
     gpu_numerics_t numerics_ {};
 
     /** The shared transients — borrowed, owned by the stack. */
-    transformer_scratch_t *scratch_ = nullptr;
+    transformer_scratch_t* scratch_ = nullptr;
 
     /** Product roles, indexing @ref packed_weights_ and @ref packed_weights_transposed_ . */
     static constexpr std::size_t product_qkv_k = 0, product_out_k = 1, product_gate_up_k = 2, product_down_k = 3;
@@ -435,10 +435,10 @@ struct transformer_block_e4m3_t {
      *  after each product); attention runs unscaled E4M3 over the ragged segments. */
     [[nodiscard]] expected_t forward(bf16r2_view_t input, bf16r2_span_t output, u32r1_view_t segment_offsets,
                                      u32r1_view_t segment_lengths, rope_angles_view_t angles, i16r2_view_t coords,
-                                     gpu_stream_t &stream) noexcept;
+                                     gpu_stream_t& stream) noexcept;
 
     /** The baked geometry. */
-    [[nodiscard]] transformer_block_config_t const &config() const noexcept { return config_; }
+    [[nodiscard]] transformer_block_config_t const& config() const noexcept { return config_; }
 
   private:
     friend struct transformer_block_bf16_t;
@@ -459,7 +459,7 @@ struct transformer_block_e4m3_t {
      *  @param[in,out] stream The stream every launch enqueues on.
      */
     [[nodiscard]] expected_t project_(std::size_t product, e4m3r2_view_t activations, f32r1_view_t token_scales,
-                                      bf16r2_view_t residual, bf16r2_span_t values, gpu_stream_t &stream) noexcept;
+                                      bf16r2_view_t residual, bf16r2_span_t values, gpu_stream_t& stream) noexcept;
 
     /** The baked geometry. */
     transformer_block_config_t config_ {};

@@ -792,7 +792,7 @@ typedef struct uform_executor_on_pool_t {
 
     /** The ForkUnion @c fu_pool_t to borrow; it must outlive the executor, and keeps
      *  its lender's mood. */
-    void *pool;
+    void* pool;
 } uform_executor_on_pool_t;
 
 /** Creates a RAM executor over a borrowed ForkUnion pool, so UForm, USearch and UStore in one
@@ -958,10 +958,10 @@ typedef struct uform_arena_describe_t {
     uform_arena_t arena;
 
     /** Output for the outcome, final once its status leaves @c uform_status_deferred_k. */
-    uform_outcome_t *outcome;
+    uform_outcome_t* outcome;
 
     /** Output for where the arena's outputs live. */
-    uform_arena_description_t *description;
+    uform_arena_description_t* description;
 } uform_arena_describe_t;
 
 /**
@@ -971,7 +971,7 @@ typedef struct uform_arena_describe_t {
  *  @par Statuses:
  *  - @c uform_status_invalid_argument_k A @c NULL arena or description.
  */
-UFORM_EXPORT void uform_arena_describe(uform_arena_describe_t *arguments);
+UFORM_EXPORT void uform_arena_describe(uform_arena_describe_t* arguments);
 
 /**
  *  @brief The canonical lowercase, dash-separated spelling of each closed set's enumerators, and
@@ -984,21 +984,21 @@ UFORM_EXPORT char const* uform_status_name(uform_status_t status);
 
 /** Reads a status back from its spelling into @p status, or fails with
  *  @c uform_status_invalid_argument_k. */
-UFORM_EXPORT uform_status_t uform_status_from_name(uform_bytes_view_t name, uform_status_t *status);
+UFORM_EXPORT uform_status_t uform_status_from_name(uform_bytes_view_t name, uform_status_t* status);
 
 /** The canonical spelling of a scalar kind, as @c uform_scalar_f32_k spells "f32". */
 UFORM_EXPORT char const* uform_scalar_name(uform_scalar_t scalar);
 
 /** Reads a scalar kind back from its spelling into @p scalar, or fails with
  *  @c uform_status_invalid_argument_k. */
-UFORM_EXPORT uform_status_t uform_scalar_from_name(uform_bytes_view_t name, uform_scalar_t *scalar);
+UFORM_EXPORT uform_status_t uform_scalar_from_name(uform_bytes_view_t name, uform_scalar_t* scalar);
 
 /** The canonical spelling of a mood, as @c uform_mood_parked_k spells "parked". */
 UFORM_EXPORT char const* uform_mood_name(uform_mood_t mood);
 
 /** Reads a mood back from its spelling into @p mood, or fails with
  *  @c uform_status_invalid_argument_k. */
-UFORM_EXPORT uform_status_t uform_mood_from_name(uform_bytes_view_t name, uform_mood_t *mood);
+UFORM_EXPORT uform_status_t uform_mood_from_name(uform_bytes_view_t name, uform_mood_t* mood);
 
 /** The canonical spelling of a CPU class, as @c uform_cpu_class_intel_haswell_k spells
  *  "intel-haswell" and @c uform_cpu_class_unknown_k spells "unknown". */
@@ -1006,7 +1006,7 @@ UFORM_EXPORT char const* uform_cpu_class_name(uform_cpu_class_t cpu_class);
 
 /** Reads a CPU class back from its spelling into @p cpu_class, or fails with
  *  @c uform_status_invalid_argument_k. */
-UFORM_EXPORT uform_status_t uform_cpu_class_from_name(uform_bytes_view_t name, uform_cpu_class_t *cpu_class);
+UFORM_EXPORT uform_status_t uform_cpu_class_from_name(uform_bytes_view_t name, uform_cpu_class_t* cpu_class);
 
 /** The canonical spelling of a GPU class, as
  *  @c uform_gpu_class_nvidia_hopper_k spells "nvidia-hopper". */
@@ -1014,7 +1014,7 @@ UFORM_EXPORT char const* uform_gpu_class_name(uform_gpu_class_t gpu_class);
 
 /** Reads a GPU class back from its spelling into @p gpu_class, or fails with
  *  @c uform_status_invalid_argument_k. */
-UFORM_EXPORT uform_status_t uform_gpu_class_from_name(uform_bytes_view_t name, uform_gpu_class_t *gpu_class);
+UFORM_EXPORT uform_status_t uform_gpu_class_from_name(uform_bytes_view_t name, uform_gpu_class_t* gpu_class);
 
 /**
  *  @brief Reports the version of the library this process linked, which may differ from the

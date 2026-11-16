@@ -23,18 +23,18 @@ namespace unum::uform::utilities {
 /** A shared library opened by name and kept open for the process's life, as the entry points
  *  resolved from it are never unloaded; empty where the system has no such library. */
 struct shared_library_t {
-    void *handle = nullptr;
+    void* handle = nullptr;
 
     /** Opens the library named @p name , or answers the empty one. */
-    static shared_library_t open(char const *name) noexcept { // vendor-boundary: `dlopen` takes a C string
+    static shared_library_t open(char const* name) noexcept { // vendor-boundary: `dlopen` takes a C string
         return {dlopen(name, RTLD_NOW | RTLD_LOCAL)};
     }
 
     /** Points @p entry at the symbol exported as @p name , answering whether there is one. */
     template <typename function_type_>
-    bool resolve(char const *name, function_type_ &entry) const noexcept { // vendor-boundary: `dlsym` takes one
+    bool resolve(char const* name, function_type_& entry) const noexcept { // vendor-boundary: `dlsym` takes one
         if (!handle) return false;
-        entry = reinterpret_cast<function_type_>(dlsym(handle, name));
+        entry = reinterpret_cast<function_type_>(dlsym(handle, name)); // vendor-boundary: `dlsym` answers a `void*`
         return entry != nullptr;
     }
 
@@ -54,10 +54,10 @@ enum cuda_result_t : int {
 };
 
 /** The driver's opaque handles: @c CUcontext , @c CUstream , @c CUmodule and @c CUfunction . */
-using cuda_context_handle_t = struct cuda_context_opaque_t *;
-using cuda_stream_handle_t = struct cuda_stream_opaque_t *;
-using cuda_module_handle_t = struct cuda_module_opaque_t *;
-using cuda_function_handle_t = struct cuda_function_opaque_t *;
+using cuda_context_handle_t = struct cuda_context_opaque_t*;
+using cuda_stream_handle_t = struct cuda_stream_opaque_t*;
+using cuda_module_handle_t = struct cuda_module_opaque_t*;
+using cuda_function_handle_t = struct cuda_function_opaque_t*;
 
 /** A device address, @c CUdeviceptr . */
 using cuda_device_address_t = unsigned long long;
@@ -77,23 +77,23 @@ enum cuda_device_attribute_t : int {
  */
 struct cuda_api_t {
     cuda_result_t (*init)(unsigned) = nullptr;
-    cuda_result_t (*get_device)(int *, int) = nullptr;
-    cuda_result_t (*get_device_attribute)(int *, cuda_device_attribute_t, int) = nullptr;
-    cuda_result_t (*get_device_name)(char *, int, int) = nullptr;
-    cuda_result_t (*get_device_memory)(std::size_t *, int) = nullptr;
-    cuda_result_t (*get_current_context)(cuda_context_handle_t *) = nullptr;
-    cuda_result_t (*get_context_device)(int *) = nullptr;
+    cuda_result_t (*get_device)(int*, int) = nullptr;
+    cuda_result_t (*get_device_attribute)(int*, cuda_device_attribute_t, int) = nullptr;
+    cuda_result_t (*get_device_name)(char*, int, int) = nullptr;
+    cuda_result_t (*get_device_memory)(std::size_t*, int) = nullptr;
+    cuda_result_t (*get_current_context)(cuda_context_handle_t*) = nullptr;
+    cuda_result_t (*get_context_device)(int*) = nullptr;
     cuda_result_t (*push_context)(cuda_context_handle_t) = nullptr;
-    cuda_result_t (*pop_context)(cuda_context_handle_t *) = nullptr;
-    cuda_result_t (*stream_context)(cuda_stream_handle_t, cuda_context_handle_t *) = nullptr;
+    cuda_result_t (*pop_context)(cuda_context_handle_t*) = nullptr;
+    cuda_result_t (*stream_context)(cuda_stream_handle_t, cuda_context_handle_t*) = nullptr;
     cuda_result_t (*copy_async)(cuda_device_address_t, cuda_device_address_t, std::size_t,
                                 cuda_stream_handle_t) = nullptr;
     cuda_result_t (*fill_async)(cuda_device_address_t, unsigned char, std::size_t, cuda_stream_handle_t) = nullptr;
-    cuda_result_t (*module_load_data)(cuda_module_handle_t *, void const *) = nullptr;
-    cuda_result_t (*module_get_function)(cuda_function_handle_t *, cuda_module_handle_t,
-                                         char const *) = nullptr; // vendor-boundary: the driver's prototype
+    cuda_result_t (*module_load_data)(cuda_module_handle_t*, void const*) = nullptr;
+    cuda_result_t (*module_get_function)(cuda_function_handle_t*, cuda_module_handle_t,
+                                         char const*) = nullptr; // vendor-boundary: the driver's prototype
     cuda_result_t (*launch_kernel)(cuda_function_handle_t, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned,
-                                   unsigned, cuda_stream_handle_t, void **, void **) = nullptr;
+                                   unsigned, cuda_stream_handle_t, void**, void**) = nullptr;
 
     /** Whether the driver loaded and initialized with every entry resolved. */
     explicit operator bool() const noexcept { return launch_kernel != nullptr; }
@@ -135,9 +135,9 @@ enum hip_result_t : int {
 };
 
 /** The runtime's opaque handles: @c hipStream_t , @c hipModule_t and @c hipFunction_t . */
-using hip_stream_handle_t = struct hip_stream_opaque_t *;
-using hip_module_handle_t = struct hip_module_opaque_t *;
-using hip_function_handle_t = struct hip_function_opaque_t *;
+using hip_stream_handle_t = struct hip_stream_opaque_t*;
+using hip_module_handle_t = struct hip_module_opaque_t*;
+using hip_function_handle_t = struct hip_function_opaque_t*;
 
 /** The @c hipMemcpyKind UForm copies with: unified addressing tells the sides apart. */
 inline constexpr int hip_copy_default_k = 4;
@@ -157,19 +157,19 @@ enum hip_device_attribute_t : int {
  *  prototype of the exported symbol it is resolved by.
  */
 struct hip_api_t {
-    hip_result_t (*get_device_attribute)(int *, hip_device_attribute_t, int) = nullptr;
-    hip_result_t (*get_device_name)(char *, int, int) = nullptr;
-    hip_result_t (*get_device_memory)(std::size_t *, int) = nullptr;
-    hip_result_t (*get_device)(int *) = nullptr;
+    hip_result_t (*get_device_attribute)(int*, hip_device_attribute_t, int) = nullptr;
+    hip_result_t (*get_device_name)(char*, int, int) = nullptr;
+    hip_result_t (*get_device_memory)(std::size_t*, int) = nullptr;
+    hip_result_t (*get_device)(int*) = nullptr;
     hip_result_t (*set_device)(int) = nullptr;
-    hip_result_t (*stream_device)(hip_stream_handle_t, int *) = nullptr;
-    hip_result_t (*copy_async)(void *, void const *, std::size_t, int, hip_stream_handle_t) = nullptr;
-    hip_result_t (*fill_async)(void *, int, std::size_t, hip_stream_handle_t) = nullptr;
-    hip_result_t (*module_load_data)(hip_module_handle_t *, void const *) = nullptr;
-    hip_result_t (*module_get_function)(hip_function_handle_t *, hip_module_handle_t,
-                                        char const *) = nullptr; // vendor-boundary: the runtime's prototype
+    hip_result_t (*stream_device)(hip_stream_handle_t, int*) = nullptr;
+    hip_result_t (*copy_async)(void*, void const*, std::size_t, int, hip_stream_handle_t) = nullptr;
+    hip_result_t (*fill_async)(void*, int, std::size_t, hip_stream_handle_t) = nullptr;
+    hip_result_t (*module_load_data)(hip_module_handle_t*, void const*) = nullptr;
+    hip_result_t (*module_get_function)(hip_function_handle_t*, hip_module_handle_t,
+                                        char const*) = nullptr; // vendor-boundary: the runtime's prototype
     hip_result_t (*module_launch_kernel)(hip_function_handle_t, unsigned, unsigned, unsigned, unsigned, unsigned,
-                                         unsigned, unsigned, hip_stream_handle_t, void **, void **) = nullptr;
+                                         unsigned, unsigned, hip_stream_handle_t, void**, void**) = nullptr;
 
     /** Whether the runtime loaded with every entry resolved. */
     explicit operator bool() const noexcept { return module_launch_kernel != nullptr; }
@@ -179,7 +179,7 @@ struct hip_api_t {
      *  points into it. */
     static hip_api_t load() noexcept {
         shared_library_t library;
-        for (char const *name : {"libamdhip64.so", "libamdhip64.so.7", "libamdhip64.so.6"}) // vendor-boundary: sonames
+        for (char const* name : {"libamdhip64.so", "libamdhip64.so.7", "libamdhip64.so.6"}) // vendor-boundary: sonames
             if ((library = shared_library_t::open(name))) break;
         hip_api_t api;
         bool const resolved = //

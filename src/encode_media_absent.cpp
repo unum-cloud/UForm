@@ -17,7 +17,7 @@ using namespace unum::uform;
 
 /** Finishes a verb over encoded files as unsupported, its outputs null. */
 template <typename arguments_type_>
-static void refuse_files(arguments_type_ &arguments, call_outcome_t &outcome) noexcept {
+static void refuse_files(arguments_type_& arguments, call_outcome_t& outcome) noexcept {
     clear_outputs(arguments);
     propagate_error(uform_status_unsupported_k, outcome, "This build decodes no files; pass decoded pixels or samples");
 }
@@ -28,19 +28,19 @@ um::expected_t um::resample_mono(std::span<f32_t const>, u32_t, u32_t, f32r1_spa
 
 extern "C" {
 
-UFORM_EXPORT void uform_image_encode(uform_image_encode_t *arguments) {
+UFORM_EXPORT void uform_image_encode(uform_image_encode_t* arguments) {
     if (submitted<uform_image_encode>(arguments)) return;
     call_outcome_t outcome(*arguments);
     refuse_files(*arguments, outcome);
 }
 
-UFORM_EXPORT void uform_video_encode(uform_video_encode_t *arguments) {
+UFORM_EXPORT void uform_video_encode(uform_video_encode_t* arguments) {
     if (submitted<uform_video_encode>(arguments)) return;
     call_outcome_t outcome(*arguments);
     refuse_files(*arguments, outcome);
 }
 
-UFORM_EXPORT void uform_audio_encode(uform_audio_encode_t *arguments) {
+UFORM_EXPORT void uform_audio_encode(uform_audio_encode_t* arguments) {
     if (submitted<uform_audio_encode>(arguments)) return;
     call_outcome_t outcome(*arguments);
     refuse_files(*arguments, outcome);

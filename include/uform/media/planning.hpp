@@ -22,11 +22,11 @@ namespace fu = ashvardanian::forkunion;
 namespace nk = ashvardanian::numkong;
 namespace st = ashvardanian::smashtable;
 
+using ue::video_batch_shape_t;
 using uu::f64_t;
 using uu::u16_t;
 using uu::u32_t;
 using uu::u64_t;
-using ue::video_batch_shape_t;
 
 /** A picture's pixel dimensions — a size travels as one value, not two loose scalars. */
 struct image_extent_t {
@@ -110,7 +110,7 @@ struct video_grid_t {
  *  @param[in] shape The video modality's geometry: patch side, tube depth and frame stride.
  *  @param[in] columns The batch row width in patches.
  */
-[[nodiscard]] video_grid_t video_tube_grid(u32_t frames, image_extent_t native, video_batch_shape_t const &shape,
+[[nodiscard]] video_grid_t video_tube_grid(u32_t frames, image_extent_t native, video_batch_shape_t const& shape,
                                            u32_t columns) noexcept;
 
 } // namespace unum::uform::media

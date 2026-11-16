@@ -37,7 +37,7 @@ enum class storage_read_path_t : u8_t {
     gpu_direct_k = 1,
 };
 
-[[nodiscard]] inline char const *to_string(storage_read_path_t path) noexcept {
+[[nodiscard]] inline char const* to_string(storage_read_path_t path) noexcept {
     return path == storage_read_path_t::gpu_direct_k ? "gpu_direct" : "compatibility";
 }
 
@@ -56,10 +56,10 @@ struct gpu_direct_storage_session_t {
     gpu_direct_storage_session_t() noexcept = default;
 
   public:
-    gpu_direct_storage_session_t(gpu_direct_storage_session_t const &) = delete;
-    gpu_direct_storage_session_t &operator=(gpu_direct_storage_session_t const &) = delete;
-    gpu_direct_storage_session_t(gpu_direct_storage_session_t &&) noexcept = default;
-    gpu_direct_storage_session_t &operator=(gpu_direct_storage_session_t &&) noexcept = default;
+    gpu_direct_storage_session_t(gpu_direct_storage_session_t const&) = delete;
+    gpu_direct_storage_session_t& operator=(gpu_direct_storage_session_t const&) = delete;
+    gpu_direct_storage_session_t(gpu_direct_storage_session_t&&) noexcept = default;
+    gpu_direct_storage_session_t& operator=(gpu_direct_storage_session_t&&) noexcept = default;
 
     /** Configure KvikIO once — idempotent, process-wide. */
     [[nodiscard]] static expected<gpu_direct_storage_session_t> make() noexcept;

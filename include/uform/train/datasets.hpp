@@ -190,28 +190,28 @@ struct dataset_source_t {
     /** Make one loader per entry of @p mixture over @p storage , before the trainer, and charge
      *  @p config with the device bytes their reservoirs can take outside the arena when one fill
      *  packs @p batches_per_fill batches. */
-    [[nodiscard]] static expected_t open(dataset_source_t &placed, trainer_config_t &config,
-                                         loaders::gpu_direct_storage_session_t &storage, mixture_t mixture,
+    [[nodiscard]] static expected_t open(dataset_source_t& placed, trainer_config_t& config,
+                                         loaders::gpu_direct_storage_session_t& storage, mixture_t mixture,
                                          std::size_t batches_per_fill) noexcept;
 
     /** Make the loaded batches, the decoder sessions and the mixer of an @ref open source from
      *  @p trainer 's arenas, packing @p batches_per_fill batches per GPU per fill. */
-    [[nodiscard]] static expected_t make(dataset_source_t &placed, trainer_t &trainer,
+    [[nodiscard]] static expected_t make(dataset_source_t& placed, trainer_t& trainer,
                                          std::size_t batches_per_fill) noexcept;
 
     /** Take every GPU's batch of this step, refilling a GPU whose period starts here; the mixer
      *  then routes them into the replicas. */
-    [[nodiscard]] expected_t fill(trainer_t &trainer, data_epoch_t data_epoch, step_report_t &report) noexcept;
+    [[nodiscard]] expected_t fill(trainer_t& trainer, data_epoch_t data_epoch, step_report_t& report) noexcept;
 
   private:
 
     /** GPU @p member draws one entry by weight, keyed by the run seed, @p data_epoch and its world
      *  coordinate, and packs its @c batches_per_fill batches from one read of it. */
-    [[nodiscard]] expected_t fill_member_(trainer_t &trainer, std::size_t member, data_epoch_t data_epoch) noexcept;
+    [[nodiscard]] expected_t fill_member_(trainer_t& trainer, std::size_t member, data_epoch_t data_epoch) noexcept;
 
     /** Rebuild every replica's relations over the world's vertices, PAD read off the mixer's world
      *  lengths: the segments of a bag attract each other, and text alone keeps self-edges. */
-    [[nodiscard]] expected_t relate_(trainer_t &trainer) noexcept;
+    [[nodiscard]] expected_t relate_(trainer_t& trainer) noexcept;
 
     using loader_t =
         std::variant<loaders::tokens_loader_parquet_t, loaders::tokens_loader_jsonl_t, loaders::tokens_loader_csv_t,

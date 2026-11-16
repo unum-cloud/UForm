@@ -30,7 +30,7 @@
 #include <cmath>   // `std::fmax` — the E4M3 scale floor; `std::sqrt`, `std::exp` — the composed norms and gates
 #include <cstring> // `std::memcpy` — byte rows and angle rows
 
-#include <type_traits> // `std::conditional_t`, `std::is_same_v`, `std::is_const_v`
+#include <type_traits> // `std::conditional_t`, `std::is_same_v`
 
 #include <numkong/attention.h>    // `nk_attention_pack_*`, `nk_attention_packed_*`, `nk_attention_rope_bf16_*`
 #include <numkong/cast.h>         // `nk_cast_*`
@@ -682,15 +682,6 @@ struct neon_elementwise_kit_t {
 };
 #endif // NUMKONG_TARGET_NEON
 
-/** Row @p row of a strided matrix starting at @p base , rows @p stride bytes apart. */
-template <typename value_type_>
-inline static value_type_ *row_at_(value_type_ *base, nk_size_t row, nk_size_t stride) noexcept { // vendor-boundary
-    using void_t = std::conditional_t<std::is_const_v<value_type_>, void const, void>;
-    using byte_t = std::conditional_t<std::is_const_v<value_type_>, uu::b8_t const, uu::b8_t>;
-    return static_cast<value_type_ *>(
-        static_cast<void_t *>(static_cast<byte_t *>(static_cast<void_t *>(base)) + row * stride));
-}
-
 /** RMSNorm over BFloat16 rows and its Float32-input twin, for classes NumKong ships no fused kernel
  *  for: each group widens a stack chunk at a time through @p cast_ , sums its squares through
  *  @p dot_f32_ , and takes the inverse RMS and the gain through @p scale_f32_ or @p fma_f32_ before
@@ -701,14 +692,14 @@ struct composed_norms {
     /** Scalars one stack chunk widens at a time. */
     static constexpr nk_size_t chunk_k = 256;
 
-    static nk_status_t rmsnorm_bf16(nk_bf16_t const *x, nk_f32_t const *gamma, nk_bf16_t *y,
+    static nk_status_t rmsnorm_bf16(nk_bf16_t const* x, nk_f32_t const* gamma, nk_bf16_t* y,
                                     nk_size_t rows, // vendor-boundary
                                     nk_size_t groups, nk_size_t columns, nk_size_t x_stride, nk_size_t y_stride,
                                     nk_f32_t epsilon, nk_stream_t stream) noexcept {
         return normalize_(x, nk_bf16_k, gamma, y, rows, groups, columns, x_stride, y_stride, epsilon, stream);
     }
 
-    static nk_status_t rmscast_bf16(nk_f32_t const *x, nk_f32_t const *gamma, nk_bf16_t *y,
+    static nk_status_t rmscast_bf16(nk_f32_t const* x, nk_f32_t const* gamma, nk_bf16_t* y,
                                     nk_size_t rows, // vendor-boundary
                                     nk_size_t groups, nk_size_t columns, nk_size_t x_stride, nk_size_t y_stride,
                                     nk_f32_t epsilon, nk_stream_t stream) noexcept {
@@ -717,17 +708,20 @@ struct composed_norms {
 
   private:
     template <typename input_type_>
-    static nk_status_t normalize_(input_type_ const *x, nk_dtype_t dtype, nk_f32_t const *gamma, nk_bf16_t *y,
+    static nk_status_t normalize_(input_type_ const* x, nk_dtype_t dtype, nk_f32_t const* gamma, nk_bf16_t* y,
                                   nk_size_t rows, nk_size_t groups, nk_size_t columns, nk_size_t x_stride,
                                   nk_size_t y_stride, nk_f32_t epsilon, nk_stream_t stream) noexcept {
         nk_f32_t chunk[chunk_k];
         nk_f32_t const zero = 0.0f;
+        std::array<std::size_t, 2> const extents {rows, groups * columns};
+        nk::tensor_view<input_type_, 2> const x_rows {x, extents, {static_cast<std::ptrdiff_t>(x_stride), sizeof(*x)}};
+        nk::tensor_span<nk_bf16_t, 2> const y_rows {y, extents, {static_cast<std::ptrdiff_t>(y_stride), sizeof(*y)}};
         for (nk_size_t row = 0; row != rows; ++row) {
-            input_type_ const *const x_row = row_at_(x, row, x_stride);
-            nk_bf16_t *const y_row = row_at_(y, row, y_stride);
+            input_type_ const* const x_row = x_rows[row, nk::slice].data();
+            nk_bf16_t* const y_row = y_rows[row, nk::slice].data();
             for (nk_size_t group = 0; group != groups; ++group) {
-                input_type_ const *const source = x_row + group * columns;
-                nk_bf16_t *const target = y_row + group * columns;
+                input_type_ const* const source = x_row + group * columns;
+                nk_bf16_t* const target = y_row + group * columns;
                 nk_f64_t sum_of_squares = 0;
                 for (nk_size_t first = 0; first < columns; first += chunk_k) {
                     nk_size_t const count = columns - first < chunk_k ? columns - first : chunk_k;
@@ -768,27 +762,41 @@ struct composed_swiglu {
     /** Scalars one stack chunk widens at a time. */
     static constexpr nk_size_t chunk_k = 256;
 
-    static nk_status_t swiglu_f32(nk_f32_t const *gate, nk_f32_t const *up, nk_f32_t *y,
+    static nk_status_t swiglu_f32(nk_f32_t const* gate, nk_f32_t const* up, nk_f32_t* y,
                                   nk_size_t rows, // vendor-boundary
                                   nk_size_t columns, nk_size_t gate_stride, nk_size_t up_stride, nk_size_t y_stride,
                                   nk_f32_t gate_scale, nk_f32_t output_scale, nk_stream_t) noexcept {
+        std::array<std::size_t, 2> const extents {rows, columns};
+        nk::tensor_view<nk_f32_t, 2> const gates {gate,
+                                                  extents,
+                                                  {static_cast<std::ptrdiff_t>(gate_stride), sizeof(*gate)}};
+        nk::tensor_view<nk_f32_t, 2> const ups {up, extents, {static_cast<std::ptrdiff_t>(up_stride), sizeof(*up)}};
+        nk::tensor_span<nk_f32_t, 2> const outputs {y, extents, {static_cast<std::ptrdiff_t>(y_stride), sizeof(*y)}};
         for (nk_size_t row = 0; row != rows; ++row)
             gate_row_(
-                {row_at_(gate, row, gate_stride), columns},
-                up ? std::span<nk_f32_t const> {row_at_(up, row, up_stride), columns} : std::span<nk_f32_t const> {},
-                {row_at_(y, row, y_stride), columns}, gate_scale, output_scale);
+                {gates[row, nk::slice].data(), columns},
+                up ? std::span<nk_f32_t const> {ups[row, nk::slice].data(), columns} : std::span<nk_f32_t const> {},
+                {outputs[row, nk::slice].data(), columns}, gate_scale, output_scale);
         return nk_success_k;
     }
 
-    static nk_status_t swiglu_bf16(nk_bf16_t const *gate, nk_bf16_t const *up, nk_bf16_t *y,
+    static nk_status_t swiglu_bf16(nk_bf16_t const* gate, nk_bf16_t const* up, nk_bf16_t* y,
                                    nk_size_t rows, // vendor-boundary
                                    nk_size_t columns, nk_size_t gate_stride, nk_size_t up_stride, nk_size_t y_stride,
                                    nk_f32_t gate_scale, nk_f32_t output_scale, nk_stream_t stream) noexcept {
         nk_f32_t gates[chunk_k], ups[chunk_k];
+        std::array<std::size_t, 2> const extents {rows, columns};
+        nk::tensor_view<nk_bf16_t, 2> const gate_rows {gate,
+                                                       extents,
+                                                       {static_cast<std::ptrdiff_t>(gate_stride), sizeof(*gate)}};
+        nk::tensor_view<nk_bf16_t, 2> const up_rows {up,
+                                                     extents,
+                                                     {static_cast<std::ptrdiff_t>(up_stride), sizeof(*up)}};
+        nk::tensor_span<nk_bf16_t, 2> const y_rows {y, extents, {static_cast<std::ptrdiff_t>(y_stride), sizeof(*y)}};
         for (nk_size_t row = 0; row != rows; ++row) {
-            nk_bf16_t const *const gate_row = row_at_(gate, row, gate_stride);
-            nk_bf16_t const *const up_row = up ? row_at_(up, row, up_stride) : nullptr;
-            nk_bf16_t *const y_row = row_at_(y, row, y_stride);
+            nk_bf16_t const* const gate_row = gate_rows[row, nk::slice].data();
+            nk_bf16_t const* const up_row = up ? up_rows[row, nk::slice].data() : nullptr;
+            nk_bf16_t* const y_row = y_rows[row, nk::slice].data();
             for (nk_size_t first = 0; first < columns; first += chunk_k) {
                 nk_size_t const count = columns - first < chunk_k ? columns - first : chunk_k;
                 nk_status_t status = cast_(gate_row + first, nk_bf16_k, gates, nk_f32_k, count, stream);
@@ -924,7 +932,7 @@ struct elementwise_ladder {
 
 /** Rows @c [t,:] of @p rows for each text segment's cells, copied from @c table[token] ; other rows
  *  stay as they are. Token IDs are trusted: every ID is below the vocabulary the load proved. */
-[[nodiscard]] inline static uu::status_t gather_bytes(segment_layout_t const &layout,
+[[nodiscard]] inline static uu::status_t gather_bytes(segment_layout_t const& layout,
                                                       nk::tensor_view<token_id_t, 1> grid_tokens, bf16r2_view_t table,
                                                       bf16r2_span_t rows, uu::pool_view_t pool) noexcept {
     std::size_t const row_bytes = rows.extent(1) * sizeof(nk_bf16_t);
@@ -953,7 +961,7 @@ inline static void fill_patch_affine(f32r1_view_t mean, f32r1_view_t inverse_std
  *  patch rows @b [rows,spatial·channels] : each cell widens into @p wide , takes the gain and bias
  *  of @c fill_patch_affine , and narrows into its row. */
 template <typename elementwise_kit_type_>
-[[nodiscard]] inline static nk_status_t stage_patches(segment_layout_t const &layout, std::size_t segment,
+[[nodiscard]] inline static nk_status_t stage_patches(segment_layout_t const& layout, std::size_t segment,
                                                       modality_t target, nk::tensor_view<pixel_t, 3> grid_pixels,
                                                       f32r2_view_t affine, f32r1_span_t wide,
                                                       bf16r2_span_t patches) noexcept {
@@ -962,7 +970,7 @@ template <typename elementwise_kit_type_>
     f32_t const one = 1.0f;
     nk_status_t status = nk_success_k;
     for (u32_t cell = 0; status == nk_success_k && cell != layout.lengths[segment]; ++cell) {
-        pixel_t const *const pixels = grid_pixels.row(layout.grid_offsets[segment] + cell).data();
+        pixel_t const* const pixels = grid_pixels.row(layout.grid_offsets[segment] + cell).data();
         status = elementwise_kit_type_::cast(pixels, nk_u8_k, wide.data(), nk_f32_k, width, nullptr);
         if (status == nk_success_k)
             status = elementwise_kit_type_::fma_f32(wide.data(), affine.row(0).data(), affine.row(1).data(), width,
@@ -978,7 +986,7 @@ template <typename elementwise_kit_type_>
 /** Segment @p segment 's raw frames @b [cells,chunk_samples] , when it is audio, narrowed into its
  *  rows in one cast, as both sides keep its cells back to back. */
 template <typename elementwise_kit_type_>
-[[nodiscard]] inline static nk_status_t stage_frames(segment_layout_t const &layout, std::size_t segment,
+[[nodiscard]] inline static nk_status_t stage_frames(segment_layout_t const& layout, std::size_t segment,
                                                      nk::tensor_view<f32_t, 2> grid_samples,
                                                      bf16r2_span_t frames) noexcept {
     std::size_t const cells = layout.lengths[segment];
@@ -990,7 +998,7 @@ template <typename elementwise_kit_type_>
 
 /** Every packed row's @c (t,h,w) into @p coords @b [rows,3] : text and audio @c (k,0,0) , image
  *  @c (0,k/cols,k%cols) , video @c (group·tube_frames·frame_stride,r,c) , PAD rows untouched. */
-[[nodiscard]] inline static uu::status_t fill_coords(segment_layout_t const &layout,
+[[nodiscard]] inline static uu::status_t fill_coords(segment_layout_t const& layout,
                                                      nk::tensor_view<u16_t, 2> image_shapes,
                                                      nk::tensor_view<u16_t, 2> video_shapes, u32_t tube_frames,
                                                      u32_t frame_stride, i16r2_span_t coords,
@@ -1048,7 +1056,7 @@ template <typename elementwise_kit_type_>
     }
     nk_status_t status = elementwise_kit_type_::cosine_f32(angle, pairs, cosine, nullptr);
     if (status == nk_success_k) status = elementwise_kit_type_::sine_f32(angle, pairs, sine, nullptr);
-    nk_bf16_t *const rotated = values.row(row).data() + role_offset;
+    nk_bf16_t* const rotated = values.row(row).data() + role_offset;
     if constexpr (rope_rotations<elementwise_kit_type_>) {
         std::size_t const stride = values.extent(1) * sizeof(nk_bf16_t);
         if (status == nk_success_k)
@@ -1059,7 +1067,7 @@ template <typename elementwise_kit_type_>
         f32_t *const low = sine + pairs, *const high = low + pairs, *const turned = high + pairs;
         f32_t const one = 1.0f, zero = 0.0f, minus_one = -1.0f;
         for (u32_t head = 0; status == nk_success_k && head != heads; ++head) {
-            nk_bf16_t *const vector = rotated + static_cast<std::size_t>(head) * head_width;
+            nk_bf16_t* const vector = rotated + static_cast<std::size_t>(head) * head_width;
             status = elementwise_kit_type_::cast(vector, nk_bf16_k, low, nk_f32_k, head_width, nullptr);
             if (status == nk_success_k) // turned = low·sine + high·cosine
                 status = elementwise_kit_type_::fma_f32(low, sine, low, pairs, &one, &zero, turned, nullptr);
@@ -1086,7 +1094,7 @@ template <typename elementwise_kit_type_, typename value_type_>
                                                              e4m3r2_span_t shadow, f32r1_span_t token_scales,
                                                              f32r1_span_t wide) noexcept {
     std::size_t const width = values.extent(1);
-    f32_t const *source = wide.data();
+    f32_t const* source = wide.data();
     nk_status_t status = nk_success_k;
     if constexpr (std::is_same_v<value_type_, f32_t>) source = values.row(row).data();
     else status = elementwise_kit_type_::cast(values.row(row).data(), nk_bf16_k, wide.data(), nk_f32_k, width, nullptr);
@@ -1115,7 +1123,7 @@ template <typename elementwise_kit_type_>
                                                        f32r1_span_t wide) noexcept {
     std::size_t const width = values.extent(1);
     f32_t const weight = weight_descale * token_scales[row], one = 1.0f, zero = 0.0f;
-    f32_t const *const product = products.row(row).data();
+    f32_t const* const product = products.row(row).data();
     nk_status_t status = nk_success_k;
     if (residual.empty())
         status = elementwise_kit_type_::scale_f32(product, width, &weight, &zero, wide.data(), nullptr);

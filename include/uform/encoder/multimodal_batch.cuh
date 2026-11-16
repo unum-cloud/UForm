@@ -57,11 +57,11 @@ using multimodal_batch_on_cpu_t = multimodal_batch<pinned_alloc_t>;
 [[nodiscard]] expected_t fill_coords(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
                                      modality_view_t segment_modality, image_shape_view_t image_shapes,
                                      video_shape_view_t video_shapes, u32_t tube_frames, u32_t frame_stride,
-                                     i16r2_span_t coords, gpu_stream_t &stream) noexcept;
+                                     i16r2_span_t coords, gpu_stream_t& stream) noexcept;
 
 /** Mark every segment of @p batch as making no choice, @c byte_pad_k across its choice rows and
  *  zero targets, for a source that names none; a batch without choice columns stays as it is. */
-[[nodiscard]] expected_t pad_choices(multimodal_batch_on_gpu_t &batch, gpu_stream_t &stream) noexcept;
+[[nodiscard]] expected_t pad_choices(multimodal_batch_on_gpu_t& batch, gpu_stream_t& stream) noexcept;
 
 /**
  *  @brief Shuffles the loaded batches between the GPUs of one multimem_domain — and, once wired,
@@ -80,8 +80,8 @@ struct multimodal_batch_mixer_t {
     /** How many Float32 payload scalars @ref make will @c reserve from the multimem_domain over
      *  @p mesh — zero when one process holds the whole world and reads every loaded batch in place;
      *  otherwise one packed batch per multimem_domain in every member's window. */
-    [[nodiscard]] static std::size_t payload_scalars_needed(multimodal_batch_shape_t const &shape,
-                                                            mesh_shape_t const &mesh) noexcept;
+    [[nodiscard]] static std::size_t payload_scalars_needed(multimodal_batch_shape_t const& shape,
+                                                            mesh_shape_t const& mesh) noexcept;
 
     /**
      *  @brief Validate the world, bake the routing key, and — when no process holds the whole world — reserve
@@ -105,8 +105,8 @@ struct multimodal_batch_mixer_t {
      *  @param[in] timeout_seconds The coordinate-exchange deadline handed to
      *      each all-gather wiring.
      */
-    [[nodiscard]] static expected<multimodal_batch_mixer_t> make(multimem_domain_t &multimem,
-                                                                 colocated_domain_t &colocated,
+    [[nodiscard]] static expected<multimodal_batch_mixer_t> make(multimem_domain_t& multimem,
+                                                                 colocated_domain_t& colocated,
                                                                  std::span<gpu_arena_t> arenas,
                                                                  multimodal_batch_shape_t shape, u64_t seed,
                                                                  std::span<gpu_stream_t> streams,
@@ -131,7 +131,7 @@ struct multimodal_batch_mixer_t {
      */
     [[nodiscard]] expected_t operator()(std::size_t local, data_epoch_t data_epoch,
                                         std::span<multimodal_batch_on_gpu_t const> loaded,
-                                        multimodal_batch_on_gpu_t &mixed, gpu_stream_t &stream) noexcept;
+                                        multimodal_batch_on_gpu_t& mixed, gpu_stream_t& stream) noexcept;
 
     /** The eager convenience: every member's slice in order over the per-GPU streams. */
     [[nodiscard]] expected_t operator()(data_epoch_t data_epoch, std::span<multimodal_batch_on_gpu_t const> loaded,
@@ -155,7 +155,7 @@ struct multimodal_batch_mixer_t {
   private:
 
     /** The main-owned multimem_domain — borrowed; its barrier brackets every mix. */
-    multimem_domain_t *multimem_ = nullptr;
+    multimem_domain_t* multimem_ = nullptr;
 
     /** The run's routing seed; combined with the per-call data epoch inside
      *  the routing bijection. */

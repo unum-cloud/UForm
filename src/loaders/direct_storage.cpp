@@ -1,6 +1,8 @@
 /**
- *  @brief The storage session's one firewalled body: configure cuDF's KvikIO layer.
  *  @file src/loaders/direct_storage.cpp
+ *  @author Ash Vardanian
+ *  @date October 13, 2026
+ *  @brief The storage session's one firewalled body: configure cuDF's KvikIO layer.
  *
  *  See the header for the contract. cuDF lives only in this translation unit and the sibling
  *  @c dataset_shards.cpp .
@@ -37,7 +39,7 @@ expected<gpu_direct_storage_session_t> gpu_direct_storage_session_t::make() noex
             return true;
         }();
     }
-    catch (std::exception const &error) {
+    catch (std::exception const& error) {
         return result_t::fail(status_t::io_k, "KvikIO setup failed at the firewall: {}", error.what());
     }
     catch (...) {
@@ -46,7 +48,7 @@ expected<gpu_direct_storage_session_t> gpu_direct_storage_session_t::make() noex
     gpu_direct_storage_session_t session;
     // GDS engages only when compat mode is explicitly off; unset or "ON" means POSIX. Read for the
     // start-up log — the actual per-read choice stays inside cuDF.
-    char const *compat = std::getenv("KVIKIO_COMPAT_MODE");
+    char const* compat = std::getenv("KVIKIO_COMPAT_MODE");
     session.read_path_ = (compat != nullptr && std::strcmp(compat, "OFF") == 0) ? storage_read_path_t::gpu_direct_k
                                                                                 : storage_read_path_t::compatibility_k;
     return result_t {std::move(session)};

@@ -12,6 +12,7 @@
  *  The checkpoint comes from @c argv[1], as written by @c test/tiny_checkpoint.cpp.
  */
 #define _GNU_SOURCE // `sched_getaffinity` and `CPU_COUNT`
+
 #include <math.h>    // `fabsf`
 #include <stdbool.h> // `bool`
 #include <stdint.h>  // `uint8_t`, `uint32_t`
@@ -41,13 +42,13 @@ static int caller_cores(void) {
 #endif
 }
 
-static void expect(bool must_be_true, char const *message) {
-    if (must_be_true) return;
+static void expect(bool is_true, char const* message) {
+    if (is_true) return;
     printf("Assert: %s\n", message);
     exit(-1);
 }
 
-static void expect_success(uform_outcome_t const *outcome, char const *what) {
+static void expect_success(uform_outcome_t const* outcome, char const* what) {
     if (outcome->status == uform_status_success_k) return;
     printf("Assert: %s: %s %s\n", what, uform_status_name(outcome->status), outcome->message ? outcome->message : "");
     exit(-1);
@@ -56,7 +57,7 @@ static void expect_success(uform_outcome_t const *outcome, char const *what) {
 /** The verbs this test drives, all over decoded inputs. */
 typedef enum verb_t { verb_text_k, verb_pixels_k, verb_samples_k } verb_t;
 
-static char const *const verb_names[] = {"text", "pixels", "samples"};
+static char const* const verb_names[] = {"text", "pixels", "samples"};
 
 enum { items_count = 4, image_bytes = 17 * 9 * 3 + 40 * 24 * 3 + 64 * 64 * 3 + 5 * 3 * 3 };
 enum { samples_count = 1000 + 3000 + 256 + 7 };
@@ -72,8 +73,8 @@ typedef struct inputs_t {
     size_t sample_offsets[items_count + 1];
 } inputs_t;
 
-static void fill_inputs(inputs_t *inputs) {
-    char const *const texts[items_count] = {"hello", "", NULL, "the quick brown fox jumps over the lazy dog"};
+static void fill_inputs(inputs_t* inputs) {
+    char const* const texts[items_count] = {"hello", "", NULL, "the quick brown fox jumps over the lazy dog"};
     size_t cursor = 0;
     for (size_t item = 0; item != items_count; ++item) {
         inputs->text_offsets[item] = cursor;
@@ -110,8 +111,8 @@ typedef struct landed_t {
 } landed_t;
 
 /** Runs @p verb over @p inputs into @p landed, final on return even when deferred. */
-static void encode(verb_t verb, inputs_t const *inputs, uform_model_t model, uform_executor_t executor,
-                   uform_arena_t arena, uform_completion_t completion, uform_progress_t progress, landed_t *landed) {
+static void encode(verb_t verb, inputs_t const* inputs, uform_model_t model, uform_executor_t executor,
+                   uform_arena_t arena, uform_completion_t completion, uform_progress_t progress, landed_t* landed) {
     memset(landed, 0, sizeof(*landed));
     uform_text_encode_stats_t text_stats = {0};
     uform_image_encode_stats_t image_stats = {0};
@@ -171,15 +172,15 @@ static void encode(verb_t verb, inputs_t const *inputs, uform_model_t model, ufo
 
 /** One call's outputs copied into host memory. */
 typedef struct fetched_t {
-    float *embeddings;
-    float *states;
+    float* embeddings;
+    float* states;
     size_t offsets[items_count + 1];
     size_t tokens;
 } fetched_t;
 
-static void copy_out(void *target, void const *source, size_t bytes, bool on_device) {
+static void copy_out(void* target, void const* source, size_t bytes, bool is_on_device) {
     if (!bytes) return;
-    if (!on_device) {
+    if (!is_on_device) {
         memcpy(target, source, bytes);
         return;
     }
@@ -187,22 +188,22 @@ static void copy_out(void *target, void const *source, size_t bytes, bool on_dev
     expect(copied == CUDA_SUCCESS, "Copying device outputs back failed");
 }
 
-static fetched_t fetch(landed_t const *landed, size_t dimensions, bool on_device) {
+static fetched_t fetch(landed_t const* landed, size_t dimensions, bool is_on_device) {
     fetched_t fetched = {0};
     fetched.tokens = landed->tokens;
     fetched.embeddings = malloc(items_count * dimensions * sizeof(float));
     fetched.states = malloc((landed->tokens ? landed->tokens : 1) * dimensions * sizeof(float));
     expect(fetched.embeddings && fetched.states, "Host copies of the outputs");
     expect(landed->embeddings.stride == dimensions * sizeof(float), "Rows are packed f32");
-    copy_out(fetched.embeddings, landed->embeddings.data, items_count * dimensions * sizeof(float), on_device);
-    copy_out(fetched.states, landed->states.rows.data, landed->tokens * dimensions * sizeof(float), on_device);
-    copy_out(fetched.offsets, landed->states.offsets, sizeof(fetched.offsets), on_device);
+    copy_out(fetched.embeddings, landed->embeddings.data, items_count * dimensions * sizeof(float), is_on_device);
+    copy_out(fetched.states, landed->states.rows.data, landed->tokens * dimensions * sizeof(float), is_on_device);
+    copy_out(fetched.offsets, landed->states.offsets, sizeof(fetched.offsets), is_on_device);
     return fetched;
 }
 
 /** The largest over rows of the row's largest absolute difference relative to the reference
  *  row's largest value. */
-static float relative_error(float const *rows, float const *reference, size_t count, size_t dimensions) {
+static float relative_error(float const* rows, float const* reference, size_t count, size_t dimensions) {
     float worst = 0.0f;
     for (size_t row = 0; row != count; ++row) {
         float difference = 0.0f, scale = 0.0f;
@@ -224,13 +225,13 @@ static size_t const choice_offsets[items_count + 1] = {0, 2, 5, 9, 11};
 
 /** The token head's vectors and the byte decoder's choices over the texts, copied to the host. */
 typedef struct heads_t {
-    float *token_vectors;
+    float* token_vectors;
     size_t token_offsets[items_count + 1];
     float probabilities[choices_count];
     size_t probability_offsets[items_count + 1];
 } heads_t;
 
-static heads_t read_heads(inputs_t const *inputs, uform_model_t model, uform_executor_t executor, uform_arena_t arena,
+static heads_t read_heads(inputs_t const* inputs, uform_model_t model, uform_executor_t executor, uform_arena_t arena,
                           size_t token_width, bool on_device) {
     heads_t heads = {0};
     uform_outcome_t outcome = {0};
@@ -267,15 +268,15 @@ static heads_t read_heads(inputs_t const *inputs, uform_model_t model, uform_exe
     return heads;
 }
 
-static uform_continuation_t carry_on(size_t completed, size_t total, void *state) {
+static uform_continuation_t carry_on(size_t completed, size_t total, void* state) {
     (void)completed, (void)total;
-    ++*(size_t *)state;
+    ++*(size_t*)state;
     return uform_continue_k;
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
     expect(argc > 1, "Pass the tiny checkpoint's path");
-    uform_bytes_view_t const path = {(uint8_t const *)argv[1], strlen(argv[1])};
+    uform_bytes_view_t const path = {(uint8_t const*)argv[1], strlen(argv[1])};
     int32_t const device = 0;
     uform_outcome_t outcome = {0};
 
@@ -329,8 +330,8 @@ int main(int argc, char *argv[]) {
     expect(cuDeviceGetCount(&visible) == CUDA_SUCCESS && visible <= 64, "Visible devices");
     for (int member = 0; member != visible; ++member) members[member] = member;
     uform_executor_t box = NULL;
-    uform_executor_for_vram(&(uform_executor_for_vram_t) {
-        .executor = &box, .outcome = &outcome, .vram = {members, (size_t)visible}});
+    uform_executor_for_vram(
+        &(uform_executor_for_vram_t) {.executor = &box, .outcome = &outcome, .vram = {members, (size_t)visible}});
     expect_success(&outcome, "Whole-box VRAM executor");
     uform_mesh_t mesh = NULL;
     uform_mesh_bootstrap(&(uform_mesh_bootstrap_t) {.mesh = &mesh, .executor = box, .outcome = &outcome});
@@ -384,7 +385,7 @@ int main(int argc, char *argv[]) {
         expect_success(&landed.outcome, "RAM encode");
         fetched_t const reference = fetch(&landed, dimensions, false);
 
-        char const *const runs[] = {"blocking", "deferred", "two slices"};
+        char const* const runs[] = {"blocking", "deferred", "two slices"};
         for (size_t run = 0; run != 3; ++run) {
             size_t reports = 0;
             uform_progress_t const progress = {run == 2 ? carry_on : NULL, &reports, 2};

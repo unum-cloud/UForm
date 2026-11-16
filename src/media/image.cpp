@@ -1,8 +1,8 @@
 /**
- *  @brief Host image decoding — see the header for the contract.
  *  @file src/media/image.cpp
  *  @author Ash Vardanian
  *  @date July 4, 2026
+ *  @brief Host image decoding — see the header for the contract.
  */
 #include <cstring> // `std::memcpy` — the unaligned load behind `load_big_endian_`
 
@@ -21,7 +21,7 @@ using namespace um;
 /** Load a big-endian unsigned integer from @p bytes — one unaligned load, then a byte swap on
  *  a little-endian host. */
 template <typename integer_type_>
-[[nodiscard]] static integer_type_ load_big_endian_(b8_t const *bytes) noexcept {
+[[nodiscard]] static integer_type_ load_big_endian_(b8_t const* bytes) noexcept {
     integer_type_ value;
     std::memcpy(&value, bytes, sizeof(value));
     if constexpr (std::endian::native == std::endian::little) value = std::byteswap(value);
@@ -30,8 +30,8 @@ template <typename integer_type_>
 
 /** The @c unsigned @c char pointer TurboJPEG, libpng and libwebp read compressed
  *  @p bytes through. */
-[[nodiscard]] static unsigned char const *codec_bytes_(b8_t const *bytes) noexcept {
-    return reinterpret_cast<unsigned char const *>(bytes);
+[[nodiscard]] static unsigned char const* codec_bytes_(b8_t const* bytes) noexcept {
+    return reinterpret_cast<unsigned char const*>(bytes); // vendor-boundary: the codecs read `unsigned char`
 }
 
 /** Sniff a blob's compressed format from its leading bytes — JPEG @c FFD8FF , PNG @c 89504E47 ,
@@ -53,7 +53,7 @@ template <typename integer_type_>
  *  DAC @c CC ). The walk starts past the SOI marker at the blob's head and at the window's first
  *  marker otherwise, and a walk leaving the window returns the offset it resumes at. */
 [[nodiscard]] static expected<image_probe_t> jpeg_probe_(bytes_view_t window, std::size_t window_offset) noexcept {
-    b8_t const *const bytes = window.data();
+    b8_t const* const bytes = window.data();
     std::size_t const size = window.size();
     std::size_t offset = window_offset == 0 ? 2 : 0;
     while (offset + 9 < size) {
@@ -78,7 +78,7 @@ template <typename integer_type_>
 /** A PNG's pixel extent from its IHDR — width and height are big-endian UInt32 at byte offsets 16
  *  and 20 of the signature+IHDR prologue. */
 [[nodiscard]] static expected<image_extent_t> png_dimensions_(bytes_view_t encoded) noexcept {
-    b8_t const *const bytes = encoded.data();
+    b8_t const* const bytes = encoded.data();
     if (encoded.size() < 24)
         return expected<image_extent_t>::fail(status_t::invalid_argument_k, "PNG header prefix too short");
     u32_t const width = load_big_endian_<u32_t>(bytes + 16), height = load_big_endian_<u32_t>(bytes + 20);
@@ -125,7 +125,7 @@ expected<image_plan_t> um::plan_image(bytes_view_t encoded, u32_t patch_side, u3
  *  extent. TurboJPEG reports a corrupt or truncated stream where libjpeg's default error handler
  *  exits the process; @c TJPF_RGBA emits a constant 255 alpha, so a JPEG matches the RGBA grid. */
 [[nodiscard]] static expected_t decode_jpeg_(tjhandle decoder, bytes_view_t encoded, pixel_image_span_t out) noexcept {
-    unsigned char const *const bytes = codec_bytes_(encoded.data());
+    unsigned char const* const bytes = codec_bytes_(encoded.data());
     std::size_t const size = encoded.size();
     if (tj3DecompressHeader(decoder, bytes, size) != 0)
         return expected_t::fail(status_t::invalid_argument_k, "malformed JPEG header: {}", tj3GetErrorStr(decoder));
@@ -146,10 +146,10 @@ expected<image_plan_t> um::plan_image(bytes_view_t encoded, u32_t patch_side, u3
 }
 
 expected_t um::decode_image_rgba(bytes_view_t encoded, image_format_t format, pixel_image_span_t out) noexcept {
-    unsigned char const *const bytes = codec_bytes_(encoded.data());
+    unsigned char const* const bytes = codec_bytes_(encoded.data());
     std::size_t const size = encoded.size();
     u32_t const height = static_cast<u32_t>(out.extent(0)), width = static_cast<u32_t>(out.extent(1));
-    pixel_t *const pixels = out.data();
+    pixel_t* const pixels = out.data();
     std::size_t const stride = static_cast<std::size_t>(width) * image_channels_k;
     if (out.extent(2) != image_channels_k)
         return expected_t::fail(status_t::unsupported_k, "RGBA decode needs 4 channels, got {}", out.extent(2));
@@ -177,7 +177,7 @@ expected_t um::decode_image_rgba(bytes_view_t encoded, image_format_t format, pi
     return decoded;
 }
 
-expected_t um::decode_image(bytes_view_t encoded, image_plan_t const &plan, pixel_patches_span_t out) noexcept {
+expected_t um::decode_image(bytes_view_t encoded, image_plan_t const& plan, pixel_patches_span_t out) noexcept {
     if (out.extent(0) != plan.grid.rows || out.extent(1) != plan.grid.columns)
         return expected_t::fail(status_t::unsupported_k, "cells [{},{}] do not match the planned grid [{},{}]",
                                 out.extent(0), out.extent(1), plan.grid.rows, plan.grid.columns);

@@ -116,7 +116,7 @@ struct fabricated_tape_t {
      *      synchronized before returning.
      *  @param[in] blobs The blobs to pack back to back, one Arrow element each.
      */
-    [[nodiscard]] static expected<fabricated_tape_t> make(gpu_arena_t &arena, gpu_stream_t &stream,
+    [[nodiscard]] static expected<fabricated_tape_t> make(gpu_arena_t& arena, gpu_stream_t& stream,
                                                           std::span<bytes_view_t const> blobs) noexcept {
         using result_t = expected<fabricated_tape_t>;
         fabricated_tape_t tape;
@@ -159,7 +159,7 @@ struct fabricated_tape_t {
     if (path.empty()) return bytes;
     sz::string_t owned;
     if (sz::failed(owned.assign(path))) return bytes;
-    std::FILE *file = std::fopen(owned.c_str(), "rb");
+    std::FILE* file = std::fopen(owned.c_str(), "rb");
     if (file == nullptr) return bytes;
     std::fseek(file, 0, SEEK_END);
     long const size = std::ftell(file);
@@ -184,8 +184,8 @@ struct fabricated_tape_t {
  *  @param[in] on_path The callback handed each non-empty path subspan.
  */
 template <typename path_fn_>
-static void for_each_env_input(char const *name, path_fn_ &&on_path) noexcept {
-    char const *value = std::getenv(name);
+static void for_each_env_input(char const* name, path_fn_&& on_path) noexcept {
+    char const* value = std::getenv(name);
     if (value == nullptr) return;
     for (sz::string_view_t path : sz::string_view_t {value}.split(","))
         if (!path.empty()) on_path(path);
@@ -196,8 +196,8 @@ static void for_each_env_input(char const *name, path_fn_ &&on_path) noexcept {
  *      the variable is unset — for the cases that need a single fixture rather than a fan-out.
  *  @param[in] name The environment variable holding the comma-separated path list.
  */
-[[nodiscard]] static st::basic_vector<b8_t> first_env_fixture(char const *name) noexcept {
-    char const *value = std::getenv(name);
+[[nodiscard]] static st::basic_vector<b8_t> first_env_fixture(char const* name) noexcept {
+    char const* value = std::getenv(name);
     if (value == nullptr) return {};
     for (sz::string_view_t path : sz::string_view_t {value}.split(","))
         if (!path.empty()) return read_fixture(path);
@@ -208,7 +208,7 @@ static void for_each_env_input(char const *name, path_fn_ &&on_path) noexcept {
 
 /** The keyed draw is stable (a splitmix64 golden fold) and a genuine permutation that
  *  reshuffles by rank. */
-static void draw_primitives_are_stable(test_suite_t &suite) {
+static void draw_primitives_are_stable(test_suite_t& suite) {
     constexpr splitmix64_hash_t hash {};
     u64_t const seed = 0xC0FFEEull;
 
@@ -244,7 +244,7 @@ static void draw_primitives_are_stable(test_suite_t &suite) {
 /** A JPEG whose APP1 metadata pushes its start-of-frame past a 4 KiB window probes to a zero extent
  *  and the next marker's offset, the window there resumes the walk to the frame, and the whole blob
  *  probes in one window. */
-static void jpeg_probe_resumes_past_metadata(test_suite_t &suite) {
+static void jpeg_probe_resumes_past_metadata(test_suite_t& suite) {
     constexpr std::size_t app1_length_k = 6000, frame_offset_k = 4 + app1_length_k, window_k = 4096;
     st::basic_vector<b8_t> blob;
     if (st::failed(blob.resize(frame_offset_k + 19))) return suite.check(false, "blob alloc failed");
@@ -267,10 +267,10 @@ static void jpeg_probe_resumes_past_metadata(test_suite_t &suite) {
 
 /** `**` spans zero and two directory levels, a symlinked directory under `*` matches, and a
  *  trailing `**` is refused. */
-static void glob_spans_depths_and_symlinks(test_suite_t &suite) {
+static void glob_spans_depths_and_symlinks(test_suite_t& suite) {
     char root[] = "/tmp/uform-glob-XXXXXX";
     if (::mkdtemp(root) == nullptr) return suite.check(false, "temporary directory creation failed");
-    auto const path = [&](char const *suffix) {
+    auto const path = [&](char const* suffix) {
         sz::string_t joined;
         if (sz::failed(joined.assign(sz::string_view_t {root})) ||
             sz::failed(joined.append(sz::string_view_t {suffix})))
@@ -280,8 +280,8 @@ static void glob_spans_depths_and_symlinks(test_suite_t &suite) {
     bool const made = ::mkdir(path("/a").c_str(), 0700) == 0 && ::mkdir(path("/a/b").c_str(), 0700) == 0 &&
                       ::mkdir(path("/real").c_str(), 0700) == 0 &&
                       ::symlink(path("/real").c_str(), path("/link").c_str()) == 0;
-    for (char const *file : {"/top.parquet", "/a/b/deep.parquet", "/real/shard.parquet"})
-        if (std::FILE *handle = std::fopen(path(file).c_str(), "w")) std::fclose(handle);
+    for (char const* file : {"/top.parquet", "/a/b/deep.parquet", "/real/shard.parquet"})
+        if (std::FILE* handle = std::fopen(path(file).c_str(), "w")) std::fclose(handle);
     if (!made) return suite.check(false, "glob fixture creation failed");
 
     auto const recursive = expand_glob(path("/**/*.parquet").view());
@@ -291,16 +291,16 @@ static void glob_spans_depths_and_symlinks(test_suite_t &suite) {
     auto const linked = expand_glob(path("/l*/shard.parquet").view());
     suite.check(linked && linked->size() == 1, "a symlinked directory under * matches");
     suite.check(!expand_glob(path("/**").view()), "a trailing ** is refused");
-    for (char const *file : {"/top.parquet", "/a/b/deep.parquet", "/real/shard.parquet", "/link"})
+    for (char const* file : {"/top.parquet", "/a/b/deep.parquet", "/real/shard.parquet", "/link"})
         ::unlink(path(file).c_str());
-    for (char const *directory : {"/a/b", "/a", "/real", ""}) ::rmdir(path(directory).c_str());
+    for (char const* directory : {"/a/b", "/a", "/real", ""}) ::rmdir(path(directory).c_str());
 }
 
 /** An entry capped at one pass retires once the world's fills drew exactly its rows, its weight
  *  moves to its modality's live entry rather than across modalities, and a run resumed at a later
  *  epoch replays the keyed draws to the same live entries. */
-static void mixture_sampler_retires_capped_entries(test_suite_t &suite) {
-    auto const entry_of = [](char const *name, f64_t weight, std::size_t epochs, modality_t modality) {
+static void mixture_sampler_retires_capped_entries(test_suite_t& suite) {
+    auto const entry_of = [](char const* name, f64_t weight, std::size_t epochs, modality_t modality) {
         ut::mixture_entry_t entry;
         (void)entry.name.assign(sz::string_view_t {name});
         (void)entry.anchor.assign(sz::string_view_t {"caption"});
@@ -364,7 +364,7 @@ static void mixture_sampler_retires_capped_entries(test_suite_t &suite) {
 
 /** The row-group draw is row-proportional, distinct, floored at two shards, and reads only the
  *  groups it drew, in the ascending order cuDF reads them. */
-static void file_pick_is_weighted_and_distinct(test_suite_t &suite) {
+static void file_pick_is_weighted_and_distinct(test_suite_t& suite) {
     u64_t const seed = 0x515Eull;
     constexpr std::size_t groups_per_shard = 4;
     stack_array<std::size_t, 5> rows; // shard 2 owns ~85% of the rows
@@ -417,7 +417,7 @@ static void file_pick_is_weighted_and_distinct(test_suite_t &suite) {
 /** The packing cursor keeps every segment in one row, packs several per row, jumps before a
  *  crossing, and repeats the cursor with zero length on PAD — the host oracle the token
  *  loader's scan mirrors. */
-static void segment_geometry_packs_multiple_per_row(test_suite_t &suite) {
+static void segment_geometry_packs_multiple_per_row(test_suite_t& suite) {
     u32_t const columns = 8u, rows = 3u, capacity = rows * columns, total_segments = 8u;
     stack_array<u64_t, 5> item_bytes; // truncated to the row width, packed back to back
     for (u64_t count : {u64_t {3}, u64_t {4}, u64_t {2}, u64_t {5}, u64_t {6}}) (void)item_bytes.push_back(count);
@@ -465,7 +465,7 @@ static void segment_geometry_packs_multiple_per_row(test_suite_t &suite) {
 /** Every image fills half a row and every clip a whole one, whatever their resolution: a 224² photo
  *  upscales to the near-square half-row grid, a 4:3 one keeps its aspect, and a short
  *  low-resolution clip grows its frame. */
-static void media_fill_their_rows(test_suite_t &suite) {
+static void media_fill_their_rows(test_suite_t& suite) {
     u32_t const columns = 1024u, half_row = media_cells(modality_t::image_k, columns);
     suite.check(half_row == 512u && media_cells(modality_t::audio_k, columns) == 512u &&
                     media_cells(modality_t::video_k, columns) == columns &&
@@ -505,7 +505,7 @@ static void media_fill_their_rows(test_suite_t &suite) {
  *  @param[in,out] arena The device arena the batch and coordinate scratch are allocated from.
  *  @param[in,out] stream The stream every stage enqueues on.
  */
-static void fill_coords_routes_every_modality(test_suite_t &suite, gpu_arena_t &arena, gpu_stream_t &stream) {
+static void fill_coords_routes_every_modality(test_suite_t& suite, gpu_arena_t& arena, gpu_stream_t& stream) {
     u32_t const columns = 32u, max_segments = 8u, tube_frames = 2u, frame_stride = 3u;
     multimodal_batch_shape_t shape {};
     shape.max_rows_per_gpu = 1u;
@@ -596,7 +596,7 @@ static void fill_coords_routes_every_modality(test_suite_t &suite, gpu_arena_t &
 }
 
 /** `pack_tokens` writes the prefix, then the text, and counts both in the segment's length. */
-static void pack_tokens_starts_with_prefix(test_suite_t &suite, gpu_arena_t &arena, gpu_stream_t &stream) {
+static void pack_tokens_starts_with_prefix(test_suite_t& suite, gpu_arena_t& arena, gpu_stream_t& stream) {
     char const text[] = "abcde", prefix_text[] = "q:";
     u64_t const host_offsets[] = {0, 3, 5}, host_elements[] = {1, 0};
     using bytes_t = nk::tensor<b8_t, gpu_arena_alloc<b8_t>, 1>;
@@ -654,8 +654,8 @@ static void pack_tokens_starts_with_prefix(test_suite_t &suite, gpu_arena_t &are
  *  @param[in,out] stream The stream every stage enqueues on.
  *  @param[in,out] pool The CPU-decode worker pool.
  */
-static void run_audio_decode(test_suite_t &suite, sz::string_view_t label, st::basic_vector<b8_t> const &clip,
-                             gpu_arena_t &arena, gpu_stream_t &stream, pool_view_t pool) {
+static void run_audio_decode(test_suite_t& suite, sz::string_view_t label, st::basic_vector<b8_t> const& clip,
+                             gpu_arena_t& arena, gpu_stream_t& stream, pool_view_t pool) {
     if (clip.empty()) return suite.skip("the audio fixture is empty or unreadable");
     u32_t const columns = 24u, chunk = 400u, max_segments = 4u, sample_rate = 16000u;
     multimodal_batch_shape_t shape {};
@@ -722,8 +722,8 @@ static void run_audio_decode(test_suite_t &suite, sz::string_view_t label, st::b
  *  @param[in,out] pool The CPU-decode worker pool.
  *  @param[in] clip The real env audio clip; an empty clip skips the case.
  */
-static void audio_fault_isolation(test_suite_t &suite, gpu_arena_t &arena, gpu_stream_t &stream, pool_view_t pool,
-                                  st::basic_vector<b8_t> const &clip) {
+static void audio_fault_isolation(test_suite_t& suite, gpu_arena_t& arena, gpu_stream_t& stream, pool_view_t pool,
+                                  st::basic_vector<b8_t> const& clip) {
     if (clip.empty()) return suite.skip("needs a UFORM_TEST_AUDIO fixture");
     u32_t const columns = 16u, chunk = 400u, max_segments = 4u, sample_rate = 16000u;
     st::basic_vector<b8_t> garbage; // not a decodable container → silence, but not the whole batch
@@ -787,8 +787,8 @@ static void audio_fault_isolation(test_suite_t &suite, gpu_arena_t &arena, gpu_s
  *  @param[in,out] pool The CPU-decode worker pool.
  *  @param[in,out] jpeg This GPU's nvJPEG session.
  */
-static void run_image_decode(test_suite_t &suite, sz::string_view_t label, st::basic_vector<b8_t> const &blob,
-                             gpu_arena_t &arena, gpu_stream_t &stream, pool_view_t pool, nvjpeg_session_t &jpeg) {
+static void run_image_decode(test_suite_t& suite, sz::string_view_t label, st::basic_vector<b8_t> const& blob,
+                             gpu_arena_t& arena, gpu_stream_t& stream, pool_view_t pool, nvjpeg_session_t& jpeg) {
     if (blob.empty()) return suite.skip("the image fixture is empty or unreadable");
     u32_t const columns = 64u, patch = 16u, channels = 4u, max_segments = 4u;
     multimodal_batch_shape_t shape {};
@@ -852,9 +852,9 @@ static void run_image_decode(test_suite_t &suite, sz::string_view_t label, st::b
 
 /** Decode every @p blobs image in one batch, then each alone with the same shape, and require each
  *  image's patches to match bit for bit, so no image's decode writes into another's region. */
-static void image_batch_matches_single(test_suite_t &suite, std::span<st::basic_vector<b8_t> const> blobs,
-                                       gpu_arena_t &arena, gpu_stream_t &stream, pool_view_t pool,
-                                       nvjpeg_session_t &jpeg) {
+static void image_batch_matches_single(test_suite_t& suite, std::span<st::basic_vector<b8_t> const> blobs,
+                                       gpu_arena_t& arena, gpu_stream_t& stream, pool_view_t pool,
+                                       nvjpeg_session_t& jpeg) {
     if (blobs.size() < 2) return suite.skip("needs at least two UFORM_TEST_IMAGE fixtures");
     u32_t const columns = 256u, patch = 16u, channels = 4u, images = static_cast<u32_t>(blobs.size());
     std::size_t const cell_pixels = std::size_t {patch} * patch * channels;
@@ -865,7 +865,7 @@ static void image_batch_matches_single(test_suite_t &suite, std::span<st::basic_
     shape.image.patch_side = patch;
     shape.image.channels = channels;
     st::basic_vector<bytes_view_t> views;
-    for (st::basic_vector<b8_t> const &blob : blobs)
+    for (st::basic_vector<b8_t> const& blob : blobs)
         if (st::failed(views.push_back(bytes_view_t {blob}))) return suite.check(false, "blob view append");
     auto tape_made = fabricated_tape_t::make(arena, stream, views);
     if (!tape_made) return suite.check(false, "image tape: {}", to_string(tape_made.status_));
@@ -877,7 +877,7 @@ static void image_batch_matches_single(test_suite_t &suite, std::span<st::basic_
         u32r1_tensor_pinned_t offsets, lengths;
         pixelr1_tensor_pinned_t pixels;
     };
-    auto decode = [&](std::span<u64_t const> drawn, landed_t &landed) -> bool {
+    auto decode = [&](std::span<u64_t const> drawn, landed_t& landed) -> bool {
         auto made = multimodal_batch_on_gpu_t::make(gpu_arena_alloc_t {arena}, shape);
         if (!made) return false;
         multimodal_batch_on_gpu_t batch = std::move(made.value_);
@@ -908,7 +908,7 @@ static void image_batch_matches_single(test_suite_t &suite, std::span<st::basic_
     }
     // The mean absolute pixel difference between batched `image` and single decode `single`.
     auto distance = [&](std::size_t image, std::size_t single) noexcept -> double {
-        landed_t const &alone = singles[single];
+        landed_t const& alone = singles[single];
         std::size_t const values = std::size_t {fu::min_of(together.lengths[image], alone.lengths[0])} * cell_pixels;
         double total = 0;
         for (std::size_t value = 0; value != values; ++value)
@@ -946,9 +946,9 @@ static void image_batch_matches_single(test_suite_t &suite, std::span<st::basic_
  *  @param[in,out] pool The CPU demux pool.
  *  @param[in,out] nvdec The multi-engine NVDEC session.
  */
-static void run_video_decode(test_suite_t &suite, sz::string_view_t label, st::basic_vector<b8_t> const &clip,
-                             std::span<u32_t const> frame_strides, gpu_arena_t &arena, gpu_stream_t &stream,
-                             pool_view_t pool, nvdec_session_t &nvdec) {
+static void run_video_decode(test_suite_t& suite, sz::string_view_t label, st::basic_vector<b8_t> const& clip,
+                             std::span<u32_t const> frame_strides, gpu_arena_t& arena, gpu_stream_t& stream,
+                             pool_view_t pool, nvdec_session_t& nvdec) {
     if (clip.empty()) return suite.skip("the video fixture is empty or unreadable");
     u32_t const columns = 4096u, patch = 32u, channels = 3u, tube_frames = 2u, max_segments = 8u;
     multimodal_batch_shape_t shape {};
@@ -1024,9 +1024,9 @@ static void run_video_decode(test_suite_t &suite, sz::string_view_t label, st::b
  *  @param[in] audio_clip The real env audio clip; empty skips the case.
  *  @param[in] image_blob The real env image blob; empty skips the case.
  */
-static void multimodal_packet_routes(test_suite_t &suite, gpu_arena_t &arena, gpu_stream_t &stream, pool_view_t pool,
-                                     nvjpeg_session_t &jpeg, st::basic_vector<b8_t> const &audio_clip,
-                                     st::basic_vector<b8_t> const &image_blob) {
+static void multimodal_packet_routes(test_suite_t& suite, gpu_arena_t& arena, gpu_stream_t& stream, pool_view_t pool,
+                                     nvjpeg_session_t& jpeg, st::basic_vector<b8_t> const& audio_clip,
+                                     st::basic_vector<b8_t> const& image_blob) {
     if (audio_clip.empty() || image_blob.empty())
         return suite.skip("needs both UFORM_TEST_AUDIO and UFORM_TEST_IMAGE fixtures");
 
@@ -1170,9 +1170,9 @@ static void multimodal_packet_routes(test_suite_t &suite, gpu_arena_t &arena, gp
 /** Fill two steps back to back on one stream with no drain between, then replay the first step
  *  and require it bitwise equal: a fill frees its reservoir stream-ordered, so the next fill's
  *  read must not land in memory the first fill's queued decode still reads. */
-static void paired_fill_replays_after_back_to_back_fills(test_suite_t &suite, ut::mixture_entry_t const &entry,
-                                                         gpu_arena_t &arena, gpu_stream_t &stream, pool_view_t pool,
-                                                         nvjpeg_session_t &jpeg) {
+static void paired_fill_replays_after_back_to_back_fills(test_suite_t& suite, ut::mixture_entry_t const& entry,
+                                                         gpu_arena_t& arena, gpu_stream_t& stream, pool_view_t pool,
+                                                         nvjpeg_session_t& jpeg) {
     sz::string_view_t const name = entry.name.view();
     expected<gpu_direct_storage_session_t> session = gpu_direct_storage_session_t::make();
     if (!session) return suite.check(false, "the storage session should make: {}", session.description_);
@@ -1212,7 +1212,7 @@ static void paired_fill_replays_after_back_to_back_fills(test_suite_t &suite, ut
         tokensr1_tensor_pinned_t::zeros({2 * tokens}, pinned_alloc<token_id_t> {}).value;
     if (!filled_pixels || !replayed_pixels || !filled_tokens || !replayed_tokens)
         return suite.check(false, "[{}] the readback buffers should allocate", name);
-    auto const read_back = [&](pixelr1_tensor_pinned_t &into_pixels, tokensr1_tensor_pinned_t &into_tokens) noexcept {
+    auto const read_back = [&](pixelr1_tensor_pinned_t& into_pixels, tokensr1_tensor_pinned_t& into_tokens) noexcept {
         for (std::size_t batch = 0; batch != first.size(); ++batch)
             if (!copy_device_to_host(first[batch].images.view().flatten<1>(),
                                      nk::tensor_span<pixel_t, 1> {into_pixels.data() + batch * pixels, pixels},
@@ -1247,14 +1247,14 @@ static void paired_fill_replays_after_back_to_back_fills(test_suite_t &suite, ut
  *  @c UFORM_TEST_DATASET glob, so a laptop run skips it and a 4-8-16 launch exercises it (see
  *  @c loaders-4-8-16.sbatch ).
  */
-static void cross_rank_sampling(test_suite_t &suite) {
-    char const *const dataset = std::getenv("UFORM_TEST_DATASET");
+static void cross_rank_sampling(test_suite_t& suite) {
+    char const* const dataset = std::getenv("UFORM_TEST_DATASET");
     if (dataset == nullptr) return suite.skip("needs a shared UFORM_TEST_DATASET");
 
     u32_t const index = host_domain_index_from_environment();
     u32_t count = 0;
-    for (char const *const variable : {"UFORM_HOST_DOMAIN_COUNT", "SLURM_NTASKS"})
-        if (char const *const value = std::getenv(variable)) {
+    for (char const* const variable : {"UFORM_HOST_DOMAIN_COUNT", "SLURM_NTASKS"})
+        if (char const* const value = std::getenv(variable)) {
             count = static_cast<u32_t>(std::atoi(value));
             break;
         }
@@ -1294,7 +1294,7 @@ static void cross_rank_sampling(test_suite_t &suite) {
     suite.check(static_cast<bool>(topology.barrier("done", 60.0)), "the closing barrier should complete");
 }
 
-int main(int, char **argv) {
+int main(int, char** argv) {
     test_suite_t suite = test_suite_t::make(argv[0]);
 
     suite.run("draw_primitives_are_stable", draw_primitives_are_stable);
@@ -1359,7 +1359,7 @@ int main(int, char **argv) {
         for_each_env_input("UFORM_TEST_MIXTURE", [&](sz::string_view_t path) {
             expected<ut::mixture_t> mixture = ut::mixture_t::read(path);
             if (!mixture) return suite.check(false, "{} should read: {}", path, mixture.description_);
-            for (ut::mixture_entry_t const &entry : mixture->datasets)
+            for (ut::mixture_entry_t const& entry : mixture->datasets)
                 if (entry.modality == modality_t::image_k)
                     suite.run("paired_fill_replays_after_back_to_back_fills",
                               paired_fill_replays_after_back_to_back_fills, entry, arena, stream, pool, jpeg);

@@ -73,8 +73,8 @@ using pinned1_t = nk::tensor<value_type_, pinned_alloc<value_type_>, 1>;
  *      into every token signature.
  *  @param[in,out] stream The member's stream the staging enqueues on.
  */
-[[nodiscard]] static expected_t fabricate_loaded_(multimodal_batch_on_gpu_t &batch, u32_t member,
-                                                  gpu_stream_t &stream) noexcept {
+[[nodiscard]] static expected_t fabricate_loaded_(multimodal_batch_on_gpu_t& batch, u32_t member,
+                                                  gpu_stream_t& stream) noexcept {
     u32_t const S = segments_per_member_k, L = tokens_per_segment_k;
     u32_t const rows = static_cast<u32_t>(batch.tokens.extent(0));
     u32_t const columns = static_cast<u32_t>(batch.tokens.extent(1));
@@ -126,9 +126,9 @@ using pinned1_t = nk::tensor<value_type_, pinned_alloc<value_type_>, 1>;
  *  @param[in] epoch The data epoch the mix ran at.
  *  @param[in,out] stream The member's stream the readback enqueues on.
  */
-[[nodiscard]] static expected_t verify_mixed_(test_suite_t &suite, multimodal_batch_on_gpu_t &mixed, u32_t member,
+[[nodiscard]] static expected_t verify_mixed_(test_suite_t& suite, multimodal_batch_on_gpu_t& mixed, u32_t member,
                                               u32_t member_count, u64_t seed, data_epoch_t epoch,
-                                              gpu_stream_t &stream) noexcept {
+                                              gpu_stream_t& stream) noexcept {
     u32_t const S = segments_per_member_k, L = tokens_per_segment_k;
     u32_t const rows = static_cast<u32_t>(mixed.tokens.extent(0));
     u32_t const columns = static_cast<u32_t>(mixed.tokens.extent(1));
@@ -177,7 +177,7 @@ using pinned1_t = nk::tensor<value_type_, pinned_alloc<value_type_>, 1>;
 /** Assert the routing is a bijection over the world's @c S·member_count segments — every destination maps
  *  to a distinct source — mirroring @ref epoch_permutation host-side so a broken permutation is caught even
  *  before the device gather. */
-static void routing_is_a_bijection(test_suite_t &suite, u32_t member_count, u64_t seed, data_epoch_t epoch) {
+static void routing_is_a_bijection(test_suite_t& suite, u32_t member_count, u64_t seed, data_epoch_t epoch) {
     std::size_t const world = static_cast<std::size_t>(segments_per_member_k) * member_count;
     st::basic_vector<u8_t> seen;
     if (st::failed(seen.resize(world))) return suite.check(false, "bijection scratch alloc failed");
@@ -221,8 +221,8 @@ inline constexpr u32_t pad_bag_k = bags_per_member_k;
  *  @param[in] member This member's world coordinate, folded into every token signature.
  *  @param[in,out] stream The member's stream the staging enqueues on.
  */
-[[nodiscard]] static expected_t fabricate_bagged_(multimodal_batch_on_gpu_t &batch, u32_t member,
-                                                  gpu_stream_t &stream) noexcept {
+[[nodiscard]] static expected_t fabricate_bagged_(multimodal_batch_on_gpu_t& batch, u32_t member,
+                                                  gpu_stream_t& stream) noexcept {
     u32_t const S = segments_per_member_k, L = tokens_per_segment_k;
 
     switch_to_gpu_t gpu_scope {stream};
@@ -308,7 +308,7 @@ using mirrored_geometry_t = stack_array<mirrored_segment_t, segments_per_member_
  */
 [[nodiscard]] static mirrored_geometry_t mirror_bag_geometry_(u32_t member, u32_t world_member_count, u64_t seed,
                                                               data_epoch_t epoch, u32_t rows, u32_t columns_per_row,
-                                                              u32_t &dropped) noexcept {
+                                                              u32_t& dropped) noexcept {
     u32_t const L = tokens_per_segment_k;
     u32_t const capacity = rows * columns_per_row;
     std::size_t const world_bags = static_cast<std::size_t>(bags_per_member_k) * world_member_count;
@@ -368,9 +368,9 @@ using mirrored_geometry_t = stack_array<mirrored_segment_t, segments_per_member_
  *  @param[in] epoch The data epoch the mix ran at.
  *  @param[in,out] stream The member's stream the readback enqueues on.
  */
-[[nodiscard]] static expected_t verify_bagged_(test_suite_t &suite, multimodal_batch_on_gpu_t &mixed, u32_t member,
+[[nodiscard]] static expected_t verify_bagged_(test_suite_t& suite, multimodal_batch_on_gpu_t& mixed, u32_t member,
                                                u32_t world_member_count, u64_t seed, data_epoch_t epoch,
-                                               gpu_stream_t &stream) noexcept {
+                                               gpu_stream_t& stream) noexcept {
     u32_t const S = segments_per_member_k, L = tokens_per_segment_k;
     u32_t const rows = static_cast<u32_t>(mixed.tokens.extent(0));
     u32_t const columns = static_cast<u32_t>(mixed.tokens.extent(1));
@@ -405,7 +405,7 @@ using mirrored_geometry_t = stack_array<mirrored_segment_t, segments_per_member_
                 dropped[0], mirrored_dropped);
     u32_t const placed = static_cast<u32_t>(mirror.size());
     for (u32_t s = 0; s != placed; ++s) {
-        mirrored_segment_t const &want = mirror[s];
+        mirrored_segment_t const& want = mirror[s];
         suite.check(offsets[s] == want.offset && lengths[s] == want.length && bags[s] == want.bag,
                     "member {} segment {}: placed (offset={},length={},bag={}) != mirror ({},{},{})", member, s,
                     offsets[s], lengths[s], bags[s], want.offset, want.length, want.bag);
@@ -488,7 +488,7 @@ struct mixer_members_t {
  *  through the eager overload, and verifies every mixed segment against its world source. Skips
  *  cleanly when the box cannot host a multicast multimem_domain (the make fails loudly).
  */
-static void mixer_routes_segments(test_suite_t &suite) {
+static void mixer_routes_segments(test_suite_t& suite) {
     int device_count = 0;
     if (cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count < 1) return suite.skip(no_cuda_device_k);
     u32_t const member_count = fu::min_of<u32_t>(static_cast<u32_t>(device_count), members_cap_k);
@@ -557,7 +557,7 @@ static void mixer_routes_segments(test_suite_t &suite) {
  *  destination forces whole-bag drops; the mirror predicts each drop exactly, so the tier is a
  *  strict oracle either way). Every source batch stays valid — only the receive side can overflow.
  */
-static void mixer_routes_bags(test_suite_t &suite, u32_t rows, u32_t columns_per_row) {
+static void mixer_routes_bags(test_suite_t& suite, u32_t rows, u32_t columns_per_row) {
     int device_count = 0;
     if (cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count < 1) return suite.skip(no_cuda_device_k);
     u32_t const member_count = fu::min_of<u32_t>(static_cast<u32_t>(device_count), members_cap_k);
@@ -614,7 +614,7 @@ static void mixer_routes_bags(test_suite_t &suite, u32_t rows, u32_t columns_per
             suite.check(false, "verify bagged on GPU {}: {}", member, verified.description_);
 }
 
-int main(int, char **argv) {
+int main(int, char** argv) {
     // The mixer runs eagerly (no captured graph) and its barrier is a device spin. Under CUDA's
     // default lazy module loading, the first kernel launched after the barrier blocks on its module
     // load while the barrier already spins — stranding the single host thread that still owes the

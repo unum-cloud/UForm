@@ -142,7 +142,7 @@ struct summand_pair_t {
 
 /** Read one head's @b [2] @c {λ · Σ, count} summands back to host. Best-effort: a slipped readback
  *  reports zeros, never fails the run. Caller holds the stream's context. */
-[[nodiscard]] static summand_pair_t read_summands_(f32r1_tensor_arena_t &summands, gpu_stream_t &stream) noexcept {
+[[nodiscard]] static summand_pair_t read_summands_(f32r1_tensor_arena_t& summands, gpu_stream_t& stream) noexcept {
     f32r1_tensor_pinned_t staging = f32r1_tensor_pinned_t::uninitialized({2}, pinned_alloc<f32_t> {}).value;
     if (!staging) return {};
     if (!copy_device_to_host(summands.view(), staging.span(), stream)) return {};
@@ -159,7 +159,7 @@ static void pause_between_polls_() noexcept {
     nanosleep(&interval, nullptr);
 }
 
-expected_t mesh_t::make(mesh_t &placed, mesh_options_t const &options, std::span<i32_t const> devices) noexcept {
+expected_t mesh_t::make(mesh_t& placed, mesh_options_t const& options, std::span<i32_t const> devices) noexcept {
     if (devices.empty()) return expected_t::fail(status_t::invalid_argument_k, "a mesh needs at least one device");
     if (options.host_domain_count == 0 || options.host_domain_index >= options.host_domain_count)
         return expected_t::fail(status_t::invalid_argument_k, "host domain {} of {} is out of range",
@@ -275,10 +275,10 @@ struct device_budget_t {
 /** Bind @p placed to @p mesh , @p config , @p devices and @p numerics , make one stream per
  *  device, and record what each device has free and this process holds into @p budgets — the part
  *  of @ref trainer_t::make before the envelope is known. */
-[[nodiscard]] static expected_t prepare_(trainer_t &placed, mesh_t &mesh, trainer_config_t const &config,
-                                         std::span<i32_t const> devices, gpu_numerics_t const &numerics,
+[[nodiscard]] static expected_t prepare_(trainer_t& placed, mesh_t& mesh, trainer_config_t const& config,
+                                         std::span<i32_t const> devices, gpu_numerics_t const& numerics,
                                          std::span<device_budget_t> budgets) noexcept {
-    mesh_topology_t const &topology = mesh.topology;
+    mesh_topology_t const& topology = mesh.topology;
     std::size_t const gpus = devices.size();
     if (gpus == 0 || gpus != topology.shape.gpus_per_host_domain)
         return expected_t::fail(status_t::invalid_argument_k, "the trainer drives the mesh's {} devices, not {}",
@@ -308,18 +308,18 @@ struct device_budget_t {
         if (!held) return expected_t::fail(std::move(held));
         budgets[member] = {memory->free_bytes, *held};
     }
-    placed.envelope.free_bytes = std::min_element(budgets.begin(), budgets.end(), [](auto const &a, auto const &b) {
+    placed.envelope.free_bytes = std::min_element(budgets.begin(), budgets.end(), [](auto const& a, auto const& b) {
                                      return a.free_bytes < b.free_bytes;
                                  })->free_bytes;
     return {};
 }
 
-[[nodiscard]] static expected_t assemble_(trainer_t &placed, mesh_t &mesh, std::size_t reserve_bytes) noexcept;
+[[nodiscard]] static expected_t assemble_(trainer_t& placed, mesh_t& mesh, std::size_t reserve_bytes) noexcept;
 
 /** How many segments a row of @p config holds: its own ratio when it sets both budgets, as the C
  *  interface does, else the density its data source charged. */
-[[nodiscard]] static f64_t segments_per_row_(trainer_config_t const &config) noexcept {
-    multimodal_batch_shape_t const &batch = config.batch;
+[[nodiscard]] static f64_t segments_per_row_(trainer_config_t const& config) noexcept {
+    multimodal_batch_shape_t const& batch = config.batch;
     if (batch.max_rows_per_gpu && batch.max_segments_per_gpu)
         return static_cast<f64_t>(batch.max_segments_per_gpu) / static_cast<f64_t>(batch.max_rows_per_gpu);
     return config.segments_per_row;
@@ -328,8 +328,8 @@ struct device_budget_t {
 /** Build a trainer over @p config at @p rows rows and segments per GPU, its arenas reserving all
  *  the free memory, take one synthetic step, and read every device's footprint against
  *  @p budgets , what it had free and held before the first probe. */
-[[nodiscard]] static expected_t probe_footprint_(mesh_t &mesh, trainer_config_t config, std::span<i32_t const> devices,
-                                                 gpu_numerics_t const &numerics, u32_t rows,
+[[nodiscard]] static expected_t probe_footprint_(mesh_t& mesh, trainer_config_t config, std::span<i32_t const> devices,
+                                                 gpu_numerics_t const& numerics, u32_t rows,
                                                  std::span<device_budget_t const> budgets,
                                                  std::span<footprint_t> footprints) noexcept {
     config.batch = batch_capacity(config.batch, rows, segments_per_row_(config));
@@ -385,16 +385,16 @@ struct device_budget_t {
 
 /** Agree on the fewest @p rows any process measured: the lead collects every peer's count and
  *  publishes the minimum, which every peer adopts. */
-[[nodiscard]] static expected<u32_t> agree_on_rows_(mesh_t &mesh, u32_t rows) noexcept {
+[[nodiscard]] static expected<u32_t> agree_on_rows_(mesh_t& mesh, u32_t rows) noexcept {
     using result_t = expected<u32_t>;
-    mesh_topology_t &topology = mesh.topology;
+    mesh_topology_t& topology = mesh.topology;
     if (topology.host_domain_count() <= 1) return result_t {rows};
     sz::string_t text, measured_key, agreed_key;
     u32_t const collective_id = topology.next_collective_id();
     if (!format_into(measured_key, "envelope.{}", collective_id) ||
         !format_into(agreed_key, "envelope.{}.agreed", collective_id))
         return result_t::fail(status_t::bad_alloc_k, "envelope key formatting failed");
-    auto parsed = [&](u32_t &value) noexcept {
+    auto parsed = [&](u32_t& value) noexcept {
         return std::from_chars(text.data(), text.data() + text.size(), value).ec == std::errc {};
     };
     if (!topology.is_lead()) {
@@ -439,9 +439,9 @@ struct device_budget_t {
  *  @par Statuses:
  *  - @c status_t::bad_alloc_k The configured rows do not fit, with the measured numbers.
  */
-[[nodiscard]] static expected<envelope_t> measure_envelope_(mesh_t &mesh, trainer_config_t const &config,
+[[nodiscard]] static expected<envelope_t> measure_envelope_(mesh_t& mesh, trainer_config_t const& config,
                                                             std::span<i32_t const> devices,
-                                                            gpu_numerics_t const &numerics,
+                                                            gpu_numerics_t const& numerics,
                                                             std::span<device_budget_t const> budgets) noexcept {
     using result_t = expected<envelope_t>;
     if (config.late_interacts() && config.batch.max_rows_per_gpu == 0)
@@ -525,9 +525,9 @@ struct device_budget_t {
 
 /** Everything @ref trainer_t::make builds after the streams and the envelope, over @p placed 's
  *  sized config, each arena reserving @p reserve_bytes . */
-[[nodiscard]] static expected_t assemble_(trainer_t &placed, mesh_t &mesh, std::size_t reserve_bytes) noexcept {
-    trainer_config_t const &config = placed.config;
-    mesh_topology_t const &topology = mesh.topology;
+[[nodiscard]] static expected_t assemble_(trainer_t& placed, mesh_t& mesh, std::size_t reserve_bytes) noexcept {
+    trainer_config_t const& config = placed.config;
+    mesh_topology_t const& topology = mesh.topology;
     std::span<i32_t const> const devices = placed.devices;
     std::size_t const gpus = devices.size();
     for (std::size_t member = 0; member != gpus; ++member) {
@@ -547,7 +547,7 @@ struct device_budget_t {
         if (!ledger) return expected_t::fail(std::move(ledger));
         placed.ledger = std::move(ledger.value_);
     }
-    auto loss_probe = [&](char const *name, telemetry_probe_t &into) noexcept -> expected_t {
+    auto loss_probe = [&](char const* name, telemetry_probe_t& into) noexcept -> expected_t {
         expected<telemetry_probe_t> registered = placed.ledger.register_probe(name, telemetry_losses_k,
                                                                               finite_signal_k);
         if (!registered) return expected_t::fail(std::move(registered));
@@ -594,7 +594,7 @@ struct device_budget_t {
     st::basic_vector<differentiable_weights_t>
         registrations; // a transient the optimizer copies into its per-replica state
     for (std::size_t member = 0; member != gpus; ++member)
-        for (differentiable_weights_t const &entry : placed.replicas[member].weights) {
+        for (differentiable_weights_t const& entry : placed.replicas[member].weights) {
             expected<differentiable_weights_t> copied = entry.copy();
             if (!copied || st::failed(registrations.push_back(std::move(copied.value_))))
                 return expected_t::fail(status_t::bad_alloc_k, "registration table allocation failed");
@@ -612,7 +612,7 @@ struct device_budget_t {
                                                                contrastive_config, topology.shape)
                                                          : 0u;
     std::size_t const mixer_scalars = multimodal_batch_mixer_t::payload_scalars_needed(config.batch, topology.shape);
-    late_interaction_config_t const &late_interaction = config.late_interaction;
+    late_interaction_config_t const& late_interaction = config.late_interaction;
     std::size_t const max_tokens = std::size_t {config.batch.max_rows_per_gpu} * config.batch.max_columns_per_row;
     contrastive_tokens_config_t tokens_config;
     tokens_config.segments_per_gpu = static_cast<u32_t>(segments);
@@ -673,7 +673,7 @@ struct device_budget_t {
         per_gpu_array<contrastive_relations_view_t> relations;
         per_gpu_array<bf16r2_span_t> forces;
         for (std::size_t member = 0; member != gpus; ++member) {
-            base_replica_t &replica = placed.replicas[member];
+            base_replica_t& replica = placed.replicas[member];
             if (towers.push_back(replica.vertices.view()) != status_t::success_k ||
                 relations.push_back(replica.relations.view()) != status_t::success_k ||
                 forces.push_back(replica.vertices_grad.span()) != status_t::success_k)
@@ -728,8 +728,8 @@ struct device_budget_t {
     return {};
 }
 
-expected_t trainer_t::make(trainer_t &placed, mesh_t &mesh, trainer_config_t const &requested,
-                           std::span<i32_t const> devices, gpu_numerics_t const &numerics) noexcept {
+expected_t trainer_t::make(trainer_t& placed, mesh_t& mesh, trainer_config_t const& requested,
+                           std::span<i32_t const> devices, gpu_numerics_t const& numerics) noexcept {
     device_budget_t budgets[max_gpus_per_host_k] = {};
     if (expected_t prepared = prepare_(placed, mesh, requested, devices, numerics, {budgets, devices.size()});
         !prepared)
@@ -743,7 +743,7 @@ expected_t trainer_t::make(trainer_t &placed, mesh_t &mesh, trainer_config_t con
     expected_t assembled = assemble_(placed, mesh, placed.envelope.reserve_bytes);
     if (assembled || assembled.status_ != status_t::bad_alloc_k) return assembled;
     std::size_t committed_bytes = 0;
-    for (gpu_arena_t const &arena : placed.arenas.view()) committed_bytes = fu::max_of(committed_bytes, arena.mapped());
+    for (gpu_arena_t const& arena : placed.arenas.view()) committed_bytes = fu::max_of(committed_bytes, arena.mapped());
     return expected_t::fail(status_t::bad_alloc_k,
                             "{}: {} rows of {} columns per GPU outgrew the device, its arena committed {} of the {} " //
                             "bytes free",
@@ -753,8 +753,8 @@ expected_t trainer_t::make(trainer_t &placed, mesh_t &mesh, trainer_config_t con
 
 /** Upload the saved Float32 vector @p name into @p destination when @p checkpoint holds it, on
  *  @p stream . */
-[[nodiscard]] static expected_t restore_vector_(checkpoint_to_load_t const &checkpoint, sz::string_view_t name,
-                                                f32r1_span_t destination, gpu_stream_t &stream) noexcept {
+[[nodiscard]] static expected_t restore_vector_(checkpoint_to_load_t const& checkpoint, sz::string_view_t name,
+                                                f32r1_span_t destination, gpu_stream_t& stream) noexcept {
     f32r2_view_t const saved = checkpoint.float32(name);
     if (saved.empty()) return {};
     if (saved.extent(0) != 1u || saved.extent(1) != destination.extent(0))
@@ -765,8 +765,8 @@ expected_t trainer_t::make(trainer_t &placed, mesh_t &mesh, trainer_config_t con
 
 /** Download the device vector @p values into @p checkpoint as the @b [1,n] Float32 entry
  *  @p name . */
-[[nodiscard]] static expected_t insert_vector_(checkpoint_to_save_t &checkpoint, sz::string_view_t name,
-                                               f32r1_view_t values, gpu_stream_t &stream) noexcept {
+[[nodiscard]] static expected_t insert_vector_(checkpoint_to_save_t& checkpoint, sz::string_view_t name,
+                                               f32r1_view_t values, gpu_stream_t& stream) noexcept {
     st::basic_vector<f32_t> staging;
     if (st::failed(staging.resize(st::assume_uninitialized, values.extent(0))))
         return expected_t::fail(status_t::bad_alloc_k, "{} staging failed", name);
@@ -786,7 +786,7 @@ expected_t trainer_t::resume(sz::string_view_t path) noexcept {
         if (expected_t warmed = load_weights(loaded.value_, replicas[member].weights, streams[member]); !warmed)
             return warmed;
         if (!config.contrasts()) continue;
-        base_replica_t &replica = replicas[member];
+        base_replica_t& replica = replicas[member];
         expected_t restored = restore_vector_(*loaded, "contrastive.inverse_temperatures",
                                               replica.inverse_temperatures.span(), streams[member]);
         if (restored) restored = restore_vector_(*loaded, "contrastive.biases", replica.biases.span(), streams[member]);
@@ -824,7 +824,7 @@ expected_t trainer_t::capture() noexcept {
     return {};
 }
 
-expected_t trainer_t::step(batch_source_t source, optimizer_step_t optimizer_step, step_report_t &report) noexcept {
+expected_t trainer_t::step(batch_source_t source, optimizer_step_t optimizer_step, step_report_t& report) noexcept {
     data_epoch_t const data_epoch {optimizer_step.ordinal};
     report.optimizer_step = optimizer_step;
     report.learning_rate = config.learning_rate_for(optimizer_step);
@@ -848,7 +848,7 @@ expected_t trainer_t::step(batch_source_t source, optimizer_step_t optimizer_ste
     if (config.late_interacts()) {
         per_gpu_array<gpu_tokens_inputs_t> inputs;
         for (std::size_t member = 0; member != gpus; ++member) {
-            base_replica_t &replica = replicas[member];
+            base_replica_t& replica = replicas[member];
             gpu_tokens_inputs_t const member_inputs {replica.tower.token_vectors(), replica.tower.token_offsets(),
                                                      replica.batch.view(),          replica.relations.view(),
                                                      replica.token_recipe(config),  replica.token_vectors_grad.span()};
@@ -903,7 +903,7 @@ expected<retrieval_t> trainer_t::evaluate(batch_source_t source, data_epoch_t da
     for (std::size_t member = 0; member != gpus; ++member) {
         switch_to_gpu_t gpu_scope {streams[member]};
         if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "context entry failed");
-        base_replica_t &replica = replicas[member];
+        base_replica_t& replica = replicas[member];
         expected_t encoded = replica.tower.pack_weights(streams[member]);
         if (encoded) encoded = replica.tower.forward(replica.batch, replica.vertices.span(), streams[member]);
         if (!encoded) return result_t::fail(std::move(encoded));
@@ -965,7 +965,7 @@ expected_t trainer_t::reseed() noexcept {
     for (std::size_t member = 0; member != replicas.size(); ++member) {
         switch_to_gpu_t gpu_scope {streams[member]};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed");
-        base_replica_t &replica = replicas[member];
+        base_replica_t& replica = replicas[member];
         if (expected_t seeded = seed_weights(replica.weights, streams[member]); !seeded) return seeded;
         if (!config.contrasts()) continue;
         expected_t staged = copy_host_to_device(f32r1_view_t {inverse_temperatures.data(), groups},
@@ -994,7 +994,7 @@ telemetry_t trainer_t::telemetry(optimizer_step_t optimizer_step) noexcept {
     // reading is a coin flip, not a statistic. The all-member pairs are also what the
     // ledger's loss rows accumulate.
     summand_pair_t token {}, image {}, video {}, audio {}, choices {};
-    auto accumulate = [](summand_pair_t &into, f32r1_tensor_arena_t &summands, gpu_stream_t &stream) noexcept {
+    auto accumulate = [](summand_pair_t& into, f32r1_tensor_arena_t& summands, gpu_stream_t& stream) noexcept {
         if (summands.empty()) return;
         summand_pair_t const read = read_summands_(summands, stream);
         into.sum += read.sum;
@@ -1004,7 +1004,7 @@ telemetry_t trainer_t::telemetry(optimizer_step_t optimizer_step) noexcept {
         switch_to_gpu_t gpu_scope {streams[member]};
         if (!gpu_scope.ok()) continue;
         cuStreamSynchronize(streams[member].get());
-        base_replica_t &replica = replicas[member];
+        base_replica_t& replica = replicas[member];
         u32_t dropped = 0; // pageable, so the copy has landed once the call returns
         if (copy_device_to_host(replica.batch.dropped.view(), std::span<u32_t> {&dropped, 1}, streams[member]) &&
             zero_async(replica.batch.dropped.span(), streams[member]))
@@ -1046,7 +1046,7 @@ telemetry_t trainer_t::telemetry(optimizer_step_t optimizer_step) noexcept {
             ledger.scalar(probes.late_interaction, staging[0], 1.0);
         }
     }
-    if (u32_t const *const round = domain.member(domain.member_offset()).round; round != nullptr) {
+    if (u32_t const* const round = domain.member(domain.member_offset()).round; round != nullptr) {
         u32r1_tensor_pinned_t staging = u32r1_tensor_pinned_t::uninitialized({1}, pinned_alloc<u32_t> {}).value;
         nk::tensor_view<u32_t, 1> const source {round, 1};
         if (staging && copy_device_to_host(source, staging.span(), streams[0])) {
@@ -1096,7 +1096,7 @@ void telemetry_t::report() const noexcept {
     if (format_into(line, "  step {:>4}  masked CE {:.6f}  round {}", optimizer_step.ordinal + 1u, token_ce,
                     concurrency_round.ordinal))
         report_line(line.view());
-    auto term = [&](char const *name, f32_t value) noexcept {
+    auto term = [&](char const* name, f32_t value) noexcept {
         line.clear();
         if (value != 0.0f && format_into(line, "            {} {:.6f}", name, value)) report_line(line.view());
     };
@@ -1124,14 +1124,14 @@ void retrieval_t::report() const noexcept {
 
 #pragma region Sources
 
-expected_t synthetic_source_t::fill(trainer_t &trainer, data_epoch_t data_epoch, step_report_t &) noexcept {
-    trainer_config_t const &config = trainer.config;
+expected_t synthetic_source_t::fill(trainer_t& trainer, data_epoch_t data_epoch, step_report_t&) noexcept {
+    trainer_config_t const& config = trainer.config;
     u32_t const first = trainer.mesh->topology.first_gpu_index();
     u32_t const segments = config.batch.max_segments_per_gpu;
     for (std::size_t member = 0; member != trainer.replicas.size(); ++member) {
         switch_to_gpu_t gpu_scope {trainer.streams[member]};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed");
-        base_replica_t &replica = trainer.replicas[member];
+        base_replica_t& replica = trainer.replicas[member];
         u32_t const gpu_index = first + static_cast<u32_t>(member);
         if (expected_t drawn = replica.draw(config, gpu_index, data_epoch, trainer.streams[member]); !drawn)
             return drawn;
@@ -1147,14 +1147,14 @@ expected_t synthetic_source_t::fill(trainer_t &trainer, data_epoch_t data_epoch,
 }
 
 /** How many choices item @p item offers, zero when the step names none. */
-[[nodiscard]] static std::size_t item_choice_count_(training_items_t const &items, std::size_t item) noexcept {
+[[nodiscard]] static std::size_t item_choice_count_(training_items_t const& items, std::size_t item) noexcept {
     return items.choices.bytes.empty() ? 0 : items.choices.bytes[item].size();
 }
 
 /** Write item @p item 's choices and targets into row @p segment of @p staged , padding the rest;
  *  a byte offered twice is refused, since one logit holds one target. */
-[[nodiscard]] static expected_t stage_choices_(training_items_t const &items, std::size_t item,
-                                               multimodal_batch_on_cpu_t &staged, std::size_t segment) noexcept {
+[[nodiscard]] static expected_t stage_choices_(training_items_t const& items, std::size_t item,
+                                               multimodal_batch_on_cpu_t& staged, std::size_t segment) noexcept {
     std::size_t const width = staged.segment_choices.extent(1), offered = item_choice_count_(items, item);
     std::span<u8_t const> const bytes = offered != 0 ? items.choices.bytes[item] : std::span<u8_t const> {};
     std::span<f32_t const> const targets = offered != 0 ? items.choices.targets[item] : std::span<f32_t const> {};
@@ -1171,17 +1171,17 @@ expected_t synthetic_source_t::fill(trainer_t &trainer, data_epoch_t data_epoch,
 }
 
 /** The video slice of @p shape with its frame stride read as at least one. */
-[[nodiscard]] static video_batch_shape_t video_shape_(multimodal_batch_shape_t const &shape) noexcept {
+[[nodiscard]] static video_batch_shape_t video_shape_(multimodal_batch_shape_t const& shape) noexcept {
     video_batch_shape_t video = shape.video;
     video.frame_stride = fu::max_of(video.frame_stride, 1u);
     return video;
 }
 
-expected_t items_source_t::make(items_source_t &placed, trainer_t &trainer) noexcept {
+expected_t items_source_t::make(items_source_t& placed, trainer_t& trainer) noexcept {
     switch_to_gpu_t lead_scope {trainer.streams[0]}; // pinned host pages allocate inside a context
     if (!lead_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed");
-    trainer_config_t const &config = trainer.config;
-    multimodal_batch_shape_t const &shape = config.batch;
+    trainer_config_t const& config = trainer.config;
+    multimodal_batch_shape_t const& shape = config.batch;
     std::size_t const gpus = trainer.replicas.size(), segments = shape.max_segments_per_gpu;
     if (config.contrasts() && trainer.mesh->topology.host_domain_count() > 1)
         return expected_t::fail(status_t::unsupported_k,
@@ -1240,7 +1240,7 @@ expected_t items_source_t::make(items_source_t &placed, trainer_t &trainer) noex
     return {};
 }
 
-expected_t items_source_t::fill(trainer_t &trainer, data_epoch_t data_epoch, step_report_t &report) noexcept {
+expected_t items_source_t::fill(trainer_t& trainer, data_epoch_t data_epoch, step_report_t& report) noexcept {
     if (expected_t packed = pack_(trainer, report); !packed) return packed;
     std::span<multimodal_batch_on_gpu_t const> const loaded = loaded_.view();
     for (std::size_t member = 0; member != trainer.replicas.size(); ++member)
@@ -1252,8 +1252,8 @@ expected_t items_source_t::fill(trainer_t &trainer, data_epoch_t data_epoch, ste
     return relate_(trainer);
 }
 
-expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noexcept {
-    multimodal_batch_shape_t const &shape = trainer.config.batch;
+expected_t items_source_t::pack_(trainer_t& trainer, step_report_t& report) noexcept {
+    multimodal_batch_shape_t const& shape = trainer.config.batch;
     std::size_t const gpus = trainer.replicas.size(), count = items.modalities.size();
     u32_t const segments = shape.max_segments_per_gpu, columns = shape.max_columns_per_row;
     u32_t const capacity = shape.max_rows_per_gpu * columns, bags_per_gpu = shape.max_bags_per_gpu;
@@ -1342,7 +1342,7 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
         if (device == gpus)
             return expected_t::fail(status_t::invalid_argument_k, "the items exceed what the devices' envelopes hold");
 
-        multimodal_batch_on_cpu_t &staged = staged_[device];
+        multimodal_batch_on_cpu_t& staged = staged_[device];
         for (std::size_t position = begin; position != end; ++position) {
             u32_t const item = order_[position], kept = tokens_[item];
             if (!kept) continue;
@@ -1409,8 +1409,8 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
     }
 
     for (std::size_t device = 0; device != gpus; ++device) {
-        multimodal_batch_on_cpu_t &staged = staged_[device];
-        multimodal_batch_on_gpu_t &loaded = loaded_[device];
+        multimodal_batch_on_cpu_t& staged = staged_[device];
+        multimodal_batch_on_gpu_t& loaded = loaded_[device];
         for (std::size_t segment = used_segments[device]; segment != segments; ++segment) {
             staged.segment_offsets[segment] = cursors[device];
             staged.segment_lengths[segment] = 0u;
@@ -1426,7 +1426,7 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
             }
         }
         staged.segment_offsets[segments] = cursors[device];
-        gpu_stream_t &stream = trainer.streams[device];
+        gpu_stream_t& stream = trainer.streams[device];
         switch_to_gpu_t gpu_scope {stream};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed");
         expected_t copied = copy_host_to_device(staged.segment_offsets.view(), loaded.segment_offsets.span(), stream);
@@ -1487,8 +1487,8 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
     return kept;
 }
 
-expected_t items_source_t::relate_(trainer_t &trainer) noexcept {
-    trainer_config_t const &config = trainer.config;
+expected_t items_source_t::relate_(trainer_t& trainer) noexcept {
+    trainer_config_t const& config = trainer.config;
     std::size_t const gpus = trainer.replicas.size(), count = items.modalities.size();
     u32_t const segments = config.batch.max_segments_per_gpu;
     std::size_t const total_segments = gpus * segments, edges = edges_.capacity();
@@ -1514,11 +1514,11 @@ expected_t items_source_t::relate_(trainer_t &trainer) noexcept {
         if (item != absent_k) destinations_[item] = static_cast<u32_t>(vertex);
     }
 
-    item_edges_t const *const sets[3] = {&items.attract, &items.repel, &items.ignore};
+    item_edges_t const* const sets[3] = {&items.attract, &items.repel, &items.ignore};
     for (std::size_t member = 0; member != gpus; ++member) {
         for (std::size_t set_index = 0; set_index != 3; ++set_index) {
             contrastive_edge_set_t const set = static_cast<contrastive_edge_set_t>(set_index);
-            item_edges_t const &edges_of = *sets[set_index];
+            item_edges_t const& edges_of = *sets[set_index];
             u32r1_span_t const offsets = edges_.offsets(set), ids = edges_.ids(set);
             f32r1_span_t const weights = edges_.weights(set);
             u32_t written = 0;
@@ -1559,8 +1559,8 @@ expected_t items_source_t::relate_(trainer_t &trainer) noexcept {
             groups_[row] = temperature_group_t {group};
         }
 
-        base_replica_t &replica = trainer.replicas[member];
-        gpu_stream_t &stream = trainer.streams[member];
+        base_replica_t& replica = trainer.replicas[member];
+        gpu_stream_t& stream = trainer.streams[member];
         switch_to_gpu_t gpu_scope {stream};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed");
         bool const ignores = !items.ignore.ids.empty();
@@ -1584,7 +1584,7 @@ expected_t items_source_t::relate_(trainer_t &trainer) noexcept {
     return {};
 }
 
-expected<bf16r2_view_t> items_source_t::pooled(trainer_t &trainer) noexcept {
+expected<bf16r2_view_t> items_source_t::pooled(trainer_t& trainer) noexcept {
     using result_t = expected<bf16r2_view_t>;
     std::size_t const segments = trainer.config.batch.max_segments_per_gpu, hidden = trainer.config.hidden;
     std::size_t const gpus = trainer.replicas.size();

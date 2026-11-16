@@ -306,7 +306,7 @@ struct multimodal_batch_shape_t {
 
 /** @p content viewed as @b [rows,scalars] , one row per grid cell or per segment, so a run of
  *  cells is a range of whole rows; an absent modality's empty view stays empty. */
-[[nodiscard]] constexpr auto as_rows(auto &&content, std::size_t rows) noexcept {
+[[nodiscard]] constexpr auto as_rows(auto&& content, std::size_t rows) noexcept {
     return content.template reshape<2>({rows, content.numel() / rows});
 }
 

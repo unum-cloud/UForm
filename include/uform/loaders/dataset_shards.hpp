@@ -54,7 +54,7 @@ struct column_view_t {
 
     /** Element @p index 's bytes, sliced on the host, so @ref offsets must be host-resident. */
     [[nodiscard]] bytes_view_t operator[](std::size_t index) const noexcept {
-        u64_t const *const bounds = offsets.data();
+        u64_t const* const bounds = offsets.data();
         return {payload.data() + bounds[index], static_cast<std::size_t>(bounds[index + 1] - bounds[index])};
     }
 };
@@ -85,7 +85,7 @@ struct reservoir_bound_t {
     /** Widen the bound to cover reads of @p shard 's row groups: the largest group times the two a
      *  fill draws past its rows, and the densest group's bytes per row. A footer without groups, as
      *  the footerless formats weigh a file, counts its @c bytes whole. */
-    void charge(parquet_length_metadata_t const &shard) noexcept {
+    void charge(parquet_length_metadata_t const& shard) noexcept {
         if (shard.group_rows.empty()) fixed_bytes = fu::max_of(fixed_bytes, 2 * copies_k * shard.bytes);
         for (std::size_t group = 0; group != shard.group_rows.size(); ++group) {
             fixed_bytes = fu::max_of(fixed_bytes, 2 * copies_k * shard.group_bytes[group]);
@@ -108,7 +108,7 @@ struct row_group_draw_t {
 
     /** Append @p path 's @p footer : its row groups with a complete row become drawable, and a
      *  shard without one is left out. */
-    [[nodiscard]] expected_t append_shard(sz::string_view_t path, parquet_length_metadata_t const &footer) noexcept;
+    [[nodiscard]] expected_t append_shard(sz::string_view_t path, parquet_length_metadata_t const& footer) noexcept;
 
     /** Reserve every fill's pick storage for at most @p groups row groups, after the last shard. */
     [[nodiscard]] expected_t reserve(std::size_t groups) noexcept;
@@ -162,10 +162,10 @@ struct row_group_draw_t {
 struct parquet_file_t {
 
     parquet_file_t() noexcept;
-    parquet_file_t(parquet_file_t const &) = delete;
-    parquet_file_t &operator=(parquet_file_t const &) = delete;
-    parquet_file_t(parquet_file_t &&) noexcept;
-    parquet_file_t &operator=(parquet_file_t &&) noexcept;
+    parquet_file_t(parquet_file_t const&) = delete;
+    parquet_file_t& operator=(parquet_file_t const&) = delete;
+    parquet_file_t(parquet_file_t&&) noexcept;
+    parquet_file_t& operator=(parquet_file_t&&) noexcept;
     ~parquet_file_t();
 
     /**
@@ -178,29 +178,29 @@ struct parquet_file_t {
      *  @param[in] columns Column names to decode, in the order @c column indexes them.
      *  @param[in,out] stream The stream the decode is enqueued on.
      */
-    [[nodiscard]] static expected<parquet_file_t> make(gpu_direct_storage_session_t const &storage,
+    [[nodiscard]] static expected<parquet_file_t> make(gpu_direct_storage_session_t const& storage,
                                                        sz::string_view_t path, sz::strings_view_t columns,
-                                                       gpu_stream_t &stream) noexcept;
+                                                       gpu_stream_t& stream) noexcept;
 
     /** Decode @p columns of @b several shards at once into @b one concatenated file, the row draw's
      *  reservoir, whose rows follow the paths, then their groups, back to back. @p row_groups holds
      *  one ascending entry of row-group indices per path, and an empty tape reads every group. */
-    [[nodiscard]] static expected<parquet_file_t> make(gpu_direct_storage_session_t const &storage,
+    [[nodiscard]] static expected<parquet_file_t> make(gpu_direct_storage_session_t const& storage,
                                                        sz::strings_view_t paths, sz::strings_view_t columns,
                                                        tape_view<u32_t const> row_groups,
-                                                       gpu_stream_t &stream) noexcept;
+                                                       gpu_stream_t& stream) noexcept;
 
     /** Read only the shard's Parquet footer at @p path — @c num_rows , the @b whole table's summed
      *  column-chunk byte size, and each row group's rows, bytes and rows @p complete_columns all
      *  fill — never touching the row groups' pages or the GPU. */
     [[nodiscard]] static expected<parquet_length_metadata_t> table_metadata(
-        gpu_direct_storage_session_t const &storage, sz::string_view_t path,
+        gpu_direct_storage_session_t const& storage, sz::string_view_t path,
         sz::strings_view_t complete_columns = std::span<sz::string_view_t const> {}) noexcept;
 
     /** Read only the shard's Parquet footer at @p path — @c num_rows and @p column 's summed
      *  column-chunk byte size — never touching the row groups or the GPU. */
     [[nodiscard]] static expected<parquet_length_metadata_t> column_metadata(
-        gpu_direct_storage_session_t const &storage, sz::string_view_t path, sz::string_view_t column) noexcept;
+        gpu_direct_storage_session_t const& storage, sz::string_view_t path, sz::string_view_t column) noexcept;
 
     /** Rows decoded — the same across every column. */
     [[nodiscard]] std::size_t rows() const noexcept;
@@ -235,24 +235,24 @@ struct parquet_file_t {
 struct jsonl_file_t {
 
     jsonl_file_t() noexcept;
-    jsonl_file_t(jsonl_file_t const &) = delete;
-    jsonl_file_t &operator=(jsonl_file_t const &) = delete;
-    jsonl_file_t(jsonl_file_t &&) noexcept;
-    jsonl_file_t &operator=(jsonl_file_t &&) noexcept;
+    jsonl_file_t(jsonl_file_t const&) = delete;
+    jsonl_file_t& operator=(jsonl_file_t const&) = delete;
+    jsonl_file_t(jsonl_file_t&&) noexcept;
+    jsonl_file_t& operator=(jsonl_file_t&&) noexcept;
     ~jsonl_file_t();
 
     /** Decode @p field of the JSONL shard at @p path — one JSON object per line — into device
      *  memory on @p stream over KvikIO / GDS. JSONL carries no footer, so a shard is always
      *  decoded to learn its rows; @ref file_size_bytes is the cheap size the loader draws
      *  files by instead. */
-    [[nodiscard]] static expected<jsonl_file_t> make(gpu_direct_storage_session_t const &storage,
+    [[nodiscard]] static expected<jsonl_file_t> make(gpu_direct_storage_session_t const& storage,
                                                      sz::string_view_t path, sz::string_view_t field,
-                                                     gpu_stream_t &stream) noexcept;
+                                                     gpu_stream_t& stream) noexcept;
 
     /** Concatenate several decoded shards' fields into one reservoir — the footerless coverage
      *  loop decodes one file at a time, then merges them here (a cuDF concatenate, one copy). */
     [[nodiscard]] static expected<jsonl_file_t> concat(std::span<jsonl_file_t const> parts,
-                                                       gpu_stream_t &stream) noexcept;
+                                                       gpu_stream_t& stream) noexcept;
 
     /** Rows decoded — one per JSON line. */
     [[nodiscard]] std::size_t rows() const noexcept;
@@ -285,23 +285,23 @@ enum class csv_header_t : bool { positional_k, named_k };
 struct csv_file_t {
 
     csv_file_t() noexcept;
-    csv_file_t(csv_file_t const &) = delete;
-    csv_file_t &operator=(csv_file_t const &) = delete;
-    csv_file_t(csv_file_t &&) noexcept;
-    csv_file_t &operator=(csv_file_t &&) noexcept;
+    csv_file_t(csv_file_t const&) = delete;
+    csv_file_t& operator=(csv_file_t const&) = delete;
+    csv_file_t(csv_file_t&&) noexcept;
+    csv_file_t& operator=(csv_file_t&&) noexcept;
     ~csv_file_t();
 
     /** Decode @p column of the CSV shard at @p path into device memory on @p stream over KvikIO /
      *  GDS. @p delimiter is the field separator; @p header says whether row 0 names the columns,
      *  and when positional, @p column is a 0-based index string. CSV carries no footer, so a shard
      *  is always decoded to learn its rows; @ref file_size_bytes is the loader's cheap weight. */
-    [[nodiscard]] static expected<csv_file_t> make(gpu_direct_storage_session_t const &storage, sz::string_view_t path,
+    [[nodiscard]] static expected<csv_file_t> make(gpu_direct_storage_session_t const& storage, sz::string_view_t path,
                                                    sz::string_view_t column, char delimiter, csv_header_t header,
-                                                   gpu_stream_t &stream) noexcept;
+                                                   gpu_stream_t& stream) noexcept;
 
     /** Concatenate several decoded shards' columns into one reservoir — the footerless coverage
      *  loop decodes one file at a time, then merges them here (a cuDF concatenate, one copy). */
-    [[nodiscard]] static expected<csv_file_t> concat(std::span<csv_file_t const> parts, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] static expected<csv_file_t> concat(std::span<csv_file_t const> parts, gpu_stream_t& stream) noexcept;
 
     /** Rows decoded — one per CSV record. */
     [[nodiscard]] std::size_t rows() const noexcept;

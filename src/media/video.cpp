@@ -39,11 +39,13 @@ struct video_memory_reader_t {
 };
 
 /** The @c uint8_t pointer libavcodec's parser reads elementary-stream @p bytes through. */
-[[nodiscard]] static u8_t const *av_bytes_(b8_t const *bytes) noexcept { return reinterpret_cast<u8_t const *>(bytes); }
+[[nodiscard]] static u8_t const* av_bytes_(b8_t const* bytes) noexcept {
+    return reinterpret_cast<u8_t const*>(bytes); // vendor-boundary: FFmpeg reads `uint8_t`
+}
 
 /** @c AVIOContext read callback: copy up to @p buffer_size bytes, @c AVERROR_EOF at the end. */
-static int video_memory_read_(void *opaque, u8_t *buffer, int buffer_size) noexcept {
-    auto *reader = static_cast<video_memory_reader_t *>(opaque);
+static int video_memory_read_(void* opaque, u8_t* buffer, int buffer_size) noexcept {
+    auto* reader = static_cast<video_memory_reader_t*>(opaque);
     std::size_t const remaining = reader->bytes.size() - reader->position;
     std::size_t const to_read = fu::min_of<std::size_t>(static_cast<std::size_t>(buffer_size), remaining);
     if (to_read == 0) return AVERROR_EOF;
@@ -55,8 +57,8 @@ static int video_memory_read_(void *opaque, u8_t *buffer, int buffer_size) noexc
 
 /** @c AVIOContext seek callback: honors @c SEEK_SET/CUR/END and the @c AVSEEK_SIZE query, @c -1
  *  out of range. */
-static i64_t video_memory_seek_(void *opaque, i64_t offset, int whence) noexcept {
-    auto *reader = static_cast<video_memory_reader_t *>(opaque);
+static i64_t video_memory_seek_(void* opaque, i64_t offset, int whence) noexcept {
+    auto* reader = static_cast<video_memory_reader_t*>(opaque);
     i64_t const size = static_cast<i64_t>(reader->bytes.size());
     if (whence == AVSEEK_SIZE) return size;
     i64_t position = 0;
@@ -98,7 +100,7 @@ static i64_t video_memory_seek_(void *opaque, i64_t offset, int whence) noexcept
 }
 
 /** Append @p packet to @p clip 's stream and record where the next one starts. */
-[[nodiscard]] static status_t append_packet_(demuxed_t &clip, bytes_view_t packet) noexcept {
+[[nodiscard]] static status_t append_packet_(demuxed_t& clip, bytes_view_t packet) noexcept {
     std::size_t const previous = clip.annex_b.size();
     if (st::failed(clip.annex_b.resize(st::assume_uninitialized, previous + packet.size())))
         return status_t::bad_alloc_k;
@@ -108,12 +110,12 @@ static i64_t video_memory_seek_(void *opaque, i64_t offset, int whence) noexcept
 }
 
 /** The payload bytes of the libav @p packet . */
-[[nodiscard]] static bytes_view_t packet_bytes_(AVPacket const *packet) noexcept {
+[[nodiscard]] static bytes_view_t packet_bytes_(AVPacket const* packet) noexcept {
     return std::as_bytes(std::span<u8_t const> {packet->data, static_cast<std::size_t>(packet->size)});
 }
 
 /** Map an @c AVCodecID onto @ref video_codec_t ; @c false leaves @p codec untouched. */
-[[nodiscard]] static bool from_av_codec_(AVCodecID av_codec_id, video_codec_t &codec) noexcept {
+[[nodiscard]] static bool from_av_codec_(AVCodecID av_codec_id, video_codec_t& codec) noexcept {
     switch (av_codec_id) {
     case AV_CODEC_ID_H264: codec = video_codec_t::h264_k; return true;
     case AV_CODEC_ID_HEVC: codec = video_codec_t::h265_k; return true;
@@ -142,7 +144,7 @@ static i64_t video_memory_seek_(void *opaque, i64_t offset, int whence) noexcept
 
 /** The bitstream filter converting a container-wrapped codec to Annex-B; @c nullptr
  *  passes packets through. */
-[[nodiscard]] static char const *bitstream_filter_name_(video_codec_t codec) noexcept {
+[[nodiscard]] static char const* bitstream_filter_name_(video_codec_t codec) noexcept {
     if (codec == video_codec_t::h264_k) return "h264_mp4toannexb";
     if (codec == video_codec_t::h265_k) return "hevc_mp4toannexb";
     // MP4 keeps MPEG-4 Part 2's VOL header in extradata, which NVDEC's parser needs in the stream.
@@ -168,12 +170,12 @@ expected<demuxed_t> um::demux_video(bytes_view_t container) noexcept {
     // Every libav handle is declared up front and freed exactly once by `release_libav`.
     // `avformat_open_input` frees and nulls `format` itself on failure while leaving our custom-IO
     // `avio` ours to free (AVFMT_FLAG_CUSTOM_IO).
-    u8_t *avio_buffer = static_cast<u8_t *>(av_malloc(video_avio_buffer_bytes_k));
-    AVIOContext *avio = nullptr;
-    AVFormatContext *format = nullptr;
-    AVBSFContext *bitstream_filter = nullptr;
-    AVPacket *raw_packet = nullptr;
-    AVPacket *filtered_packet = nullptr;
+    u8_t* avio_buffer = static_cast<u8_t*>(av_malloc(video_avio_buffer_bytes_k));
+    AVIOContext* avio = nullptr;
+    AVFormatContext* format = nullptr;
+    AVBSFContext* bitstream_filter = nullptr;
+    AVPacket* raw_packet = nullptr;
+    AVPacket* filtered_packet = nullptr;
     auto release_libav = [&]() noexcept {
         if (raw_packet != nullptr) av_packet_free(&raw_packet);
         if (filtered_packet != nullptr) av_packet_free(&filtered_packet);
@@ -185,7 +187,7 @@ expected<demuxed_t> um::demux_video(bytes_view_t container) noexcept {
         }
         else if (avio_buffer != nullptr) av_free(avio_buffer);
     };
-    auto fail = [&](status_t status, char const *reason) noexcept {
+    auto fail = [&](status_t status, char const* reason) noexcept {
         release_libav();
         return result_t::fail(status, "video demux: {}", reason);
     };
@@ -208,7 +210,7 @@ expected<demuxed_t> um::demux_video(bytes_view_t container) noexcept {
             break;
         }
     if (video_stream_index < 0) return fail(status_t::invalid_argument_k, "no video stream");
-    AVStream *video_stream = format->streams[video_stream_index];
+    AVStream* video_stream = format->streams[video_stream_index];
     if (!from_av_codec_(video_stream->codecpar->codec_id, clip.codec))
         return fail(status_t::invalid_argument_k, "unsupported video codec");
     clip.extent.width = static_cast<u32_t>(fu::max_of(video_stream->codecpar->width, 0));
@@ -224,8 +226,8 @@ expected<demuxed_t> um::demux_video(bytes_view_t container) noexcept {
                                              (static_cast<i64_t>(rate.den) * AV_TIME_BASE));
     }
 
-    if (char const *filter_name = bitstream_filter_name_(clip.codec); filter_name != nullptr) {
-        AVBitStreamFilter const *descriptor = av_bsf_get_by_name(filter_name);
+    if (char const* filter_name = bitstream_filter_name_(clip.codec); filter_name != nullptr) {
+        AVBitStreamFilter const* descriptor = av_bsf_get_by_name(filter_name);
         if (descriptor == nullptr || av_bsf_alloc(descriptor, &bitstream_filter) < 0 ||
             avcodec_parameters_copy(bitstream_filter->par_in, video_stream->codecpar) < 0)
             return fail(status_t::bad_alloc_k, "Annex-B filter setup failed");
@@ -267,20 +269,20 @@ expected<demuxed_t> um::demux_video(bytes_view_t container) noexcept {
 struct video_decoder_ {
 
     /** The decoder context, single-threaded since executors decode clips in parallel. */
-    AVCodecContext *context = nullptr; // vendor-boundary
+    AVCodecContext* context = nullptr; // vendor-boundary
 
     /** The parser that splits the elementary stream into the decoder's packets. */
-    AVCodecParserContext *parser = nullptr; // vendor-boundary
+    AVCodecParserContext* parser = nullptr; // vendor-boundary
 
     /** The reusable packet the parser fills. */
-    AVPacket *packet = nullptr; // vendor-boundary
+    AVPacket* packet = nullptr; // vendor-boundary
 
     /** The reusable frame the decoder emits into. */
-    AVFrame *frame = nullptr; // vendor-boundary
+    AVFrame* frame = nullptr; // vendor-boundary
 
     /** The scaler to RGB24 at the planned grid size, rebuilt only when the
      *  decoded format changes. */
-    SwsContext *scaler = nullptr; // vendor-boundary
+    SwsContext* scaler = nullptr; // vendor-boundary
 
     ~video_decoder_() noexcept {
         if (scaler != nullptr) sws_freeContext(scaler);
@@ -322,9 +324,9 @@ struct frame_sampler_ {
 
 /** Convert @p frame to RGB at the planned size and scatter it as compact frame @c sampler.kept into
  *  @p out . */
-static void keep_frame_(video_decoder_ &decoder, frame_sampler_ &sampler, AVFrame const *frame,
+static void keep_frame_(video_decoder_& decoder, frame_sampler_& sampler, AVFrame const* frame,
                         pixel_tubes_span_t out) noexcept {
-    SwsContext *const scaler = sws_getCachedContext(
+    SwsContext* const scaler = sws_getCachedContext(
         decoder.scaler, frame->width, frame->height, static_cast<AVPixelFormat>(frame->format),
         static_cast<int>(sampler.width), static_cast<int>(sampler.height), AV_PIX_FMT_RGB24,
         SWS_BILINEAR | SWS_ACCURATE_RND | SWS_FULL_CHR_H_INT, nullptr, nullptr, nullptr);
@@ -335,7 +337,7 @@ static void keep_frame_(video_decoder_ &decoder, frame_sampler_ &sampler, AVFram
     decoder.scaler = scaler;
     sws_setColorspaceDetails(scaler, sws_getCoefficients(SWS_CS_ITU601), 0, sws_getCoefficients(SWS_CS_ITU601), 1, 0,
                              1 << 16, 1 << 16); // BT.601 limited to full range whatever the stream signals, as on GPUs
-    u8_t *const planes[4] = {sampler.rgb.data(), nullptr, nullptr, nullptr};
+    u8_t* const planes[4] = {sampler.rgb.data(), nullptr, nullptr, nullptr};
     int const strides[4] = {static_cast<int>(sampler.width * video_channels_k), 0, 0, 0};
     if (sws_scale(scaler, frame->data, frame->linesize, 0, frame->height, planes, strides) !=
         static_cast<int>(sampler.height)) {
@@ -361,7 +363,7 @@ static void keep_frame_(video_decoder_ &decoder, frame_sampler_ &sampler, AVFram
 
 /** Pull every frame the decoder holds, keeping the sampled ones, until it asks for input or the
  *  segment is full. */
-static void receive_frames_(video_decoder_ &decoder, frame_sampler_ &sampler, pixel_tubes_span_t out) noexcept {
+static void receive_frames_(video_decoder_& decoder, frame_sampler_& sampler, pixel_tubes_span_t out) noexcept {
     while (sampler.status == status_t::success_k && sampler.kept != sampler.wanted) {
         int const received = avcodec_receive_frame(decoder.context, decoder.frame);
         if (received == AVERROR(EAGAIN) || received == AVERROR_EOF) return;
@@ -375,14 +377,14 @@ static void receive_frames_(video_decoder_ &decoder, frame_sampler_ &sampler, pi
 }
 
 /** Send the parser's current packet, or the flush when it is empty, and pull what it decodes. */
-static void submit_packet_(video_decoder_ &decoder, frame_sampler_ &sampler, AVPacket *packet,
+static void submit_packet_(video_decoder_& decoder, frame_sampler_& sampler, AVPacket* packet,
                            pixel_tubes_span_t out) noexcept {
     int const sent = avcodec_send_packet(decoder.context, packet);
     if (sent < 0 && sent != AVERROR(EAGAIN) && sent != AVERROR_EOF) sampler.status = status_t::invalid_argument_k;
     receive_frames_(decoder, sampler, out);
 }
 
-expected_t um::decode_video_frames(demuxed_t const &clip, video_grid_t grid, video_batch_shape_t const &shape,
+expected_t um::decode_video_frames(demuxed_t const& clip, video_grid_t grid, video_batch_shape_t const& shape,
                                    pixel_tubes_span_t out) noexcept {
     std::size_t const cells = static_cast<std::size_t>(grid.patch_rows) * grid.patch_columns;
     if (out.extent(0) != grid.temporal_groups || out.extent(1) != cells || out.extent(2) != shape.tube_frames ||
@@ -395,7 +397,7 @@ expected_t um::decode_video_frames(demuxed_t const &clip, video_grid_t grid, vid
     if (clip.annex_b.empty() || clip.packet_offsets.size() < 2u)
         return expected_t::fail(status_t::invalid_argument_k, "the clip holds no packets");
     std::size_t const elements = out.extent(0) * cells * out.extent(2) * out.extent(3) * out.extent(4) * out.extent(5);
-    pixel_t *const cells_begin = out.data();
+    pixel_t* const cells_begin = out.data();
     std::fill(cells_begin, cells_begin + elements, pixel_t {0});
 
     frame_sampler_ sampler;
@@ -409,7 +411,7 @@ expected_t um::decode_video_frames(demuxed_t const &clip, video_grid_t grid, vid
                                 sampler.height);
 
     AVCodecID const codec_id = to_av_codec_(clip.codec);
-    AVCodec const *const codec = avcodec_find_decoder(codec_id);
+    AVCodec const* const codec = avcodec_find_decoder(codec_id);
     if (codec == nullptr)
         return expected_t::fail(status_t::unsupported_k, "no software decoder for codec {}",
                                 static_cast<int>(clip.codec));
@@ -429,7 +431,7 @@ expected_t um::decode_video_frames(demuxed_t const &clip, video_grid_t grid, vid
 
     std::size_t const packets = clip.packet_offsets.size() - 1u;
     for (std::size_t index = 0; index != packets && sampler.status == status_t::success_k; ++index) {
-        u8_t const *data = av_bytes_(clip.annex_b.data() + clip.packet_offsets[index]);
+        u8_t const* data = av_bytes_(clip.annex_b.data() + clip.packet_offsets[index]);
         int remaining = static_cast<int>(clip.packet_offsets[index + 1] - clip.packet_offsets[index]);
         while (remaining > 0 && sampler.status == status_t::success_k && sampler.kept != sampler.wanted) {
             int const used = av_parser_parse2(decoder.parser, decoder.context, &decoder.packet->data,

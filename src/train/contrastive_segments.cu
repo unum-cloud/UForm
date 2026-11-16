@@ -301,7 +301,7 @@ static __global__ void contrastive_cast_f32_to_bf16_kernel_(f32r2_view_t source,
 
 /** Cell @c (prefix,row,candidate) of a @b [prefixes,subgraphs,rows,per_subgraph] stash
  *  by global candidate. */
-[[nodiscard]] static __device__ f32_t &contrastive_stash_cell_(f32r4_span_t stash, std::size_t prefix, std::size_t row,
+[[nodiscard]] static __device__ f32_t& contrastive_stash_cell_(f32r4_span_t stash, std::size_t prefix, std::size_t row,
                                                                std::size_t candidate) noexcept {
     std::size_t const per_subgraph = stash.extent(3);
     return stash[prefix, candidate / per_subgraph, row, candidate % per_subgraph];
@@ -346,7 +346,7 @@ static __global__ void contrastive_sigmoid_bce_kernel_(f32r4_span_t logits, f32r
     f32_t thread_loss = 0.0f, thread_bias_grad = 0.0f, thread_log_inverse_temperature_grad = 0.0f;
     for (std::size_t prefix = 0; prefix != prefixes; ++prefix)
         for (std::size_t candidate = threadIdx.x; candidate < candidates; candidate += blockDim.x) {
-            f32_t &cell = contrastive_stash_cell_(logits, prefix, row, candidate);
+            f32_t& cell = contrastive_stash_cell_(logits, prefix, row, candidate);
             contrastive_pair_relation_t const relation = contrastive_pair_relation(relations, row, u32_t(candidate));
             f32_t const scaled = cell;
             f32_t const signed_logit = relation.target * (scaled + bias);
@@ -671,7 +671,7 @@ static __global__ void contrastive_retrieval_kernel_(f32r4_view_t logits, f32r2_
     for (std::size_t index = 0; index != std::size(sums); ++index)
         totals[index] = block_reduce_broadcast<kernel_block_size_default_k>(sums[index]);
     if (threadIdx.x != 0u) return;
-    auto const column = [&](retrieval_column_t which) noexcept -> f32_t & { return table[row, std::size_t(which)]; };
+    auto const column = [&](retrieval_column_t which) noexcept -> f32_t& { return table[row, std::size_t(which)]; };
     bool const ranked = totals[0] != 0.0f && totals[1] != 0.0f;
     column(retrieval_column_t::ranked_k) = ranked ? 1.0f : 0.0f;
     column(retrieval_column_t::hit_at_1_k) = ranked && totals[2] == 0.0f ? 1.0f : 0.0f;
@@ -687,7 +687,7 @@ static __global__ void contrastive_retrieval_kernel_(f32r4_view_t logits, f32r2_
     column(retrieval_column_t::centred_products_k) = totals[8];
 }
 
-expected<contrastive_pair_loss_t> contrastive_pair_loss_t::make(gpu_arena_t &arena, u32_t rows,
+expected<contrastive_pair_loss_t> contrastive_pair_loss_t::make(gpu_arena_t& arena, u32_t rows,
                                                                 u32_t candidates_per_row,
                                                                 contrastive_pair_loss_form_t form) noexcept {
     using result_t = expected<contrastive_pair_loss_t>;
@@ -708,7 +708,7 @@ expected<contrastive_pair_loss_t> contrastive_pair_loss_t::make(gpu_arena_t &are
 
 expected_t contrastive_pair_loss_t::operator()(f32r4_span_t logits, contrastive_relations_view_t relations,
                                                contrastive_recipe_t recipe, f32r1_view_t live_anchors,
-                                               f32r1_span_t loss_out, gpu_stream_t &stream,
+                                               f32r1_span_t loss_out, gpu_stream_t& stream,
                                                f32r1_span_t log_inverse_temperature_grad,
                                                f32r1_span_t bias_grad) noexcept {
     std::size_t const rows = from_vertex_accumulator_.extent(1);
@@ -747,9 +747,9 @@ expected_t contrastive_pair_loss_t::operator()(f32r4_span_t logits, contrastive_
     return launched;
 }
 
-expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena, contrastive_segments_config_t config,
+expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t& arena, contrastive_segments_config_t config,
                                                               u32r1_view_t prefix_dims,
-                                                              gpu_numerics_t const &numerics) noexcept {
+                                                              gpu_numerics_t const& numerics) noexcept {
     if (config.from_vertices_per_gpu == 0 || config.hidden == 0)
         return expected<contrastive_segments_t>::fail(status_t::unsupported_k,
                                                       "the segments loss scores pooled rows (vertices={} hidden={})",
@@ -830,7 +830,7 @@ expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena
         std::size_t const pack_shapes[][2] = {{to_vertices_per_gpu, width},
                                               {width, to_vertices_per_gpu},
                                               {width, rows}};
-        for (auto const &[columns, depth] : pack_shapes) {
+        for (auto const& [columns, depth] : pack_shapes) {
             expected<std::size_t> shape_bytes = pack_bytes_bf16(columns, depth, loss.numerics_);
             if (!shape_bytes) return expected<contrastive_segments_t>::fail(std::move(shape_bytes));
             packed_bytes = fu::max_of(packed_bytes, shape_bytes.value_);
@@ -845,7 +845,7 @@ expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena
 
 expected_t contrastive_segments_t::score_(bf16r2_view_t vertices, nk::tensor_view<gpu_subgraph_t, 1> gpu_subgraphs,
                                           contrastive_relations_view_t relations, contrastive_recipe_t recipe,
-                                          gpu_stream_t &stream) noexcept {
+                                          gpu_stream_t& stream) noexcept {
     if (vertices.extent(0) != config_.from_vertices_per_gpu || vertices.extent(1) != config_.hidden)
         return expected_t::fail(status_t::unsupported_k, "vertex tower [{}x{}] disagrees with the baked [{}x{}]",
                                 vertices.extent(0), vertices.extent(1), config_.from_vertices_per_gpu, config_.hidden);
@@ -941,7 +941,7 @@ expected_t contrastive_segments_t::score_(bf16r2_view_t vertices, nk::tensor_vie
 
 expected_t contrastive_segments_t::evaluate(bf16r2_view_t vertices, nk::tensor_view<gpu_subgraph_t, 1> gpu_subgraphs,
                                             contrastive_relations_view_t relations, contrastive_recipe_t recipe,
-                                            gpu_stream_t &stream) noexcept {
+                                            gpu_stream_t& stream) noexcept {
     if (expected_t scored = score_(vertices, gpu_subgraphs, relations, recipe, stream); !scored) return scored;
     // The world's centre over the full-width prefix, summed subgraph by subgraph in order, and
     // every unit vertex's alignment with it.
@@ -981,7 +981,7 @@ expected_t contrastive_segments_t::evaluate(bf16r2_view_t vertices, nk::tensor_v
 expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor_view<gpu_subgraph_t, 1> gpu_subgraphs,
                                               contrastive_relations_view_t relations, contrastive_recipe_t recipe,
                                               f32r1_span_t loss_out, bf16r2_span_t from_vertices_grad,
-                                              gpu_stream_t &stream, f32r1_span_t log_inverse_temperature_grad,
+                                              gpu_stream_t& stream, f32r1_span_t log_inverse_temperature_grad,
                                               f32r1_span_t bias_grad) noexcept {
 
     if (loss_out.empty())
@@ -998,7 +998,7 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
                                 recipe.temperature_group_count());
     if (expected_t scored = score_(vertices, gpu_subgraphs, relations, recipe, stream); !scored) return scored;
     // Zero the Float32 owned-vertex force; the pair loss writes every row of its own accumulator.
-    for (f32r2_tensor_arena_t *const zeroed : {&from_vertices_grad_f32_, &from_vertices_grad_products_})
+    for (f32r2_tensor_arena_t* const zeroed : {&from_vertices_grad_f32_, &from_vertices_grad_products_})
         if (expected_t reset = zero_async(zeroed->span(), stream); !reset) return reset;
 
     u32_t const prefix_count = prefixes_.size();
@@ -1138,10 +1138,10 @@ static __global__ void contrastive_column_fold_kernel_(bf16r1_span_t destination
 }
 
 expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t::make(
-    multimem_domain_t &domain, colocated_domain_t &colocated, std::span<gpu_arena_t> arenas,
+    multimem_domain_t& domain, colocated_domain_t& colocated, std::span<gpu_arena_t> arenas,
     std::span<gpu_stream_t> streams, std::span<bf16r2_view_t const> towers,
     std::span<contrastive_relations_view_t const> relations, std::span<bf16r2_span_t const> from_vertices_grads,
-    contrastive_segments_config_t config, u32r1_view_t prefix_dims, gpu_numerics_t const &numerics,
+    contrastive_segments_config_t config, u32r1_view_t prefix_dims, gpu_numerics_t const& numerics,
     f64_t timeout_seconds) noexcept {
     using result_t = expected<distributed_contrastive_segments_t>;
     std::size_t const gpus = arenas.size();
@@ -1247,7 +1247,7 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
     // caller towers/grads and the domain windows never move after construction.
     bf16r3_span_t const world_tower = whole_world ? bf16r3_span_t {} : distributed.world_tower_();
     for (std::size_t rank = 0; rank != gpus; ++rank) {
-        st::basic_vector<gpu_subgraph_t> &table = distributed.subgraph_tables_[rank];
+        st::basic_vector<gpu_subgraph_t>& table = distributed.subgraph_tables_[rank];
         if (st::failed(table.resize(subgraphs)))
             return result_t::fail(status_t::bad_alloc_k, "subgraph table allocation failed (rank={})", rank);
         f32r3_span_t const forces = distributed.window_forces_(domain.member_offset() + rank);
@@ -1261,7 +1261,7 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
     return result_t {std::move(distributed)};
 }
 
-expected_t distributed_contrastive_segments_t::stage_world_tower_(std::size_t rank, gpu_stream_t &stream) noexcept {
+expected_t distributed_contrastive_segments_t::stage_world_tower_(std::size_t rank, gpu_stream_t& stream) noexcept {
     std::size_t const member = domain_->member_offset() + rank;
     // A whole world is read in place from the peers' towers, so every peer's forward
     // must have landed.
@@ -1278,7 +1278,7 @@ expected_t distributed_contrastive_segments_t::stage_world_tower_(std::size_t ra
 }
 
 expected_t distributed_contrastive_segments_t::evaluate(std::size_t rank, contrastive_recipe_t recipe,
-                                                        gpu_stream_t &stream) noexcept {
+                                                        gpu_stream_t& stream) noexcept {
     if (rank >= losses_.size())
         return expected_t::fail(status_t::invalid_argument_k, "rank {} of {}", rank, losses_.size());
     switch_to_gpu_t gpu_scope {stream};
@@ -1296,7 +1296,7 @@ expected_t distributed_contrastive_segments_t::evaluate(std::size_t rank, contra
 }
 
 expected_t distributed_contrastive_segments_t::operator()(std::size_t rank, contrastive_recipe_t recipe,
-                                                          gpu_stream_t &stream) noexcept {
+                                                          gpu_stream_t& stream) noexcept {
     std::size_t const gpus = losses_.size();
     std::size_t const subgraphs = config_.gpu_subgraphs_per_step;
     std::size_t const tower_scalars = static_cast<std::size_t>(config_.from_vertices_per_gpu) * config_.hidden;
@@ -1368,7 +1368,7 @@ expected_t distributed_contrastive_segments_t::operator()(contrastive_recipe_t r
     return {};
 }
 
-expected_t distributed_contrastive_segments_t::gather_world_tower_(gpu_stream_t &stream) noexcept {
+expected_t distributed_contrastive_segments_t::gather_world_tower_(gpu_stream_t& stream) noexcept {
     bf16r1_span_t const own_block = gather_buffer_.own_block();
     bf16r1_span_t const world_tower = world_tower_().flatten<1>();
     bf16r2_span_t const world_tower_rows = world_tower.reshape<2>({std::size_t {world_domains()}, own_block.extent(0)});
@@ -1378,8 +1378,8 @@ expected_t distributed_contrastive_segments_t::gather_world_tower_(gpu_stream_t 
     return staged;
 }
 
-expected_t distributed_contrastive_segments_t::reduce_world_columns_(std::size_t rank, gpu_stream_t &stream,
-                                                                     f32r1_view_t &column_force) noexcept {
+expected_t distributed_contrastive_segments_t::reduce_world_columns_(std::size_t rank, gpu_stream_t& stream,
+                                                                     f32r1_view_t& column_force) noexcept {
     std::size_t const members = domain_->member_count();
     std::size_t const member = domain_->member_offset() + rank;
     std::size_t const tower_scalars = static_cast<std::size_t>(config_.from_vertices_per_gpu) * config_.hidden;

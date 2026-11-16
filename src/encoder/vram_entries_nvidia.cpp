@@ -55,7 +55,7 @@ enum class kernel_t : std::size_t {
     count_k,
 };
 
-static char const *const kernel_names_k[] = {
+static char const* const kernel_names_k[] = {
     "uform_fill_layout_kernel",          "uform_fill_coords_kernel",         "uform_gather_bytes_kernel",
     "uform_stage_patches_kernel",        "uform_stage_frames_kernel",        "uform_mrope_kernel",
     "uform_quantize_bf16_tokens_kernel", "uform_quantize_f32_tokens_kernel", "uform_rescale_tokens_kernel",
@@ -83,20 +83,20 @@ struct device_module_t {
 static device_module_t device_modules_[max_gpus_per_host_k];
 
 /** The driver every entry calls through, opened at the first entry; empty without one. */
-[[nodiscard]] static cuda_api_t const &driver_() noexcept {
+[[nodiscard]] static cuda_api_t const& driver_() noexcept {
     static cuda_api_t const driver = cuda_api_t::load();
     return driver;
 }
 
 [[nodiscard]] static cuda_stream_handle_t native_(nk_stream_t stream) noexcept {
-    return static_cast<cuda_stream_handle_t>(static_cast<void *>(stream));
+    return static_cast<cuda_stream_handle_t>(static_cast<void*>(stream)); // vendor-boundary: an opaque stream handle
 }
 
 /** Run @p enqueue in the context of @p stream , the current one for a null stream, and
  *  report its result. */
 template <typename enqueue_type_>
-[[nodiscard]] static nk_status_t in_context_(nk_stream_t stream, enqueue_type_ const &enqueue) noexcept {
-    cuda_api_t const &driver = driver_();
+[[nodiscard]] static nk_status_t in_context_(nk_stream_t stream, enqueue_type_ const& enqueue) noexcept {
+    cuda_api_t const& driver = driver_();
     cuda_context_handle_t context = nullptr;
     if (!driver || (stream && (driver.stream_context(native_(stream), &context) != uu::cuda_success_k ||
                                driver.push_context(context) != uu::cuda_success_k)))
@@ -108,14 +108,14 @@ template <typename enqueue_type_>
 
 /** The function of @p kernel in the current context's device, loading the bundle there
  *  on first use. */
-[[nodiscard]] static cuda_result_t function_of_(cuda_api_t const &driver, kernel_t kernel,
-                                                cuda_function_handle_t &function) noexcept {
+[[nodiscard]] static cuda_result_t function_of_(cuda_api_t const& driver, kernel_t kernel,
+                                                cuda_function_handle_t& function) noexcept {
     cuda_context_handle_t context = nullptr;
     int device = 0;
     if (cuda_result_t const result = driver.get_current_context(&context); result != uu::cuda_success_k) return result;
     if (cuda_result_t const result = driver.get_context_device(&device); result != uu::cuda_success_k) return result;
     if (device < 0 || std::size_t(device) >= max_gpus_per_host_k) return uu::cuda_error_invalid_device_k;
-    device_module_t &module = device_modules_[device];
+    device_module_t& module = device_modules_[device];
     fu::standard_atomic_ref<load_stage_t> const stage_ref {module.stage};
     load_stage_t stage = load_stage_t::unloaded_k;
     if (stage_ref.compare_exchange_strong(stage, load_stage_t::loading_k, std::memory_order_acquire)) {
@@ -144,8 +144,8 @@ template <typename enqueue_type_>
 template <typename... argument_types_>
 [[nodiscard]] static nk_status_t launch_(kernel_t kernel, unsigned blocks, unsigned threads, nk_stream_t stream,
                                          argument_types_... arguments) noexcept {
-    void *addresses[] = {static_cast<void *>(&arguments)...};
-    return in_context_(stream, [&](cuda_api_t const &driver, cuda_stream_handle_t native) {
+    void* addresses[] = {static_cast<void*>(&arguments)...}; // vendor-boundary: the launch takes argument addresses
+    return in_context_(stream, [&](cuda_api_t const& driver, cuda_stream_handle_t native) {
         cuda_function_handle_t function = nullptr;
         if (cuda_result_t const result = function_of_(driver, kernel, function); result != uu::cuda_success_k)
             return result;
@@ -160,8 +160,8 @@ template <typename... argument_types_>
 }
 
 nk_status_t ue::vram_nvidia_entries_kit_t::describe(std::size_t vendor_ordinal,
-                                                    device_description_t &description) noexcept {
-    cuda_api_t const &driver = driver_();
+                                                    device_description_t& description) noexcept {
+    cuda_api_t const& driver = driver_();
     int device = 0, compute_units = 0, architecture_major = 0, architecture_minor = 0;
     std::size_t memory_bytes = 0;
     if (!driver || driver.get_device(&device, static_cast<int>(vendor_ordinal)) != uu::cuda_success_k ||
@@ -182,14 +182,14 @@ nk_status_t ue::vram_nvidia_entries_kit_t::describe(std::size_t vendor_ordinal,
 }
 
 nk_status_t ue::vram_nvidia_entries_kit_t::copy(bytes_span_t target, bytes_view_t source, nk_stream_t stream) noexcept {
-    return in_context_(stream, [&](cuda_api_t const &driver, cuda_stream_handle_t native) {
+    return in_context_(stream, [&](cuda_api_t const& driver, cuda_stream_handle_t native) {
         return driver.copy_async(std::bit_cast<cuda_device_address_t>(target.data()),
                                  std::bit_cast<cuda_device_address_t>(source.data()), source.size(), native);
     });
 }
 
 nk_status_t ue::vram_nvidia_entries_kit_t::zero(bytes_span_t target, nk_stream_t stream) noexcept {
-    return in_context_(stream, [&](cuda_api_t const &driver, cuda_stream_handle_t native) {
+    return in_context_(stream, [&](cuda_api_t const& driver, cuda_stream_handle_t native) {
         return driver.fill_async(std::bit_cast<cuda_device_address_t>(target.data()), 0, target.size(), native);
     });
 }

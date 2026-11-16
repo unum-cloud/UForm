@@ -32,22 +32,22 @@ static char const doc_Model[] =                                                 
     "  >>> model.describe().dimensions\n"                                                          //
     "  64";
 
-static PyObject *Model_tp_new(PyTypeObject *type, PyObject *args, PyObject *keywords) {
+static PyObject* Model_tp_new(PyTypeObject* type, PyObject* args, PyObject* keywords) {
     PyErr_SetString(PyExc_TypeError,
                     "Model is built through load_ram(), load_ram_buffer(), load_vram() or load_vram_buffer()");
     return NULL;
 }
 
-static void Model_dealloc(Model *self) {
+static void Model_dealloc(Model* self) {
     Py_BEGIN_ALLOW_THREADS;
     uform_model_free(self->handle);
     Py_END_ALLOW_THREADS;
-    Py_TYPE(self)->tp_free((PyObject *)self);
+    Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
 /** Wraps the handle a load produced, a progress handler's own exception outranking the outcome,
  *  or frees it. */
-static PyObject *model_loaded(PyTypeObject *type, uform_model_t handle, uform_py_call_t *call) {
+static PyObject* model_loaded(PyTypeObject* type, uform_model_t handle, uform_py_call_t* call) {
     if (call->raised || call->outcome.status != uform_status_success_k) {
         uform_model_free(handle);
         if (!call->raised) return uform_py_raise_on_outcome(&call->outcome), NULL;
@@ -55,13 +55,13 @@ static PyObject *model_loaded(PyTypeObject *type, uform_model_t handle, uform_py
         call->raised = NULL;
         return NULL;
     }
-    Model *const model = (Model *)type->tp_alloc(type, 0);
+    Model* const model = (Model*)type->tp_alloc(type, 0);
     if (!model) {
         uform_model_free(handle);
         return NULL;
     }
     model->handle = handle;
-    return (PyObject *)model;
+    return (PyObject*)model;
 }
 
 /** What every load takes beside its source and its residency's placement. */
@@ -80,10 +80,10 @@ typedef struct load_options_t {
  *  @return 0 on success, -1 with an exception set otherwise; release
  *      @c options->progress either way.
  */
-static int load_parse(char const *verb, PyObject *const *args, Py_ssize_t positional_args_count,
-                      PyObject *args_names_tuple, char const *source_name, PyObject **source, char const *arm_name,
-                      PyObject **arm, char const *pin_name, uform_py_enum_t const *classes, int *pin,
-                      load_options_t *options) {
+static int load_parse(char const* verb, PyObject* const* args, Py_ssize_t positional_args_count,
+                      PyObject* args_names_tuple, char const* source_name, PyObject** source, char const* arm_name,
+                      PyObject** arm, char const* pin_name, uform_py_enum_t const* classes, int* pin,
+                      load_options_t* options) {
     PyObject *pin_object, *executor_object, *quantization_object, *progress_object, *progress_steps_object;
     uform_py_argument_t const arguments[] = {
         {source_name, source},
@@ -128,12 +128,12 @@ static char const doc_Model_load_ram[] =                                        
     "    False stops the load and raises `CancelledError`.\n"                                      //
     "  progress_steps (int, optional): Reports the load makes at most; 0 derives to ten.";
 
-static PyObject *Model_load_ram(PyTypeObject *type, PyObject *const *args, Py_ssize_t positional_args_count,
-                                PyObject *args_names_tuple) {
+static PyObject* Model_load_ram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
+                                PyObject* args_names_tuple) {
     PyObject *path_object, *memory_domains_object, *decoded = NULL, *result = NULL;
     load_options_t options;
     uform_bytes_view_t path;
-    int32_t *memory_domains = NULL;
+    int32_t* memory_domains = NULL;
     size_t memory_domains_count = 0;
     int cpu_class = 0;
     if (load_parse("load_ram", args, positional_args_count, args_names_tuple, "path", &path_object, "memory_domains",
@@ -182,12 +182,12 @@ static char const doc_Model_load_ram_buffer[] =                                 
     "  progress (callable, optional): Called with (completed, total) tensors placed.\n"          //
     "  progress_steps (int, optional): Reports the load makes at most; 0 derives to ten.";
 
-static PyObject *Model_load_ram_buffer(PyTypeObject *type, PyObject *const *args, Py_ssize_t positional_args_count,
-                                       PyObject *args_names_tuple) {
+static PyObject* Model_load_ram_buffer(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
+                                       PyObject* args_names_tuple) {
     PyObject *buffer_object, *memory_domains_object, *result = NULL;
     load_options_t options;
     Py_buffer buffer = {0};
-    int32_t *memory_domains = NULL;
+    int32_t* memory_domains = NULL;
     size_t memory_domains_count = 0;
     int cpu_class = 0;
     if (load_parse("load_ram_buffer", args, positional_args_count, args_names_tuple, "buffer", &buffer_object,
@@ -203,7 +203,7 @@ static PyObject *Model_load_ram_buffer(PyTypeObject *type, PyObject *const *args
         .model = &handle,
         .executor = options.executor,
         .outcome = &options.call.outcome,
-        .buffer = {(uint8_t const *)buffer.buf, (size_t)buffer.len},
+        .buffer = {(uint8_t const*)buffer.buf, (size_t)buffer.len},
         .ram = {memory_domains, memory_domains_count, (uform_cpu_class_t)cpu_class},
         .quantization = options.quantization,
         .progress = uform_py_progress_registered(&options.progress, options.progress_steps),
@@ -243,12 +243,12 @@ static char const doc_Model_load_vram[] =                                       
     "Example:\n"                                                                               //
     "  >>> model = uform.Model.load_vram('model.safetensors', devices=[0])   # doctest: +SKIP";
 
-static PyObject *Model_load_vram(PyTypeObject *type, PyObject *const *args, Py_ssize_t positional_args_count,
-                                 PyObject *args_names_tuple) {
+static PyObject* Model_load_vram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
+                                 PyObject* args_names_tuple) {
     PyObject *path_object, *devices_object, *decoded = NULL, *result = NULL;
     load_options_t options;
     uform_bytes_view_t path;
-    int32_t *devices = NULL;
+    int32_t* devices = NULL;
     size_t devices_count = 0;
     int gpu_class = 0;
     if (load_parse("load_vram", args, positional_args_count, args_names_tuple, "path", &path_object, "devices",
@@ -296,12 +296,12 @@ static char const doc_Model_load_vram_buffer[] =                                
     "  progress (callable, optional): Called with (completed, total) tensors placed.\n"   //
     "  progress_steps (int, optional): Reports the load makes at most; 0 derives to ten.";
 
-static PyObject *Model_load_vram_buffer(PyTypeObject *type, PyObject *const *args, Py_ssize_t positional_args_count,
-                                        PyObject *args_names_tuple) {
+static PyObject* Model_load_vram_buffer(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
+                                        PyObject* args_names_tuple) {
     PyObject *buffer_object, *devices_object, *result = NULL;
     load_options_t options;
     Py_buffer buffer = {0};
-    int32_t *devices = NULL;
+    int32_t* devices = NULL;
     size_t devices_count = 0;
     int gpu_class = 0;
     if (load_parse("load_vram_buffer", args, positional_args_count, args_names_tuple, "buffer", &buffer_object,
@@ -315,7 +315,7 @@ static PyObject *Model_load_vram_buffer(PyTypeObject *type, PyObject *const *arg
         .model = &handle,
         .executor = options.executor,
         .outcome = &options.call.outcome,
-        .buffer = {(uint8_t const *)buffer.buf, (size_t)buffer.len},
+        .buffer = {(uint8_t const*)buffer.buf, (size_t)buffer.len},
         .vram = {devices, devices_count, (uform_gpu_class_t)gpu_class},
         .quantization = options.quantization,
         .progress = uform_py_progress_registered(&options.progress, options.progress_steps),
@@ -352,13 +352,13 @@ static char const doc_Model_deferred[] =                                        
     "Args:\n"                                                                                   //
     "  executor (Executor): The executor the calls run on; its residency must match.";
 
-static PyObject *Model_on(PyObject *self, PyObject *executor) { return uform_py_on_new(&OnType, self, executor); }
+static PyObject* Model_on(PyObject* self, PyObject* executor) { return uform_py_on_new(&OnType, self, executor); }
 
-static PyObject *Model_deferred(PyObject *self, PyObject *executor) {
+static PyObject* Model_deferred(PyObject* self, PyObject* executor) {
     return uform_py_on_new(&DeferredOnType, self, executor);
 }
 
-static PyObject *Model_repr(Model *self) { return PyUnicode_FromFormat("uform.Model(at=%p)", (void *)self->handle); }
+static PyObject* Model_repr(Model* self) { return PyUnicode_FromFormat("uform.Model(at=%p)", (void*)self->handle); }
 
 #pragma endregion Construction
 
@@ -400,11 +400,11 @@ typedef struct describe_call_t {
     uform_model_description_t description;
 } describe_call_t;
 
-static void describe_submit(void *call) { uform_model_describe(&((describe_call_t *)call)->arguments); }
+static void describe_submit(void* call) { uform_model_describe(&((describe_call_t*)call)->arguments); }
 
-static PyObject *describe_answer(void *erased) {
-    uform_model_description_t const *const description = &((describe_call_t *)erased)->description;
-    PyObject *fields[8] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
+static PyObject* describe_answer(void* erased) {
+    uform_model_description_t const* const description = &((describe_call_t*)erased)->description;
+    PyObject* fields[8] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
     (void)((fields[0] = PyLong_FromSize_t(description->dimensions)) &&
            (fields[1] = PyLong_FromSize_t(description->context)) &&
            (fields[2] = uform_py_enum_to_object(&uform_py_scalar, (int)description->quantization)) &&
@@ -419,13 +419,13 @@ static PyObject *describe_answer(void *erased) {
 static uform_py_verb_t const describe_verb = {sizeof(describe_call_t), describe_submit, describe_answer,
                                               uform_py_call_release, NULL};
 
-static PyObject *Model_describe(PyObject *self, PyObject *unused) {
+static PyObject* Model_describe(PyObject* self, PyObject* unused) {
     uform_py_receiver_t receiver;
     if (uform_py_receiver_from_object(self, &ModelType, &receiver) != 0) return NULL;
     describe_call_t stack;
-    describe_call_t *const call = uform_py_call_open(&receiver, &describe_verb, &stack);
+    describe_call_t* const call = uform_py_call_open(&receiver, &describe_verb, &stack);
     if (!call) return NULL;
-    call->arguments = (uform_model_describe_t) {.model = ((Model *)receiver.target)->handle,
+    call->arguments = (uform_model_describe_t) {.model = ((Model*)receiver.target)->handle,
                                                 .executor = receiver.executor,
                                                 .outcome = &call->call.outcome,
                                                 .completion = receiver.completion,

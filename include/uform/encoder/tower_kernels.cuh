@@ -55,7 +55,7 @@ template <typename pixels_type_, typename statistics_type_, typename patches_typ
 constexpr void stage_patches_segment(pixels_type_ pixels, std::size_t source_first, std::size_t target_first,
                                      u32_t length, statistics_type_ mean, statistics_type_ inverse_std,
                                      patches_type_ patches, u32_t thread, u32_t threads,
-                                     scalars_type_ const &scalars) noexcept {
+                                     scalars_type_ const& scalars) noexcept {
     u32_t const spatial = static_cast<u32_t>(pixels.extent(1));
     u32_t const channels = static_cast<u32_t>(pixels.extent(2));
     std::size_t const cells = static_cast<std::size_t>(length) * spatial;
@@ -77,7 +77,7 @@ constexpr void stage_patches_segment(pixels_type_ pixels, std::size_t source_fir
 template <typename samples_type_, typename frames_type_, typename scalars_type_>
 constexpr void stage_frames_segment(samples_type_ samples, std::size_t source_first, std::size_t target_first,
                                     u32_t length, frames_type_ frames, u32_t thread, u32_t threads,
-                                    scalars_type_ const &scalars) noexcept {
+                                    scalars_type_ const& scalars) noexcept {
     u32_t const width = static_cast<u32_t>(samples.extent(1));
     std::size_t const cells = static_cast<std::size_t>(length) * width;
     for (std::size_t cell = thread; cell < cells; cell += threads) {
@@ -91,7 +91,7 @@ constexpr void stage_frames_segment(samples_type_ samples, std::size_t source_fi
  *  width grids @b [positions,pairs] , temporal pairs first. */
 template <typename coords_type_, typename angles_type_>
 [[nodiscard]] constexpr f32_t rope_angle(u32_t pair, coords_type_ coords, std::size_t token,
-                                         angles_type_ const &angles) noexcept {
+                                         angles_type_ const& angles) noexcept {
     u32_t const temporal_pairs = static_cast<u32_t>(angles.temporal.extent(1));
     u32_t const height_pairs = static_cast<u32_t>(angles.height.extent(1));
     if (pair < temporal_pairs) return angles.temporal[static_cast<std::size_t>(coords[token, 0]), pair];
@@ -105,9 +105,9 @@ template <typename coords_type_, typename angles_type_>
  *  split-half pair @c (k,k+head_width/2) of all @p heads heads from @p role_offset ; a sign of
  *  @c -1 is the inverse rotation. */
 template <typename values_type_, typename coords_type_, typename angles_type_, typename scalars_type_>
-constexpr void rope_rotate(values_type_ values, angles_type_ const &angles, coords_type_ coords, u32_t heads,
+constexpr void rope_rotate(values_type_ values, angles_type_ const& angles, coords_type_ coords, u32_t heads,
                            u32_t head_width, u32_t role_offset, f32_t angle_sign, std::size_t first, std::size_t stride,
-                           scalars_type_ const &scalars) noexcept {
+                           scalars_type_ const& scalars) noexcept {
     u32_t const pairs_per_head = head_width >> 1u;
     std::size_t const total_pairs = static_cast<std::size_t>(pairs_per_head) * values.extent(0);
     for (std::size_t pair_index = first; pair_index < total_pairs; pair_index += stride) {
@@ -128,7 +128,7 @@ constexpr void rope_rotate(values_type_ values, angles_type_ const &angles, coor
 /** This thread's share of row @p token 's largest magnitude, over its striped channels. */
 template <typename values_type_, typename scalars_type_>
 [[nodiscard]] constexpr f32_t token_largest(values_type_ values, std::size_t token, u32_t thread, u32_t threads,
-                                            scalars_type_ const &scalars) noexcept {
+                                            scalars_type_ const& scalars) noexcept {
     u32_t const width = static_cast<u32_t>(values.extent(1));
     f32_t largest = 0.0f;
     for (u32_t channel = thread; channel < width; channel += threads)
@@ -140,7 +140,7 @@ template <typename values_type_, typename scalars_type_>
  *  and return that scale. */
 template <typename values_type_, typename shadow_type_, typename scalars_type_>
 constexpr f32_t quantize_token(values_type_ values, shadow_type_ shadow, std::size_t token, f32_t largest, u32_t thread,
-                               u32_t threads, scalars_type_ const &scalars) noexcept {
+                               u32_t threads, scalars_type_ const& scalars) noexcept {
     u32_t const width = static_cast<u32_t>(values.extent(1));
     f32_t const scale = std::fmax(largest / e4m3_range_k, e4m3_descale_floor_k);
     f32_t const inverse = 1.0f / scale;
@@ -155,7 +155,7 @@ template <typename products_type_, typename scales_type_, typename residual_type
           typename scalars_type_>
 constexpr void rescale_tokens_cells(products_type_ products, scales_type_ token_scales, f32_t descale,
                                     residual_type_ residual, values_type_ values, std::size_t first, std::size_t stride,
-                                    scalars_type_ const &scalars) noexcept {
+                                    scalars_type_ const& scalars) noexcept {
     u32_t const width = static_cast<u32_t>(values.extent(1));
     std::size_t const total = values.extent(0) * width;
     for (std::size_t cell = first; cell < total; cell += stride) {

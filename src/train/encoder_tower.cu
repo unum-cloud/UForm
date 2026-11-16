@@ -227,10 +227,10 @@ static __global__ void tower_audio_segment_kernel_(nk::tensor_view<f32_t, 2> con
  *  raw, never L2-normalized here, since the loss owns the cosine geometry. Each product lands
  *  in the Float32 @p products and narrows into its BFloat16 destination. Shared verbatim by
  *  both towers' forwards. */
-static expected_t head_forward_(bf16r2_view_t normalized, b8r1_tensor_arena_t const &packed_fc1,
-                                b8r1_tensor_arena_t const &packed_fc2, bf16r2_span_t hidden_state,
+static expected_t head_forward_(bf16r2_view_t normalized, b8r1_tensor_arena_t const& packed_fc1,
+                                b8r1_tensor_arena_t const& packed_fc2, bf16r2_span_t hidden_state,
                                 bf16r2_span_t activated, f32r2_span_t products, bf16r2_span_t vertices,
-                                gpu_numerics_t const &numerics, gpu_stream_t &stream) noexcept {
+                                gpu_numerics_t const& numerics, gpu_stream_t& stream) noexcept {
     std::size_t const cells = normalized.extent(0) * normalized.extent(1);
     dim3 const cell_grid {static_cast<u32_t>(divide_round_up(cells, kernel_block_size_default_k)), 1u, 1u};
     expected_t staged = multiply_bf16(normalized, packed_fc1.view(), products, numerics, stream);
@@ -253,9 +253,9 @@ static expected_t head_forward_(bf16r2_view_t normalized, b8r1_tensor_arena_t co
  *  @b [channels] arenas off @p f32_alloc — the shared upload @ref encoder_tower_bf16_t::make runs
  *  for image and video (audio frames are raw waveform with no per-channel statistics, so they
  *  never call this). */
-static expected_t upload_pixel_constants(f32r1_tensor_arena_t &mean_arena, f32r1_tensor_arena_t &inverse_std_arena,
-                                         f32_t const *mean_source, f32_t const *std_source, u32_t channels,
-                                         gpu_arena_alloc<f32_t> &f32_alloc, gpu_arena_t &arena) noexcept {
+static expected_t upload_pixel_constants(f32r1_tensor_arena_t& mean_arena, f32r1_tensor_arena_t& inverse_std_arena,
+                                         f32_t const* mean_source, f32_t const* std_source, u32_t channels,
+                                         gpu_arena_alloc<f32_t>& f32_alloc, gpu_arena_t& arena) noexcept {
     mean_arena = f32r1_tensor_arena_t::uninitialized({channels}, f32_alloc).value;
     inverse_std_arena = f32r1_tensor_arena_t::uninitialized({channels}, f32_alloc).value;
     if (!mean_arena || !inverse_std_arena)
@@ -289,7 +289,7 @@ static expected_t upload_pixel_constants(f32r1_tensor_arena_t &mean_arena, f32r1
 static expected_t stage_pixel_patches(nk::tensor_view<pixel_t, 3> raw, modality_t target, f32r1_view_t mean,
                                       f32r1_view_t inverse_std, u32r1_view_t offsets, u32r1_view_t lengths,
                                       modality_view_t modality, dim3 segment_grid, bf16r2_span_t patches,
-                                      gpu_stream_t &stream) noexcept {
+                                      gpu_stream_t& stream) noexcept {
     std::size_t const rows = patches.extent(0);
     u32_t const spatial = static_cast<u32_t>(raw.extent(1));
     u32_t const channels = static_cast<u32_t>(raw.extent(2));
@@ -309,13 +309,13 @@ static expected_t stage_pixel_patches(nk::tensor_view<pixel_t, 3> raw, modality_
  *  other cell untouched — no scatter, no atomics. A modality is present iff its projection is
  *  packed. Shared verbatim by both towers' forwards; the text entry (a kernel) is the caller's.
  */
-static expected_t project_media_entries(multimodal_batch_on_gpu_t const &batch, bf16r2_tensor_arena_t &patch_scratch,
-                                        f32r1_tensor_arena_t &image_mean, f32r1_tensor_arena_t &image_inverse_std,
-                                        b8r1_tensor_arena_t &packed_image, f32r1_tensor_arena_t &video_mean,
-                                        f32r1_tensor_arena_t &video_inverse_std, b8r1_tensor_arena_t &packed_video,
-                                        b8r1_tensor_arena_t &packed_audio, f32r2_span_t entry_state,
-                                        f32r1_span_t products, gpu_numerics_t const &numerics,
-                                        gpu_stream_t &stream) noexcept {
+static expected_t project_media_entries(multimodal_batch_on_gpu_t const& batch, bf16r2_tensor_arena_t& patch_scratch,
+                                        f32r1_tensor_arena_t& image_mean, f32r1_tensor_arena_t& image_inverse_std,
+                                        b8r1_tensor_arena_t& packed_image, f32r1_tensor_arena_t& video_mean,
+                                        f32r1_tensor_arena_t& video_inverse_std, b8r1_tensor_arena_t& packed_video,
+                                        b8r1_tensor_arena_t& packed_audio, f32r2_span_t entry_state,
+                                        f32r1_span_t products, gpu_numerics_t const& numerics,
+                                        gpu_stream_t& stream) noexcept {
     std::size_t const columns = batch.tokens.extent(1);
     std::size_t const live_tokens = static_cast<std::size_t>(batch.tokens.extent(0)) * columns;
     std::size_t const hidden = entry_state.extent(1);
@@ -326,7 +326,7 @@ static expected_t project_media_entries(multimodal_batch_on_gpu_t const &batch, 
     modality_view_t const segment_modality = batch.segment_modality.view();
     f32r2_span_t const projected {products.data(), live_tokens, hidden};
 
-    auto add_projection = [&](bf16r2_view_t patches, b8r1_tensor_arena_t const &packed) noexcept -> expected_t {
+    auto add_projection = [&](bf16r2_view_t patches, b8r1_tensor_arena_t const& packed) noexcept -> expected_t {
         expected_t staged = multiply_bf16(patches, packed.view(), projected, numerics, stream);
         if (staged)
             staged = numkong_result(numerics.sum_f32(entry_state.data(), projected.data(), live_tokens * hidden,
@@ -337,7 +337,7 @@ static expected_t project_media_entries(multimodal_batch_on_gpu_t const &batch, 
     // One pixel modality's forward: zero the scratch, normalize its cells in place,
     // add the projection.
     auto project_pixels = [&](nk::tensor_view<pixel_t, 3> raw, modality_t target, f32r1_view_t mean,
-                              f32r1_view_t inverse_std, b8r1_tensor_arena_t const &packed) noexcept -> expected_t {
+                              f32r1_view_t inverse_std, b8r1_tensor_arena_t const& packed) noexcept -> expected_t {
         u32_t const scalars = static_cast<u32_t>(raw.extent(1)) * static_cast<u32_t>(raw.extent(2));
         bf16r2_span_t const patches {patch_scratch.data(), live_tokens, scalars};
         expected_t staged = stage_pixel_patches(raw, target, mean, inverse_std, segment_offsets, segment_lengths,
@@ -380,15 +380,15 @@ static expected_t project_media_entries(multimodal_batch_on_gpu_t const &batch, 
  *  then take the weight gradient through the blocks' shared @p scratch — the backward twin of
  *  @ref project_media_entries . A modality is present iff its gradient is allocated.
  */
-static expected_t project_media_weight_grads(multimodal_batch_on_gpu_t const &batch,
-                                             bf16r2_tensor_arena_t &patch_scratch, bf16r2_view_t entry_grad,
-                                             f32r1_tensor_arena_t &image_mean, f32r1_tensor_arena_t &image_inverse_std,
-                                             bf16r2_tensor_arena_t &image_projection_grad,
-                                             f32r1_tensor_arena_t &video_mean, f32r1_tensor_arena_t &video_inverse_std,
-                                             bf16r2_tensor_arena_t &video_projection_grad,
-                                             bf16r2_tensor_arena_t &audio_projection_grad,
-                                             transformer_scratch_t &scratch, gpu_numerics_t const &numerics,
-                                             gpu_stream_t &stream) noexcept {
+static expected_t project_media_weight_grads(multimodal_batch_on_gpu_t const& batch,
+                                             bf16r2_tensor_arena_t& patch_scratch, bf16r2_view_t entry_grad,
+                                             f32r1_tensor_arena_t& image_mean, f32r1_tensor_arena_t& image_inverse_std,
+                                             bf16r2_tensor_arena_t& image_projection_grad,
+                                             f32r1_tensor_arena_t& video_mean, f32r1_tensor_arena_t& video_inverse_std,
+                                             bf16r2_tensor_arena_t& video_projection_grad,
+                                             bf16r2_tensor_arena_t& audio_projection_grad,
+                                             transformer_scratch_t& scratch, gpu_numerics_t const& numerics,
+                                             gpu_stream_t& stream) noexcept {
     std::size_t const columns = batch.tokens.extent(1);
     std::size_t const live_tokens = static_cast<std::size_t>(batch.tokens.extent(0)) * columns;
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
@@ -443,14 +443,14 @@ static expected_t project_media_weight_grads(multimodal_batch_on_gpu_t const &ba
     return staged;
 }
 
-expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, encoder_tower_config_t config,
+expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t& arena, encoder_tower_config_t config,
                                                           multimodal_batch_shape_t shape,
-                                                          gpu_numerics_t const &numerics) noexcept {
+                                                          gpu_numerics_t const& numerics) noexcept {
     using result_t = expected<encoder_tower_bf16_t>;
     if (config.depth == 0) return result_t::fail(status_t::invalid_argument_k, "a tower needs at least one block");
     if (config.vocabulary == 0)
-        return result_t::fail(status_t::invalid_argument_k,
-                              "the token entry is the only entry wired so far; " "vocabulary must be non-zero");
+        return result_t::fail(status_t::invalid_argument_k, "the token entry is the only entry wired so far; " //
+                                                            "vocabulary must be non-zero");
     if (config.rope_max_positions == 0)
         return result_t::fail(status_t::invalid_argument_k, "rope_max_positions must cover the longest sequence");
 
@@ -607,7 +607,7 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, en
                                   arena.used());
     }
 
-    auto allocate_pack = [&](b8r1_tensor_arena_t &packed, std::size_t depth) noexcept -> expected_t {
+    auto allocate_pack = [&](b8r1_tensor_arena_t& packed, std::size_t depth) noexcept -> expected_t {
         expected<b8r1_tensor_arena_t> allocated = allocate_pack_bf16(hidden, depth, tower.numerics_, arena);
         if (!allocated) return expected_t::fail(std::move(allocated));
         packed = std::move(allocated.value_);
@@ -651,8 +651,8 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, en
     return result_t {std::move(tower)};
 }
 
-expected<tower_pool_t> tower_pool_t::make(gpu_arena_t &arena, transformer_block_config_t const &block,
-                                          gpu_numerics_t const &numerics) noexcept {
+expected<tower_pool_t> tower_pool_t::make(gpu_arena_t& arena, transformer_block_config_t const& block,
+                                          gpu_numerics_t const& numerics) noexcept {
     using result_t = expected<tower_pool_t>;
     tower_pool_t pool;
     pool.numerics_ = numerics;
@@ -691,19 +691,20 @@ expected<tower_pool_t> tower_pool_t::make(gpu_arena_t &arena, transformer_block_
 }
 
 expected_t tower_pool_t::forward(bf16r1_view_t query, bf16r2_view_t states, u32r1_view_t segment_offsets,
-                                 u32r1_view_t segment_lengths, bf16r2_span_t pooled, gpu_stream_t &stream) noexcept {
+                                 u32r1_view_t segment_lengths, bf16r2_span_t pooled, gpu_stream_t& stream) noexcept {
     std::size_t const segments = pooled_.extent(0), hidden = pooled_.extent(1);
     std::size_t const heads = hidden / transformer_head_dim_k;
-    nk_bf16_t const *const states_data = numkong_scalars(states.data());
+    nk_bf16_t const* const states_data = nk::as_values<nk_bf16_t>(nk::as_bytes(states)).data();
     nk_status_t status = numerics_.attention_pack_bf16(heads, transformer_head_dim_k, segment_offsets.data(),
                                                        segment_lengths.data(), segments, states_data,
                                                        hidden * sizeof(bf16_t), states_data, hidden * sizeof(bf16_t),
                                                        packed_.data(), 0, segments * heads, stream.numkong());
     if (status == nk_success_k)
-        status = numerics_.attend_bf16(
-            heads, heads, transformer_head_dim_k, query_offsets_.data(), segments, transformer_attention_scale(),
-            NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, numkong_scalars(query.data()), 0, packed_.data(), pooled_.data(),
-            hidden * sizeof(f32_t), log_sum_exp_.data(), 0, NUMKONG_SIZE_MAX, NUMKONG_NULL, 0, stream.numkong());
+        status = numerics_.attend_bf16(heads, heads, transformer_head_dim_k, query_offsets_.data(), segments,
+                                       transformer_attention_scale(), NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX,
+                                       nk::as_values<nk_bf16_t>(nk::as_bytes(query)).data(), 0, packed_.data(),
+                                       pooled_.data(), hidden * sizeof(f32_t), log_sum_exp_.data(), 0, NUMKONG_SIZE_MAX,
+                                       NUMKONG_NULL, 0, stream.numkong());
     if (status == nk_success_k)
         status = numerics_.cast(pooled_.data(), nk_f32_k, pooled.data(), nk_bf16_k, segments * hidden,
                                 stream.numkong());
@@ -713,13 +714,13 @@ expected_t tower_pool_t::forward(bf16r1_view_t query, bf16r2_view_t states, u32r
 }
 
 expected_t tower_pool_t::backward(bf16r1_view_t query, bf16r2_view_t pooled_grad, f32r2_span_t key_grad,
-                                  f32r2_span_t value_grad, bf16r1_span_t query_grad, gpu_stream_t &stream) noexcept {
+                                  f32r2_span_t value_grad, bf16r1_span_t query_grad, gpu_stream_t& stream) noexcept {
     std::size_t const segments = pooled_.extent(0), hidden = pooled_.extent(1);
     std::size_t const heads = hidden / transformer_head_dim_k;
     std::size_t const tokens = key_grad.extent(0);
     // NumKong never writes rows past a segment's live keys, nor the query rows of
     // key-less PAD segments.
-    for (f32_t *const gradient : {key_grad.data(), value_grad.data()})
+    for (f32_t* const gradient : {key_grad.data(), value_grad.data()})
         if (expected_t zeroed = zero_async(f32r1_span_t {gradient, tokens * hidden}, stream); !zeroed) return zeroed;
     if (expected_t zeroed = zero_async(f32r1_span_t {query_partials_.data(), segments * hidden}, stream); !zeroed)
         return zeroed;
@@ -728,8 +729,8 @@ expected_t tower_pool_t::backward(bf16r1_view_t query, bf16r2_view_t pooled_grad
     if (status == nk_success_k)
         status = numerics_.attend_gradients_bf16(
             heads, heads, transformer_head_dim_k, query_offsets_.data(), segments, transformer_attention_scale(),
-            NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, numkong_scalars(query.data()), 0, packed_.data(), pooled_.data(),
-            pooled_grad_.data(), hidden * sizeof(f32_t), log_sum_exp_.data(), query_partials_.data(),
+            NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, nk::as_values<nk_bf16_t>(nk::as_bytes(query)).data(), 0, packed_.data(),
+            pooled_.data(), pooled_grad_.data(), hidden * sizeof(f32_t), log_sum_exp_.data(), query_partials_.data(),
             hidden * sizeof(f32_t), key_grad.data(), value_grad.data(), key_grad.stride_bytes(0), 0, NUMKONG_SIZE_MAX,
             NUMKONG_NULL, 0, stream.numkong());
     if (status == nk_success_k)
@@ -744,7 +745,7 @@ expected_t tower_pool_t::backward(bf16r1_view_t query, bf16r2_view_t pooled_grad
 
 /** The rows segment @p segment lends the token head: its live tokens past the prefix, or none when
  *  it plays no late-interaction side. */
-[[nodiscard]] static __device__ inline u32_t tower_token_span_(multimodal_batch_view_t const &batch,
+[[nodiscard]] static __device__ inline u32_t tower_token_span_(multimodal_batch_view_t const& batch,
                                                                u32_t segment) noexcept {
     u32_t const length = batch.segment_lengths[segment], prefix = batch.segment_prefix_length[segment];
     bool const sided = batch.segment_side[segment] != late_interaction_side_t::none_k;
@@ -752,7 +753,7 @@ expected_t tower_pool_t::backward(bf16r1_view_t query, bf16r2_view_t pooled_grad
 }
 
 /** The flat state row compact row @p row of the token head reads, or @c ~0u past the live total. */
-[[nodiscard]] static __device__ inline u32_t tower_token_source_(multimodal_batch_view_t const &batch,
+[[nodiscard]] static __device__ inline u32_t tower_token_source_(multimodal_batch_view_t const& batch,
                                                                  u32r1_view_t token_offsets, u32_t row) noexcept {
     u32_t const segments = static_cast<u32_t>(token_offsets.extent(0) - 1u);
     if (row >= token_offsets[segments]) return ~0u;
@@ -862,8 +863,8 @@ static __global__ void tower_token_normalize_backward_kernel_(f32r2_view_t proje
     }
 }
 
-expected<tower_token_head_t> tower_token_head_t::make(gpu_arena_t &arena, transformer_block_config_t const &block,
-                                                      u32_t width, gpu_numerics_t const &numerics) noexcept {
+expected<tower_token_head_t> tower_token_head_t::make(gpu_arena_t& arena, transformer_block_config_t const& block,
+                                                      u32_t width, gpu_numerics_t const& numerics) noexcept {
     using result_t = expected<tower_token_head_t>;
     if (width == 0 || width % 8u != 0u)
         return result_t::fail(status_t::unsupported_k, "the token width must be a positive multiple of 8 ({})", width);
@@ -900,8 +901,8 @@ expected<tower_token_head_t> tower_token_head_t::make(gpu_arena_t &arena, transf
     return result_t {std::move(head)};
 }
 
-expected_t tower_token_head_t::forward(bf16r2_view_t states, multimodal_batch_view_t const &batch,
-                                       gpu_stream_t &stream) noexcept {
+expected_t tower_token_head_t::forward(bf16r2_view_t states, multimodal_batch_view_t const& batch,
+                                       gpu_stream_t& stream) noexcept {
     std::size_t const tokens = gathered_.extent(0);
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const row_grid {static_cast<u32_t>(tokens), 1u, 1u};
@@ -921,9 +922,9 @@ expected_t tower_token_head_t::forward(bf16r2_view_t states, multimodal_batch_vi
     return staged;
 }
 
-expected_t tower_token_head_t::backward(bf16r2_view_t vectors_grad, multimodal_batch_view_t const &batch,
-                                        f32r2_span_t states_grad, transformer_scratch_t &scratch,
-                                        gpu_stream_t &stream) noexcept {
+expected_t tower_token_head_t::backward(bf16r2_view_t vectors_grad, multimodal_batch_view_t const& batch,
+                                        f32r2_span_t states_grad, transformer_scratch_t& scratch,
+                                        gpu_stream_t& stream) noexcept {
     std::size_t const tokens = gathered_.extent(0), hidden = gathered_.extent(1);
     if (vectors_grad.extent(0) != tokens || vectors_grad.extent(1) != vectors_.extent(1))
         return expected_t::fail(status_t::unsupported_k, "token vectors_grad must be [{},{}] (got [{},{}])", tokens,
@@ -963,7 +964,7 @@ expected_t tower_token_head_t::backward(bf16r2_view_t vectors_grad, multimodal_b
     return staged;
 }
 
-expected_t tower_token_head_t::fill(st::basic_vector<differentiable_weights_t> &weights) noexcept {
+expected_t tower_token_head_t::fill(st::basic_vector<differentiable_weights_t>& weights) noexcept {
     std::size_t const hidden = norm_scale_.extent(0);
     differentiable_weights_t norm {{},
                                    bf16r2_span_t {norm_scale_.data(), 1u, hidden},
@@ -976,17 +977,17 @@ expected_t tower_token_head_t::fill(st::basic_vector<differentiable_weights_t> &
     return {};
 }
 
-expected_t tower_token_head_t::pack_weights(bf16r1_span_t transposed, gpu_stream_t &stream) noexcept {
+expected_t tower_token_head_t::pack_weights(bf16r1_span_t transposed, gpu_stream_t& stream) noexcept {
     return pack_weight_bf16(projection_.view(), transposed, packed_projection_.span(),
                             packed_projection_transposed_.span(), numerics_, stream);
 }
 
-expected<tower_token_head_t> tower_token_head_t::snapshot(gpu_arena_t &arena, transformer_block_config_t const &block,
-                                                          gpu_stream_t &stream) const noexcept {
+expected<tower_token_head_t> tower_token_head_t::snapshot(gpu_arena_t& arena, transformer_block_config_t const& block,
+                                                          gpu_stream_t& stream) const noexcept {
     using result_t = expected<tower_token_head_t>;
     expected<tower_token_head_t> made = make(arena, block, static_cast<u32_t>(projection_.extent(0)), numerics_);
     if (!made) return made;
-    tower_token_head_t &copy = made.value_;
+    tower_token_head_t& copy = made.value_;
     expected_t copied = copy_device_to_device(norm_scale_.view(), copy.norm_scale_.span(), stream);
     if (copied)
         copied = copy_device_to_device(projection_.view().flatten<1>(), copy.projection_.span().flatten<1>(), stream);
@@ -995,8 +996,8 @@ expected<tower_token_head_t> tower_token_head_t::snapshot(gpu_arena_t &arena, tr
     return made;
 }
 
-expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch, bf16r2_span_t vertices,
-                                         gpu_stream_t &stream) noexcept {
+expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const& batch, bf16r2_span_t vertices,
+                                         gpu_stream_t& stream) noexcept {
     u32_t const hidden = config_.block.hidden;
     std::size_t const columns = batch.tokens.extent(1);
     std::size_t const live_tokens = static_cast<std::size_t>(batch.tokens.extent(0)) * columns;
@@ -1064,7 +1065,7 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
     // ping-ponging the two buffers, and the last output is a stash the backward reads.
     f32r2_view_t layer_input = activations_b_.view();
     for (u32_t layer_index = 0; layer_index != config_.depth; ++layer_index) {
-        f32r2_tensor_arena_t &layer_output = layer_index % 2 == 0 ? activations_a_ : activations_b_;
+        f32r2_tensor_arena_t& layer_output = layer_index % 2 == 0 ? activations_a_ : activations_b_;
         staged = blocks_[layer_index].forward(layer_input, layer_output.span(), segment_offsets, segment_lengths,
                                               angles_.view(), coords_.view(), stream);
         if (!staged) return staged;
@@ -1078,8 +1079,9 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
                                         hidden, stream.numkong());
     if (status == nk_success_k)
         status = numerics_.rmscast_bf16(
-            stack_output_.data(), widened_final_norm_scale_.data(), numkong_scalars(normalized_.data()), live_tokens, 1,
-            hidden, hidden * sizeof(f32_t), hidden * sizeof(bf16_t), config_.block.rms_eps, stream.numkong());
+            stack_output_.data(), widened_final_norm_scale_.data(),
+            nk::as_writable_values<nk_bf16_t>(nk::as_writable_bytes(normalized_.span())).data(), live_tokens, 1, hidden,
+            hidden * sizeof(f32_t), hidden * sizeof(bf16_t), config_.block.rms_eps, stream.numkong());
     if (status != nk_success_k)
         return expected_t::fail(status_t::device_error_k, "final norm failed: {}", nk_status_name(status));
     if (config_.token_width != 0)
@@ -1109,9 +1111,9 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
                          numerics_, stream);
 }
 
-expected_t encoder_tower_bf16_t::patchify_media_targets(multimodal_batch_on_gpu_t const &batch,
+expected_t encoder_tower_bf16_t::patchify_media_targets(multimodal_batch_on_gpu_t const& batch,
                                                         bf16r2_span_t image_patches, bf16r2_span_t video_patches,
-                                                        gpu_stream_t &stream) noexcept {
+                                                        gpu_stream_t& stream) noexcept {
     // The masked-autoencoder reconstruction target: the same per-channel-normalized patch vectors
     // the entry stages before its projection, but written into the caller's clean-batch spans with
     // no projection and no forward — one shared stage per present pixel modality, non-modality and
@@ -1148,7 +1150,7 @@ expected_t encoder_tower_bf16_t::patchify_media_targets(multimodal_batch_on_gpu_
 }
 
 expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_view_t hidden_grad,
-                                          multimodal_batch_on_gpu_t const &batch, gpu_stream_t &stream,
+                                          multimodal_batch_on_gpu_t const& batch, gpu_stream_t& stream,
                                           bf16r2_view_t token_vectors_grad) noexcept {
     u32_t const hidden = config_.block.hidden;
     std::size_t const columns = batch.tokens.extent(1);
@@ -1195,7 +1197,7 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
         std::size_t const head_cells = segments * hidden;
         dim3 const head_cell_grid {static_cast<u32_t>(divide_round_up(head_cells, kernel_block_size_default_k)), 1u,
                                    1u};
-        transformer_scratch_t &scratch = *scratch_;
+        transformer_scratch_t& scratch = *scratch_;
         f32r2_span_t const head_products {scratch.products.data(), segments, hidden};
         auto weight_gradient = [&](bf16r2_view_t product_grad, bf16r2_view_t product_input,
                                    bf16r2_span_t weight_grad) noexcept {
@@ -1204,7 +1206,7 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
                                         scratch.weight_grad_products.span(), scratch.weight_gradient_workspace.span(),
                                         numerics_, stream);
         };
-        auto data_gradient = [&](bf16r2_view_t product_grad, b8r1_tensor_arena_t const &packed_transposed) noexcept {
+        auto data_gradient = [&](bf16r2_view_t product_grad, b8r1_tensor_arena_t const& packed_transposed) noexcept {
             expected_t multiplied = multiply_bf16(product_grad, packed_transposed.view(), head_products, numerics_,
                                                   stream);
             if (multiplied)
@@ -1243,7 +1245,7 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
     // capacity than the live extent.
     if (masked_present) {
         bf16r2_view_t const masked_grad = hidden_grad[nk::range(0, live_tokens), nk::slice];
-        f32_t *const widened = pooled_present ? token_grad_b_.data() : token_grad_a_.data();
+        f32_t* const widened = pooled_present ? token_grad_b_.data() : token_grad_a_.data();
         nk_status_t status = numerics_.cast(masked_grad.data(), nk_bf16_k, widened, nk_f32_k, live_tokens * hidden,
                                             stream.numkong());
         if (status == nk_success_k && pooled_present)
@@ -1271,11 +1273,11 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
 
     // Blocks in reverse; the flowing gradient ping-pongs the two token-gradient buffers. `coords_`
     // still holds this step's coordinates from the paired forward.
-    f32r2_tensor_arena_t *grad_in = &token_grad_b_;
-    f32r2_tensor_arena_t *grad_out = &token_grad_a_;
+    f32r2_tensor_arena_t* grad_in = &token_grad_b_;
+    f32r2_tensor_arena_t* grad_out = &token_grad_a_;
     f32r2_view_t flowing = grad_in->view();
     for (u32_t layer_index = config_.depth; layer_index != 0; --layer_index) {
-        transformer_block_bf16_t &block = blocks_[layer_index - 1];
+        transformer_block_bf16_t& block = blocks_[layer_index - 1];
         // The top block's stashes are still its forward's; the others replay from their input.
         if (layer_index != config_.depth)
             staged = block.forward(block.input(), activations_a_.span(), segment_offsets, segment_lengths,
@@ -1339,8 +1341,8 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
                                       video_projection_grad_, audio_projection_grad_, *scratch_, numerics_, stream);
 }
 
-expected_t encoder_tower_bf16_t::pack_weights(gpu_stream_t &stream) noexcept {
-    for (transformer_block_bf16_t &layer : blocks_)
+expected_t encoder_tower_bf16_t::pack_weights(gpu_stream_t& stream) noexcept {
+    for (transformer_block_bf16_t& layer : blocks_)
         if (expected_t packed = layer.pack_weights(stream); !packed) return packed;
     bf16r1_span_t const transposed = scratch_->transposed_weight.span();
     expected_t packed = pack_weight_bf16(head_fc1_.view(), transposed, packed_head_fc1_.span(),
@@ -1348,8 +1350,8 @@ expected_t encoder_tower_bf16_t::pack_weights(gpu_stream_t &stream) noexcept {
     if (packed)
         packed = pack_weight_bf16(head_fc2_.view(), transposed, packed_head_fc2_.span(),
                                   packed_head_fc2_transposed_.span(), numerics_, stream);
-    bf16r2_tensor_arena_t const *const projections[] = {&image_projection_, &video_projection_, &audio_projection_};
-    b8r1_tensor_arena_t *const packs[] = {&packed_image_projection_, &packed_video_projection_,
+    bf16r2_tensor_arena_t const* const projections[] = {&image_projection_, &video_projection_, &audio_projection_};
+    b8r1_tensor_arena_t* const packs[] = {&packed_image_projection_, &packed_video_projection_,
                                           &packed_audio_projection_};
     for (std::size_t modality = 0; packed && modality != 3; ++modality)
         if (projections[modality]->data() != nullptr)
@@ -1358,7 +1360,7 @@ expected_t encoder_tower_bf16_t::pack_weights(gpu_stream_t &stream) noexcept {
     return packed;
 }
 
-expected_t encoder_tower_bf16_t::fill(st::basic_vector<differentiable_weights_t> &weights) noexcept {
+expected_t encoder_tower_bf16_t::fill(st::basic_vector<differentiable_weights_t>& weights) noexcept {
     u32_t const hidden = config_.block.hidden;
     u32_t const ffn = config_.block.ffn_expansion * hidden;
     // Every weight joins under the checkpoint name the tower spells for it — the composition root
@@ -1387,7 +1389,7 @@ expected_t encoder_tower_bf16_t::fill(st::basic_vector<differentiable_weights_t>
         pushed = push("audio_projection", audio_projection_.span(), audio_projection_grad_.view());
     sz::string_t name_text;
     for (u32_t layer_index = 0; pushed == status_t::success_k && layer_index != config_.depth; ++layer_index) {
-        transformer_block_bf16_t &layer = blocks_[layer_index];
+        transformer_block_bf16_t& layer = blocks_[layer_index];
         struct block_part_t {
             sz::string_view_t suffix;
             bf16r1_span_t weight;
@@ -1402,7 +1404,7 @@ expected_t encoder_tower_bf16_t::fill(st::basic_vector<differentiable_weights_t>
             {"pre_norm", layer.pre_norm_scale(), layer.pre_norm_scale_grad(), 1u, hidden},
             {"post_norm", layer.post_norm_scale(), layer.post_norm_scale_grad(), 1u, hidden},
         };
-        for (block_part_t const &part : parts) {
+        for (block_part_t const& part : parts) {
             name_text.clear();
             if (!format_into(name_text, "blocks.{}.{}", layer_index, part.suffix))
                 return expected_t::fail(status_t::bad_alloc_k, "weight name format failed");
@@ -1426,8 +1428,8 @@ expected_t encoder_tower_bf16_t::fill(st::basic_vector<differentiable_weights_t>
 /** Snapshot one BFloat16 matrix into a fresh arena tensor — the twin's tail tiers (entries,
  *  norms, pool, head) stay BFloat16, so their quantization is a plain device-to-device copy.
  *  @p name tags the failure diagnostic with the weight's role. */
-[[nodiscard]] static expected<bf16r2_tensor_arena_t> snapshot_weight_(bf16r2_view_t source, gpu_arena_t &arena,
-                                                                      gpu_stream_t &stream,
+[[nodiscard]] static expected<bf16r2_tensor_arena_t> snapshot_weight_(bf16r2_view_t source, gpu_arena_t& arena,
+                                                                      gpu_stream_t& stream,
                                                                       sz::string_view_t name) noexcept {
     using result_t = expected<bf16r2_tensor_arena_t>;
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
@@ -1443,8 +1445,8 @@ expected_t encoder_tower_bf16_t::fill(st::basic_vector<differentiable_weights_t>
 }
 
 /** The rank-1 overload of @ref snapshot_weight_ for the norm scales and the pool query. */
-[[nodiscard]] static expected<bf16r1_tensor_arena_t> snapshot_weight_(bf16r1_view_t source, gpu_arena_t &arena,
-                                                                      gpu_stream_t &stream,
+[[nodiscard]] static expected<bf16r1_tensor_arena_t> snapshot_weight_(bf16r1_view_t source, gpu_arena_t& arena,
+                                                                      gpu_stream_t& stream,
                                                                       sz::string_view_t name) noexcept {
     using result_t = expected<bf16r1_tensor_arena_t>;
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
@@ -1455,8 +1457,8 @@ expected_t encoder_tower_bf16_t::fill(st::basic_vector<differentiable_weights_t>
     return result_t {std::move(copy)};
 }
 
-expected<encoder_tower_e4m3_t> encoder_tower_bf16_t::quantize_weights(gpu_arena_t &arena,
-                                                                      gpu_stream_t &stream) noexcept {
+expected<encoder_tower_e4m3_t> encoder_tower_bf16_t::quantize_weights(gpu_arena_t& arena,
+                                                                      gpu_stream_t& stream) noexcept {
     using result_t = expected<encoder_tower_e4m3_t>;
     encoder_tower_e4m3_t twin;
     twin.config_ = config_;
@@ -1496,7 +1498,7 @@ expected<encoder_tower_e4m3_t> encoder_tower_bf16_t::quantize_weights(gpu_arena_
 
     // Every product's B operand packs once here, since the twin's weights never change: the two head projections,
     // then — per present media modality — the projection snapshot, in modality order.
-    auto snapshot_and_pack = [&](bf16r2_view_t weight, bf16r2_tensor_arena_t &copy, b8r1_tensor_arena_t &packed,
+    auto snapshot_and_pack = [&](bf16r2_view_t weight, bf16r2_tensor_arena_t& copy, b8r1_tensor_arena_t& packed,
                                  sz::string_view_t name) noexcept -> expected_t {
         expected<bf16r2_tensor_arena_t> snapshot = snapshot_weight_(weight, arena, stream, name);
         if (!snapshot) return expected_t::fail(std::move(snapshot));
@@ -1578,8 +1580,8 @@ expected<encoder_tower_e4m3_t> encoder_tower_bf16_t::quantize_weights(gpu_arena_
     return result_t {std::move(twin)};
 }
 
-expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const &batch, bf16r2_span_t vertices,
-                                         gpu_stream_t &stream) noexcept {
+expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const& batch, bf16r2_span_t vertices,
+                                         gpu_stream_t& stream) noexcept {
     u32_t const hidden = config_.block.hidden;
     std::size_t const columns = batch.tokens.extent(1);
     std::size_t const live_tokens = static_cast<std::size_t>(batch.tokens.extent(0)) * columns;
@@ -1643,7 +1645,7 @@ expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const &batch,
     // The E4M3 block stack: layer n reads layer n-1's output, ping-ponging two dedicated buffers.
     bf16r2_view_t layer_input = entry_output_.view();
     for (u32_t layer_index = 0; layer_index != config_.depth; ++layer_index) {
-        bf16r2_tensor_arena_t &layer_output = layer_index % 2 == 0 ? activations_a_ : activations_b_;
+        bf16r2_tensor_arena_t& layer_output = layer_index % 2 == 0 ? activations_a_ : activations_b_;
         staged = blocks_[layer_index].forward(layer_input, layer_output.span(), segment_offsets, segment_lengths,
                                               angles_.view(), coords_.view(), stream);
         if (!staged) return staged;

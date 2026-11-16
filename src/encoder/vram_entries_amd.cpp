@@ -50,7 +50,7 @@ enum class kernel_t : std::size_t {
     count_k,
 };
 
-static char const *const kernel_names_k[] = {
+static char const* const kernel_names_k[] = {
     "uform_fill_layout_kernel",          "uform_fill_coords_kernel",         "uform_gather_bytes_kernel",
     "uform_stage_patches_kernel",        "uform_stage_frames_kernel",        "uform_mrope_kernel",
     "uform_quantize_bf16_tokens_kernel", "uform_quantize_f32_tokens_kernel", "uform_rescale_tokens_kernel",
@@ -77,20 +77,20 @@ struct device_module_t {
 static device_module_t device_modules_[max_gpus_per_host_k];
 
 /** The runtime every entry calls through, opened at the first entry; empty without one. */
-[[nodiscard]] static hip_api_t const &runtime_() noexcept {
+[[nodiscard]] static hip_api_t const& runtime_() noexcept {
     static hip_api_t const runtime = hip_api_t::load();
     return runtime;
 }
 
 [[nodiscard]] static hip_stream_handle_t native_(nk_stream_t stream) noexcept {
-    return static_cast<hip_stream_handle_t>(static_cast<void *>(stream));
+    return static_cast<hip_stream_handle_t>(static_cast<void*>(stream)); // vendor-boundary: an opaque stream handle
 }
 
 /** Run @p enqueue on the device of @p stream , the current one for a null stream, and report its
  *  result. */
 template <typename enqueue_type_>
-[[nodiscard]] static nk_status_t on_device_(nk_stream_t stream, enqueue_type_ const &enqueue) noexcept {
-    hip_api_t const &runtime = runtime_();
+[[nodiscard]] static nk_status_t on_device_(nk_stream_t stream, enqueue_type_ const& enqueue) noexcept {
+    hip_api_t const& runtime = runtime_();
     int caller = 0, device = 0;
     if (!runtime || runtime.get_device(&caller) != uu::hip_success_k) return nk_device_code_mismatch_k;
     device = caller;
@@ -104,10 +104,10 @@ template <typename enqueue_type_>
 
 /** The function of @p kernel on @p device , the current one, loading the bundle there on first
  *  use. */
-[[nodiscard]] static hip_result_t function_of_(hip_api_t const &runtime, kernel_t kernel, int device,
-                                               hip_function_handle_t &function) noexcept {
+[[nodiscard]] static hip_result_t function_of_(hip_api_t const& runtime, kernel_t kernel, int device,
+                                               hip_function_handle_t& function) noexcept {
     if (device < 0 || std::size_t(device) >= max_gpus_per_host_k) return uu::hip_error_invalid_device_k;
-    device_module_t &module = device_modules_[device];
+    device_module_t& module = device_modules_[device];
     fu::standard_atomic_ref<load_stage_t> const stage_ref {module.stage};
     load_stage_t stage = load_stage_t::unloaded_k;
     if (stage_ref.compare_exchange_strong(stage, load_stage_t::loading_k, std::memory_order_acquire)) {
@@ -134,8 +134,8 @@ template <typename enqueue_type_>
 template <typename... argument_types_>
 [[nodiscard]] static nk_status_t launch_(kernel_t kernel, unsigned blocks, unsigned threads, nk_stream_t stream,
                                          argument_types_... arguments) noexcept {
-    void *addresses[] = {static_cast<void *>(&arguments)...};
-    return on_device_(stream, [&](hip_api_t const &runtime, hip_stream_handle_t native, int device) {
+    void* addresses[] = {static_cast<void*>(&arguments)...}; // vendor-boundary: the launch takes argument addresses
+    return on_device_(stream, [&](hip_api_t const& runtime, hip_stream_handle_t native, int device) {
         hip_function_handle_t function = nullptr;
         if (hip_result_t const result = function_of_(runtime, kernel, device, function); result != uu::hip_success_k)
             return result;
@@ -150,8 +150,8 @@ template <typename... argument_types_>
 }
 
 nk_status_t ue::vram_amd_entries_kit_t::describe(std::size_t vendor_ordinal,
-                                                 device_description_t &description) noexcept {
-    hip_api_t const &runtime = runtime_();
+                                                 device_description_t& description) noexcept {
+    hip_api_t const& runtime = runtime_();
     int const device = static_cast<int>(vendor_ordinal);
     int compute_units = 0, architecture_major = 0, architecture_minor = 0;
     std::size_t memory_bytes = 0;
@@ -172,13 +172,13 @@ nk_status_t ue::vram_amd_entries_kit_t::describe(std::size_t vendor_ordinal,
 }
 
 nk_status_t ue::vram_amd_entries_kit_t::copy(bytes_span_t target, bytes_view_t source, nk_stream_t stream) noexcept {
-    return on_device_(stream, [&](hip_api_t const &runtime, hip_stream_handle_t native, int) {
+    return on_device_(stream, [&](hip_api_t const& runtime, hip_stream_handle_t native, int) {
         return runtime.copy_async(target.data(), source.data(), source.size(), uu::hip_copy_default_k, native);
     });
 }
 
 nk_status_t ue::vram_amd_entries_kit_t::zero(bytes_span_t target, nk_stream_t stream) noexcept {
-    return on_device_(stream, [&](hip_api_t const &runtime, hip_stream_handle_t native, int) {
+    return on_device_(stream, [&](hip_api_t const& runtime, hip_stream_handle_t native, int) {
         return runtime.fill_async(target.data(), 0, target.size(), native);
     });
 }

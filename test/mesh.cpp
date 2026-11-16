@@ -83,8 +83,8 @@ static sz::string_t manifest_payload(sz::string_view_t job, u32_t multimem, u32_
 
 /** Write @p content into @p path — one simulated peer's exchange file, planted before the bootstrap
  *  under test reads it. Uses stdio, never a `std::*stream`. */
-static void plant(fs::path const &path, sz::string_view_t content) {
-    std::FILE *file = std::fopen(path.c_str(), "wb");
+static void plant(fs::path const& path, sz::string_view_t content) {
+    std::FILE* file = std::fopen(path.c_str(), "wb");
     if (file == nullptr) return;
     (void)std::fwrite(content.data(), 1, content.size(), file);
     std::fclose(file);
@@ -93,12 +93,12 @@ static void plant(fs::path const &path, sz::string_view_t content) {
 /** The device-0 model name with spaces replaced by underscores — exactly what
  *  `probe_local_host_domain_` records, so a planted peer's `device_name` matches this box's probe
  *  and the uniformity check passes. */
-static bool probe_local_device_name(sz::string_t &name) {
+static bool probe_local_device_name(sz::string_t& name) {
     CUdevice device = 0;
     if (cuDeviceGet(&device, 0) != CUDA_SUCCESS) return false;
     char raw[64] = {};
     if (cuDeviceGetName(raw, sizeof(raw) - 1, device) != CUDA_SUCCESS) return false;
-    for (char *character = raw; *character != '\0'; ++character)
+    for (char* character = raw; *character != '\0'; ++character)
         if (*character == ' ') *character = '_';
     return sz::succeeded(name.assign(sz::string_view_t {raw}));
 }
@@ -107,7 +107,7 @@ static bool probe_local_device_name(sz::string_t &name) {
  *  atomically (temp + rename, no leftover), `await_text` reads it whole, and a second publish
  *  replaces the first — the primitive every wiring phase carries its coordinates over.
  *  Hand-built topology, no GPU. */
-static void exchange_round_trips(test_suite_t &suite, fs::path const &base) {
+static void exchange_round_trips(test_suite_t& suite, fs::path const& base) {
     fs::path const directory = base / "exchange";
     std::error_code error;
     fs::create_directories(directory, error);
@@ -135,7 +135,7 @@ static void exchange_round_trips(test_suite_t &suite, fs::path const &base) {
 
 /** A hand-built two-host_domain topology over @p directory , as host_domain @p index : what
  *  `bootstrap` assembles, without the GPU probe the rendezvous itself never needs. */
-static bool two_host_topology(mesh_topology_t &topology, fs::path const &directory, u32_t index) {
+static bool two_host_topology(mesh_topology_t& topology, fs::path const& directory, u32_t index) {
     if (st::failed(topology.host_domains.resize(2))) return false;
     topology.shape = mesh_shape_t {1u, 1u, 2u};
     topology.host_domain_index = index;
@@ -147,7 +147,7 @@ static bool two_host_topology(mesh_topology_t &topology, fs::path const &directo
  *  naming the round under its key, read the peer's payload back, and cross the generation's
  *  barrier. The lead publishes late in every round past the first, so a follower reading an
  *  earlier generation's file would see the wrong round. */
-static bool wire_rounds(mesh_topology_t &topology, u32_t rounds) {
+static bool wire_rounds(mesh_topology_t& topology, u32_t rounds) {
     u32_t const peer = 1u - topology.host_domain_index;
     for (u32_t round = 0; round != rounds; ++round) {
         u32_t const collective_id = topology.next_collective_id();
@@ -170,7 +170,7 @@ static bool wire_rounds(mesh_topology_t &topology, u32_t rounds) {
  *  phase three times, as the two measuring trainers and the real one each make a multimem domain,
  *  and every round must read its own generation's payload, never the one before. Host-only: a
  *  forked peer, no GPU. */
-static void rendezvous_generations(test_suite_t &suite, fs::path const &base) {
+static void rendezvous_generations(test_suite_t& suite, fs::path const& base) {
     fs::path const directory = base / "generations";
     std::error_code error;
     fs::create_directories(directory, error);
@@ -192,7 +192,7 @@ static void rendezvous_generations(test_suite_t &suite, fs::path const &base) {
 
 /** The single-host_domain world: `bootstrap(0,1)` assembles the whole topology from the local probe
  *  and never opens the exchange directory — the common one-box case. */
-static void single_box_world(test_suite_t &suite, fs::path const &base, u32_t local_devices) {
+static void single_box_world(test_suite_t& suite, fs::path const& base, u32_t local_devices) {
     if (local_devices == 0) return suite.skip(no_cuda_device_k);
     auto result = mesh_topology_t::bootstrap(0, 1, &pause_between_polls, local_devices, base.c_str(), "single_box",
                                              10.0);
@@ -210,7 +210,7 @@ static void single_box_world(test_suite_t &suite, fs::path const &base, u32_t lo
 /** The substance: a lead reads a peer's published facts, validates agreement, and assembles the
  *  world; a follower adopts the lead's manifest. Both halves run against a matching simulated peer
  *  carrying this box's real GPU identity, and each must arrive at the correct world table. */
-static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t local_devices) {
+static void world_reconciles(test_suite_t& suite, fs::path const& base, u32_t local_devices) {
     if (local_devices == 0) return suite.skip(no_cuda_device_k);
     sz::string_t device_name;
     if (!probe_local_device_name(device_name)) return suite.check(false, "probing the local GPU name");
@@ -218,7 +218,7 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
 
     // The lead assembles the world by reading a peer's facts, then publishing the merged manifest.
     {
-        char const *job = "reconcile_lead";
+        char const* job = "reconcile_lead";
         fs::path const directory = base / job;
         fs::create_directories(directory, error);
         plant(directory / "host_domain1.mesh",
@@ -229,7 +229,7 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
         if (!result) suite.check(false, "lead should assemble the world: {}", result.description_);
         else {
             mesh_topology_t lead = std::move(*result);
-            mesh_host_domain_t const &peer = lead.host_domains[1];
+            mesh_host_domain_t const& peer = lead.host_domains[1];
             sz::string_view_t const peer_host {peer.hostname};
             suite.check(lead.host_domain_count() == 2, "lead world size: got {} want 2", lead.host_domain_count());
             suite.check(lead.host_domains[0].device_count == local_devices, "lead self row should reflect the probe");
@@ -242,7 +242,7 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
 
     // The lead refuses a peer whose GPUs train as another class.
     {
-        char const *job = "reconcile_gpu_class";
+        char const* job = "reconcile_gpu_class";
         fs::path const directory = base / job;
         fs::create_directories(directory, error);
         plant(directory / "host_domain1.mesh",
@@ -255,7 +255,7 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
 
     // A follower rebuilds the same world by adopting the lead's manifest, validating its own row.
     {
-        char const *job = "reconcile_follower";
+        char const* job = "reconcile_follower";
         fs::path const directory = base / job;
         fs::create_directories(directory, error);
         plant(directory / "host_domain0.manifest", manifest_payload(job, local_devices, 2, local_devices, device_name));
@@ -264,7 +264,7 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
         if (!result) suite.check(false, "follower should adopt the world: {}", result.description_);
         else {
             mesh_topology_t follower = std::move(*result);
-            mesh_host_domain_t const &self = follower.self();
+            mesh_host_domain_t const& self = follower.self();
             suite.check(follower.host_domain_count() == 2, "follower world size: got {} want 2",
                         follower.host_domain_count());
             suite.check(
@@ -278,7 +278,7 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
  *  hanging, and member 0's fault record names the barrier target it gave up on. Member 0's round
  *  scalar is set one round ahead, so even a one-GPU domain waits for an arrival no member will
  *  make. The trap poisons the context, so this case runs last. */
-static void barrier_traps_past_deadline(test_suite_t &suite, fs::path const &base, u32_t local_devices) {
+static void barrier_traps_past_deadline(test_suite_t& suite, fs::path const& base, u32_t local_devices) {
     if (local_devices == 0) return suite.skip(no_cuda_device_k);
     auto bootstrapped = mesh_topology_t::bootstrap(0, 1, &pause_between_polls, local_devices, base.c_str(),
                                                    "barrier_deadline", 10.0);
@@ -323,12 +323,12 @@ static void barrier_traps_past_deadline(test_suite_t &suite, fs::path const &bas
  *  byte-identical across ranks (round-trip fidelity + phase ordering) and the closing barrier
  *  completes. The world size travels as `$UFORM_HOST_DOMAIN_COUNT` (Slurm's `$SLURM_NTASKS`
  *  as a fallback). */
-static void run_cluster_exchange(test_suite_t &suite, u32_t local_devices) {
+static void run_cluster_exchange(test_suite_t& suite, u32_t local_devices) {
     if (local_devices == 0) return suite.skip(no_cuda_device_k);
     u32_t const index = host_domain_index_from_environment();
     u32_t count = 0;
-    for (char const *variable : {"UFORM_HOST_DOMAIN_COUNT", "SLURM_NTASKS"})
-        if (char const *value = std::getenv(variable)) {
+    for (char const* variable : {"UFORM_HOST_DOMAIN_COUNT", "SLURM_NTASKS"})
+        if (char const* value = std::getenv(variable)) {
             count = static_cast<u32_t>(std::atoi(value));
             break;
         }
@@ -342,7 +342,7 @@ static void run_cluster_exchange(test_suite_t &suite, u32_t local_devices) {
 
     sz::string_t table;
     for (u32_t peer = 0; peer != count; ++peer) {
-        mesh_host_domain_t const &entry = topology.host_domains[peer];
+        mesh_host_domain_t const& entry = topology.host_domains[peer];
         (void)format_into(table, "{} {} {} {}\n", entry.host_domain_index, sz::string_view_t {entry.hostname},
                           entry.device_count, sz::string_view_t {entry.device_name});
     }
@@ -358,7 +358,7 @@ static void run_cluster_exchange(test_suite_t &suite, u32_t local_devices) {
     suite.check(static_cast<bool>(topology.barrier("done", 60.0)), "the closing barrier should complete");
 }
 
-int main(int, char **argv) {
+int main(int, char** argv) {
     test_suite_t suite = test_suite_t::make(argv[0]);
     bool const cluster = std::getenv("UFORM_HOST_DOMAIN_INDEX") != nullptr;
 

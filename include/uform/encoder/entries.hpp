@@ -103,7 +103,7 @@ struct rope_angles_t {
     [[nodiscard]] std::span<f32_t const> scalars() const noexcept { return angles_; }
 
     /** The three grids over @p copy , a copy of @ref scalars in any memory. */
-    [[nodiscard]] rope_grids_t grids(f32_t const *copy) const noexcept {
+    [[nodiscard]] rope_grids_t grids(f32_t const* copy) const noexcept {
         std::size_t const temporal = static_cast<std::size_t>(positions_) * pairs_[0];
         std::size_t const height = static_cast<std::size_t>(positions_) * pairs_[1];
         return {{copy, positions_, pairs_[0]},

@@ -35,20 +35,20 @@ struct text_packer_t {
     static constexpr modality_t modality_k = modality_t::text_k;
     tape_view<b8_t const> tape;
 
-    std::size_t cell_bytes(ue::geometry_t const &) const noexcept { return sizeof(token_id_t); }
-    failure_t validate(ue::geometry_t const &) const noexcept { return {}; }
-    failure_t prepare(chunked_arena_t &, std::size_t, ue::geometry_t const &) noexcept { return {}; }
+    std::size_t cell_bytes(ue::geometry_t const&) const noexcept { return sizeof(token_id_t); }
+    failure_t validate(ue::geometry_t const&) const noexcept { return {}; }
+    failure_t prepare(chunked_arena_t&, std::size_t, ue::geometry_t const&) noexcept { return {}; }
 
-    failure_t plan(std::size_t item, item_plan_t &plan, ue::geometry_t const &geometry, std::size_t) const noexcept {
+    failure_t plan(std::size_t item, item_plan_t& plan, ue::geometry_t const& geometry, std::size_t) const noexcept {
         plan.spanned = tape[item].size();
         plan.tokens = static_cast<u32_t>(plan.spanned < geometry.columns ? plan.spanned : geometry.columns);
         return {};
     }
 
-    failure_t stage(std::size_t item, item_plan_t const &plan, bytes_span_t cells, ue::geometry_t const &,
+    failure_t stage(std::size_t item, item_plan_t const& plan, bytes_span_t cells, ue::geometry_t const&,
                     std::size_t) const noexcept {
         bytes_view_t const bytes = tape[item];
-        token_id_t *const tokens = static_cast<token_id_t *>(static_cast<void *>(cells.data()));
+        nk::tensor_span<token_id_t, 1> const tokens = nk::as_writable_values<token_id_t>(cells);
         for (u32_t token = 0; token != plan.tokens; ++token) tokens[token] = static_cast<token_id_t>(bytes[token]);
         return {};
     }
@@ -60,20 +60,20 @@ struct choice_packer_t {
     static constexpr modality_t modality_k = modality_t::text_k;
     tape_view<b8_t const> tape;
 
-    std::size_t cell_bytes(ue::geometry_t const &) const noexcept { return sizeof(token_id_t); }
-    failure_t validate(ue::geometry_t const &) const noexcept { return {}; }
-    failure_t prepare(chunked_arena_t &, std::size_t, ue::geometry_t const &) noexcept { return {}; }
+    std::size_t cell_bytes(ue::geometry_t const&) const noexcept { return sizeof(token_id_t); }
+    failure_t validate(ue::geometry_t const&) const noexcept { return {}; }
+    failure_t prepare(chunked_arena_t&, std::size_t, ue::geometry_t const&) noexcept { return {}; }
 
-    failure_t plan(std::size_t item, item_plan_t &plan, ue::geometry_t const &geometry, std::size_t) const noexcept {
+    failure_t plan(std::size_t item, item_plan_t& plan, ue::geometry_t const& geometry, std::size_t) const noexcept {
         plan.spanned = tape[item].size() + 1;
         plan.tokens = static_cast<u32_t>(plan.spanned < geometry.columns ? plan.spanned : geometry.columns);
         return {};
     }
 
-    failure_t stage(std::size_t item, item_plan_t const &plan, bytes_span_t cells, ue::geometry_t const &,
+    failure_t stage(std::size_t item, item_plan_t const& plan, bytes_span_t cells, ue::geometry_t const&,
                     std::size_t) const noexcept {
         bytes_view_t const bytes = tape[item];
-        token_id_t *const tokens = static_cast<token_id_t *>(static_cast<void *>(cells.data()));
+        nk::tensor_span<token_id_t, 1> const tokens = nk::as_writable_values<token_id_t>(cells);
         std::size_t const kept = plan.tokens - 1, skipped = bytes.size() - kept;
         for (std::size_t token = 0; token != kept; ++token)
             tokens[token] = static_cast<token_id_t>(bytes[skipped + token]);
@@ -93,9 +93,9 @@ struct pixels_packer_t {
      *  the resize reads. */
     nk::tensor_span<pixel_t, 2> expanded {};
 
-    std::size_t cell_bytes(ue::geometry_t const &geometry) const noexcept { return geometry.image_scalars(); }
+    std::size_t cell_bytes(ue::geometry_t const& geometry) const noexcept { return geometry.image_scalars(); }
 
-    failure_t validate(ue::geometry_t const &geometry) const noexcept {
+    failure_t validate(ue::geometry_t const& geometry) const noexcept {
         if (failure_t const refused = validate_images(geometry); refused.message) return refused;
         std::size_t const count = tape.size();
         if (count && (heights.empty() || widths.empty()))
@@ -108,20 +108,20 @@ struct pixels_packer_t {
         return {};
     }
 
-    failure_t prepare(chunked_arena_t &staging, std::size_t threads, ue::geometry_t const &) noexcept {
+    failure_t prepare(chunked_arena_t& staging, std::size_t threads, ue::geometry_t const&) noexcept {
         std::size_t widest = 0;
         for (std::size_t item = 0; item != tape.size(); ++item) {
             std::size_t const bytes = std::size_t {heights[item]} * widths[item] * um::image_channels_k;
             widest = bytes > widest ? bytes : widest;
         }
         if (!widest) return {};
-        pixel_t *const rows = staging.allocate<pixel_t>(widest * threads);
+        pixel_t* const rows = staging.allocate<pixel_t>(widest * threads);
         if (!rows) return {uform_status_out_of_memory_k, "Failed to allocate the pixel staging"};
         expanded = {rows, threads, widest};
         return {};
     }
 
-    failure_t plan(std::size_t item, item_plan_t &plan, ue::geometry_t const &geometry, std::size_t) const noexcept {
+    failure_t plan(std::size_t item, item_plan_t& plan, ue::geometry_t const& geometry, std::size_t) const noexcept {
         um::image_extent_t const native {widths[item], heights[item]};
         if (!native.width || !native.height) return {};
         um::patch_grid_t const grid = um::image_patch_grid(ue::media_cells(ue::modality_t::image_k, geometry.columns),
@@ -132,12 +132,12 @@ struct pixels_packer_t {
         return {};
     }
 
-    failure_t stage(std::size_t item, item_plan_t const &plan, bytes_span_t cells, ue::geometry_t const &geometry,
+    failure_t stage(std::size_t item, item_plan_t const& plan, bytes_span_t cells, ue::geometry_t const& geometry,
                     std::size_t thread) const noexcept {
         if (!plan.tokens) return {};
         std::size_t const height = heights[item], width = widths[item], pixels = height * width;
         nk::tensor_view<b8_t, 2> const rgb {tape[item].data(), pixels, 3};
-        pixel_t *const rgba = expanded.row(thread).data();
+        pixel_t* const rgba = expanded.row(thread).data();
         nk::tensor_span<pixel_t, 2> const rgba_pixels {rgba, pixels, 4};
         for (std::size_t pixel = 0; pixel != pixels; ++pixel) {
             for (std::size_t channel = 0; channel != 3; ++channel)
@@ -147,7 +147,7 @@ struct pixels_packer_t {
         std::size_t const side = geometry.image_patch_side;
         expected_t const resized = um::resize_image(
             {rgba, {height, width, um::image_channels_k}},
-            {static_cast<pixel_t *>(static_cast<void *>(cells.data())), {plan.shape[0], plan.shape[1], side, side, 4}});
+            nk::as_writable_values<pixel_t>(cells).reshape<5>({plan.shape[0], plan.shape[1], side, side, 4}));
         if (!resized) return {media_status_of(resized.status_), "An image could not be resized"};
         return {};
     }
@@ -159,11 +159,11 @@ struct samples_packer_t {
     tape_view<f32_t const> tape;
     u32_t sample_rate;
 
-    std::size_t cell_bytes(ue::geometry_t const &geometry) const noexcept {
+    std::size_t cell_bytes(ue::geometry_t const& geometry) const noexcept {
         return std::size_t {geometry.audio_chunk_samples} * sizeof(f32_t);
     }
 
-    failure_t validate(ue::geometry_t const &geometry) const noexcept {
+    failure_t validate(ue::geometry_t const& geometry) const noexcept {
         if (failure_t const refused = validate_audio(geometry); refused.message) return refused;
         if (!sample_rate) return {uform_status_invalid_argument_k, "The sample rate must not be zero"};
         for (std::size_t item = 0; item != tape.size(); ++item)
@@ -172,25 +172,25 @@ struct samples_packer_t {
         return {};
     }
 
-    failure_t prepare(chunked_arena_t &, std::size_t, ue::geometry_t const &) noexcept { return {}; }
+    failure_t prepare(chunked_arena_t&, std::size_t, ue::geometry_t const&) noexcept { return {}; }
 
     /** Samples item @p item spans at the model's rate of @p geometry . */
-    std::size_t resampled(std::size_t item, ue::geometry_t const &geometry) const noexcept {
+    std::size_t resampled(std::size_t item, ue::geometry_t const& geometry) const noexcept {
         std::size_t const samples = tape[item].size();
         if (sample_rate == geometry.audio_sample_rate) return samples;
         return divide_round_up(samples * geometry.audio_sample_rate, sample_rate);
     }
 
-    failure_t plan(std::size_t item, item_plan_t &plan, ue::geometry_t const &geometry, std::size_t) const noexcept {
+    failure_t plan(std::size_t item, item_plan_t& plan, ue::geometry_t const& geometry, std::size_t) const noexcept {
         plan.spanned = divide_round_up(resampled(item, geometry), geometry.audio_chunk_samples);
         u32_t const cells = ue::media_cells(ue::modality_t::audio_k, geometry.columns);
         plan.tokens = static_cast<u32_t>(plan.spanned < cells ? plan.spanned : cells);
         return {};
     }
 
-    failure_t stage(std::size_t item, item_plan_t const &plan, bytes_span_t cells, ue::geometry_t const &geometry,
+    failure_t stage(std::size_t item, item_plan_t const& plan, bytes_span_t cells, ue::geometry_t const& geometry,
                     std::size_t) const noexcept {
-        f32_t *const frames = static_cast<f32_t *>(static_cast<void *>(cells.data()));
+        f32_t* const frames = nk::as_writable_values<f32_t>(cells).data();
         std::size_t const capacity = std::size_t {plan.tokens} * geometry.audio_chunk_samples;
         std::size_t const total = resampled(item, geometry), kept = total < capacity ? total : capacity;
         std::span<f32_t const> const samples = tape[item];
@@ -209,7 +209,7 @@ struct samples_packer_t {
 
 extern "C" {
 
-UFORM_EXPORT void uform_text_encode(uform_text_encode_t *arguments) {
+UFORM_EXPORT void uform_text_encode(uform_text_encode_t* arguments) {
     if (submitted<uform_text_encode>(arguments)) return;
     call_outcome_t outcome(*arguments);
     uform_tape_view_t const tape = arguments->texts;
@@ -217,7 +217,7 @@ UFORM_EXPORT void uform_text_encode(uform_text_encode_t *arguments) {
     encode_call(*arguments, packer, tape, uform_scalar_u8_k, {tape.data, tape.offsets}, outcome);
 }
 
-UFORM_EXPORT void uform_text_choose(uform_text_choose_t *arguments) {
+UFORM_EXPORT void uform_text_choose(uform_text_choose_t* arguments) {
     if (submitted<uform_text_choose>(arguments)) return;
     call_outcome_t outcome(*arguments);
     uform_tape_view_t const tape = arguments->texts;
@@ -228,7 +228,7 @@ UFORM_EXPORT void uform_text_choose(uform_text_choose_t *arguments) {
         outcome);
 }
 
-UFORM_EXPORT void uform_image_encode_pixels(uform_image_encode_pixels_t *arguments) {
+UFORM_EXPORT void uform_image_encode_pixels(uform_image_encode_pixels_t* arguments) {
     if (submitted<uform_image_encode_pixels>(arguments)) return;
     call_outcome_t outcome(*arguments);
     uform_tape_view_t const tape = arguments->pixels;
@@ -240,7 +240,7 @@ UFORM_EXPORT void uform_image_encode_pixels(uform_image_encode_pixels_t *argumen
                 {tape.data, tape.offsets, arguments->heights, arguments->widths}, outcome);
 }
 
-UFORM_EXPORT void uform_audio_encode_samples(uform_audio_encode_samples_t *arguments) {
+UFORM_EXPORT void uform_audio_encode_samples(uform_audio_encode_samples_t* arguments) {
     if (submitted<uform_audio_encode_samples>(arguments)) return;
     call_outcome_t outcome(*arguments);
     uform_tape_view_t const tape = arguments->samples;

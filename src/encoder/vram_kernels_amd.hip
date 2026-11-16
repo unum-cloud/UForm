@@ -50,7 +50,7 @@ struct vram_scalars_t {
         return narrow;
     }
     template <typename value_type_>
-    __host__ __device__ void sincos(value_type_ angle, f32_t *sine, f32_t *cosine) const noexcept {
+    __host__ __device__ void sincos(value_type_ angle, f32_t* sine, f32_t* cosine) const noexcept {
         __sincosf(angle, sine, cosine);
     }
 };

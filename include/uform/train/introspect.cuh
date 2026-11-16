@@ -133,10 +133,10 @@ struct telemetry_loss_stats_t {
 struct telemetry_ledger_t {
 
     telemetry_ledger_t() noexcept = default;
-    telemetry_ledger_t(telemetry_ledger_t const &) = delete;
-    telemetry_ledger_t &operator=(telemetry_ledger_t const &) = delete;
-    telemetry_ledger_t(telemetry_ledger_t &&) noexcept = default;
-    telemetry_ledger_t &operator=(telemetry_ledger_t &&) noexcept = default;
+    telemetry_ledger_t(telemetry_ledger_t const&) = delete;
+    telemetry_ledger_t& operator=(telemetry_ledger_t const&) = delete;
+    telemetry_ledger_t(telemetry_ledger_t&&) noexcept = default;
+    telemetry_ledger_t& operator=(telemetry_ledger_t&&) noexcept = default;
     ~telemetry_ledger_t() noexcept = default;
 
     /** The inert ledger — every method an early-out, no device memory, no rows. */
@@ -147,8 +147,8 @@ struct telemetry_ledger_t {
      *  @p max_probes registrations. @p stream orders the table's zeroing (a transient bring-up
      *  stream is fine — nothing is retained). @p channels is final — no toggle exists, so a capture
      *  can never bake a mix of armed and unarmed enqueues. */
-    [[nodiscard]] static expected<telemetry_ledger_t> make(gpu_arena_t &arena, u32_t channels, u32_t max_probes,
-                                                           gpu_stream_t &stream) noexcept;
+    [[nodiscard]] static expected<telemetry_ledger_t> make(gpu_arena_t& arena, u32_t channels, u32_t max_probes,
+                                                           gpu_stream_t& stream) noexcept;
 
     /** Whether @p channel was armed at construction. */
     [[nodiscard]] bool armed(telemetry_channel_t channel) const noexcept { return (channels_ & channel) != 0u; }
@@ -163,13 +163,13 @@ struct telemetry_ledger_t {
      *  updates the probe's row in place (L2, checksum, zero / non-finite counts, violations), and
      *  traps only on a non-finite value, recording why in @p fault , the record of the GPU
      *  @p stream runs on. Capture-safe — pure enqueue, fixed row address. */
-    [[nodiscard]] expected_t probe_signal(telemetry_probe_t probe, f32r1_view_t values, gpu_fault_t *fault,
-                                          gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t probe_signal(telemetry_probe_t probe, f32r1_view_t values, gpu_fault_t* fault,
+                                          gpu_stream_t& stream) noexcept;
 
     /** Enqueue one round probe over @p member 's own barrier-round scalar: records the value and
      *  counts a violation when it moved backwards. Capture-safe, one thread. */
     [[nodiscard]] expected_t probe_round(telemetry_probe_t probe, multimem_member_t member,
-                                         gpu_stream_t &stream) noexcept;
+                                         gpu_stream_t& stream) noexcept;
 
     /** Fold one host-side loss reading into the probe's running statistics: @p sum is the
      *  weighted summand, @p count its sample mass — a zero count never scores, so an unscored head
@@ -181,11 +181,11 @@ struct telemetry_ledger_t {
 
     /** The probe's device row, synchronized through @p stream — a quiescent-point read; never
      *  call from inside a capture. */
-    [[nodiscard]] expected<telemetry_row_t> row(telemetry_probe_t probe, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected<telemetry_row_t> row(telemetry_probe_t probe, gpu_stream_t& stream) noexcept;
 
     /** Drain the device table through @p stream and emit one diagnostic line per registered
      *  probe on the host channel. */
-    [[nodiscard]] expected_t report(gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t report(gpu_stream_t& stream) noexcept;
 
   private:
 

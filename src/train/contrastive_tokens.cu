@@ -190,7 +190,7 @@ struct contrastive_tokens_lane_t {
 inline constexpr std::size_t contrastive_tokens_wide_rows_k = 8u * warp_size_k;
 
 /** The four products at @p column and after of a 16-byte aligned row. */
-[[nodiscard]] static __device__ inline float4 contrastive_tokens_load_(f32_t const *row_start,
+[[nodiscard]] static __device__ inline float4 contrastive_tokens_load_(f32_t const* row_start,
                                                                        std::size_t column) noexcept {
     float4 vector;
     asm("ld.global.v4.f32 {%0, %1, %2, %3}, [%4];"
@@ -207,8 +207,8 @@ inline constexpr std::size_t contrastive_tokens_wide_rows_k = 8u * warp_size_k;
 
 /** Store the eight gradients @p low then @p high at @p column and after of a 16-byte
  *  aligned BFloat16 row. */
-static __device__ inline void contrastive_tokens_store_(bf16_t *row_start, std::size_t column, float4 low,
-                                                        float4 high) noexcept {
+static __device__ inline void contrastive_tokens_store_(                       //
+    bf16_t* row_start, std::size_t column, float4 low, float4 high) noexcept { // device-boundary
     asm volatile("st.global.v4.u32 [%0], {%1, %2, %3, %4};" ::"l"(row_start + column),
                  "r"(contrastive_tokens_pack_(low.x, low.y)), "r"(contrastive_tokens_pack_(low.z, low.w)),
                  "r"(contrastive_tokens_pack_(high.x, high.y)), "r"(contrastive_tokens_pack_(high.z, high.w))
@@ -243,7 +243,7 @@ static __global__ void contrastive_tokens_band_max_kernel_(f32r2_view_t band_pro
     if (query_row >= band_products.extent(0) || query_segments[query_row] == ~0u) return;
     std::size_t const live_rows = document_offsets[document_offsets.extent(0) - 1u];
     std::size_t const band_rows = band_products.extent(1);
-    f32_t const *const products = &band_products[query_row, 0];
+    f32_t const* const products = &band_products[query_row, 0];
     u32_t open_document = ~0u;
     f32_t open_maximum = -std::numeric_limits<f32_t>::infinity();
     auto const fold_chunk = [&](std::size_t chunk) noexcept {
@@ -339,8 +339,8 @@ static __global__ void contrastive_tokens_band_grad_kernel_(f32r2_view_t band_pr
     f32_t const inverse_length = query != ~0u
                                      ? 1.0f / static_cast<f32_t>(query_offsets[query + 1u] - query_offsets[query])
                                      : 0.0f;
-    f32_t const *const products = &band_products[query_row, 0];
-    bf16_t *const gradients = &band_grad[query_row, 0];
+    f32_t const* const products = &band_products[query_row, 0];
+    bf16_t* const gradients = &band_grad[query_row, 0];
     u32_t open_document = ~0u;
     f32_t open_maximum = 0.0f, open_gradient = 0.0f;
     bool open_claimed = false;
@@ -460,8 +460,8 @@ static __global__ void contrastive_tokens_weigh_kernel_(f32r1_span_t loss_out,
     for (std::size_t group = threadIdx.x; group < bias_grad.extent(0); group += blockDim.x) bias_grad[group] *= weight;
 }
 
-expected<contrastive_tokens_t> contrastive_tokens_t::make(gpu_arena_t &arena, contrastive_tokens_config_t config,
-                                                          gpu_numerics_t const &numerics) noexcept {
+expected<contrastive_tokens_t> contrastive_tokens_t::make(gpu_arena_t& arena, contrastive_tokens_config_t config,
+                                                          gpu_numerics_t const& numerics) noexcept {
     using result_t = expected<contrastive_tokens_t>;
     if (config.segments_per_gpu == 0 || config.head_tokens_per_gpu == 0 || config.query_tokens_per_gpu == 0 ||
         config.documents_per_gpu == 0 || config.band_tokens == 0 || config.gpu_subgraphs_per_step == 0)
@@ -469,10 +469,10 @@ expected<contrastive_tokens_t> contrastive_tokens_t::make(gpu_arena_t &arena, co
             status_t::invalid_argument_k,
             "the tokens loss needs segments, head rows, query rows, documents, a band and a subgraph");
     if (config.width % 8u != 0u || config.query_tokens_per_gpu % 8u != 0u || config.band_tokens % warp_size_k != 0u)
-        return result_t::fail(
-            status_t::unsupported_k,
-            "width and query rows must be multiples of 8 and the band of {} (width={} queries={} " "band={})",
-            warp_size_k, config.width, config.query_tokens_per_gpu, config.band_tokens);
+        return result_t::fail(status_t::unsupported_k,
+                              "width and query rows must be multiples of 8 and the band of {} (width={} queries={} " //
+                              "band={})",
+                              warp_size_k, config.width, config.query_tokens_per_gpu, config.band_tokens);
     config.document_tokens_per_gpu = static_cast<u32_t>(
         round_up_to_multiple(fu::max_of(config.document_tokens_per_gpu, config.band_tokens), config.band_tokens));
 
@@ -543,7 +543,7 @@ expected<contrastive_tokens_t> contrastive_tokens_t::make(gpu_arena_t &arena, co
 }
 
 expected_t contrastive_tokens_t::stage(bf16r2_view_t token_vectors, u32r1_view_t token_offsets,
-                                       multimodal_batch_view_t const &batch, gpu_stream_t &stream) noexcept {
+                                       multimodal_batch_view_t const& batch, gpu_stream_t& stream) noexcept {
     if (token_vectors.extent(0) != config_.head_tokens_per_gpu || token_vectors.extent(1) != config_.width ||
         token_offsets.extent(0) != config_.segments_per_gpu + 1u)
         return expected_t::fail(status_t::unsupported_k,
@@ -580,8 +580,8 @@ expected_t contrastive_tokens_t::stage(bf16r2_view_t token_vectors, u32r1_view_t
     return staged;
 }
 
-expected_t contrastive_tokens_t::score(std::size_t subgraph_index, gpu_query_subgraph_t const &subgraph,
-                                       f32r2_span_t raw_scores, gpu_stream_t &stream) noexcept {
+expected_t contrastive_tokens_t::score(std::size_t subgraph_index, gpu_query_subgraph_t const& subgraph,
+                                       f32r2_span_t raw_scores, gpu_stream_t& stream) noexcept {
     if (subgraph_index >= config_.gpu_subgraphs_per_step ||
         subgraph.query_vectors.extent(0) != config_.query_tokens_per_gpu)
         return expected_t::fail(status_t::unsupported_k, "query subgraph {} disagrees with the baked shape",
@@ -609,9 +609,9 @@ expected_t contrastive_tokens_t::score(std::size_t subgraph_index, gpu_query_sub
     return staged;
 }
 
-expected_t contrastive_tokens_t::force(std::size_t subgraph_index, gpu_query_subgraph_t const &subgraph,
+expected_t contrastive_tokens_t::force(std::size_t subgraph_index, gpu_query_subgraph_t const& subgraph,
                                        f32r2_view_t score_grad, f32r2_span_t query_grad,
-                                       gpu_stream_t &stream) noexcept {
+                                       gpu_stream_t& stream) noexcept {
     std::size_t const band = config_.band_tokens, queries = config_.query_tokens_per_gpu, width = config_.width;
     f32r2_span_t const maxima = maxima_[subgraph_index, nk::slice];
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
@@ -641,7 +641,7 @@ expected_t contrastive_tokens_t::force(std::size_t subgraph_index, gpu_query_sub
             staged = multiply_bf16(band_grad_transposed_.view(), packed_queries_transposed_.view(),
                                    document_grad_products_.span(), numerics_, stream);
         if (staged) {
-            f32_t *const band_force = document_grad_.data() + band_index * band * width;
+            f32_t* const band_force = document_grad_.data() + band_index * band * width;
             staged = numkong_result(numerics_.sum_f32(band_force, document_grad_products_.data(), band * width,
                                                       band_force, stream.numkong()),
                                     "document force addition");
@@ -652,7 +652,7 @@ expected_t contrastive_tokens_t::force(std::size_t subgraph_index, gpu_query_sub
 
 expected_t contrastive_tokens_t::relax(f32r4_span_t scores, contrastive_relations_view_t relations,
                                        contrastive_recipe_t recipe, u32r1_view_t world_document_lengths,
-                                       f32r1_view_t live_queries, f32r1_span_t loss_out, gpu_stream_t &stream,
+                                       f32r1_view_t live_queries, f32r1_span_t loss_out, gpu_stream_t& stream,
                                        f32r1_span_t log_inverse_temperature_grad, f32r1_span_t bias_grad) noexcept {
     relations.from_vertex_effective_length = query_lengths_.view();
     relations.to_vertex_effective_length = world_document_lengths;
@@ -674,8 +674,8 @@ expected_t contrastive_tokens_t::relax(f32r4_span_t scores, contrastive_relation
 }
 
 expected_t contrastive_tokens_t::finish(f32r2_view_t query_grad, u32r1_view_t token_offsets,
-                                        multimodal_batch_view_t const &batch, bf16r2_span_t token_vectors_grad,
-                                        gpu_stream_t &stream) noexcept {
+                                        multimodal_batch_view_t const& batch, bf16r2_span_t token_vectors_grad,
+                                        gpu_stream_t& stream) noexcept {
     if (token_vectors_grad.extent(0) != config_.head_tokens_per_gpu || token_vectors_grad.extent(1) != config_.width)
         return expected_t::fail(status_t::unsupported_k, "token_vectors_grad must be [{}x{}]",
                                 config_.head_tokens_per_gpu, config_.width);
@@ -686,10 +686,10 @@ expected_t contrastive_tokens_t::finish(f32r2_view_t query_grad, u32r1_view_t to
 }
 
 expected_t contrastive_tokens_t::operator()(bf16r2_view_t token_vectors, u32r1_view_t token_offsets,
-                                            multimodal_batch_view_t const &batch,
+                                            multimodal_batch_view_t const& batch,
                                             contrastive_relations_view_t relations, contrastive_recipe_t recipe,
                                             f32r1_span_t loss_out, bf16r2_span_t token_vectors_grad,
-                                            gpu_stream_t &stream, f32r1_span_t log_inverse_temperature_grad,
+                                            gpu_stream_t& stream, f32r1_span_t log_inverse_temperature_grad,
                                             f32r1_span_t bias_grad) noexcept {
     if (config_.gpu_subgraphs_per_step != 1)
         return expected_t::fail(status_t::invalid_argument_k, "a {}-subgraph tokens loss runs distributed",
@@ -708,8 +708,8 @@ expected_t contrastive_tokens_t::operator()(bf16r2_view_t token_vectors, u32r1_v
 }
 
 expected<distributed_contrastive_tokens_t> distributed_contrastive_tokens_t::make(
-    multimem_domain_t &domain, colocated_domain_t &colocated, std::span<gpu_arena_t> arenas,
-    std::span<gpu_stream_t> streams, contrastive_tokens_config_t config, gpu_numerics_t const &numerics,
+    multimem_domain_t& domain, colocated_domain_t& colocated, std::span<gpu_arena_t> arenas,
+    std::span<gpu_stream_t> streams, contrastive_tokens_config_t config, gpu_numerics_t const& numerics,
     f64_t timeout_seconds) noexcept {
     using result_t = expected<distributed_contrastive_tokens_t>;
     std::size_t const gpus = arenas.size();
@@ -856,7 +856,7 @@ f32r3_view_t distributed_contrastive_tokens_t::world_scores_(std::size_t world_g
     std::size_t const members = losses_.size(), member = world_gpu % members, domain = world_gpu / members;
     if (domain == home_domain_index_) return window_scores_(domain_->member_offset() + member, block);
     std::size_t const subgraphs = config_.gpu_subgraphs_per_step, segments = config_.segments_per_gpu;
-    infiniband_all_gather<f32_t> &gathered = block == 0u ? score_gathers_[member] : gradient_gathers_[member];
+    infiniband_all_gather<f32_t>& gathered = block == 0u ? score_gathers_[member] : gradient_gathers_[member];
     f32r2_span_t const blocks = gathered.payload().reshape<2>({world_domains_(), subgraphs * segments * segments});
     return blocks[domain, nk::slice].reshape<3>({subgraphs, segments, segments});
 }
@@ -867,14 +867,14 @@ expected_t distributed_contrastive_tokens_t::operator()(std::span<gpu_tokens_inp
     if (inputs.size() != gpus || streams.size() != gpus)
         return expected_t::fail(status_t::invalid_argument_k, "every rank needs its inputs and stream ({} ranks)",
                                 gpus);
-    for (gpu_tokens_inputs_t const &rank_inputs : inputs)
+    for (gpu_tokens_inputs_t const& rank_inputs : inputs)
         if (rank_inputs.recipe.temperature_group_count() > config_.temperature_groups)
             return expected_t::fail(status_t::unsupported_k, "a recipe selects {} temperature groups of {}",
                                     rank_inputs.recipe.temperature_group_count(), config_.temperature_groups);
     // Phase-major: every rank's phase is enqueued before any rank's next one, so a rank spinning at
     // a barrier never holds the host while its peers' arrivals wait unenqueued behind it.
-    using phase_t = expected_t (distributed_contrastive_tokens_t::*)(std::size_t, gpu_tokens_inputs_t const &,
-                                                                     gpu_stream_t &) noexcept;
+    using phase_t = expected_t (distributed_contrastive_tokens_t::*)(std::size_t, gpu_tokens_inputs_t const&,
+                                                                     gpu_stream_t&) noexcept;
     phase_t const phases[] = {&distributed_contrastive_tokens_t::stage_, &distributed_contrastive_tokens_t::score_,
                               &distributed_contrastive_tokens_t::relax_, &distributed_contrastive_tokens_t::force_,
                               &distributed_contrastive_tokens_t::reduce_};
@@ -889,11 +889,11 @@ expected_t distributed_contrastive_tokens_t::operator()(std::span<gpu_tokens_inp
     return {};
 }
 
-expected_t distributed_contrastive_tokens_t::stage_(std::size_t rank, gpu_tokens_inputs_t const &inputs,
-                                                    gpu_stream_t &stream) noexcept {
+expected_t distributed_contrastive_tokens_t::stage_(std::size_t rank, gpu_tokens_inputs_t const& inputs,
+                                                    gpu_stream_t& stream) noexcept {
     std::size_t const gradients = 2u * std::size_t {config_.temperature_groups};
     f32r1_span_t const tail = window_tail_(domain_->member_offset() + rank);
-    contrastive_tokens_t &loss = losses_[rank];
+    contrastive_tokens_t& loss = losses_[rank];
     expected_t staged = loss.stage(inputs.token_vectors, inputs.token_offsets, inputs.batch, stream);
     if (staged)
         staged = copy_device_to_device(loss.live_queries(), tail[nk::range(gradients + 1u, gradients + 2u), nk::slice],
@@ -918,13 +918,13 @@ expected_t distributed_contrastive_tokens_t::stage_(std::size_t rank, gpu_tokens
     return staged;
 }
 
-expected_t distributed_contrastive_tokens_t::score_(std::size_t rank, gpu_tokens_inputs_t const &,
-                                                    gpu_stream_t &stream) noexcept {
+expected_t distributed_contrastive_tokens_t::score_(std::size_t rank, gpu_tokens_inputs_t const&,
+                                                    gpu_stream_t& stream) noexcept {
     std::size_t const subgraphs = config_.gpu_subgraphs_per_step, segments = config_.segments_per_gpu;
     std::size_t const gradients = 2u * std::size_t {config_.temperature_groups};
     std::size_t const member = domain_->member_offset() + rank;
     std::size_t const tail_offset = window_.offset + window_.scalars - world_scalar_count_(config_);
-    contrastive_tokens_t &loss = losses_[rank];
+    contrastive_tokens_t& loss = losses_[rank];
     f32r3_span_t const outbound = window_scores_(member, 0);
     expected_t staged {};
     for (std::size_t home = 0; staged && home != subgraphs; ++home)
@@ -947,8 +947,8 @@ expected_t distributed_contrastive_tokens_t::score_(std::size_t rank, gpu_tokens
     return staged;
 }
 
-expected_t distributed_contrastive_tokens_t::relax_(std::size_t rank, gpu_tokens_inputs_t const &inputs,
-                                                    gpu_stream_t &stream) noexcept {
+expected_t distributed_contrastive_tokens_t::relax_(std::size_t rank, gpu_tokens_inputs_t const& inputs,
+                                                    gpu_stream_t& stream) noexcept {
     std::size_t const subgraphs = config_.gpu_subgraphs_per_step, segments = config_.segments_per_gpu;
     std::size_t const groups = config_.temperature_groups, gradients = 2u * groups;
     std::size_t const member = domain_->member_offset() + rank;
@@ -977,8 +977,8 @@ expected_t distributed_contrastive_tokens_t::relax_(std::size_t rank, gpu_tokens
     return staged;
 }
 
-expected_t distributed_contrastive_tokens_t::force_(std::size_t rank, gpu_tokens_inputs_t const &,
-                                                    gpu_stream_t &stream) noexcept {
+expected_t distributed_contrastive_tokens_t::force_(std::size_t rank, gpu_tokens_inputs_t const&,
+                                                    gpu_stream_t& stream) noexcept {
     std::size_t const subgraphs = config_.gpu_subgraphs_per_step;
     std::size_t const own_world_gpu = home_domain_index_ * losses_.size() + rank;
     f32r3_span_t const query_forces = window_query_forces_(domain_->member_offset() + rank);
@@ -991,8 +991,8 @@ expected_t distributed_contrastive_tokens_t::force_(std::size_t rank, gpu_tokens
     return staged;
 }
 
-expected_t distributed_contrastive_tokens_t::reduce_(std::size_t rank, gpu_tokens_inputs_t const &inputs,
-                                                     gpu_stream_t &stream) noexcept {
+expected_t distributed_contrastive_tokens_t::reduce_(std::size_t rank, gpu_tokens_inputs_t const& inputs,
+                                                     gpu_stream_t& stream) noexcept {
     std::size_t const members = losses_.size(), segments = config_.segments_per_gpu;
     std::size_t const subgraphs = config_.gpu_subgraphs_per_step;
     std::size_t const gradients = 2u * std::size_t {config_.temperature_groups};

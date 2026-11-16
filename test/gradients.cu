@@ -57,7 +57,7 @@
 #include "uform/train/optimizer.hpp"         // `adafactor_t`
 #include "uform/train/pooled_spectrum.cuh"   // `distributed_pooled_spectrum_t`
 #include "uform/train/transformer_block.cuh" // `transformer_block_bf16_t`, `transformer_scratch_t`
-#include "uform/train/base.cuh"             // `base_replica_t`, `trainer_config_t`, `seed_weights`
+#include "uform/train/base.cuh"              // `base_replica_t`, `trainer_config_t`, `seed_weights`
 
 #include "train/numerics.hpp" // `gpu_numerics_of`
 
@@ -78,7 +78,7 @@ using namespace unum::uform::train;
 using namespace unum::uform::test;
 
 /** Download the BFloat16 scalars of @p device into @p widened , widened once by NumKong. */
-[[nodiscard]] static bool download_widened_(std::span<bf16_t const> device, st::basic_vector<f64_t> &widened) noexcept {
+[[nodiscard]] static bool download_widened_(std::span<bf16_t const> device, st::basic_vector<f64_t>& widened) noexcept {
     std::size_t const count = device.size();
     st::basic_vector<nk_bf16_t> staging;
     if (st::failed(staging.resize(st::assume_uninitialized, count)) ||
@@ -90,7 +90,7 @@ using namespace unum::uform::test;
 
 /** Narrow @p values onto the BFloat16 grid in place and upload them to @p device , landed before
  *  the non-blocking stream reads them. */
-[[nodiscard]] static bool upload_narrowed_(std::span<f64_t> values, bf16_t *device) noexcept {
+[[nodiscard]] static bool upload_narrowed_(std::span<f64_t> values, bf16_t* device) noexcept {
     st::basic_vector<nk_bf16_t> staging;
     if (st::failed(staging.resize(st::assume_uninitialized, values.size())) || !narrow_to_bf16(values, staging))
         return false;
@@ -133,8 +133,8 @@ inline constexpr f64_t finite_difference_tolerance_k = 0x1.0p-4;
 
 /** Build and seed a replica for @p config over @p arena , then draw and corrupt the batch of epoch
  *  @p epoch . */
-[[nodiscard]] static expected<base_replica_t> make_replica_(gpu_arena_t &arena, device_t &device,
-                                                            trainer_config_t const &config,
+[[nodiscard]] static expected<base_replica_t> make_replica_(gpu_arena_t& arena, device_t& device,
+                                                            trainer_config_t const& config,
                                                             data_epoch_t epoch) noexcept {
     expected<base_replica_t> replica = base_replica_t::make(arena, config, 0, device.numerics);
     expected_t staged = replica ? seed_weights(replica->weights, device.stream) : expected_t::fail(std::move(replica));
@@ -145,8 +145,8 @@ inline constexpr f64_t finite_difference_tolerance_k = 0x1.0p-4;
 }
 
 /** Draw and corrupt the batch of epoch @p epoch into an existing @p replica . */
-[[nodiscard]] static expected_t redraw_(base_replica_t &replica, trainer_config_t const &config, data_epoch_t epoch,
-                                        gpu_stream_t &stream) noexcept {
+[[nodiscard]] static expected_t redraw_(base_replica_t& replica, trainer_config_t const& config, data_epoch_t epoch,
+                                        gpu_stream_t& stream) noexcept {
     expected_t staged = replica.draw(config, 0, epoch, stream);
     if (staged) staged = replica.prepare(config, epoch, stream);
     return staged;
@@ -157,7 +157,7 @@ struct summand_pair_t {
     f64_t sum = 0, count = 0;
 };
 
-[[nodiscard]] static summand_pair_t read_pair_(f32r1_tensor_arena_t const &summands) noexcept {
+[[nodiscard]] static summand_pair_t read_pair_(f32r1_tensor_arena_t const& summands) noexcept {
     if (summands.empty()) return {};
     f32_t host[2] = {0.0f, 0.0f};
     cuMemcpyDtoH(host, device_address(summands.data()), sizeof(host));
@@ -166,11 +166,11 @@ struct summand_pair_t {
 
 /** Run the forward region of @p config from zeroed summands and return the composite loss the
  *  backward differentiates: every live head's weighted sum over its own count. */
-[[nodiscard]] static expected<f64_t> forward_loss_(base_replica_t &replica, trainer_config_t const &config,
-                                                   gpu_stream_t &stream) noexcept {
-    f32r1_tensor_arena_t *const pairs[] = {&replica.tokens_summands, &replica.image_summands, &replica.video_summands,
+[[nodiscard]] static expected<f64_t> forward_loss_(base_replica_t& replica, trainer_config_t const& config,
+                                                   gpu_stream_t& stream) noexcept {
+    f32r1_tensor_arena_t* const pairs[] = {&replica.tokens_summands, &replica.image_summands, &replica.video_summands,
                                            &replica.audio_summands};
-    for (f32r1_tensor_arena_t *pair : pairs)
+    for (f32r1_tensor_arena_t* pair : pairs)
         if (!pair->empty())
             if (expected_t zeroed = zero_async(pair->span(), stream); !zeroed)
                 return expected<f64_t>::fail(std::move(zeroed));
@@ -179,7 +179,7 @@ struct summand_pair_t {
     if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
         return cuda_failure<f64_t>(result, "forward drain failed");
     f64_t loss = 0;
-    for (f32r1_tensor_arena_t *pair : pairs) {
+    for (f32r1_tensor_arena_t* pair : pairs) {
         summand_pair_t const read = read_pair_(*pair);
         if (read.count != 0) loss += read.sum / read.count;
     }
@@ -188,18 +188,18 @@ struct summand_pair_t {
 
 /** Perturb every registered matrix along its own gradient and compare the central difference of the
  *  composite loss with the gradient's dot product with the BFloat16-rounded step. */
-static void finite_differences(test_suite_t &suite, device_t &device, bool omni) {
+static void finite_differences(test_suite_t& suite, device_t& device, bool is_omni) {
     switch_to_gpu_t scope {device.stream};
     // One block keeps every perturbed matrix's loss change far above the BFloat16 noise of a deeper
     // stack; the block's own backward is checked exactly by block_host_replay.
-    trainer_config_t config = test_geometry_(omni);
+    trainer_config_t config = test_geometry_(is_omni);
     config.depth = 1;
     config.seed = suite.settings.seed;
     expected<gpu_arena_t> arena = gpu_arena_t::make(0, case_arena_bytes_k);
     if (!arena) return suite.check(false, "arena: {}", arena.description_);
     expected<base_replica_t> made = make_replica_(*arena, device, config, data_epoch_t {0});
     if (!made) return suite.check(false, "replica: {}", made.description_);
-    base_replica_t &replica = *made;
+    base_replica_t& replica = *made;
     expected<f64_t> const base_loss = forward_loss_(replica, config, device.stream);
     if (!base_loss) return suite.check(false, "forward: {}", base_loss.description_);
     if (expected_t backward = replica.backward_region(device.stream); !backward)
@@ -208,7 +208,7 @@ static void finite_differences(test_suite_t &suite, device_t &device, bool omni)
 
     st::basic_vector<f64_t> weights, gradient, plus, minus;
     st::basic_vector<nk_bf16_t> staging;
-    for (differentiable_weights_t const &matrix : replica.weights) {
+    for (differentiable_weights_t const& matrix : replica.weights) {
         std::size_t const scalars = matrix.weights.numel();
         if (!download_widened_({matrix.weights.data(), scalars}, weights) ||
             !download_widened_({matrix.weights_grad.data(), scalars}, gradient) ||
@@ -248,11 +248,11 @@ static void finite_differences(test_suite_t &suite, device_t &device, bool omni)
     }
 }
 
-static void finite_differences_tokens(test_suite_t &suite, device_t &device) {
+static void finite_differences_tokens(test_suite_t& suite, device_t& device) {
     finite_differences(suite, device, false);
 }
 
-static void finite_differences_omni(test_suite_t &suite, device_t &device) { finite_differences(suite, device, true); }
+static void finite_differences_omni(test_suite_t& suite, device_t& device) { finite_differences(suite, device, true); }
 
 /** Host copies of the batch's segment table. */
 struct host_segments_t {
@@ -260,7 +260,7 @@ struct host_segments_t {
     st::basic_vector<modality_t> modality {};
 };
 
-[[nodiscard]] static host_segments_t read_segments_(multimodal_batch_on_gpu_t const &batch) noexcept {
+[[nodiscard]] static host_segments_t read_segments_(multimodal_batch_on_gpu_t const& batch) noexcept {
     host_segments_t segments;
     std::size_t const count = batch.segment_lengths.extent(0);
     if (st::failed(segments.offsets.resize(count)) || st::failed(segments.lengths.resize(count)) ||
@@ -275,8 +275,8 @@ struct host_segments_t {
 /** The linear loss @c ⟨R,V⟩ over the token head's unit vectors @c V after one tower forward,
  *  normalized in Float64 from the Float32 projections, since the BFloat16 vectors' rounding noise
  *  would swamp a central difference of the projection. */
-[[nodiscard]] static expected<f64_t> token_head_loss_(base_replica_t &replica, st::basic_vector<f64_t> const &direction,
-                                                      gpu_stream_t &stream) noexcept {
+[[nodiscard]] static expected<f64_t> token_head_loss_(base_replica_t& replica, st::basic_vector<f64_t> const& direction,
+                                                      gpu_stream_t& stream) noexcept {
     expected_t forwarded = replica.tower.pack_weights(stream);
     if (forwarded) forwarded = replica.tower.forward(replica.batch, {}, stream);
     if (!forwarded) return expected<f64_t>::fail(std::move(forwarded));
@@ -306,7 +306,7 @@ struct host_segments_t {
  *  whose gradient is its direction, against central differences of the projection and the final
  *  norm, and the norm scale against a Float64 replay, with each segment's prefix and the side-less
  *  segments left out of the compact rows. */
-static void token_head_finite_differences(test_suite_t &suite, device_t &device) {
+static void token_head_finite_differences(test_suite_t& suite, device_t& device) {
     switch_to_gpu_t scope {device.stream};
     trainer_config_t config = test_geometry_(false);
     config.depth = 1;
@@ -321,7 +321,7 @@ static void token_head_finite_differences(test_suite_t &suite, device_t &device)
     expected_t staged = made ? seed_weights(made->weights, device.stream) : expected_t::fail(std::move(made));
     if (staged) staged = made->draw(config, 0, data_epoch_t {0}, device.stream);
     if (!staged) return suite.check(false, "replica: {}", staged.description_);
-    base_replica_t &replica = *made;
+    base_replica_t& replica = *made;
     cuStreamSynchronize(device.stream.get());
 
     // Sides and prefixes over the four drawn segments: a query, a document, a side-less segment and
@@ -368,7 +368,7 @@ static void token_head_finite_differences(test_suite_t &suite, device_t &device)
     // for a difference.
     st::basic_vector<f64_t> states, scale, scale_grad, projection;
     differentiable_weights_t const *norm = nullptr, *projected = nullptr;
-    for (differentiable_weights_t const &matrix : replica.weights)
+    for (differentiable_weights_t const& matrix : replica.weights)
         if (matrix.name.view() == "token_head.norm") norm = &matrix;
         else if (matrix.name.view() == "token_head.projection") projected = &matrix;
     bf16r2_view_t const normalized = replica.tower.normalized();
@@ -387,7 +387,7 @@ static void token_head_finite_differences(test_suite_t &suite, device_t &device)
     for (std::size_t segment = 0; segment != count; ++segment)
         for (u32_t token = 0; token != expected_offsets[segment + 1] - expected_offsets[segment]; ++token) {
             std::size_t const row = expected_offsets[segment] + token;
-            f64_t const *const state = states.data() + (segments.offsets[segment] + prefixes[segment] + token) * hidden;
+            f64_t const* const state = states.data() + (segments.offsets[segment] + prefixes[segment] + token) * hidden;
             f64_t squares = 0;
             for (std::size_t channel = 0; channel != hidden; ++channel) squares += state[channel] * state[channel];
             f64_t const inverse_rms = 1.0 / std::sqrt(squares / f64_t(hidden) + epsilon);
@@ -419,7 +419,7 @@ static void token_head_finite_differences(test_suite_t &suite, device_t &device)
                 "token_head.norm gradient matches the Float64 replay: relative {:.3g}", std::sqrt(gap / magnitude));
 
     st::basic_vector<f64_t> weights, gradient, plus, minus;
-    for (differentiable_weights_t const &matrix : replica.weights) {
+    for (differentiable_weights_t const& matrix : replica.weights) {
         sz::string_view_t const name = matrix.name.view();
         if (name != "token_head.projection" && name != "final_norm") continue;
         std::size_t const scalars = matrix.weights.numel();
@@ -456,7 +456,7 @@ static void token_head_finite_differences(test_suite_t &suite, device_t &device)
 
 /** Every text row with bytes carries at least one masked position, over sixteen 64-byte rows
  *  and eight epochs. */
-static void masked_text_rows(test_suite_t &suite, device_t &device) {
+static void masked_text_rows(test_suite_t& suite, device_t& device) {
     switch_to_gpu_t scope {device.stream};
     trainer_config_t config = test_geometry_(false);
     config.batch = multimodal_batch_shape_t {16u, 16u, 64u};
@@ -491,7 +491,7 @@ static void masked_text_rows(test_suite_t &suite, device_t &device) {
 
 /** Each media head counts only masked cells of its own modality, and some of them,
  *  across four epochs. */
-static void masked_media_rows(test_suite_t &suite, device_t &device) {
+static void masked_media_rows(test_suite_t& suite, device_t& device) {
     switch_to_gpu_t scope {device.stream};
     trainer_config_t config = test_geometry_(true);
     config.seed = suite.settings.seed;
@@ -509,14 +509,14 @@ static void masked_media_rows(test_suite_t &suite, device_t &device) {
         for (std::size_t segment = 0; segment != segments.lengths.size(); ++segment)
             cells[static_cast<u32_t>(segments.modality[segment])] += segments.lengths[segment];
         struct head_t {
-            char const *name;
+            char const* name;
             modality_t modality;
-            f32r1_tensor_arena_t const &summands;
+            f32r1_tensor_arena_t const& summands;
         };
         head_t const heads[] = {{"image", modality_t::image_k, replica->image_summands},
                                 {"video", modality_t::video_k, replica->video_summands},
                                 {"audio", modality_t::audio_k, replica->audio_summands}};
-        for (head_t const &head : heads) {
+        for (head_t const& head : heads) {
             f64_t const scored = read_pair_(head.summands).count;
             f64_t const live = cells[static_cast<u32_t>(head.modality)];
             suite.check(scored > 0 && scored <= live, "epoch {}: the {} head scored {} cells of {} {} cells", epoch,
@@ -527,7 +527,7 @@ static void masked_media_rows(test_suite_t &suite, device_t &device) {
 
 /** A freshly seeded six-block tower predicts uniform random bytes at about the uniform
  *  cross-entropy: logits of unit variance add half a nat over @c ln(258) . */
-static void chance_cross_entropy(test_suite_t &suite, device_t &device) {
+static void chance_cross_entropy(test_suite_t& suite, device_t& device) {
     switch_to_gpu_t scope {device.stream};
     trainer_config_t config = test_geometry_(false);
     config.batch = multimodal_batch_shape_t {8u, 8u, 64u};
@@ -553,7 +553,7 @@ struct optimized_matrix_t {
     st::basic_vector<f64_t> host_weights {}, host_gradient {};
 };
 
-[[nodiscard]] static expected_t allocate_matrix_(optimized_matrix_t &matrix, gpu_arena_t &arena, std::size_t rows,
+[[nodiscard]] static expected_t allocate_matrix_(optimized_matrix_t& matrix, gpu_arena_t& arena, std::size_t rows,
                                                  std::size_t columns) noexcept {
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     matrix.weights = bf16r2_tensor_arena_t::uninitialized({rows, columns}, bf16_alloc).value;
@@ -582,7 +582,7 @@ struct optimized_matrix_t {
  *  the first moment of the clipped update under @p beta1 , and the step. Each step restarts the
  *  host replay from the device's rounded weights, so the comparison allows one BFloat16 spacing. A
  *  kept first moment must also survive a save and a load into a fresh optimizer unchanged. */
-static void adafactor_reference(test_suite_t &suite, device_t &device, f32_t beta1) {
+static void adafactor_reference(test_suite_t& suite, device_t& device, f32_t beta1) {
     switch_to_gpu_t scope {device.stream};
     expected<gpu_arena_t> arena = gpu_arena_t::make(0, 64ull << 20);
     if (!arena) return suite.check(false, "arena: {}", arena.description_);
@@ -619,7 +619,7 @@ static void adafactor_reference(test_suite_t &suite, device_t &device, f32_t bet
     }
     for (u32_t step = 1; step != 3u; ++step) {
         for (u32_t matrix = 0; matrix != 2u; ++matrix) {
-            optimized_matrix_t &state = matrices[matrix];
+            optimized_matrix_t& state = matrices[matrix];
             for (std::size_t index = 0; index != state.host_gradient.size(); ++index)
                 state.host_gradient[index] = keyed_uniform_(suite.settings.seed, 16u * step + matrix + 2u, index);
             if (!upload_narrowed_(state.host_gradient, state.gradient.data()))
@@ -631,7 +631,7 @@ static void adafactor_reference(test_suite_t &suite, device_t &device, f32_t bet
         f64_t const decay = fu::min_of<f64_t>(config.beta2,
                                               1.0 - std::pow(static_cast<f64_t>(step), -config.decay_exponent));
         for (u32_t matrix = 0; matrix != 2u; ++matrix) {
-            optimized_matrix_t &state = matrices[matrix];
+            optimized_matrix_t& state = matrices[matrix];
             std::size_t const rows = shapes[matrix][0], columns = shapes[matrix][1];
             f64r2_view_t const gradient {state.host_gradient.data(), rows, columns};
             for (std::size_t row = 0; row != rows; ++row)
@@ -709,7 +709,7 @@ static void adafactor_reference(test_suite_t &suite, device_t &device, f32_t bet
     expected<checkpoint_to_load_t> reloaded = checkpoint_to_load_t::make(path.view());
     std::remove(path.c_str());
     if (!reloaded) return suite.check(false, "reload: {}", reloaded.description_);
-    for (char const *name : {"optimizer.matrix.first_moment", "optimizer.vector.first_moment"}) {
+    for (char const* name : {"optimizer.matrix.first_moment", "optimizer.vector.first_moment"}) {
         nk::tensor_view<f32_t, 2> const before = loaded->float32(name), after = reloaded->float32(name);
         bool const same = !before.empty() && before.extent(1) == after.extent(1) &&
                           std::memcmp(before.data(), after.data(), before.extent(1) * sizeof(f32_t)) == 0;
@@ -720,7 +720,7 @@ static void adafactor_reference(test_suite_t &suite, device_t &device, f32_t bet
 /** A @b [64,256] matrix of ones under a unit gradient takes one step of @c 2^−10 , a quarter of
  *  the BFloat16 spacing below one: the weights must move by that step on average instead of
  *  rounding back to one. */
-static void adafactor_small_steps(test_suite_t &suite, device_t &device) {
+static void adafactor_small_steps(test_suite_t& suite, device_t& device) {
     switch_to_gpu_t scope {device.stream};
     expected<gpu_arena_t> arena = gpu_arena_t::make(0, 64ull << 20);
     if (!arena) return suite.check(false, "arena: {}", arena.description_);
@@ -779,7 +779,7 @@ static void adafactor_small_steps(test_suite_t &suite, device_t &device) {
  *  choices, the force lands on @c d(normalized) at their answer rows alone, added onto what was
  *  there, the decoder's gradient is added onto too, and a central difference of the loss along
  *  that gradient agrees with it. */
-static void choices_cross_entropy(test_suite_t &suite, device_t &device) {
+static void choices_cross_entropy(test_suite_t& suite, device_t& device) {
     switch_to_gpu_t scope {device.stream};
     u32_t const rows = 4, columns = 64, hidden = 256, width = 4, tokens = rows * columns;
     std::size_t const decoder_scalars = std::size_t {byte_vocabulary_k} * hidden;
@@ -938,7 +938,7 @@ static void choices_cross_entropy(test_suite_t &suite, device_t &device) {
 }
 
 /** Unit RMS normalization of the run @p input into @p output , the forward's own epsilon. */
-static void normalize_rms_(auto const &input, auto const &output, f64_t epsilon) noexcept {
+static void normalize_rms_(auto const& input, auto const& output, f64_t epsilon) noexcept {
     std::size_t const count = input.size();
     f64_t const inverse = 1.0 / std::sqrt(dot(input, input) / static_cast<f64_t>(count) + epsilon);
     for (std::size_t index = 0; index != count; ++index) output[index] = input[index] * inverse;
@@ -962,7 +962,7 @@ inline constexpr f64_t rope_base_k = 10000.0;
 
 /** Rotate every NeoX split-half pair @c (k,k+64) of the head vector @p values by @p sign times its
  *  angle at @p coordinates ; a sign of @c -1 is the inverse the backward applies. */
-static void rotate_(auto &&values, nk::tensor_view<i16_t, 1> coordinates, f64_t sign) noexcept {
+static void rotate_(auto&& values, nk::tensor_view<i16_t, 1> coordinates, f64_t sign) noexcept {
     std::size_t const pairs = transformer_head_dim_k / 2;
     for (std::size_t pair = 0; pair != pairs; ++pair) {
         f64_t const angle = sign * rope_angle_(pair, coordinates);
@@ -974,8 +974,8 @@ static void rotate_(auto &&values, nk::tensor_view<i16_t, 1> coordinates, f64_t 
 
 /** Seed @p block 's matrices for unit-variance outputs from draws salted @p salt onward and its
  *  norm scales to one, leaving the six narrowed host copies in @p weights . */
-[[nodiscard]] static bool seed_block_(transformer_block_bf16_t &block, u64_t seed, u32_t salt,
-                                      st::basic_vector<f64_t> *weights) noexcept {
+[[nodiscard]] static bool seed_block_(transformer_block_bf16_t& block, u64_t seed, u32_t salt,
+                                      st::basic_vector<f64_t>* weights) noexcept {
     std::size_t const hidden = block.config().hidden, ffn = block.config().ffn_expansion * hidden;
     struct seeded_t {
         bf16r1_span_t weights;
@@ -999,7 +999,7 @@ static void rotate_(auto &&values, nk::tensor_view<i16_t, 1> coordinates, f64_t 
  *  and M-RoPE coordinates on all three axes: its forward and its attention backward against a
  *  Float64 host replay, the output of every token, and the dQ, dK and dV every segment's softmax
  *  owes back through the inverse rotation and the QK-norm, zero past each segment's length. */
-static void block_host_replay(test_suite_t &suite, device_t &device) {
+static void block_host_replay(test_suite_t& suite, device_t& device) {
     switch_to_gpu_t scope {device.stream};
     std::size_t const hidden = 256, sequence = 64, segments = 4, tokens = sequence * segments;
     std::size_t const heads = hidden / transformer_head_dim_k, ffn = 2 * hidden;
@@ -1050,13 +1050,13 @@ static void block_host_replay(test_suite_t &suite, device_t &device) {
     }
     if (nk::cast<nk::f32_t, nk::f64_t>(input, widened_input) != nk::status_t::success_k)
         return suite.check(false, "input widening failed");
-    f32_t *const device_input = arena->allocate_object<f32_t>(tokens * hidden);
-    f32_t *const device_output = arena->allocate_object<f32_t>(tokens * hidden);
-    f32_t *const device_output_grad = arena->allocate_object<f32_t>(tokens * hidden);
-    f32_t *const device_input_grad = arena->allocate_object<f32_t>(tokens * hidden);
-    u32_t *const device_offsets = arena->allocate_object<u32_t>(segments + 1);
-    u32_t *const device_lengths = arena->allocate_object<u32_t>(segments);
-    i16_t *const device_coordinates = arena->allocate_object<i16_t>(tokens * 3);
+    f32_t* const device_input = arena->allocate_object<f32_t>(tokens * hidden);
+    f32_t* const device_output = arena->allocate_object<f32_t>(tokens * hidden);
+    f32_t* const device_output_grad = arena->allocate_object<f32_t>(tokens * hidden);
+    f32_t* const device_input_grad = arena->allocate_object<f32_t>(tokens * hidden);
+    u32_t* const device_offsets = arena->allocate_object<u32_t>(segments + 1);
+    u32_t* const device_lengths = arena->allocate_object<u32_t>(segments);
+    i16_t* const device_coordinates = arena->allocate_object<i16_t>(tokens * 3);
     cuMemcpyHtoD(device_address(device_input), input.data(), input.size() * sizeof(f32_t));
     cuMemcpyHtoD(device_address(device_output_grad), output_grad.data(), output_grad.size() * sizeof(f32_t));
     cuMemcpyHtoD(device_address(device_offsets), offsets.data(), offsets.size() * sizeof(u32_t));
@@ -1214,7 +1214,7 @@ static void block_host_replay(test_suite_t &suite, device_t &device) {
     // bounds every cell.
     suite.check(worst_output <= 0.02 * largest_output, "forward: off by {:.4g} of {:.4g}", worst_output,
                 largest_output);
-    char const *const roles[] = {"dQ", "dK", "dV"};
+    char const* const roles[] = {"dQ", "dK", "dV"};
     for (u32_t role = 0; role != 3u; ++role)
         suite.check(worst_grad[role] <= 0.02 * largest_grad[role], "{}: off by {:.4g} of {:.4g} over {} segments",
                     roles[role], worst_grad[role], largest_grad[role], segments);
@@ -1223,7 +1223,7 @@ static void block_host_replay(test_suite_t &suite, device_t &device) {
 /** A block's forward replayed from its own @c input() after another block's forward
  *  overwrote their shared scratch reproduces its backward bitwise, as the tower's
  *  recomputing backward relies on. */
-static void block_recompute_replays(test_suite_t &suite, device_t &device) {
+static void block_recompute_replays(test_suite_t& suite, device_t& device) {
     switch_to_gpu_t scope {device.stream};
     std::size_t const hidden = 256, sequence = 64, segments = 2, tokens = sequence * segments;
     expected<gpu_arena_t> arena = gpu_arena_t::make(0, case_arena_bytes_k);
@@ -1256,12 +1256,12 @@ static void block_recompute_replays(test_suite_t &suite, device_t &device) {
     u32_t const offsets[] = {0, sequence, tokens}, lengths[] = {sequence, sequence * 5 / 8};
     i16_t coordinates[tokens * 3] = {};
     for (std::size_t token = 0; token != tokens; ++token) coordinates[token * 3] = static_cast<i16_t>(token % sequence);
-    f32_t *const device_rows = arena->allocate_object<f32_t>(3 * tokens * hidden);
-    f32_t *const device_output = arena->allocate_object<f32_t>(tokens * hidden);
-    f32_t *const device_input_grad = arena->allocate_object<f32_t>(tokens * hidden);
-    u32_t *const device_offsets = arena->allocate_object<u32_t>(segments + 1);
-    u32_t *const device_lengths = arena->allocate_object<u32_t>(segments);
-    i16_t *const device_coordinates = arena->allocate_object<i16_t>(tokens * 3);
+    f32_t* const device_rows = arena->allocate_object<f32_t>(3 * tokens * hidden);
+    f32_t* const device_output = arena->allocate_object<f32_t>(tokens * hidden);
+    f32_t* const device_input_grad = arena->allocate_object<f32_t>(tokens * hidden);
+    u32_t* const device_offsets = arena->allocate_object<u32_t>(segments + 1);
+    u32_t* const device_lengths = arena->allocate_object<u32_t>(segments);
+    i16_t* const device_coordinates = arena->allocate_object<i16_t>(tokens * 3);
     cuMemcpyHtoD(device_address(device_rows), rows.data(), rows.size() * sizeof(f32_t));
     cuMemcpyHtoD(device_address(device_offsets), offsets, sizeof(offsets));
     cuMemcpyHtoD(device_address(device_lengths), lengths, sizeof(lengths));
@@ -1304,7 +1304,7 @@ static void block_recompute_replays(test_suite_t &suite, device_t &device) {
     if (!staged) return suite.check(false, "block step: {}", staged.description_);
     suite.check(std::memcmp(input_grads[0].data(), input_grads[1].data(), tokens * hidden * sizeof(f32_t)) == 0,
                 "the input gradient survives the replay bitwise");
-    char const *const names[] = {"qkv", "out", "gate_up", "down"};
+    char const* const names[] = {"qkv", "out", "gate_up", "down"};
     for (u32_t matrix = 0; matrix != 4u; ++matrix)
         suite.check(
             std::memcmp(grads[0][matrix].data(), grads[1][matrix].data(), grads[0][matrix].size() * sizeof(f64_t)) == 0,
@@ -1374,7 +1374,7 @@ static void normalize_rows_(f64r2_view_t pooled, f64r2_span_t units, std::span<f
  *  coding rate, the top eigenvalue after the configured power steps, and the force on every raw
  *  row, with an all-zero row taking none. The replay's own force is checked by central differences
  *  of its loss, and a second call reproduces the terms bitwise and doubles the force. */
-static void spectrum_replay(test_suite_t &suite, device_t &device) {
+static void spectrum_replay(test_suite_t& suite, device_t& device) {
     switch_to_gpu_t scope {device.stream};
     // Three tiles of channels run the panel, the trailing update and the mirror; 37 rows pad to 40.
     std::size_t const rows = 37, hidden = 96, empty_row = 5;
@@ -1538,17 +1538,17 @@ static void spectrum_replay(test_suite_t &suite, device_t &device) {
                 terms[0][1], terms[1][1]);
 }
 
-int main(int, char **argv) {
+int main(int, char** argv) {
     ::setenv("CUDA_MODULE_LOADING", "EAGER", 1);
     test_suite_t suite = test_suite_t::make(argv[0]);
     int device_count = 0;
-    char const *const cases[] = {"gradients/tokens",    "gradients/omni",          "gradients/token_head",
+    char const* const cases[] = {"gradients/tokens",    "gradients/omni",          "gradients/token_head",
                                  "masking/text_rows",   "masking/media_rows",      "init/chance_entropy",
                                  "adafactor/reference", "adafactor/first_moment",  "adafactor/small_steps",
                                  "block/host_replay",   "block/recompute_replays", "choices/cross_entropy",
                                  "spectrum/replay"};
     if (cuInit(0) != CUDA_SUCCESS || cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count <= 0) {
-        for (char const *name : cases) suite.skip(name, no_cuda_device_k);
+        for (char const* name : cases) suite.skip(name, no_cuda_device_k);
         return suite.finish();
     }
     expected<gpu_stream_t> stream = gpu_stream_t::make(0);

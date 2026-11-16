@@ -21,11 +21,11 @@ static char const doc_module[] =                                                
 /** One type the module readies, the name it exports it under, and the layout of
  *  a struct sequence. */
 static struct {
-    char const *name;
-    PyTypeObject *type;
+    char const* name;
+    PyTypeObject* type;
 
     /** NULL for every type but a struct sequence. */
-    PyStructSequence_Desc *layout;
+    PyStructSequence_Desc* layout;
 } const module_types[] = {
     {"Executor", &ExecutorType, NULL},
     {"Arena", &ArenaType, NULL},
@@ -53,7 +53,7 @@ static struct {
 
 /** The keyword-built structures, readied from their field tables; nested ones before the
  *  ones holding them. */
-static uform_py_fields_t *const module_fields[] = {
+static uform_py_fields_t* const module_fields[] = {
     &ImageShapeType,      &VideoShapeType, &AudioShapeType, &BatchShapeType,  &MaskingType, &ContrastiveType,
     &LateInteractionType, &ChoicesType,    &ScheduleType,   &MeshOptionsType, &EdgesType,   &RelationsType,
 };
@@ -72,10 +72,10 @@ static PyMethodDef const receiver_class_getitem[] = {
 
 /** Copies the rows of the @p count NULL-terminated @p tables into @p merged, ending it
  *  with a sentinel. */
-static void methods_merge(PyMethodDef *merged, PyMethodDef const *const *tables, size_t count) {
+static void methods_merge(PyMethodDef* merged, PyMethodDef const* const* tables, size_t count) {
     size_t written = 0;
     for (size_t table = 0; table != count; ++table)
-        for (PyMethodDef const *row = tables[table]; row->ml_name; ++row) merged[written++] = *row;
+        for (PyMethodDef const* row = tables[table]; row->ml_name; ++row) merged[written++] = *row;
     merged[written] = (PyMethodDef) {NULL, NULL, 0, NULL};
 }
 
@@ -95,9 +95,9 @@ static PyModuleDef module_definition = {
 };
 
 PyMODINIT_FUNC PyInit_lib(void) {
-    PyMethodDef const *const model_tables[] = {uform_py_model_methods, uform_py_model_verbs, uform_py_encode_verbs};
-    PyMethodDef const *const trainer_tables[] = {uform_py_trainer_methods, uform_py_trainer_verbs};
-    PyMethodDef const *const receiver_tables[] = {uform_py_model_verbs, uform_py_encode_verbs, uform_py_trainer_verbs,
+    PyMethodDef const* const model_tables[] = {uform_py_model_methods, uform_py_model_verbs, uform_py_encode_verbs};
+    PyMethodDef const* const trainer_tables[] = {uform_py_trainer_methods, uform_py_trainer_verbs};
+    PyMethodDef const* const receiver_tables[] = {uform_py_model_verbs, uform_py_encode_verbs, uform_py_trainer_verbs,
                                                   receiver_class_getitem};
     methods_merge(model_methods, model_tables, sizeof(model_tables) / sizeof(*model_tables));
     methods_merge(trainer_methods, trainer_tables, sizeof(trainer_tables) / sizeof(*trainer_tables));
@@ -109,15 +109,15 @@ PyMODINIT_FUNC PyInit_lib(void) {
 
     size_t const types_count = sizeof(module_types) / sizeof(*module_types);
     for (size_t type_index = 0; type_index != types_count; ++type_index) {
-        PyTypeObject *const type = module_types[type_index].type;
-        PyStructSequence_Desc *const layout = module_types[type_index].layout;
+        PyTypeObject* const type = module_types[type_index].type;
+        PyStructSequence_Desc* const layout = module_types[type_index].layout;
         if ((layout ? PyStructSequence_InitType2(type, layout) : PyType_Ready(type)) < 0) return NULL;
     }
     size_t const fields_count = sizeof(module_fields) / sizeof(*module_fields);
     for (size_t fields_index = 0; fields_index != fields_count; ++fields_index)
         if (uform_py_fields_ready(module_fields[fields_index]) < 0) return NULL;
 
-    PyObject *const module = PyModule_Create(&module_definition);
+    PyObject* const module = PyModule_Create(&module_definition);
     if (!module) return NULL;
 
 #ifdef Py_GIL_DISABLED
@@ -128,11 +128,11 @@ PyMODINIT_FUNC PyInit_lib(void) {
         PyModule_AddStringConstant(module, "__version__", uform_version_name()) < 0)
         goto failed;
     for (size_t type_index = 0; type_index != types_count; ++type_index)
-        if (PyModule_AddObjectRef(module, module_types[type_index].name, (PyObject *)module_types[type_index].type) < 0)
+        if (PyModule_AddObjectRef(module, module_types[type_index].name, (PyObject*)module_types[type_index].type) < 0)
             goto failed;
     for (size_t fields_index = 0; fields_index != fields_count; ++fields_index) {
-        PyTypeObject *const type = &module_fields[fields_index]->type;
-        if (PyModule_AddObjectRef(module, type->tp_name + sizeof("uform.") - 1, (PyObject *)type) < 0) goto failed;
+        PyTypeObject* const type = &module_fields[fields_index]->type;
+        if (PyModule_AddObjectRef(module, type->tp_name + sizeof("uform.") - 1, (PyObject*)type) < 0) goto failed;
     }
     return module;
 

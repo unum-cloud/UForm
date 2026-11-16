@@ -207,7 +207,7 @@ struct mesh_location_t {
     /** Multicast VA of this rank's multimem_domain; a @c multimem.* op against @c +offset fans
      *  across the whole domain, so there is no per-peer pointer list for intra-domain peers. Null
      *  until the symmetric heap binds it; null at @c gpus_per_multimem_domain==1 forever. */
-    void *multimem_domain_base = nullptr;
+    void* multimem_domain_base = nullptr;
 };
 
 /**
@@ -343,7 +343,7 @@ struct gpu_fault_t {
 };
 
 /** Append the sentence naming @p fault to @p text ; @c false only on allocation failure. */
-[[nodiscard]] inline bool format_fault_into(sz::string_t &text, gpu_fault_t const &fault) noexcept {
+[[nodiscard]] inline bool format_fault_into(sz::string_t& text, gpu_fault_t const& fault) noexcept {
     switch (fault.code) {
     case gpu_fault_code_t::none_k: return format_into(text, "no fault");
     case gpu_fault_code_t::barrier_deadline_k:
@@ -366,7 +366,7 @@ struct gpu_fault_t {
 #if defined(__CUDACC__)
 
 /** Record why this kernel dies in @p fault , when it has one, then trap. */
-__device__ inline void trap_with(gpu_fault_t *fault, gpu_fault_code_t code, u32_t first, u32_t second,
+__device__ inline void trap_with(gpu_fault_t* fault, gpu_fault_code_t code, u32_t first, u32_t second,
                                  u32_t third) noexcept {
     if (fault != nullptr) {
         fault->first = first;
@@ -443,10 +443,10 @@ using mesh_pause_t = void (*)() noexcept;
 struct mesh_topology_t {
 
     mesh_topology_t() noexcept = default;
-    mesh_topology_t(mesh_topology_t const &) = delete;
-    mesh_topology_t &operator=(mesh_topology_t const &) = delete;
-    mesh_topology_t(mesh_topology_t &&other) noexcept { swap_(other); }
-    mesh_topology_t &operator=(mesh_topology_t &&other) noexcept {
+    mesh_topology_t(mesh_topology_t const&) = delete;
+    mesh_topology_t& operator=(mesh_topology_t const&) = delete;
+    mesh_topology_t(mesh_topology_t&& other) noexcept { swap_(other); }
+    mesh_topology_t& operator=(mesh_topology_t&& other) noexcept {
         if (this != &other) {
             destroy_();
             swap_(other);
@@ -477,7 +477,7 @@ struct mesh_topology_t {
     [[nodiscard]] u32_t host_domain_count() const noexcept { return static_cast<u32_t>(host_domains.size()); }
 
     /** This host_domain's own published facts. */
-    [[nodiscard]] mesh_host_domain_t const &self() const noexcept { return host_domains[host_domain_index]; }
+    [[nodiscard]] mesh_host_domain_t const& self() const noexcept { return host_domains[host_domain_index]; }
 
     /** Whether this host_domain owns @c gpu_index 0 — the one that aggregates the exchange and
      *  writes checkpoints and metrics. */
@@ -546,7 +546,7 @@ struct mesh_topology_t {
         // nesting invariants are enforced by the same make_mesh_shape every hand-configured
         // world goes through.
         if (gpus_per_multimem_domain == 0)
-            if (char const *value = std::getenv("UFORM_GPUS_PER_MULTIMEM_DOMAIN"); value != nullptr) // vendor-boundary
+            if (char const* value = std::getenv("UFORM_GPUS_PER_MULTIMEM_DOMAIN"); value != nullptr) // vendor-boundary
                 if (!parse_u32_(sz::string_view_t {value}, gpus_per_multimem_domain))
                     return expected<mesh_topology_t>::fail(
                         status_t::invalid_argument_k, "$UFORM_GPUS_PER_MULTIMEM_DOMAIN is not a number: \"{}\"", value);
@@ -574,7 +574,7 @@ struct mesh_topology_t {
         // (an unshared directory) or how node families collide (an anonymous namespace).
         sz::string_view_t base = directory, job = job_id;
         if (base.empty())
-            if (char const *value = std::getenv("UFORM_EXCHANGE_DIR"); value != nullptr) // vendor-boundary
+            if (char const* value = std::getenv("UFORM_EXCHANGE_DIR"); value != nullptr) // vendor-boundary
                 base = sz::string_view_t {value};
         if (base.empty())
             return expected<mesh_topology_t>::fail( //
@@ -583,7 +583,7 @@ struct mesh_topology_t {
                 "$UFORM_EXCHANGE_DIR (host_domain_count={})",
                 host_domain_count);
         if (job.empty())
-            if (char const *value = std::getenv("UFORM_JOB_ID"); value != nullptr) // vendor-boundary
+            if (char const* value = std::getenv("UFORM_JOB_ID"); value != nullptr) // vendor-boundary
                 job = sz::string_view_t {value};
         if (job.empty())
             return expected<mesh_topology_t>::fail( //
@@ -632,20 +632,20 @@ struct mesh_topology_t {
         expected<sz::string_t> final_path = host_domain_file_path_(host_domain_index, key);
         if (!final_path) return expected_t::fail(std::move(final_path));
         std::string_view const payload = text;
-        return replace_file_durably(final_path->view(), [payload](file_appender_t &file) noexcept {
+        return replace_file_durably(final_path->view(), [payload](file_appender_t& file) noexcept {
             return file.append(std::as_bytes(std::span {payload}));
         });
     }
 
     /** Poll, through @ref poll_pause , until @p peer_host_domain 's payload under @p key exists,
      *  then read it whole into @p out ; fails naming the full path once @p timeout_seconds pass. */
-    [[nodiscard]] expected_t await_text(u32_t peer_host_domain, sz::string_view_t key, sz::string_t &out,
+    [[nodiscard]] expected_t await_text(u32_t peer_host_domain, sz::string_view_t key, sz::string_t& out,
                                         f64_t timeout_seconds) const noexcept {
         expected<sz::string_t> path = host_domain_file_path_(peer_host_domain, key);
         if (!path) return expected_t::fail(std::move(path));
         auto const deadline = std::chrono::steady_clock::now() + std::chrono::duration<f64_t>(timeout_seconds);
         while (true) {
-            if (std::FILE *file = std::fopen(path.value_.c_str(), "r"); file != nullptr) {
+            if (std::FILE* file = std::fopen(path.value_.c_str(), "r"); file != nullptr) {
                 char buffer[512];
                 out.clear();
                 for (std::size_t read_count = 0; (read_count = std::fread(buffer, 1, sizeof(buffer), file)) != 0;)
@@ -724,7 +724,7 @@ struct mesh_topology_t {
     };
 
     /** Parse a whole decimal token; @c false on anything but a clean number. */
-    [[nodiscard]] static bool parse_u32_(sz::string_view_t token, u32_t &value) noexcept {
+    [[nodiscard]] static bool parse_u32_(sz::string_view_t token, u32_t& value) noexcept {
         std::from_chars_result const result = std::from_chars(token.data(), token.data() + token.size(), value);
         return result.ec == std::errc {} && result.ptr == token.data() + token.size();
     }
@@ -737,7 +737,7 @@ struct mesh_topology_t {
     }
 
     /** Append one GPU UUID as 32 lowercase hex characters — the wire form of a @c CUuuid . */
-    [[nodiscard]] static bool format_uuid_(sz::string_t &text, CUuuid const &uuid) noexcept {
+    [[nodiscard]] static bool format_uuid_(sz::string_t& text, CUuuid const& uuid) noexcept {
         bool built = true;
         for (char const byte : uuid.bytes) built = built && format_into(text, "{:02x}", static_cast<u8_t>(byte));
         return built;
@@ -745,10 +745,10 @@ struct mesh_topology_t {
 
     /** Parse a 32-hex GPU UUID token back into a @c CUuuid ; @c false on any non-hex
      *  or short token. */
-    [[nodiscard]] static bool parse_uuid_(sz::string_view_t token, CUuuid &uuid) noexcept {
+    [[nodiscard]] static bool parse_uuid_(sz::string_view_t token, CUuuid& uuid) noexcept {
         if (token.size() != 2u * sizeof(uuid.bytes)) return false;
         for (std::size_t byte_index = 0; byte_index != sizeof(uuid.bytes); ++byte_index) {
-            char const *pair = token.data() + 2u * byte_index;
+            char const* pair = token.data() + 2u * byte_index;
             unsigned value = 0;
             std::from_chars_result const result = std::from_chars(pair, pair + 2, value, 16);
             if (result.ec != std::errc {} || result.ptr != pair + 2) return false;
@@ -763,7 +763,7 @@ struct mesh_topology_t {
     [[nodiscard]] static expected<local_probe_t> probe_local_host_domain_(u32_t host_domain_index,
                                                                           u32_t device_count) noexcept {
         local_probe_t probe;
-        mesh_host_domain_t &self = probe.facts;
+        mesh_host_domain_t& self = probe.facts;
         self.host_domain_index = host_domain_index;
         self.device_count = device_count;
         if (::gethostname(self.hostname, sizeof(self.hostname) - 1u) != 0) self.hostname[0] = '\0';
@@ -774,7 +774,7 @@ struct mesh_topology_t {
             char name[device_name_capacity_k] = {};
             if (CUresult result = cuDeviceGetName(name, sizeof(name) - 1u, device); result != CUDA_SUCCESS)
                 return cuda_failure<local_probe_t>(result, "device name query failed (device={})", device_ordinal);
-            for (char *character = name; *character != '\0'; ++character)
+            for (char* character = name; *character != '\0'; ++character)
                 if (*character == ' ') *character = '_';
             if (device_ordinal == 0) std::memcpy(self.device_name, name, sizeof(name));
             else if (std::strcmp(self.device_name, name) != 0)
@@ -795,8 +795,8 @@ struct mesh_topology_t {
 
     /** Assemble the line-oriented facts payload — the exact inverse of @c parse_facts_ .
      *  @c false only on allocation failure. */
-    [[nodiscard]] static bool build_facts_(sz::string_t &text, mesh_host_domain_t const &self,
-                                           mesh_shape_t const &shape, sz::string_view_t job, u32_t gpu_class,
+    [[nodiscard]] static bool build_facts_(sz::string_t& text, mesh_host_domain_t const& self,
+                                           mesh_shape_t const& shape, sz::string_view_t job, u32_t gpu_class,
                                            std::span<CUuuid const> uuids) noexcept {
         bool built = format_into(text,
                                  "schema {}\n"            //
@@ -812,14 +812,14 @@ struct mesh_topology_t {
                                  mesh_schema_k, job, self.host_domain_index, shape.host_domain_count(),
                                  shape.gpus_per_multimem_domain, gpu_class, self.hostname, self.device_count,
                                  self.device_name);
-        for (CUuuid const &uuid : uuids) built = built && format_into(text, " ") && format_uuid_(text, uuid);
+        for (CUuuid const& uuid : uuids) built = built && format_into(text, " ") && format_uuid_(text, uuid);
         return built;
     }
 
     /** Parse a line-oriented key and value facts payload with the partition API — SIMD scans, zero
      *  allocations, zero exceptions. @c false when any field is missing or malformed; field-level
      *  agreement stays with the caller, which owns the diagnostics. */
-    [[nodiscard]] static bool parse_facts_(sz::string_view_t payload, facts_t &facts) noexcept {
+    [[nodiscard]] static bool parse_facts_(sz::string_view_t payload, facts_t& facts) noexcept {
         sz::byteset_t const whitespaces = sz::whitespaces_set();
         bool index_parsed = false, count_parsed = false, multimem_parsed = false, devices_parsed = false,
              class_parsed = false;
@@ -844,11 +844,11 @@ struct mesh_topology_t {
 
     /** Assemble the manifest payload from a complete table — the exact inverse of
      *  @c parse_manifest_ . @c false only on allocation failure. */
-    [[nodiscard]] static bool build_manifest_(sz::string_t &text, st::basic_vector<mesh_host_domain_t> const &table,
-                                              mesh_shape_t const &shape, sz::string_view_t job) noexcept {
+    [[nodiscard]] static bool build_manifest_(sz::string_t& text, st::basic_vector<mesh_host_domain_t> const& table,
+                                              mesh_shape_t const& shape, sz::string_view_t job) noexcept {
         bool built = format_into(text, "schema {}\njob {}\nmultimem {}\n", mesh_schema_k, job,
                                  shape.gpus_per_multimem_domain);
-        for (mesh_host_domain_t const &entry : table)
+        for (mesh_host_domain_t const& entry : table)
             built = built &&
                     format_into(text, "host_domain {} hostname {} devices {} device_name {}\n", entry.host_domain_index,
                                 entry.hostname, entry.device_count, entry.device_name);
@@ -862,14 +862,14 @@ struct mesh_topology_t {
      *  payload in it. */
     [[nodiscard]] static bool parse_manifest_(sz::string_view_t payload, sz::string_view_t job,
                                               u32_t gpus_per_multimem_domain,
-                                              st::basic_vector<mesh_host_domain_t> &table) noexcept {
-        auto take_token = [](sz::string_view_t &row) noexcept {
+                                              st::basic_vector<mesh_host_domain_t>& table) noexcept {
+        auto take_token = [](sz::string_view_t& row) noexcept {
             // Pop the leading space-separated token off the row with the partition API.
             auto [token, match, rest] = row.partition(' ');
             row = rest;
             return token;
         };
-        auto parse_row = [&take_token](sz::string_view_t row, mesh_host_domain_t &entry) noexcept {
+        auto parse_row = [&take_token](sz::string_view_t row, mesh_host_domain_t& entry) noexcept {
             if (take_token(row) != "host_domain" || !parse_u32_(take_token(row), entry.host_domain_index)) return false;
             if (take_token(row) != "hostname") return false;
             copy_token_(take_token(row), entry.hostname);
@@ -903,16 +903,16 @@ struct mesh_topology_t {
     /** The lead's half of the exchange: read every peer's facts, validate agreement against this
      *  host_domain's own @p probed facts, @p self_gpu_class and the world @ref shape , fill
      *  @ref host_domains , and publish the merged manifest. */
-    [[nodiscard]] expected_t collect_world_as_lead_(sz::string_view_t job, local_probe_t const &probed,
+    [[nodiscard]] expected_t collect_world_as_lead_(sz::string_view_t job, local_probe_t const& probed,
                                                     u32_t self_gpu_class, f64_t timeout_seconds) noexcept {
-        mesh_host_domain_t const &self = probed.facts;
+        mesh_host_domain_t const& self = probed.facts;
         st::basic_vector<claimed_gpu_t> claimed;
         // The world's physical GPU identities, this host_domain's first; sorted once at the end to
         // prove none is claimed twice — O(world log world), never a pairwise scan.
         if (st::failed(claimed.reserve(shape.gpus_per_colocated_domain)))
             return expected_t::fail(status_t::bad_alloc_k, "GPU-uniqueness table allocation failed ({} GPUs)",
                                     shape.gpus_per_colocated_domain);
-        for (CUuuid const &uuid : probed.uuids.view())
+        for (CUuuid const& uuid : probed.uuids.view())
             if (st::failed(claimed.push_back({uuid, 0u})))
                 return expected_t::fail(status_t::bad_alloc_k, "GPU-uniqueness table push failed");
 
@@ -977,7 +977,7 @@ struct mesh_topology_t {
             host_domains[peer_index] = peer;
         }
 
-        auto const by_uuid = [](claimed_gpu_t const &left, claimed_gpu_t const &right) noexcept {
+        auto const by_uuid = [](claimed_gpu_t const& left, claimed_gpu_t const& right) noexcept {
             return std::memcmp(left.uuid.bytes, right.uuid.bytes, sizeof(left.uuid.bytes)) < 0;
         };
         // No physical GPU is owned by two host_domains — the guard against an unpartitioned
@@ -991,7 +991,8 @@ struct mesh_topology_t {
                 (void)format_uuid_(uuid_hex, claimed[index].uuid);
                 return expected_t::fail( //
                     status_t::unsupported_k,
-                    "GPU {} is claimed by both host_domain {} and host_domain {} — the launcher did not partition " "CU" "DA" "_V" "IS" "IB" "LE" "_D" "EV" "IC" "ES" " a" "cr" "os" "s " "co" "-l" "oc" "at" "ed" " p" "ro" "ce" "ss" "e" "s",
+                    "GPU {} is claimed by both host_domain {} and host_domain {} — the launcher did not partition " //
+                    "CUDA_VISIBLE_DEVICES across co-located processes",
                     uuid_hex, claimed[index - 1u].owner, claimed[index].owner);
             }
 
@@ -1003,7 +1004,7 @@ struct mesh_topology_t {
 
     /** A follower's half of the exchange: read the lead's manifest, adopt the world table, and
      *  verify the row describing this host_domain agrees with the local @p probed facts. */
-    [[nodiscard]] expected_t adopt_manifest_(sz::string_view_t job, mesh_host_domain_t const &probed,
+    [[nodiscard]] expected_t adopt_manifest_(sz::string_view_t job, mesh_host_domain_t const& probed,
                                              f64_t timeout_seconds) noexcept {
         sz::string_t manifest;
         if (expected_t awaited = await_text(0u, "manifest", manifest, timeout_seconds); !awaited) return awaited;
@@ -1051,16 +1052,16 @@ struct mesh_topology_t {
         if (CUresult result = cuCtxPushCurrent(fault_context_); result != CUDA_SUCCESS)
             return cuda_failure(result, "context push failed (device=0)");
         std::size_t const bytes = shape.gpus_per_host_domain * sizeof(gpu_fault_t);
-        void *table = nullptr;
+        void* table = nullptr;
         CUresult const pinned = cuMemHostAlloc(&table, bytes, CU_MEMHOSTALLOC_PORTABLE | CU_MEMHOSTALLOC_DEVICEMAP);
         cuCtxPopCurrent(nullptr);
         if (pinned != CUDA_SUCCESS) return cuda_failure(pinned, "fault table allocation failed ({} bytes)", bytes);
         std::memset(table, 0, bytes);
-        faults_ = static_cast<gpu_fault_t *>(table);
+        faults_ = static_cast<gpu_fault_t*>(table);
         return {};
     }
 
-    void swap_(mesh_topology_t &other) noexcept {
+    void swap_(mesh_topology_t& other) noexcept {
         std::swap(shape, other.shape);
         std::swap(host_domain_index, other.host_domain_index);
         std::swap(host_domains, other.host_domains);
@@ -1094,7 +1095,7 @@ struct mesh_topology_t {
     CUcontext fault_context_ = nullptr;
 
     /** The pinned @ref faults table; null for a topology @ref bootstrap did not make. */
-    gpu_fault_t *faults_ = nullptr;
+    gpu_fault_t* faults_ = nullptr;
 };
 
 /** This host_domain's index in the world, read from whichever launcher spawned the process —
@@ -1106,10 +1107,10 @@ struct mesh_topology_t {
  *  cannot change the math. */
 [[nodiscard]] inline u32_t host_domain_index_from_environment() noexcept {
     // `std::getenv` speaks C strings; the names never escape this loop.
-    char const *const variables[] = {"UFORM_HOST_DOMAIN_INDEX", "SLURM_NODEID", // vendor-boundary
+    char const* const variables[] = {"UFORM_HOST_DOMAIN_INDEX", "SLURM_NODEID", // vendor-boundary
                                      "OMPI_COMM_WORLD_RANK"};                   // vendor-boundary
-    for (char const *variable : variables)                                      // vendor-boundary
-        if (char const *value = std::getenv(variable); value != nullptr)        // vendor-boundary
+    for (char const* variable : variables)                                      // vendor-boundary
+        if (char const* value = std::getenv(variable); value != nullptr)        // vendor-boundary
             return static_cast<u32_t>(std::atoi(value));
     return 0u;
 }
@@ -1122,10 +1123,10 @@ struct mesh_topology_t {
  *  world. The whole contract is tabled in @c scripts/slurm/README.md . */
 [[nodiscard]] inline u32_t host_domain_count_from_environment() noexcept {
     // `std::getenv` speaks C strings; the names never escape this loop.
-    char const *const variables[] = {"UFORM_HOST_DOMAIN_COUNT", "SLURM_JOB_NUM_NODES", // vendor-boundary
+    char const* const variables[] = {"UFORM_HOST_DOMAIN_COUNT", "SLURM_JOB_NUM_NODES", // vendor-boundary
                                      "OMPI_COMM_WORLD_SIZE"};
-    for (char const *variable : variables)                                 // vendor-boundary
-        if (char const *value = std::getenv(variable); value != nullptr) { // vendor-boundary
+    for (char const* variable : variables)                                 // vendor-boundary
+        if (char const* value = std::getenv(variable); value != nullptr) { // vendor-boundary
             u32_t const count = static_cast<u32_t>(std::atoi(value));
             return count != 0u ? count : 1u;
         }

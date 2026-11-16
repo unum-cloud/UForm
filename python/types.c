@@ -12,20 +12,20 @@
 
 #pragma region Failures
 
-PyObject *ErrorType = NULL;
+PyObject* ErrorType = NULL;
 
 /** The class each failing status raises, indexed by status; success and deferred never raise. */
-static PyObject *status_error_types[uform_status_invalid_argument_k + 1];
+static PyObject* status_error_types[uform_status_invalid_argument_k + 1];
 
 /** One failing status, the dotted name of the class it raises, the built-in it also subclasses,
  *  and its doc. */
 static struct {
     uform_status_t status;
-    char const *name;
+    char const* name;
 
     /** NULL when no built-in names the fault. */
-    PyObject **builtin;
-    char const *doc;
+    PyObject** builtin;
+    char const* doc;
 } const status_errors[] = {
     {uform_status_out_of_memory_k, "uform.OutOfMemoryError", &PyExc_MemoryError,
      "Device, pinned, or host memory could not be allocated, or the scratch ceiling is too low."},
@@ -54,24 +54,24 @@ static struct {
      "An argument breaks the verb's contract."},
 };
 
-int uform_py_raise(uform_status_t status, char const *format, ...) {
+int uform_py_raise(uform_status_t status, char const* format, ...) {
     PyErr_Clear(); // a status this specific supersedes whatever the caller was carrying
     size_t const types_count = sizeof(status_error_types) / sizeof(*status_error_types);
-    PyObject *type = (size_t)status < types_count ? status_error_types[status] : NULL;
+    PyObject* type = (size_t)status < types_count ? status_error_types[status] : NULL;
     if (!type) {
         status = uform_status_internal_k;
         type = status_error_types[status];
     }
     va_list arguments;
     va_start(arguments, format);
-    PyObject *const message = PyUnicode_FromFormatV(format ? format : "", arguments);
+    PyObject* const message = PyUnicode_FromFormatV(format ? format : "", arguments);
     va_end(arguments);
     if (!message) return -1;
 
-    PyObject *const instance = PyObject_CallOneArg(type, message);
+    PyObject* const instance = PyObject_CallOneArg(type, message);
     Py_DECREF(message);
     if (!instance) return -1;
-    PyObject *const member = uform_py_enum_to_object(&uform_py_status, (int)status);
+    PyObject* const member = uform_py_enum_to_object(&uform_py_status, (int)status);
     int const attached = member ? PyObject_SetAttrString(instance, "status", member) : -1;
     Py_XDECREF(member);
     if (attached != 0) {
@@ -82,12 +82,12 @@ int uform_py_raise(uform_status_t status, char const *format, ...) {
     return -1;
 }
 
-int uform_py_raise_on_outcome(uform_outcome_t const *outcome) {
+int uform_py_raise_on_outcome(uform_outcome_t const* outcome) {
     if (outcome->status == uform_status_success_k) return 0;
     return uform_py_raise(outcome->status, "%s", outcome->message ? outcome->message : "");
 }
 
-int uform_py_dict_steal_item(PyObject *dict, char const *key, PyObject *value) {
+int uform_py_dict_steal_item(PyObject* dict, char const* key, PyObject* value) {
     if (!value) return -1;
     int const stored = PyDict_SetItemString(dict, key, value);
     Py_DECREF(value);
@@ -108,14 +108,14 @@ static char const doc_Error[] =                                                 
     "    `Status.SHAPE_MISMATCH`.\n"                                                           //
     "  args (tuple): The detail the status cannot carry, as on any exception.";
 
-int uform_py_register_error_types(PyObject *module) {
-    ErrorType = PyErr_NewExceptionWithDoc("uform.Error", (char *)doc_Error, PyExc_RuntimeError, NULL);
+int uform_py_register_error_types(PyObject* module) {
+    ErrorType = PyErr_NewExceptionWithDoc("uform.Error", (char*)doc_Error, PyExc_RuntimeError, NULL);
     if (!ErrorType || PyModule_AddObjectRef(module, "Error", ErrorType) < 0) return -1;
     for (size_t row = 0; row != sizeof(status_errors) / sizeof(*status_errors); ++row) {
-        PyObject *const bases = status_errors[row].builtin ? PyTuple_Pack(2, ErrorType, *status_errors[row].builtin)
+        PyObject* const bases = status_errors[row].builtin ? PyTuple_Pack(2, ErrorType, *status_errors[row].builtin)
                                                            : Py_NewRef(ErrorType);
         if (!bases) return -1;
-        PyObject *const type = PyErr_NewExceptionWithDoc(status_errors[row].name, (char *)status_errors[row].doc, bases,
+        PyObject* const type = PyErr_NewExceptionWithDoc(status_errors[row].name, (char*)status_errors[row].doc, bases,
                                                          NULL);
         Py_DECREF(bases);
         if (!type) return -1;
@@ -129,14 +129,14 @@ int uform_py_register_error_types(PyObject *module) {
 
 #pragma region Enums
 
-static char const *spell_status(int value) { return uform_status_name((uform_status_t)value); }
-static char const *spell_scalar(int value) { return uform_scalar_name((uform_scalar_t)value); }
-static char const *spell_mood(int value) { return uform_mood_name((uform_mood_t)value); }
-static char const *spell_cpu_class(int value) { return uform_cpu_class_name((uform_cpu_class_t)value); }
-static char const *spell_gpu_class(int value) { return uform_gpu_class_name((uform_gpu_class_t)value); }
+static char const* spell_status(int value) { return uform_status_name((uform_status_t)value); }
+static char const* spell_scalar(int value) { return uform_scalar_name((uform_scalar_t)value); }
+static char const* spell_mood(int value) { return uform_mood_name((uform_mood_t)value); }
+static char const* spell_cpu_class(int value) { return uform_cpu_class_name((uform_cpu_class_t)value); }
+static char const* spell_gpu_class(int value) { return uform_gpu_class_name((uform_gpu_class_t)value); }
 
 /** The C interface spells no vendor, so the binding names the three it lists. */
-static char const *spell_gpu_vendor(int value) {
+static char const* spell_gpu_vendor(int value) {
     switch (value) {
     case uform_gpu_vendor_nvidia_k: return "nvidia";
     case uform_gpu_vendor_amd_k: return "amd";
@@ -179,19 +179,19 @@ uform_py_enum_t uform_py_gpu_vendor = {.name = "GPUVendor",
                                        .spell = spell_gpu_vendor};
 
 /** The spelling of @p value, or NULL when no member carries it. */
-static char const *enum_spelling(uform_py_enum_t const *mirrored, long value) {
+static char const* enum_spelling(uform_py_enum_t const* mirrored, long value) {
     if (value < mirrored->first || value > mirrored->last) return NULL;
-    char const *const spelled = mirrored->spell((int)value);
+    char const* const spelled = mirrored->spell((int)value);
     if (!spelled || strcmp(spelled, "unknown") == 0 || strcmp(spelled, "unrecognized") == 0) return NULL;
     return spelled;
 }
 
 /** Builds the class of @p mirrored by calling its base from @p enum_module with @p keywords,
  *  in value order. */
-static int enum_register(PyObject *module, PyObject *enum_module, PyObject *keywords, uform_py_enum_t *mirrored) {
-    PyObject *members = PyDict_New();
+static int enum_register(PyObject* module, PyObject* enum_module, PyObject* keywords, uform_py_enum_t* mirrored) {
+    PyObject* members = PyDict_New();
     for (long value = mirrored->first; members && value <= mirrored->last; ++value) {
-        char const *const spelled = enum_spelling(mirrored, value);
+        char const* const spelled = enum_spelling(mirrored, value);
         if (!spelled) continue;
         char member_name[32];
         size_t length = 0;
@@ -204,9 +204,9 @@ static int enum_register(PyObject *module, PyObject *enum_module, PyObject *keyw
         member_name[length] = '\0';
         if (uform_py_dict_steal_item(members, member_name, PyLong_FromLong(value)) != 0) Py_CLEAR(members);
     }
-    PyObject *const base = members ? PyObject_GetAttrString(enum_module, mirrored->base) : NULL;
-    PyObject *const name = base ? PyUnicode_FromString(mirrored->name) : NULL;
-    PyObject *const arguments = name ? PyTuple_Pack(2, name, members) : NULL;
+    PyObject* const base = members ? PyObject_GetAttrString(enum_module, mirrored->base) : NULL;
+    PyObject* const name = base ? PyUnicode_FromString(mirrored->name) : NULL;
+    PyObject* const arguments = name ? PyTuple_Pack(2, name, members) : NULL;
     mirrored->type = arguments ? PyObject_Call(base, arguments, keywords) : NULL;
     Py_XDECREF(arguments);
     Py_XDECREF(name);
@@ -215,14 +215,14 @@ static int enum_register(PyObject *module, PyObject *enum_module, PyObject *keyw
     return mirrored->type ? PyModule_AddObjectRef(module, mirrored->name, mirrored->type) : -1;
 }
 
-int uform_py_register_enums(PyObject *module) {
-    uform_py_enum_t *const mirrored[] = {
+int uform_py_register_enums(PyObject* module) {
+    uform_py_enum_t* const mirrored[] = {
         &uform_py_status,       &uform_py_scalar,     &uform_py_mood,           &uform_py_cpu_class,
         &uform_py_gpu_class,    &uform_py_gpu_vendor, &uform_py_outputs,        &uform_py_modality,
         &uform_py_objective,    &uform_py_negatives,  &uform_py_pair_loss_form, &uform_py_late_interaction_side,
         &uform_py_multimem_tier};
-    PyObject *const enum_module = PyImport_ImportModule("enum");
-    PyObject *keywords = enum_module ? PyDict_New() : NULL;
+    PyObject* const enum_module = PyImport_ImportModule("enum");
+    PyObject* keywords = enum_module ? PyDict_New() : NULL;
     if (keywords && uform_py_dict_steal_item(keywords, "module", PyUnicode_FromString("uform")) != 0)
         Py_CLEAR(keywords);
     int registered = keywords ? 0 : -1;
@@ -233,7 +233,7 @@ int uform_py_register_enums(PyObject *module) {
     return registered;
 }
 
-int uform_py_enum_from_object(PyObject *object, char const *field, uform_py_enum_t const *mirrored, int *value) {
+int uform_py_enum_from_object(PyObject* object, char const* field, uform_py_enum_t const* mirrored, int* value) {
     if (!PyLong_Check(object) || PyBool_Check(object)) {
         PyErr_Format(PyExc_TypeError, "the '%s' option takes a uform.%s, got %S", field, mirrored->name,
                      Py_TYPE(object));
@@ -250,20 +250,20 @@ int uform_py_enum_from_object(PyObject *object, char const *field, uform_py_enum
                           mirrored->name, object);
 }
 
-PyObject *uform_py_enum_to_object(uform_py_enum_t const *mirrored, int value) {
-    PyObject *const integer = PyLong_FromLong(value);
-    PyObject *const member = integer ? PyObject_CallOneArg(mirrored->type, integer) : NULL;
+PyObject* uform_py_enum_to_object(uform_py_enum_t const* mirrored, int value) {
+    PyObject* const integer = PyLong_FromLong(value);
+    PyObject* const member = integer ? PyObject_CallOneArg(mirrored->type, integer) : NULL;
     Py_XDECREF(integer);
     return member;
 }
 
-int uform_py_class_from_object(PyObject *object, char const *field, uform_py_enum_t const *classes, int *value) {
+int uform_py_class_from_object(PyObject* object, char const* field, uform_py_enum_t const* classes, int* value) {
     *value = 0;
     if (!object || object == Py_None) return 0;
     return uform_py_enum_from_object(object, field, classes, value);
 }
 
-PyObject *uform_py_class_to_object(uform_py_enum_t const *classes, int value) {
+PyObject* uform_py_class_to_object(uform_py_enum_t const* classes, int value) {
     return value ? uform_py_enum_to_object(classes, value) : Py_NewRef(Py_None);
 }
 
@@ -271,9 +271,9 @@ PyObject *uform_py_class_to_object(uform_py_enum_t const *classes, int value) {
 
 #pragma region Arguments
 
-int uform_py_arguments_parse(char const *verb, PyObject *const *args, Py_ssize_t positional_args_count,
-                             PyObject *args_names_tuple, Py_ssize_t positional_only, Py_ssize_t positional_max,
-                             uform_py_argument_t const *arguments, size_t count) {
+int uform_py_arguments_parse(char const* verb, PyObject* const* args, Py_ssize_t positional_args_count,
+                             PyObject* args_names_tuple, Py_ssize_t positional_only, Py_ssize_t positional_max,
+                             uform_py_argument_t const* arguments, size_t count) {
     if (positional_args_count > positional_max) {
         PyErr_Format(PyExc_TypeError, "%s() takes at most %zd positional arguments, received %zd", verb, positional_max,
                      positional_args_count);
@@ -285,7 +285,7 @@ int uform_py_arguments_parse(char const *verb, PyObject *const *args, Py_ssize_t
 
     Py_ssize_t const args_names_count = args_names_tuple ? PyTuple_GET_SIZE(args_names_tuple) : 0;
     for (Py_ssize_t name_index = 0; name_index != args_names_count; ++name_index) {
-        PyObject *const name = PyTuple_GET_ITEM(args_names_tuple, name_index);
+        PyObject* const name = PyTuple_GET_ITEM(args_names_tuple, name_index);
         size_t position = (size_t)positional_only;
         while (position != count && PyUnicode_CompareWithASCIIString(name, arguments[position].name) != 0) ++position;
         if (position == count) {
@@ -306,7 +306,7 @@ int uform_py_arguments_parse(char const *verb, PyObject *const *args, Py_ssize_t
     return 0;
 }
 
-int uform_py_size_from_object(PyObject *object, char const *field, size_t *value) {
+int uform_py_size_from_object(PyObject* object, char const* field, size_t* value) {
     if (!object) return 0;
     Py_ssize_t const signed_value = PyNumber_AsSsize_t(object, PyExc_OverflowError);
     if (signed_value == -1 && PyErr_Occurred()) return -1;
@@ -316,7 +316,7 @@ int uform_py_size_from_object(PyObject *object, char const *field, size_t *value
     return 0;
 }
 
-int uform_py_scalar_from_object(PyObject *object, char const *field, uform_scalar_t *kind) {
+int uform_py_scalar_from_object(PyObject* object, char const* field, uform_scalar_t* kind) {
     if (!object) return 0;
     int value = uform_scalar_unknown_k;
     if (uform_py_enum_from_object(object, field, &uform_py_scalar, &value) != 0) return -1;
@@ -324,14 +324,14 @@ int uform_py_scalar_from_object(PyObject *object, char const *field, uform_scala
     return 0;
 }
 
-int uform_py_ordinals_from_object(PyObject *object, char const *field, int32_t **ordinals, size_t *count) {
+int uform_py_ordinals_from_object(PyObject* object, char const* field, int32_t** ordinals, size_t* count) {
     *ordinals = NULL;
     *count = 0;
     if (!object || object == Py_None) return 0;
-    PyObject *const sequence = PySequence_Fast(object, "expected a sequence of integers");
+    PyObject* const sequence = PySequence_Fast(object, "expected a sequence of integers");
     if (!sequence) return -1;
     Py_ssize_t const length = PySequence_Fast_GET_SIZE(sequence);
-    int32_t *const claimed = length ? (int32_t *)PyMem_Malloc((size_t)length * sizeof(int32_t)) : NULL;
+    int32_t* const claimed = length ? (int32_t*)PyMem_Malloc((size_t)length * sizeof(int32_t)) : NULL;
     if (length && !claimed) {
         Py_DECREF(sequence);
         PyErr_NoMemory();
@@ -354,17 +354,17 @@ int uform_py_ordinals_from_object(PyObject *object, char const *field, int32_t *
     return 0;
 }
 
-int uform_py_path_from_object(PyObject *object, char const *field, uform_bytes_view_t *path, PyObject **decoded) {
-    PyObject *bytes_object = NULL;
+int uform_py_path_from_object(PyObject* object, char const* field, uform_bytes_view_t* path, PyObject** decoded) {
+    PyObject* bytes_object = NULL;
     if (!PyUnicode_FSConverter(object, &bytes_object)) return -1;
-    path->data = (uint8_t const *)PyBytes_AS_STRING(bytes_object);
+    path->data = (uint8_t const*)PyBytes_AS_STRING(bytes_object);
     path->length = (size_t)PyBytes_GET_SIZE(bytes_object);
     *decoded = bytes_object;
     return 0;
 }
 
-PyObject *uform_py_struct_sequence_steal(PyTypeObject *type, PyObject **fields, Py_ssize_t count) {
-    PyObject *result = NULL;
+PyObject* uform_py_struct_sequence_steal(PyTypeObject* type, PyObject** fields, Py_ssize_t count) {
+    PyObject* result = NULL;
     Py_ssize_t filled = 0;
     while (filled != count && fields[filled]) ++filled;
     if (filled == count) result = PyStructSequence_New(type);
@@ -385,7 +385,7 @@ PyObject *uform_py_struct_sequence_steal(PyTypeObject *type, PyObject **fields, 
  *      nested structure from its items in order.
  *  @return A new reference to what the structure keeps, or NULL with an exception set.
  */
-static PyObject *field_accept(uform_py_field_t const *field, PyObject *value) {
+static PyObject* field_accept(uform_py_field_t const* field, PyObject* value) {
     switch (field->kind) {
     case uform_py_field_size_k: {
         size_t checked = 0;
@@ -398,31 +398,31 @@ static PyObject *field_accept(uform_py_field_t const *field, PyObject *value) {
         return NULL;
     case uform_py_field_enum_k: {
         int member = 0;
-        if (uform_py_enum_from_object(value, field->name, (uform_py_enum_t const *)field->detail, &member) != 0)
+        if (uform_py_enum_from_object(value, field->name, (uform_py_enum_t const*)field->detail, &member) != 0)
             return NULL;
-        return uform_py_enum_to_object((uform_py_enum_t const *)field->detail, member);
+        return uform_py_enum_to_object((uform_py_enum_t const*)field->detail, member);
     }
     case uform_py_field_struct_k: {
-        PyTypeObject *const nested = (PyTypeObject *)field->detail;
+        PyTypeObject* const nested = (PyTypeObject*)field->detail;
         if (value == Py_None || Py_IS_TYPE(value, nested)) return Py_NewRef(value);
         if (!PyTuple_Check(value)) {
             PyErr_Format(PyExc_TypeError, "the '%s' field takes a uform.%s or a tuple of its fields, got %S",
                          field->name, nested->tp_name + sizeof("uform.") - 1, Py_TYPE(value));
             return NULL;
         }
-        uform_py_fields_t const *const schema = (uform_py_fields_t const *)nested;
+        uform_py_fields_t const* const schema = (uform_py_fields_t const*)nested;
         Py_ssize_t const given = PyTuple_GET_SIZE(value);
         if ((size_t)given > schema->count) {
             PyErr_Format(PyExc_TypeError, "the '%s' field takes at most %zu values, got %zd", field->name,
                          schema->count, given);
             return NULL;
         }
-        PyObject *keywords = PyDict_New();
+        PyObject* keywords = PyDict_New();
         for (Py_ssize_t position = 0; keywords && position != given; ++position)
             if (PyDict_SetItemString(keywords, schema->fields[position].name, PyTuple_GET_ITEM(value, position)) != 0)
                 Py_CLEAR(keywords);
-        PyObject *const empty = keywords ? PyTuple_New(0) : NULL;
-        PyObject *const built = empty ? PyObject_Call((PyObject *)nested, empty, keywords) : NULL;
+        PyObject* const empty = keywords ? PyTuple_New(0) : NULL;
+        PyObject* const built = empty ? PyObject_Call((PyObject*)nested, empty, keywords) : NULL;
         Py_XDECREF(empty);
         Py_XDECREF(keywords);
         return built;
@@ -434,29 +434,29 @@ static PyObject *field_accept(uform_py_field_t const *field, PyObject *value) {
 
 /** The value a field the caller left out holds: zero for a number, the zero member of an
  *  enum, None otherwise. */
-static PyObject *field_default(uform_py_field_t const *field) {
+static PyObject* field_default(uform_py_field_t const* field) {
     switch (field->kind) {
     case uform_py_field_size_k: return PyLong_FromLong(0);
     case uform_py_field_float_k:
     case uform_py_field_double_k: return PyFloat_FromDouble(0.0);
-    case uform_py_field_enum_k: return uform_py_enum_to_object((uform_py_enum_t const *)field->detail, 0);
+    case uform_py_field_enum_k: return uform_py_enum_to_object((uform_py_enum_t const*)field->detail, 0);
     default: return Py_NewRef(Py_None);
     }
 }
 
-static PyObject *Fields_tp_new(PyTypeObject *type, PyObject *args, PyObject *keywords) {
-    uform_py_fields_t const *const schema = (uform_py_fields_t const *)type;
+static PyObject* Fields_tp_new(PyTypeObject* type, PyObject* args, PyObject* keywords) {
+    uform_py_fields_t const* const schema = (uform_py_fields_t const*)type;
     if (PyTuple_GET_SIZE(args) != 0) {
         PyErr_Format(PyExc_TypeError, "%s() takes keyword arguments only", type->tp_name + sizeof("uform.") - 1);
         return NULL;
     }
     Py_ssize_t const given = keywords ? PyDict_GET_SIZE(keywords) : 0; // owned by this call, so borrowed values stay
-    Fields *const instance = (Fields *)type->tp_alloc(type, 0);
+    Fields* const instance = (Fields*)type->tp_alloc(type, 0);
     if (!instance) return NULL;
     Py_ssize_t matched = 0;
     for (size_t index = 0; index != schema->count; ++index) {
-        uform_py_field_t const *const field = &schema->fields[index];
-        PyObject *const value = keywords ? PyDict_GetItemString(keywords, field->name) : NULL;
+        uform_py_field_t const* const field = &schema->fields[index];
+        PyObject* const value = keywords ? PyDict_GetItemString(keywords, field->name) : NULL;
         instance->values[index] = value ? field_accept(field, value) : field_default(field);
         matched += value != NULL;
         if (!instance->values[index]) goto failed;
@@ -466,23 +466,23 @@ static PyObject *Fields_tp_new(PyTypeObject *type, PyObject *args, PyObject *key
                      type->tp_name + sizeof("uform.") - 1, keywords);
         goto failed;
     }
-    return (PyObject *)instance;
+    return (PyObject*)instance;
 
 failed:
     Py_DECREF(instance);
     return NULL;
 }
 
-static void Fields_dealloc(Fields *self) {
+static void Fields_dealloc(Fields* self) {
     for (size_t index = 0; index != uform_py_fields_max_k; ++index) Py_XDECREF(self->values[index]);
-    Py_TYPE(self)->tp_free((PyObject *)self);
+    Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
-static PyObject *Fields_repr(Fields *self) {
-    uform_py_fields_t const *const schema = (uform_py_fields_t const *)Py_TYPE(self);
-    PyObject *const parts = PyList_New(0);
+static PyObject* Fields_repr(Fields* self) {
+    uform_py_fields_t const* const schema = (uform_py_fields_t const*)Py_TYPE(self);
+    PyObject* const parts = PyList_New(0);
     for (size_t index = 0; parts && index != schema->count; ++index) {
-        PyObject *const part = PyUnicode_FromFormat("%s=%R", schema->fields[index].name, self->values[index]);
+        PyObject* const part = PyUnicode_FromFormat("%s=%R", schema->fields[index].name, self->values[index]);
         if (!part || PyList_Append(parts, part) != 0) {
             Py_XDECREF(part);
             Py_DECREF(parts);
@@ -490,9 +490,9 @@ static PyObject *Fields_repr(Fields *self) {
         }
         Py_DECREF(part);
     }
-    PyObject *const separator = parts ? PyUnicode_FromString(", ") : NULL;
-    PyObject *const joined = separator ? PyUnicode_Join(separator, parts) : NULL;
-    PyObject *const repr = joined
+    PyObject* const separator = parts ? PyUnicode_FromString(", ") : NULL;
+    PyObject* const joined = separator ? PyUnicode_Join(separator, parts) : NULL;
+    PyObject* const repr = joined
                                ? PyUnicode_FromFormat("%s(%U)", Py_TYPE(self)->tp_name + sizeof("uform.") - 1, joined)
                                : NULL;
     Py_XDECREF(joined);
@@ -501,16 +501,16 @@ static PyObject *Fields_repr(Fields *self) {
     return repr;
 }
 
-int uform_py_fields_ready(uform_py_fields_t *fields) {
-    PyMemberDef *const members = (PyMemberDef *)PyMem_Calloc(fields->count + 1, sizeof(PyMemberDef));
+int uform_py_fields_ready(uform_py_fields_t* fields) {
+    PyMemberDef* const members = (PyMemberDef*)PyMem_Calloc(fields->count + 1, sizeof(PyMemberDef));
     if (!members) {
         PyErr_NoMemory();
         return -1;
     }
     for (size_t index = 0; index != fields->count; ++index)
         members[index] = (PyMemberDef) {fields->fields[index].name, Py_T_OBJECT_EX,
-                                        (Py_ssize_t)(offsetof(Fields, values) + index * sizeof(PyObject *)),
-                                        Py_READONLY, fields->fields[index].doc};
+                                        (Py_ssize_t)(offsetof(Fields, values) + index * sizeof(PyObject*)), Py_READONLY,
+                                        fields->fields[index].doc};
     fields->type.tp_basicsize = sizeof(Fields);
     fields->type.tp_flags = Py_TPFLAGS_DEFAULT;
     fields->type.tp_new = Fields_tp_new;
@@ -520,26 +520,26 @@ int uform_py_fields_ready(uform_py_fields_t *fields) {
     return PyType_Ready(&fields->type);
 }
 
-int uform_py_fields_write(PyObject *object, char const *field, uform_py_fields_t const *fields, void *target) {
+int uform_py_fields_write(PyObject* object, char const* field, uform_py_fields_t const* fields, void* target) {
     if (!object || object == Py_None) return 0;
-    if (!Py_IS_TYPE(object, (PyTypeObject *)&fields->type)) {
+    if (!Py_IS_TYPE(object, (PyTypeObject*)&fields->type)) {
         PyErr_Format(PyExc_TypeError, "the '%s' option takes a uform.%s, got %S", field,
                      fields->type.tp_name + sizeof("uform.") - 1, Py_TYPE(object));
         return -1;
     }
     for (size_t index = 0; index != fields->count; ++index) {
-        uform_py_field_t const *const described = &fields->fields[index];
-        PyObject *const value = ((Fields *)object)->values[index];
-        char *const at = (char *)target + described->offset;
+        uform_py_field_t const* const described = &fields->fields[index];
+        PyObject* const value = ((Fields*)object)->values[index];
+        char* const at = (char*)target + described->offset;
         switch (described->kind) {
         case uform_py_field_size_k:
-            if (uform_py_size_from_object(value, described->name, (size_t *)(void *)at) != 0) return -1;
+            if (uform_py_size_from_object(value, described->name, (size_t*)(void*)at) != 0) return -1;
             break;
-        case uform_py_field_float_k: *(float *)(void *)at = (float)PyFloat_AS_DOUBLE(value); break;
-        case uform_py_field_double_k: *(double *)(void *)at = PyFloat_AS_DOUBLE(value); break;
-        case uform_py_field_enum_k: *(int *)(void *)at = (int)PyLong_AsLong(value); break;
+        case uform_py_field_float_k: *(float*)(void*)at = (float)PyFloat_AS_DOUBLE(value); break;
+        case uform_py_field_double_k: *(double*)(void*)at = PyFloat_AS_DOUBLE(value); break;
+        case uform_py_field_enum_k: *(int*)(void*)at = (int)PyLong_AsLong(value); break;
         case uform_py_field_struct_k:
-            if (uform_py_fields_write(value, described->name, (uform_py_fields_t const *)described->detail, at) != 0)
+            if (uform_py_fields_write(value, described->name, (uform_py_fields_t const*)described->detail, at) != 0)
                 return -1;
             break;
         case uform_py_field_object_k: break;
@@ -553,12 +553,12 @@ int uform_py_fields_write(PyObject *object, char const *field, uform_py_fields_t
 #pragma region Calls
 
 /** The @c Deferred whose trailing storage holds @p call. */
-static Deferred *deferred_of(void *call) { return (Deferred *)(void *)((char *)call - offsetof(Deferred, call)); }
+static Deferred* deferred_of(void* call) { return (Deferred*)(void*)((char*)call - offsetof(Deferred, call)); }
 
-void *uform_py_call_open(uform_py_receiver_t const *receiver, uform_py_verb_t const *verb, void *stack) {
-    void *call = stack;
+void* uform_py_call_open(uform_py_receiver_t const* receiver, uform_py_verb_t const* verb, void* stack) {
+    void* call = stack;
     if (receiver->completion == uform_completion_deferred_k) {
-        Deferred *const deferred = PyObject_GC_NewVar(Deferred, &DeferredType, (Py_ssize_t)verb->call_bytes);
+        Deferred* const deferred = PyObject_GC_NewVar(Deferred, &DeferredType, (Py_ssize_t)verb->call_bytes);
         if (!deferred) return NULL;
         deferred->verb = verb;
         deferred->origin = Py_NewRef(receiver->origin);
@@ -575,8 +575,8 @@ void *uform_py_call_open(uform_py_receiver_t const *receiver, uform_py_verb_t co
 
 /** Answers a final @p call: a callback's first exception, else the outcome's failure, else
  *  the verb's answer. */
-static PyObject *call_answer(uform_py_verb_t const *verb, void *call) {
-    uform_py_call_t *const header = (uform_py_call_t *)call;
+static PyObject* call_answer(uform_py_verb_t const* verb, void* call) {
+    uform_py_call_t* const header = (uform_py_call_t*)call;
     if (header->raised) {
         PyErr_SetRaisedException(header->raised);
         header->raised = NULL;
@@ -586,44 +586,44 @@ static PyObject *call_answer(uform_py_verb_t const *verb, void *call) {
 }
 
 /** Lets go of what @p call gathered, keeping whatever exception is set. */
-static void call_release(uform_py_verb_t const *verb, void *call) {
-    PyObject *const raised = PyErr_GetRaisedException();
+static void call_release(uform_py_verb_t const* verb, void* call) {
+    PyObject* const raised = PyErr_GetRaisedException();
     verb->release(call);
     PyErr_SetRaisedException(raised);
 }
 
-PyObject *uform_py_call_run(uform_py_receiver_t const *receiver, uform_py_verb_t const *verb, void *call) {
+PyObject* uform_py_call_run(uform_py_receiver_t const* receiver, uform_py_verb_t const* verb, void* call) {
     Py_BEGIN_ALLOW_THREADS;
     verb->submit(call);
     Py_END_ALLOW_THREADS;
-    if (receiver->completion == uform_completion_deferred_k) return (PyObject *)deferred_of(call);
-    PyObject *const answer = call_answer(verb, call);
+    if (receiver->completion == uform_completion_deferred_k) return (PyObject*)deferred_of(call);
+    PyObject* const answer = call_answer(verb, call);
     call_release(verb, call);
     return answer;
 }
 
-PyObject *uform_py_call_discard(uform_py_receiver_t const *receiver, uform_py_verb_t const *verb, void *call) {
+PyObject* uform_py_call_discard(uform_py_receiver_t const* receiver, uform_py_verb_t const* verb, void* call) {
     call_release(verb, call);
     if (receiver->completion == uform_completion_blocking_k) return NULL;
-    Deferred *const deferred = deferred_of(call);
+    Deferred* const deferred = deferred_of(call);
     deferred->verb = NULL;
-    PyObject *const raised = PyErr_GetRaisedException();
+    PyObject* const raised = PyErr_GetRaisedException();
     Py_DECREF(deferred);
     PyErr_SetRaisedException(raised);
     return NULL;
 }
 
-void uform_py_call_release(void *call) {
-    uform_py_call_t *const header = (uform_py_call_t *)call;
+void uform_py_call_release(void* call) {
+    uform_py_call_t* const header = (uform_py_call_t*)call;
     Py_CLEAR(header->raised);
     if (header->arena) uform_py_arena_unclaim(header->arena);
     header->arena = NULL;
 }
 
-PyObject *uform_py_call_answer_none(void *call) { Py_RETURN_NONE; }
+PyObject* uform_py_call_answer_none(void* call) { Py_RETURN_NONE; }
 
-int uform_py_callback_from_object(PyObject *object, char const *field, uform_py_call_t *call,
-                                  uform_py_callback_t *callback) {
+int uform_py_callback_from_object(PyObject* object, char const* field, uform_py_call_t* call,
+                                  uform_py_callback_t* callback) {
     callback->call = call;
     callback->callable = NULL;
     if (!object || object == Py_None) return 0;
@@ -637,16 +637,16 @@ int uform_py_callback_from_object(PyObject *object, char const *field, uform_py_
 
 /** Moves the exception the calling thread holds into @p call unless an earlier one is there, a
  *  store that is the fence a later report reads; the GIL is held. */
-static void callback_latch(uform_py_call_t *call) {
-    PyObject *const raised = PyErr_GetRaisedException();
-    PyObject *expected = NULL;
-    if (raised && !atomic_compare_exchange_strong((_Atomic(PyObject *) *)&call->raised, &expected, raised))
+static void callback_latch(uform_py_call_t* call) {
+    PyObject* const raised = PyErr_GetRaisedException();
+    PyObject* expected = NULL;
+    if (raised && !atomic_compare_exchange_strong((_Atomic(PyObject*)*)&call->raised, &expected, raised))
         Py_DECREF(raised);
 }
 
 /** Whether a callback of @p call already raised, so a later one returns at once. */
-static int callback_raised(uform_py_call_t *call) {
-    return atomic_load_explicit((_Atomic(PyObject *) *)&call->raised, memory_order_acquire) != NULL;
+static int callback_raised(uform_py_call_t* call) {
+    return atomic_load_explicit((_Atomic(PyObject*)*)&call->raised, memory_order_acquire) != NULL;
 }
 
 /**
@@ -656,15 +656,15 @@ static int callback_raised(uform_py_call_t *call) {
  *  so the GIL is taken here rather than assumed. A handler answering @c None carries on, and one
  *  that raises also stops the call, so it unwinds at the next slice instead of running on.
  */
-static uform_continuation_t progress_trampoline(size_t completed, size_t total, void *state) {
-    uform_py_callback_t const *const callback = (uform_py_callback_t const *)state;
+static uform_continuation_t progress_trampoline(size_t completed, size_t total, void* state) {
+    uform_py_callback_t const* const callback = (uform_py_callback_t const*)state;
     if (callback_raised(callback->call)) return uform_cancel_k;
     PyGILState_STATE const gil_state = PyGILState_Ensure();
     uform_continuation_t continuation = uform_cancel_k;
-    PyObject *const completed_object = PyLong_FromSize_t(completed);
-    PyObject *const total_object = completed_object ? PyLong_FromSize_t(total) : NULL;
-    PyObject *const arguments[2] = {completed_object, total_object};
-    PyObject *const verdict = total_object ? PyObject_Vectorcall(callback->callable, arguments, 2, NULL) : NULL;
+    PyObject* const completed_object = PyLong_FromSize_t(completed);
+    PyObject* const total_object = completed_object ? PyLong_FromSize_t(total) : NULL;
+    PyObject* const arguments[2] = {completed_object, total_object};
+    PyObject* const verdict = total_object ? PyObject_Vectorcall(callback->callable, arguments, 2, NULL) : NULL;
     if (verdict) {
         int const truth = verdict == Py_None ? 1 : PyObject_IsTrue(verdict);
         continuation = truth > 0 ? uform_continue_k : uform_cancel_k;
@@ -677,7 +677,7 @@ static uform_continuation_t progress_trampoline(size_t completed, size_t total, 
     return continuation;
 }
 
-uform_progress_t uform_py_progress_registered(uform_py_callback_t *callback, size_t steps) {
+uform_progress_t uform_py_progress_registered(uform_py_callback_t* callback, size_t steps) {
     return (uform_progress_t) {.callback = callback->callable ? progress_trampoline : NULL,
                                .state = callback,
                                .steps = steps};
@@ -693,10 +693,10 @@ typedef struct On {
     PyObject ob_base;
 
     /** The model or trainer the verbs address, held. */
-    PyObject *target;
+    PyObject* target;
 
     /** The @c Executor the calls run on, held. */
-    PyObject *executor;
+    PyObject* executor;
 } On;
 
 static char const doc_On[] =                                                                  //
@@ -725,44 +725,44 @@ static char const doc_DeferredOn[] =                                            
     "once. Arguments the binding refuses raise at the call, while the library's refusals,\n"        //
     "`ContendedError` from an executor another call holds included, raise at `await` or `wait()`.";
 
-int uform_py_receiver_from_object(PyObject *self, PyTypeObject *type, uform_py_receiver_t *receiver) {
+int uform_py_receiver_from_object(PyObject* self, PyTypeObject* type, uform_py_receiver_t* receiver) {
     int const deferred = Py_IS_TYPE(self, &DeferredOnType);
     receiver->origin = self;
     receiver->target = self;
     receiver->executor = NULL;
     receiver->completion = deferred ? uform_completion_deferred_k : uform_completion_blocking_k;
-    if (deferred || Py_IS_TYPE(self, &OnType)) receiver->target = ((On *)self)->target;
+    if (deferred || Py_IS_TYPE(self, &OnType)) receiver->target = ((On*)self)->target;
     if (!Py_IS_TYPE(receiver->target, type)) {
         PyErr_Format(PyExc_TypeError, "the verb addresses a uform.%s, got a receiver over %S",
                      type->tp_name + sizeof("uform.") - 1, Py_TYPE(receiver->target));
         return -1;
     }
     if (receiver->target == self) return 0;
-    return uform_py_executor_from_object(((On *)self)->executor, &receiver->executor);
+    return uform_py_executor_from_object(((On*)self)->executor, &receiver->executor);
 }
 
-PyObject *uform_py_on_new(PyTypeObject *type, PyObject *target, PyObject *executor) {
+PyObject* uform_py_on_new(PyTypeObject* type, PyObject* target, PyObject* executor) {
     uform_executor_t handle = NULL;
     if (uform_py_executor_from_object(executor, &handle) != 0) return NULL;
-    On *const on = PyObject_New(On, type);
+    On* const on = PyObject_New(On, type);
     if (!on) return NULL;
     on->target = Py_NewRef(target);
     on->executor = Py_NewRef(executor);
-    return (PyObject *)on;
+    return (PyObject*)on;
 }
 
-static PyObject *On_tp_new(PyTypeObject *type, PyObject *args, PyObject *keywords) {
+static PyObject* On_tp_new(PyTypeObject* type, PyObject* args, PyObject* keywords) {
     PyErr_SetString(PyExc_TypeError, "receivers are built through model.on(executor) or model.deferred(executor)");
     return NULL;
 }
 
-static void On_dealloc(On *self) {
+static void On_dealloc(On* self) {
     Py_XDECREF(self->executor);
     Py_XDECREF(self->target);
-    Py_TYPE(self)->tp_free((PyObject *)self);
+    Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
-static PyObject *On_repr(On *self) {
+static PyObject* On_repr(On* self) {
     return PyUnicode_FromFormat("%s(%R, %R)", Py_TYPE(self)->tp_name + sizeof("uform.") - 1, self->target,
                                 self->executor);
 }
@@ -811,17 +811,17 @@ static char const doc_Deferred[] =                                              
     "  1";
 
 /** The outcome of the call @p deferred holds. */
-static uform_outcome_t *deferred_outcome(Deferred *deferred) {
-    return &((uform_py_call_t *)(void *)deferred->call)->outcome;
+static uform_outcome_t* deferred_outcome(Deferred* deferred) {
+    return &((uform_py_call_t*)(void*)deferred->call)->outcome;
 }
 
 /** The status of the call @p deferred holds, as the library finishes it elsewhere. */
-static uform_status_t deferred_status(Deferred *deferred) { return uform_outcome_status(deferred_outcome(deferred)); }
+static uform_status_t deferred_status(Deferred* deferred) { return uform_outcome_status(deferred_outcome(deferred)); }
 
 /** Blocks with the thread state detached until the call @p deferred holds is final. */
-static void deferred_block(Deferred *deferred) {
+static void deferred_block(Deferred* deferred) {
     if (deferred_status(deferred) != uform_status_deferred_k) return;
-    uform_outcome_t *const outcome = deferred_outcome(deferred);
+    uform_outcome_t* const outcome = deferred_outcome(deferred);
     Py_BEGIN_ALLOW_THREADS;
     uform_outcome_wait(outcome);
     Py_END_ALLOW_THREADS;
@@ -834,8 +834,8 @@ static void deferred_block(Deferred *deferred) {
  *  Answering may run Python, which lets another thread in even under the GIL, so the verb is taken
  *  before answering and the answer published after it, never one check spanning both.
  */
-static void deferred_finish(Deferred *self) {
-    uform_py_verb_t const *finishing = NULL;
+static void deferred_finish(Deferred* self) {
+    uform_py_verb_t const* finishing = NULL;
 #if PY_VERSION_HEX >= 0x030D0000
     Py_BEGIN_CRITICAL_SECTION(self);
 #endif
@@ -845,8 +845,8 @@ static void deferred_finish(Deferred *self) {
     Py_END_CRITICAL_SECTION();
 #endif
     if (!finishing) return;
-    PyObject *const answer = call_answer(finishing, self->call);
-    PyObject *const raised = answer ? NULL : PyErr_GetRaisedException();
+    PyObject* const answer = call_answer(finishing, self->call);
+    PyObject* const raised = answer ? NULL : PyErr_GetRaisedException();
 #if PY_VERSION_HEX >= 0x030D0000
     Py_BEGIN_CRITICAL_SECTION(self);
 #endif
@@ -859,10 +859,10 @@ static void deferred_finish(Deferred *self) {
 }
 
 /** Answers what a final @p self finished with, finishing it first when nobody has. */
-static PyObject *deferred_answer(Deferred *self) {
+static PyObject* deferred_answer(Deferred* self) {
     deferred_finish(self);
     for (;;) {
-        PyObject *answer = NULL;
+        PyObject* answer = NULL;
         int published = 0;
 #if PY_VERSION_HEX >= 0x030D0000
         Py_BEGIN_CRITICAL_SECTION(self);
@@ -883,7 +883,7 @@ static char const doc_Deferred_status[] =                                       
     "The status of the call: `Status.DEFERRED` until it is final, then the final one, such as\n" //
     "`Status.SUCCESS`. Calls `uform_outcome_status`.";
 
-static PyObject *Deferred_get_status(Deferred *self, void *closure) {
+static PyObject* Deferred_get_status(Deferred* self, void* closure) {
     uform_status_t const status = deferred_status(self);
     if (status != uform_status_deferred_k) deferred_finish(self); // lets go of the inputs, as a poller never waits
     return uform_py_enum_to_object(&uform_py_status, (int)status);
@@ -900,38 +900,38 @@ static char const doc_Deferred_wait[] =                                         
     "  Error: What the blocking verb would have raised, `ContendedError` included when\n"    //
     "    another call held the executor.";
 
-static PyObject *Deferred_wait(Deferred *self, PyObject *unused) {
+static PyObject* Deferred_wait(Deferred* self, PyObject* unused) {
     deferred_block(self);
     return deferred_answer(self);
 }
 
 /** Calls the method @p name of @p self with up to two positional arguments, NULL ones left out. */
-static PyObject *method_call(PyObject *self, char const *name, PyObject *first, PyObject *second) {
-    PyObject *const method = PyUnicode_InternFromString(name);
+static PyObject* method_call(PyObject* self, char const* name, PyObject* first, PyObject* second) {
+    PyObject* const method = PyUnicode_InternFromString(name);
     if (!method) return NULL;
-    PyObject *const arguments[3] = {self, first, second};
+    PyObject* const arguments[3] = {self, first, second};
     size_t const count = 1 + (first != NULL) + (second != NULL);
-    PyObject *const result = PyObject_VectorcallMethod(method, arguments, count, NULL);
+    PyObject* const result = PyObject_VectorcallMethod(method, arguments, count, NULL);
     Py_DECREF(method);
     return result;
 }
 
 /** Answers the iterator of an `asyncio.Future` that `wait()` resolves on the running
  *  loop's default executor. */
-static PyObject *Deferred_await(PyObject *self) {
-    PyObject *const asyncio = PyImport_ImportModule("asyncio");
-    PyObject *const loop = asyncio ? method_call(asyncio, "get_running_loop", NULL, NULL) : NULL;
+static PyObject* Deferred_await(PyObject* self) {
+    PyObject* const asyncio = PyImport_ImportModule("asyncio");
+    PyObject* const loop = asyncio ? method_call(asyncio, "get_running_loop", NULL, NULL) : NULL;
     Py_XDECREF(asyncio);
-    PyObject *const wait = loop ? PyObject_GetAttrString(self, "wait") : NULL;
-    PyObject *const future = wait ? method_call(loop, "run_in_executor", Py_None, wait) : NULL;
+    PyObject* const wait = loop ? PyObject_GetAttrString(self, "wait") : NULL;
+    PyObject* const future = wait ? method_call(loop, "run_in_executor", Py_None, wait) : NULL;
     Py_XDECREF(wait);
     Py_XDECREF(loop);
-    PyObject *const awaiting = future ? method_call(future, "__await__", NULL, NULL) : NULL;
+    PyObject* const awaiting = future ? method_call(future, "__await__", NULL, NULL) : NULL;
     Py_XDECREF(future);
     return awaiting;
 }
 
-static void Deferred_dealloc(Deferred *self) {
+static void Deferred_dealloc(Deferred* self) {
     PyObject_GC_UnTrack(self);
     if (self->verb) { // the library writes into the call and reads its borrowed inputs until it is final
         deferred_block(self);
@@ -940,18 +940,18 @@ static void Deferred_dealloc(Deferred *self) {
     Py_XDECREF(self->answer);
     Py_XDECREF(self->raised);
     Py_XDECREF(self->origin);
-    Py_TYPE(self)->tp_free((PyObject *)self);
+    Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
 /** Visits what @p self holds; an unfinished call's own objects stay unvisited, so every cycle
  *  through them waits for a later collection rather than being cleared while the library
  *  still reads them. */
-static int Deferred_traverse(Deferred *self, visitproc visit, void *arg) {
+static int Deferred_traverse(Deferred* self, visitproc visit, void* arg) {
     Py_VISIT(self->origin);
     Py_VISIT(self->answer);
     Py_VISIT(self->raised);
     if (!self->verb || deferred_status(self) == uform_status_deferred_k) return 0;
-    uform_py_call_t const *const header = (uform_py_call_t const *)(void const *)self->call;
+    uform_py_call_t const* const header = (uform_py_call_t const*)(void const*)self->call;
     Py_VISIT(header->raised);
     Py_VISIT(header->arena);
     return self->verb->traverse ? self->verb->traverse(self->call, visit, arg) : 0;
@@ -959,9 +959,9 @@ static int Deferred_traverse(Deferred *self, visitproc visit, void *arg) {
 
 /** Breaks a garbage cycle through a final @p self; an unfinished one is left whole, as its
  *  traversal hid the cycle. */
-static int Deferred_clear(Deferred *self) {
+static int Deferred_clear(Deferred* self) {
     if (deferred_status(self) == uform_status_deferred_k) return 0;
-    uform_py_verb_t const *const releasing = self->verb;
+    uform_py_verb_t const* const releasing = self->verb;
     self->verb = NULL;
     if (releasing) call_release(releasing, self->call);
     Py_CLEAR(self->answer);
@@ -970,7 +970,7 @@ static int Deferred_clear(Deferred *self) {
     return 0;
 }
 
-static PyObject *Deferred_repr(Deferred *self) {
+static PyObject* Deferred_repr(Deferred* self) {
     return PyUnicode_FromFormat("Deferred(status=%s)", uform_status_name(deferred_status(self)));
 }
 
@@ -1031,17 +1031,17 @@ static char const doc_Executor[] =                                              
 
 /** Wraps a fresh handle, or frees it when the wrapper cannot be allocated; a new
  *  reference, or NULL. */
-static PyObject *executor_adopt(PyTypeObject *type, uform_executor_t handle) {
-    Executor *const executor = (Executor *)type->tp_alloc(type, 0);
+static PyObject* executor_adopt(PyTypeObject* type, uform_executor_t handle) {
+    Executor* const executor = (Executor*)type->tp_alloc(type, 0);
     if (!executor) {
         uform_executor_free(handle);
         return NULL;
     }
     executor->handle = handle;
-    return (PyObject *)executor;
+    return (PyObject*)executor;
 }
 
-static PyObject *Executor_tp_new(PyTypeObject *type, PyObject *args, PyObject *keywords) {
+static PyObject* Executor_tp_new(PyTypeObject* type, PyObject* args, PyObject* keywords) {
     PyErr_SetString(PyExc_TypeError, "Executor is built through Executor.for_ram(), .on_pool() or .for_vram()");
     return NULL;
 }
@@ -1056,7 +1056,7 @@ static void executor_free(uform_executor_t handle) {
 
 /** Closes @p executor once, fenced against a concurrent close; while a GPU arena it made is alive,
  *  the handle is left for the last of them to free. */
-static void executor_close(Executor *executor) {
+static void executor_close(Executor* executor) {
     uform_executor_t handle = NULL;
 #if PY_VERSION_HEX >= 0x030D0000
     Py_BEGIN_CRITICAL_SECTION(executor);
@@ -1074,11 +1074,11 @@ static void executor_close(Executor *executor) {
 }
 
 /** Takes a GPU arena's hold on @p executor, whose handle must outlive the arena. */
-static PyObject *executor_hold(PyObject *executor) {
+static PyObject* executor_hold(PyObject* executor) {
 #if PY_VERSION_HEX >= 0x030D0000
     Py_BEGIN_CRITICAL_SECTION(executor);
 #endif
-    ++((Executor *)executor)->arenas;
+    ++((Executor*)executor)->arenas;
 #if PY_VERSION_HEX >= 0x030D0000
     Py_END_CRITICAL_SECTION();
 #endif
@@ -1086,14 +1086,14 @@ static PyObject *executor_hold(PyObject *executor) {
 }
 
 /** Drops a GPU arena's hold on @p executor, freeing the handle a close left to the last of them. */
-static void executor_release(PyObject *executor) {
+static void executor_release(PyObject* executor) {
     uform_executor_t retained = NULL;
 #if PY_VERSION_HEX >= 0x030D0000
     Py_BEGIN_CRITICAL_SECTION(executor);
 #endif
-    if (!--((Executor *)executor)->arenas) {
-        retained = ((Executor *)executor)->retained;
-        ((Executor *)executor)->retained = NULL;
+    if (!--((Executor*)executor)->arenas) {
+        retained = ((Executor*)executor)->retained;
+        ((Executor*)executor)->retained = NULL;
     }
 #if PY_VERSION_HEX >= 0x030D0000
     Py_END_CRITICAL_SECTION();
@@ -1102,19 +1102,19 @@ static void executor_release(PyObject *executor) {
     Py_DECREF(executor);
 }
 
-static void Executor_dealloc(Executor *executor) {
+static void Executor_dealloc(Executor* executor) {
     executor_close(executor);
-    Py_TYPE(executor)->tp_free((PyObject *)executor);
+    Py_TYPE(executor)->tp_free((PyObject*)executor);
 }
 
-static PyObject *Executor_enter(PyObject *self, PyObject *unused) { return Py_NewRef(self); }
+static PyObject* Executor_enter(PyObject* self, PyObject* unused) { return Py_NewRef(self); }
 
-static PyObject *Executor_exit(PyObject *self, PyObject *const *args, Py_ssize_t count) {
-    executor_close((Executor *)self);
+static PyObject* Executor_exit(PyObject* self, PyObject* const* args, Py_ssize_t count) {
+    executor_close((Executor*)self);
     Py_RETURN_NONE;
 }
 
-int uform_py_executor_from_object(PyObject *object, uform_executor_t *executor) {
+int uform_py_executor_from_object(PyObject* object, uform_executor_t* executor) {
     if (!PyObject_TypeCheck(object, &ExecutorType)) {
         PyErr_Format(PyExc_TypeError, "expected an Executor, got %S", Py_TYPE(object));
         return -1;
@@ -1122,7 +1122,7 @@ int uform_py_executor_from_object(PyObject *object, uform_executor_t *executor) 
 #if PY_VERSION_HEX >= 0x030D0000
     Py_BEGIN_CRITICAL_SECTION(object);
 #endif
-    *executor = ((Executor *)object)->handle;
+    *executor = ((Executor*)object)->handle;
 #if PY_VERSION_HEX >= 0x030D0000
     Py_END_CRITICAL_SECTION();
 #endif
@@ -1131,7 +1131,7 @@ int uform_py_executor_from_object(PyObject *object, uform_executor_t *executor) 
     return 0;
 }
 
-int uform_py_executor_optional(PyObject *object, uform_executor_t *executor) {
+int uform_py_executor_optional(PyObject* object, uform_executor_t* executor) {
     *executor = NULL;
     return !object || object == Py_None ? 0 : uform_py_executor_from_object(object, executor);
 }
@@ -1154,8 +1154,8 @@ static char const doc_Executor_for_ram[] =                                      
     "  >>> with uform.Executor.for_ram(threads=8) as executor:\n"                               //
     "  ...     executor.drain()";
 
-static PyObject *Executor_for_ram(PyTypeObject *type, PyObject *const *args, Py_ssize_t positional_args_count,
-                                  PyObject *args_names_tuple) {
+static PyObject* Executor_for_ram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
+                                  PyObject* args_names_tuple) {
     PyObject *threads_object, *memory_domains_object, *cpu_class_object;
     uform_py_argument_t const arguments[] = {
         {"threads", &threads_object},
@@ -1164,7 +1164,7 @@ static PyObject *Executor_for_ram(PyTypeObject *type, PyObject *const *args, Py_
     };
     size_t threads = 0;
     int cpu_class = 0;
-    int32_t *memory_domains = NULL;
+    int32_t* memory_domains = NULL;
     size_t memory_domains_count = 0;
     if (uform_py_arguments_parse("for_ram", args, positional_args_count, args_names_tuple, 0, 1, arguments,
                                  sizeof(arguments) / sizeof(*arguments)) != 0 ||
@@ -1206,8 +1206,8 @@ static char const doc_Executor_on_pool[] =                                      
     "    drive; None derives every node the process may allocate on.\n"                        //
     "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.";
 
-static PyObject *Executor_on_pool(PyTypeObject *type, PyObject *const *args, Py_ssize_t positional_args_count,
-                                  PyObject *args_names_tuple) {
+static PyObject* Executor_on_pool(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
+                                  PyObject* args_names_tuple) {
     PyObject *pool_object, *memory_domains_object, *cpu_class_object;
     uform_py_argument_t const arguments[] = {
         {"pool", &pool_object},
@@ -1220,13 +1220,13 @@ static PyObject *Executor_on_pool(PyTypeObject *type, PyObject *const *args, Py_
         uform_py_class_from_object(cpu_class_object, "cpu_class", &uform_py_cpu_class, &cpu_class) != 0)
         return NULL;
 
-    PyObject *const address = PyNumber_Index(pool_object);
+    PyObject* const address = PyNumber_Index(pool_object);
     if (!address) return NULL;
-    void *const pool = PyLong_AsVoidPtr(address);
+    void* const pool = PyLong_AsVoidPtr(address);
     Py_DECREF(address);
     if (!pool && PyErr_Occurred()) return NULL;
 
-    int32_t *memory_domains = NULL;
+    int32_t* memory_domains = NULL;
     size_t memory_domains_count = 0;
     if (uform_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
                                       &memory_domains_count) != 0)
@@ -1272,8 +1272,8 @@ static char const doc_Executor_for_vram[] =                                     
     "Example:\n"                                                                                //
     "  >>> executor = uform.Executor.for_vram([0, 1])   # doctest: +SKIP";
 
-static PyObject *Executor_for_vram(PyTypeObject *type, PyObject *const *args, Py_ssize_t positional_args_count,
-                                   PyObject *args_names_tuple) {
+static PyObject* Executor_for_vram(PyTypeObject* type, PyObject* const* args, Py_ssize_t positional_args_count,
+                                   PyObject* args_names_tuple) {
     PyObject *devices_object, *scratch_limit_object, *gpu_class_object, *memory_domains_object, *cpu_class_object;
     uform_py_argument_t const arguments[] = {
         {"devices", &devices_object},     {"scratch_limit", &scratch_limit_object},
@@ -1331,16 +1331,16 @@ static char const doc_Executor_drain[] =                                        
     "  Error: What befell the executor itself, such as a lost device; every call\n"       //
     "    reports its own failure through its own verb.";
 
-static PyObject *Executor_drain(Executor *executor, PyObject *const *args, Py_ssize_t positional_args_count,
-                                PyObject *args_names_tuple) {
-    PyObject *mood_object;
+static PyObject* Executor_drain(Executor* executor, PyObject* const* args, Py_ssize_t positional_args_count,
+                                PyObject* args_names_tuple) {
+    PyObject* mood_object;
     uform_py_argument_t const arguments[] = {{"mood", &mood_object}};
     int mood = uform_mood_parked_k;
     uform_executor_t handle = NULL;
     if (uform_py_arguments_parse("drain", args, positional_args_count, args_names_tuple, 0, 1, arguments,
                                  sizeof(arguments) / sizeof(*arguments)) != 0 ||
         (mood_object && uform_py_enum_from_object(mood_object, "mood", &uform_py_mood, &mood) != 0) ||
-        uform_py_executor_from_object((PyObject *)executor, &handle) != 0)
+        uform_py_executor_from_object((PyObject*)executor, &handle) != 0)
         return NULL;
 
     uform_outcome_t outcome = {0};
@@ -1352,8 +1352,8 @@ static PyObject *Executor_drain(Executor *executor, PyObject *const *args, Py_ss
     Py_RETURN_NONE;
 }
 
-static PyObject *Executor_repr(Executor *executor) {
-    return PyUnicode_FromFormat("uform.Executor(at=%p)", (void *)executor->handle);
+static PyObject* Executor_repr(Executor* executor) {
+    return PyUnicode_FromFormat("uform.Executor(at=%p)", (void*)executor->handle);
 }
 
 static PyMethodDef Executor_methods[] = {
@@ -1416,32 +1416,32 @@ typedef struct DLDataType {
 } DLDataType;
 
 typedef struct DLTensor {
-    void *data;
+    void* data;
     DLDevice device;
     int32_t ndim;
     DLDataType dtype;
-    int64_t *shape;
-    int64_t *strides;
+    int64_t* shape;
+    int64_t* strides;
     uint64_t byte_offset;
 } DLTensor;
 
 typedef struct DLManagedTensor {
     DLTensor dl_tensor;
-    void *manager_ctx;
-    void (*deleter)(struct DLManagedTensor *self);
+    void* manager_ctx;
+    void (*deleter)(struct DLManagedTensor* self);
 } DLManagedTensor;
 
 typedef struct DLManagedTensorVersioned {
     DLPackVersion version;
-    void *manager_ctx;
-    void (*deleter)(struct DLManagedTensorVersioned *self);
+    void* manager_ctx;
+    void (*deleter)(struct DLManagedTensorVersioned* self);
     uint64_t flags;
     DLTensor dl_tensor;
 } DLManagedTensorVersioned;
 
 /** The buffer formats a DLPack tensor crosses as, and the element type each stands for. */
 static struct {
-    char const *format;
+    char const* format;
     DLDataType dtype;
 } const dlpack_formats[] = {
     {"B", {kDLUInt, 8, 1}},   {"b", {kDLInt, 8, 1}},    {"I", {kDLUInt, 32, 1}},
@@ -1451,14 +1451,14 @@ static struct {
 
 /** Hands the tensor a consumed capsule holds back to its producer, and frees the extents
  *  its view borrowed. */
-static void dlpack_capsule_release(PyObject *capsule) {
+static void dlpack_capsule_release(PyObject* capsule) {
     PyMem_Free(PyCapsule_GetContext(capsule));
     if (PyCapsule_IsValid(capsule, "used_dltensor_versioned")) {
-        DLManagedTensorVersioned *const managed = PyCapsule_GetPointer(capsule, "used_dltensor_versioned");
+        DLManagedTensorVersioned* const managed = PyCapsule_GetPointer(capsule, "used_dltensor_versioned");
         if (managed->deleter) managed->deleter(managed);
     }
     else if (PyCapsule_IsValid(capsule, "used_dltensor")) {
-        DLManagedTensor *const managed = PyCapsule_GetPointer(capsule, "used_dltensor");
+        DLManagedTensor* const managed = PyCapsule_GetPointer(capsule, "used_dltensor");
         if (managed->deleter) managed->deleter(managed);
     }
 }
@@ -1471,15 +1471,15 @@ static void dlpack_capsule_release(PyObject *capsule) {
  *  Only C-contiguous tensors cross. Host-readable memory always does, and CUDA and ROCm memory only
  *  where @p device_allowed, since the binding reads the other inputs itself.
  */
-static int dlpack_acquire(PyObject *object, int device_allowed, Py_buffer *view) {
-    PyObject *const exporter = PyObject_GetAttrString(object, "__dlpack__");
+static int dlpack_acquire(PyObject* object, int device_allowed, Py_buffer* view) {
+    PyObject* const exporter = PyObject_GetAttrString(object, "__dlpack__");
     if (!exporter) {
         PyErr_Clear();
         return 0;
     }
-    PyObject *const arguments = PyTuple_New(0);
-    PyObject *const keywords = PyDict_New();
-    PyObject *const version = PyTuple_New(2);
+    PyObject* const arguments = PyTuple_New(0);
+    PyObject* const keywords = PyDict_New();
+    PyObject* const version = PyTuple_New(2);
     if (version) {
         PyTuple_SET_ITEM(version, 0, PyLong_FromLong(1));
         PyTuple_SET_ITEM(version, 1, PyLong_FromLong(0));
@@ -1487,7 +1487,7 @@ static int dlpack_acquire(PyObject *object, int device_allowed, Py_buffer *view)
     int const packed = arguments && keywords && version && PyTuple_GET_ITEM(version, 0) &&
                        PyTuple_GET_ITEM(version, 1) && PyDict_SetItemString(keywords, "stream", Py_None) == 0 &&
                        PyDict_SetItemString(keywords, "max_version", version) == 0;
-    PyObject *const capsule = packed ? PyObject_Call(exporter, arguments, keywords) : NULL;
+    PyObject* const capsule = packed ? PyObject_Call(exporter, arguments, keywords) : NULL;
     Py_XDECREF(version);
     Py_XDECREF(keywords);
     Py_XDECREF(arguments);
@@ -1497,17 +1497,17 @@ static int dlpack_acquire(PyObject *object, int device_allowed, Py_buffer *view)
         return 0;
     }
     int const versioned = PyCapsule_IsValid(capsule, "dltensor_versioned");
-    void *const managed = PyCapsule_GetPointer(capsule, versioned ? "dltensor_versioned" : "dltensor");
+    void* const managed = PyCapsule_GetPointer(capsule, versioned ? "dltensor_versioned" : "dltensor");
     if (!managed) {
         Py_DECREF(capsule);
         return -1;
     }
-    DLTensor const *const tensor = versioned ? &((DLManagedTensorVersioned *)managed)->dl_tensor
-                                             : &((DLManagedTensor *)managed)->dl_tensor;
+    DLTensor const* const tensor = versioned ? &((DLManagedTensorVersioned*)managed)->dl_tensor
+                                             : &((DLManagedTensor*)managed)->dl_tensor;
     DLDeviceType const device = tensor->device.device_type;
     int const host_readable = device == kDLCPU || device == kDLCUDAHost || device == kDLROCMHost ||
                               device == kDLCUDAManaged;
-    char const *format = NULL;
+    char const* format = NULL;
     for (size_t row = 0; row != sizeof(dlpack_formats) / sizeof(*dlpack_formats) && !format; ++row)
         if (dlpack_formats[row].dtype.code == tensor->dtype.code &&
             dlpack_formats[row].dtype.bits == tensor->dtype.bits && tensor->dtype.lanes == 1)
@@ -1527,8 +1527,8 @@ static int dlpack_acquire(PyObject *object, int device_allowed, Py_buffer *view)
         failed = uform_py_raise(uform_status_unsupported_layout_k, "the DLPack tensor holds items no format names");
     else if (!contiguous)
         failed = uform_py_raise(uform_status_unsupported_layout_k, "the DLPack tensor must be C-contiguous");
-    Py_ssize_t *const extents = failed ? NULL
-                                       : (Py_ssize_t *)PyMem_Malloc((size_t)(tensor->ndim + 1) * sizeof(Py_ssize_t));
+    Py_ssize_t* const extents = failed ? NULL
+                                       : (Py_ssize_t*)PyMem_Malloc((size_t)(tensor->ndim + 1) * sizeof(Py_ssize_t));
     if (!failed && !extents) failed = (PyErr_NoMemory(), -1);
     if (!failed && (PyCapsule_SetContext(capsule, extents) != 0 ||
                     PyCapsule_SetName(capsule, versioned ? "used_dltensor_versioned" : "used_dltensor") != 0 ||
@@ -1542,20 +1542,20 @@ static int dlpack_acquire(PyObject *object, int device_allowed, Py_buffer *view)
     }
     for (int axis = 0; axis != tensor->ndim; ++axis) extents[axis] = (Py_ssize_t)tensor->shape[axis];
     Py_ssize_t const item_bytes = tensor->dtype.bits / 8;
-    *view = (Py_buffer) {.buf = (char *)tensor->data + tensor->byte_offset,
+    *view = (Py_buffer) {.buf = (char*)tensor->data + tensor->byte_offset,
                          .obj = capsule,
                          .len = items * item_bytes,
                          .itemsize = item_bytes,
                          .readonly = 1,
                          .ndim = tensor->ndim,
-                         .format = (char *)format,
+                         .format = (char*)format,
                          .shape = extents};
     return 1;
 }
 
 /** Acquires @p object into @p view through DLPack first, then the buffer protocol under @p flags;
  *  0, or -1 with an exception set. */
-static int buffer_acquire(PyObject *object, int device_allowed, int flags, Py_buffer *view) {
+static int buffer_acquire(PyObject* object, int device_allowed, int flags, Py_buffer* view) {
     int const consumed = dlpack_acquire(object, device_allowed, view);
     return consumed ? (consumed > 0 ? 0 : -1) : PyObject_GetBuffer(object, view, flags);
 }
@@ -1594,13 +1594,13 @@ static char const doc_Arena[] =                                                 
     "  >>> memoryview(model.text_encode(['second'], arena).embeddings).shape\n"                //
     "  (1, 64)";
 
-static PyObject *Arena_tp_new(PyTypeObject *type, PyObject *args, PyObject *keywords) {
+static PyObject* Arena_tp_new(PyTypeObject* type, PyObject* args, PyObject* keywords) {
     Py_ssize_t const positional_args_count = PyTuple_GET_SIZE(args);
     if (positional_args_count > 1 || (keywords && PyDict_GET_SIZE(keywords) != 0)) {
         PyErr_SetString(PyExc_TypeError, "Arena() takes one optional positional argument, the executor");
         return NULL;
     }
-    PyObject *const executor_object = positional_args_count ? PyTuple_GET_ITEM(args, 0) : Py_None;
+    PyObject* const executor_object = positional_args_count ? PyTuple_GET_ITEM(args, 0) : Py_None;
     uform_executor_t executor = NULL;
     if (uform_py_executor_optional(executor_object, &executor) != 0) return NULL;
 
@@ -1609,7 +1609,7 @@ static PyObject *Arena_tp_new(PyTypeObject *type, PyObject *args, PyObject *keyw
     uform_arena_init_t arguments = {.arena = &handle, .executor = executor, .outcome = &outcome};
     uform_arena_init(&arguments);
     if (uform_py_raise_on_outcome(&outcome) != 0) return NULL;
-    Arena *const arena = (Arena *)type->tp_alloc(type, 0);
+    Arena* const arena = (Arena*)type->tp_alloc(type, 0);
     if (!arena) {
         uform_arena_free(handle);
         return NULL;
@@ -1623,15 +1623,15 @@ static PyObject *Arena_tp_new(PyTypeObject *type, PyObject *args, PyObject *keyw
     }
     if (description.residency == uform_residency_vram_k) // a GPU arena frees on its executor's first stream
         arena->executor = executor_hold(executor_object);
-    return (PyObject *)arena;
+    return (PyObject*)arena;
 }
 
-static void Arena_dealloc(Arena *self) {
+static void Arena_dealloc(Arena* self) {
     Py_BEGIN_ALLOW_THREADS;
     uform_arena_free(self->handle);
     Py_END_ALLOW_THREADS;
     if (self->executor) executor_release(self->executor);
-    Py_TYPE(self)->tp_free((PyObject *)self);
+    Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
 PyTypeObject ArenaType = {
@@ -1644,12 +1644,12 @@ PyTypeObject ArenaType = {
     .tp_dealloc = (destructor)Arena_dealloc,
 };
 
-int uform_py_arena_claim(PyObject *object, PyObject **arena) {
+int uform_py_arena_claim(PyObject* object, PyObject** arena) {
     if (!PyObject_TypeCheck(object, &ArenaType)) {
         PyErr_Format(PyExc_TypeError, "the 'arena' argument must be an Arena, got %S", Py_TYPE(object));
         return -1;
     }
-    Arena *const claimed = (Arena *)object;
+    Arena* const claimed = (Arena*)object;
     Py_ssize_t held = 0;
 #if PY_VERSION_HEX >= 0x030D0000
     Py_BEGIN_CRITICAL_SECTION(object);
@@ -1669,11 +1669,11 @@ int uform_py_arena_claim(PyObject *object, PyObject **arena) {
     return 0;
 }
 
-void uform_py_arena_unclaim(PyObject *arena) {
+void uform_py_arena_unclaim(PyObject* arena) {
 #if PY_VERSION_HEX >= 0x030D0000
     Py_BEGIN_CRITICAL_SECTION(arena);
 #endif
-    --((Arena *)arena)->exports;
+    --((Arena*)arena)->exports;
 #if PY_VERSION_HEX >= 0x030D0000
     Py_END_CRITICAL_SECTION();
 #endif
@@ -1689,14 +1689,14 @@ typedef struct ArenaBuffer {
     PyObject ob_base;
 
     /** The arena the output lives in, kept alive so the memory outlives every other name for it. */
-    PyObject *arena;
+    PyObject* arena;
 
     /** The arena's generation when the call wrote the output; any later one means a
      *  call rewound it. */
     size_t generation;
 
-    void const *data;
-    char const *format;
+    void const* data;
+    char const* format;
     Py_ssize_t item_bytes;
     int rank;
     Py_ssize_t shape[arena_buffer_max_rank_k];
@@ -1708,14 +1708,14 @@ typedef struct RowsTape {
     ArenaBuffer rows;
 
     /** The @c (count + 1,) @c ArenaBuffer of offsets into the rows. */
-    PyObject *offsets;
+    PyObject* offsets;
 } RowsTape;
 
 /** Where the outputs of @p buffer live, as the engine reports its arena; 0, or -1 with
  *  an error set. */
-static int arena_buffer_describe(ArenaBuffer const *buffer, uform_arena_description_t *description) {
+static int arena_buffer_describe(ArenaBuffer const* buffer, uform_arena_description_t* description) {
     uform_outcome_t outcome = {0};
-    uform_arena_describe(&(uform_arena_describe_t) {.arena = ((Arena *)buffer->arena)->handle,
+    uform_arena_describe(&(uform_arena_describe_t) {.arena = ((Arena*)buffer->arena)->handle,
                                                     .outcome = &outcome,
                                                     .description = description});
     return uform_py_raise_on_outcome(&outcome);
@@ -1723,15 +1723,15 @@ static int arena_buffer_describe(ArenaBuffer const *buffer, uform_arena_descript
 
 /** Raises @c InvalidArgumentError unless the call that wrote @p buffer is still the last to claim
  *  its arena; returns 0 or -1. */
-static int arena_buffer_fresh(ArenaBuffer const *buffer, size_t generation) {
+static int arena_buffer_fresh(ArenaBuffer const* buffer, size_t generation) {
     if (generation == buffer->generation) return 0;
     return uform_py_raise(uform_status_invalid_argument_k, "a later call rewound the arena this output lived in");
 }
 
 /** Holds the arena of @p buffer against a rewind as one more export; 0, or -1 with an
  *  @c InvalidArgumentError set when a later call rewound it. */
-static int arena_buffer_hold(ArenaBuffer const *buffer) {
-    Arena *const arena = (Arena *)buffer->arena;
+static int arena_buffer_hold(ArenaBuffer const* buffer) {
+    Arena* const arena = (Arena*)buffer->arena;
     size_t generation = 0;
 #if PY_VERSION_HEX >= 0x030D0000
     Py_BEGIN_CRITICAL_SECTION(arena);
@@ -1745,11 +1745,11 @@ static int arena_buffer_hold(ArenaBuffer const *buffer) {
 }
 
 /** Lets go of one export @c arena_buffer_hold took on the arena of @p buffer. */
-static void arena_buffer_unhold(ArenaBuffer const *buffer) {
+static void arena_buffer_unhold(ArenaBuffer const* buffer) {
 #if PY_VERSION_HEX >= 0x030D0000
     Py_BEGIN_CRITICAL_SECTION(buffer->arena);
 #endif
-    --((Arena *)buffer->arena)->exports;
+    --((Arena*)buffer->arena)->exports;
 #if PY_VERSION_HEX >= 0x030D0000
     Py_END_CRITICAL_SECTION();
 #endif
@@ -1760,7 +1760,7 @@ static void arena_buffer_unhold(ArenaBuffer const *buffer) {
  *  @return 0 on success, -1 with a @c DeviceError set when the output is on a device, or an
  *      @c InvalidArgumentError when a later call rewound it.
  */
-static int arena_buffer_pin(ArenaBuffer const *buffer) {
+static int arena_buffer_pin(ArenaBuffer const* buffer) {
     uform_arena_description_t description = {0};
     if (arena_buffer_describe(buffer, &description) != 0) return -1;
     if (description.residency == uform_residency_vram_k)
@@ -1768,17 +1768,17 @@ static int arena_buffer_pin(ArenaBuffer const *buffer) {
     return arena_buffer_hold(buffer);
 }
 
-static int ArenaBuffer_getbuffer(ArenaBuffer *self, Py_buffer *view, int flags) {
+static int ArenaBuffer_getbuffer(ArenaBuffer* self, Py_buffer* view, int flags) {
     view->obj = NULL;
     if (arena_buffer_pin(self) != 0) return -1;
     Py_ssize_t bytes = self->item_bytes;
     for (int axis = 0; axis != self->rank; ++axis) bytes *= self->shape[axis];
-    view->obj = Py_NewRef((PyObject *)self);
-    view->buf = (void *)self->data;
+    view->obj = Py_NewRef((PyObject*)self);
+    view->buf = (void*)self->data;
     view->len = bytes;
     view->readonly = 0;
     view->itemsize = self->item_bytes; // describes the cells the shape counts, even when no format was asked for
-    view->format = (flags & PyBUF_FORMAT) == PyBUF_FORMAT ? (char *)self->format : NULL;
+    view->format = (flags & PyBUF_FORMAT) == PyBUF_FORMAT ? (char*)self->format : NULL;
     view->ndim = self->rank;
     view->shape = (flags & PyBUF_ND) == PyBUF_ND ? self->shape : NULL;
     view->strides = (flags & PyBUF_STRIDES) == PyBUF_STRIDES ? self->strides : NULL;
@@ -1787,13 +1787,13 @@ static int ArenaBuffer_getbuffer(ArenaBuffer *self, Py_buffer *view, int flags) 
     return 0;
 }
 
-static void ArenaBuffer_releasebuffer(ArenaBuffer *self, Py_buffer *view) { arena_buffer_unhold(self); }
+static void ArenaBuffer_releasebuffer(ArenaBuffer* self, Py_buffer* view) { arena_buffer_unhold(self); }
 
 /** A tuple of the first @p rank of @p extents; a new reference, or NULL. */
-static PyObject *extents_to_tuple(Py_ssize_t const *extents, int rank) {
-    PyObject *const tuple = PyTuple_New(rank);
+static PyObject* extents_to_tuple(Py_ssize_t const* extents, int rank) {
+    PyObject* const tuple = PyTuple_New(rank);
     for (int axis = 0; tuple && axis != rank; ++axis) {
-        PyObject *const extent = PyLong_FromSsize_t(extents[axis]);
+        PyObject* const extent = PyLong_FromSsize_t(extents[axis]);
         if (!extent) {
             Py_DECREF(tuple);
             return NULL;
@@ -1803,7 +1803,7 @@ static PyObject *extents_to_tuple(Py_ssize_t const *extents, int rank) {
     return tuple;
 }
 
-static PyObject *ArenaBuffer_get_cuda_array_interface(ArenaBuffer *self, void *closure) {
+static PyObject* ArenaBuffer_get_cuda_array_interface(ArenaBuffer* self, void* closure) {
     uform_arena_description_t description = {0};
     if (arena_buffer_describe(self, &description) != 0) return NULL;
     if (description.residency != uform_residency_vram_k) {
@@ -1814,17 +1814,17 @@ static PyObject *ArenaBuffer_get_cuda_array_interface(ArenaBuffer *self, void *c
 #if PY_VERSION_HEX >= 0x030D0000
     Py_BEGIN_CRITICAL_SECTION(self->arena);
 #endif
-    generation = ((Arena *)self->arena)->generation;
+    generation = ((Arena*)self->arena)->generation;
 #if PY_VERSION_HEX >= 0x030D0000
     Py_END_CRITICAL_SECTION();
 #endif
     if (arena_buffer_fresh(self, generation) != 0) return NULL;
     char const kind = *self->format == 'b' ? 'i' : strchr("efd", *self->format) ? 'f' : 'u';
     char const typestr[3] = {self->item_bytes == 1 ? '|' : '<', kind, (char)('0' + self->item_bytes)};
-    PyObject *const address = PyLong_FromVoidPtr((void *)self->data);
-    PyObject *const data = address ? PyTuple_Pack(2, address, Py_False) : NULL;
+    PyObject* const address = PyLong_FromVoidPtr((void*)self->data);
+    PyObject* const data = address ? PyTuple_Pack(2, address, Py_False) : NULL;
     Py_XDECREF(address);
-    PyObject *const array_interface = data ? PyDict_New() : NULL;
+    PyObject* const array_interface = data ? PyDict_New() : NULL;
     if (!array_interface) {
         Py_XDECREF(data);
         return NULL;
@@ -1842,14 +1842,14 @@ static PyObject *ArenaBuffer_get_cuda_array_interface(ArenaBuffer *self, void *c
 
 /** The DLPack device the outputs of @p buffer live on, from the engine's description of its arena;
  *  0, or -1 with an exception set. */
-static int arena_buffer_device(ArenaBuffer const *buffer, DLDevice *device) {
+static int arena_buffer_device(ArenaBuffer const* buffer, DLDevice* device) {
     uform_arena_description_t description = {0};
     if (arena_buffer_describe(buffer, &description) != 0) return -1;
     *device = (DLDevice) {kDLCPU, 0};
     if (description.residency != uform_residency_vram_k) return 0;
     size_t const capacity = (size_t)description.device + 1;
     size_t count = 0;
-    uform_gpu_device_t *const listed = (uform_gpu_device_t *)PyMem_Calloc(capacity, sizeof(uform_gpu_device_t));
+    uform_gpu_device_t* const listed = (uform_gpu_device_t*)PyMem_Calloc(capacity, sizeof(uform_gpu_device_t));
     if (!listed) return PyErr_NoMemory(), -1;
     uform_outcome_t outcome = {0};
     uform_gpu_devices(&(uform_gpu_devices_t) {.outcome = &outcome,
@@ -1858,7 +1858,7 @@ static int arena_buffer_device(ArenaBuffer const *buffer, DLDevice *device) {
                                               .devices_count = &count});
     int failed = uform_py_raise_on_outcome(&outcome);
     if (!failed && count < capacity) failed = uform_py_raise(uform_status_device_k, "the arena's GPU is not listed");
-    uform_gpu_device_t const *const gpu = &listed[description.device];
+    uform_gpu_device_t const* const gpu = &listed[description.device];
     if (!failed)
         *device = (DLDevice) {gpu->vendor == uform_gpu_vendor_amd_k     ? kDLROCM
                               : gpu->vendor == uform_gpu_vendor_apple_k ? kDLMetal
@@ -1875,13 +1875,13 @@ typedef struct dlpack_export_t {
         DLManagedTensor legacy;
         DLManagedTensorVersioned versioned;
     } managed;
-    ArenaBuffer *buffer;
+    ArenaBuffer* buffer;
     int64_t shape[arena_buffer_max_rank_k];
     int64_t strides[arena_buffer_max_rank_k];
 } dlpack_export_t;
 
 /** Releases an export from whichever thread its consumer drops it on, taking the GIL itself. */
-static void dlpack_export_release(dlpack_export_t *exported) {
+static void dlpack_export_release(dlpack_export_t* exported) {
     PyGILState_STATE const state = PyGILState_Ensure();
     arena_buffer_unhold(exported->buffer);
     Py_DECREF(exported->buffer);
@@ -1889,29 +1889,29 @@ static void dlpack_export_release(dlpack_export_t *exported) {
     PyGILState_Release(state);
 }
 
-static void dlpack_legacy_deleter(DLManagedTensor *self) { dlpack_export_release(self->manager_ctx); }
+static void dlpack_legacy_deleter(DLManagedTensor* self) { dlpack_export_release(self->manager_ctx); }
 
-static void dlpack_versioned_deleter(DLManagedTensorVersioned *self) { dlpack_export_release(self->manager_ctx); }
+static void dlpack_versioned_deleter(DLManagedTensorVersioned* self) { dlpack_export_release(self->manager_ctx); }
 
 /** Releases an export no consumer took; a consumer renames the capsule and owns it. */
-static void dlpack_export_capsule_release(PyObject *capsule) {
+static void dlpack_export_capsule_release(PyObject* capsule) {
     if (PyCapsule_IsValid(capsule, "dltensor")) {
-        DLManagedTensor *const managed = PyCapsule_GetPointer(capsule, "dltensor");
+        DLManagedTensor* const managed = PyCapsule_GetPointer(capsule, "dltensor");
         managed->deleter(managed);
     }
     else if (PyCapsule_IsValid(capsule, "dltensor_versioned")) {
-        DLManagedTensorVersioned *const managed = PyCapsule_GetPointer(capsule, "dltensor_versioned");
+        DLManagedTensorVersioned* const managed = PyCapsule_GetPointer(capsule, "dltensor_versioned");
         managed->deleter(managed);
     }
 }
 
-static PyObject *ArenaBuffer_dlpack(ArenaBuffer *self, PyObject *const *args, Py_ssize_t positional, PyObject *names) {
+static PyObject* ArenaBuffer_dlpack(ArenaBuffer* self, PyObject* const* args, Py_ssize_t positional, PyObject* names) {
     // The call that wrote the output is final, so `stream` names no work left to order after.
     PyObject *stream = Py_None, *max_version = Py_None, *dl_device = Py_None, *copy = Py_None;
     if (positional) return PyErr_Format(PyExc_TypeError, "__dlpack__() takes keyword arguments only");
     for (Py_ssize_t keyword = 0; names && keyword != PyTuple_GET_SIZE(names); ++keyword) {
-        PyObject *const name = PyTuple_GET_ITEM(names, keyword);
-        PyObject **const slot = PyUnicode_CompareWithASCIIString(name, "stream") == 0        ? &stream
+        PyObject* const name = PyTuple_GET_ITEM(names, keyword);
+        PyObject** const slot = PyUnicode_CompareWithASCIIString(name, "stream") == 0        ? &stream
                                 : PyUnicode_CompareWithASCIIString(name, "max_version") == 0 ? &max_version
                                 : PyUnicode_CompareWithASCIIString(name, "dl_device") == 0   ? &dl_device
                                 : PyUnicode_CompareWithASCIIString(name, "copy") == 0        ? &copy
@@ -1946,19 +1946,19 @@ static PyObject *ArenaBuffer_dlpack(ArenaBuffer *self, PyObject *const *args, Py
         if (*dlpack_formats[row].format == *self->format) dtype = dlpack_formats[row].dtype;
     if (!dtype.bits) return PyErr_Format(PyExc_BufferError, "format '%s' has no DLPack type", self->format);
 
-    dlpack_export_t *const exported = (dlpack_export_t *)PyMem_Calloc(1, sizeof(dlpack_export_t));
+    dlpack_export_t* const exported = (dlpack_export_t*)PyMem_Calloc(1, sizeof(dlpack_export_t));
     if (!exported) return PyErr_NoMemory();
     if (arena_buffer_hold(self) != 0) {
         PyMem_Free(exported);
         return NULL;
     }
-    exported->buffer = (ArenaBuffer *)Py_NewRef((PyObject *)self);
+    exported->buffer = (ArenaBuffer*)Py_NewRef((PyObject*)self);
     for (int axis = 0; axis != self->rank; ++axis) {
         exported->shape[axis] = self->shape[axis];
         exported->strides[axis] = self->strides[axis] / self->item_bytes;
     }
-    DLTensor const tensor = {(void *)self->data, device, self->rank, dtype, exported->shape, exported->strides, 0};
-    void *managed = NULL;
+    DLTensor const tensor = {(void*)self->data, device, self->rank, dtype, exported->shape, exported->strides, 0};
+    void* managed = NULL;
     if (major >= 1) {
         exported->managed.versioned =
             (DLManagedTensorVersioned) {{1, 0}, exported, dlpack_versioned_deleter, 0, tensor};
@@ -1968,16 +1968,16 @@ static PyObject *ArenaBuffer_dlpack(ArenaBuffer *self, PyObject *const *args, Py
         exported->managed.legacy = (DLManagedTensor) {tensor, exported, dlpack_legacy_deleter};
         managed = &exported->managed.legacy;
     }
-    PyObject *const capsule = PyCapsule_New(managed, major >= 1 ? "dltensor_versioned" : "dltensor",
+    PyObject* const capsule = PyCapsule_New(managed, major >= 1 ? "dltensor_versioned" : "dltensor",
                                             dlpack_export_capsule_release);
     if (!capsule) dlpack_export_release(exported);
     return capsule;
 }
 
-static PyObject *ArenaBuffer_dlpack_device(ArenaBuffer *self, PyObject *unused) {
+static PyObject* ArenaBuffer_dlpack_device(ArenaBuffer* self, PyObject* unused) {
     DLDevice device;
     if (arena_buffer_device(self, &device) != 0) return NULL;
-    PyObject *const pair = PyTuple_New(2);
+    PyObject* const pair = PyTuple_New(2);
     if (!pair) return NULL;
     PyTuple_SET_ITEM(pair, 0, PyLong_FromLong((long)device.device_type));
     PyTuple_SET_ITEM(pair, 1, PyLong_FromLong((long)device.device_id));
@@ -2005,12 +2005,12 @@ static PyMethodDef ArenaBuffer_methods[] = {
     {NULL, NULL, 0, NULL},
 };
 
-static void ArenaBuffer_dealloc(ArenaBuffer *self) {
+static void ArenaBuffer_dealloc(ArenaBuffer* self) {
     Py_DECREF(self->arena);
-    Py_TYPE(self)->tp_free((PyObject *)self);
+    Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
-static Py_ssize_t ArenaBuffer_length(ArenaBuffer *self) { return self->shape[0]; }
+static Py_ssize_t ArenaBuffer_length(ArenaBuffer* self) { return self->shape[0]; }
 
 static PySequenceMethods ArenaBuffer_as_sequence = {.sq_length = (lenfunc)ArenaBuffer_length};
 
@@ -2047,7 +2047,7 @@ PyTypeObject ArenaBufferType = {
     .tp_methods = ArenaBuffer_methods,
 };
 
-static void RowsTape_dealloc(RowsTape *self) {
+static void RowsTape_dealloc(RowsTape* self) {
     Py_XDECREF(self->offsets);
     ArenaBuffer_dealloc(&self->rows);
 }
@@ -2082,7 +2082,7 @@ PyTypeObject RowsTapeType = {
 /** The buffer format of the scalars a @c memoryview can format, and the bytes one value takes. */
 static struct {
     uform_scalar_t kind;
-    char const *format;
+    char const* format;
     Py_ssize_t bytes;
 } const scalar_formats[] = {
     {uform_scalar_f64_k, "d", 8}, {uform_scalar_f32_k, "f", 4}, {uform_scalar_f16_k, "e", 2},
@@ -2091,13 +2091,13 @@ static struct {
 
 /** A new @c ArenaBuffer of @p type over @p data inside the claimed @p arena, C-contiguous;
  *  NULL on failure. */
-static ArenaBuffer *arena_buffer_new(PyTypeObject *type, PyObject *arena, void const *data, char const *format,
-                                     Py_ssize_t item_bytes, Py_ssize_t const *shape, int rank) {
+static ArenaBuffer* arena_buffer_new(PyTypeObject* type, PyObject* arena, void const* data, char const* format,
+                                     Py_ssize_t item_bytes, Py_ssize_t const* shape, int rank) {
     static char const empty_output = 0; // stands in for a null output, which no exporter may hand out
-    ArenaBuffer *const exporter = (ArenaBuffer *)type->tp_alloc(type, 0);
+    ArenaBuffer* const exporter = (ArenaBuffer*)type->tp_alloc(type, 0);
     if (!exporter) return NULL;
     exporter->arena = Py_NewRef(arena);
-    exporter->generation = ((Arena *)arena)->generation; // built while the writing call still holds the arena
+    exporter->generation = ((Arena*)arena)->generation; // built while the writing call still holds the arena
     exporter->data = data ? data : &empty_output;
     exporter->format = format;
     exporter->item_bytes = item_bytes;
@@ -2111,8 +2111,8 @@ static ArenaBuffer *arena_buffer_new(PyTypeObject *type, PyObject *arena, void c
     return exporter;
 }
 
-PyObject *uform_py_rows_answer(PyTypeObject *type, PyObject *arena, uform_rows_view_t const *rows, size_t count) {
-    char const *format = "B";
+PyObject* uform_py_rows_answer(PyTypeObject* type, PyObject* arena, uform_rows_view_t const* rows, size_t count) {
+    char const* format = "B";
     Py_ssize_t item_bytes = 1;
     Py_ssize_t shape[2] = {(Py_ssize_t)count, (Py_ssize_t)rows->stride};
     for (size_t row = 0; row != sizeof(scalar_formats) / sizeof(*scalar_formats); ++row)
@@ -2122,35 +2122,35 @@ PyObject *uform_py_rows_answer(PyTypeObject *type, PyObject *arena, uform_rows_v
             item_bytes = scalar_formats[row].bytes;
             shape[1] = (Py_ssize_t)rows->columns;
         }
-    return (PyObject *)arena_buffer_new(type, arena, rows->data, format, item_bytes, shape, 2);
+    return (PyObject*)arena_buffer_new(type, arena, rows->data, format, item_bytes, shape, 2);
 }
 
-PyObject *uform_py_rows_tape_answer(PyObject *arena, uform_rows_tape_view_t const *states, size_t count,
+PyObject* uform_py_rows_tape_answer(PyObject* arena, uform_rows_tape_view_t const* states, size_t count,
                                     size_t tokens) {
     Py_ssize_t const offsets_shape[1] = {(Py_ssize_t)count + 1};
-    RowsTape *rows_tape = (RowsTape *)uform_py_rows_answer(&RowsTapeType, arena, &states->rows, tokens);
+    RowsTape* rows_tape = (RowsTape*)uform_py_rows_answer(&RowsTapeType, arena, &states->rows, tokens);
     if (!rows_tape) return NULL;
-    rows_tape->offsets = (PyObject *)arena_buffer_new(&ArenaBufferType, arena, states->offsets, "N", sizeof(size_t),
-                                                      offsets_shape, 1);
+    rows_tape->offsets = (PyObject*)arena_buffer_new(&ArenaBufferType, arena, states->offsets, "N", sizeof(size_t),
+                                                     offsets_shape, 1);
     if (!rows_tape->offsets) Py_CLEAR(rows_tape);
-    return (PyObject *)rows_tape;
+    return (PyObject*)rows_tape;
 }
 
-PyObject *uform_py_tape_answer(PyObject *arena, uform_tape_view_t const *tape, size_t count, size_t elements) {
+PyObject* uform_py_tape_answer(PyObject* arena, uform_tape_view_t const* tape, size_t count, size_t elements) {
     Py_ssize_t const shape[1] = {(Py_ssize_t)elements}, offsets_shape[1] = {(Py_ssize_t)count + 1};
-    RowsTape *rows_tape = (RowsTape *)arena_buffer_new(&RowsTapeType, arena, tape->data, "f", sizeof(float), shape, 1);
+    RowsTape* rows_tape = (RowsTape*)arena_buffer_new(&RowsTapeType, arena, tape->data, "f", sizeof(float), shape, 1);
     if (!rows_tape) return NULL;
-    rows_tape->offsets = (PyObject *)arena_buffer_new(&ArenaBufferType, arena, tape->offsets, "N", sizeof(size_t),
-                                                      offsets_shape, 1);
+    rows_tape->offsets = (PyObject*)arena_buffer_new(&ArenaBufferType, arena, tape->offsets, "N", sizeof(size_t),
+                                                     offsets_shape, 1);
     if (!rows_tape->offsets) Py_CLEAR(rows_tape);
-    return (PyObject *)rows_tape;
+    return (PyObject*)rows_tape;
 }
 
 #pragma endregion Arenas
 
 #pragma region Tapes
 
-void uform_py_tape_release(uform_py_tape_t *tape) {
+void uform_py_tape_release(uform_py_tape_t* tape) {
     PyMem_Free(tape->gathered);
     if (tape->data.obj) PyBuffer_Release(&tape->data);
     if (tape->offsets.obj) PyBuffer_Release(&tape->offsets);
@@ -2164,14 +2164,14 @@ static size_t element_bytes(uform_py_element_t element) {
 
 /** The format character a buffer of @p element must report, its byte-order prefix stripped;
  *  NULL takes any. */
-static char const *element_format(uform_py_element_t element) {
+static char const* element_format(uform_py_element_t element) {
     return element == uform_py_element_samples_k ? "f" : element == uform_py_element_pixels_k ? "B" : NULL;
 }
 
 /** The format character of @p buffer, its byte-order prefix skipped; "B" when the
  *  exporter named none. */
-static char buffer_format(Py_buffer const *buffer) {
-    char const *format = buffer->format ? buffer->format : "B";
+static char buffer_format(Py_buffer const* buffer) {
+    char const* format = buffer->format ? buffer->format : "B";
     while (*format == '@' || *format == '=' || *format == '<' || *format == '>' || *format == '!') ++format;
     return *format;
 }
@@ -2181,7 +2181,7 @@ static char buffer_format(Py_buffer const *buffer) {
  *      a C-contiguous run of unsigned words as wide as a @c size_t.
  *  @return 1 when it does, 0 when it is no offsets buffer at all, with no exception set.
  */
-static int tape_offsets_acquire(PyObject *candidate, uform_py_tape_t *tape) {
+static int tape_offsets_acquire(PyObject* candidate, uform_py_tape_t* tape) {
     if (buffer_acquire(candidate, 0, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT, &tape->offsets) != 0) {
         PyErr_Clear();
         return 0;
@@ -2197,13 +2197,13 @@ static int tape_offsets_acquire(PyObject *candidate, uform_py_tape_t *tape) {
 
 /** Lends the data of a pair whose offsets @p tape already holds; returns 0 or -1 with
  *  an exception set. */
-static int tape_lend(PyObject *data, char const *field, uform_py_element_t element, uform_py_tape_t *tape) {
+static int tape_lend(PyObject* data, char const* field, uform_py_element_t element, uform_py_tape_t* tape) {
     if (buffer_acquire(data, 1, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT, &tape->data) != 0) return -1;
-    char const *const expected = element_format(element);
+    char const* const expected = element_format(element);
     if ((size_t)tape->data.itemsize != element_bytes(element) || (expected && buffer_format(&tape->data) != *expected))
         return uform_py_raise(uform_status_unsupported_layout_k, "the '%s' data holds items the verb cannot read",
                               field);
-    size_t const *const offsets = (size_t const *)tape->offsets.buf;
+    size_t const* const offsets = (size_t const*)tape->offsets.buf;
     tape->count = (size_t)tape->offsets.len / sizeof(size_t) - 1;
     size_t const elements = (size_t)tape->data.len / element_bytes(element);
     if (offsets[tape->count] > elements)
@@ -2216,12 +2216,12 @@ static int tape_lend(PyObject *data, char const *field, uform_py_element_t eleme
 
 /** Acquires one entry of a gathered batch into @p view, checking it holds @p element; returns
  *  0 or -1. */
-static int tape_entry_acquire(PyObject *entry, char const *field, Py_ssize_t position, uform_py_element_t element,
-                              Py_buffer *view) {
+static int tape_entry_acquire(PyObject* entry, char const* field, Py_ssize_t position, uform_py_element_t element,
+                              Py_buffer* view) {
     if (element == uform_py_element_text_k && PyUnicode_Check(entry)) {
         Py_ssize_t length = 0;
-        char const *const text = PyUnicode_AsUTF8AndSize(entry, &length); // lives as long as the string the view holds
-        return text ? PyBuffer_FillInfo(view, entry, (void *)text, length, 1, PyBUF_SIMPLE) : -1;
+        char const* const text = PyUnicode_AsUTF8AndSize(entry, &length); // lives as long as the string the view holds
+        return text ? PyBuffer_FillInfo(view, entry, (void*)text, length, 1, PyBUF_SIMPLE) : -1;
     }
     int const flags = element == uform_py_element_pixels_k || element == uform_py_element_samples_k
                           ? PyBUF_C_CONTIGUOUS | PyBUF_FORMAT
@@ -2233,7 +2233,7 @@ static int tape_entry_acquire(PyObject *entry, char const *field, Py_ssize_t pos
                      Py_TYPE(entry));
         return -1;
     }
-    char const *const expected = element_format(element);
+    char const* const expected = element_format(element);
     int const shaped = element == uform_py_element_pixels_k
                            ? view->ndim == 3 && view->shape[2] == 3 && view->shape[0] <= UINT32_MAX &&
                                  view->shape[1] <= UINT32_MAX
@@ -2249,9 +2249,9 @@ static int tape_entry_acquire(PyObject *entry, char const *field, Py_ssize_t pos
 
 /** Gathers the entries of @p sequence into one block @p tape owns; returns 0 or -1 with
  *  an exception set. */
-static int tape_gather(PyObject *sequence, char const *field, uform_py_element_t element, uform_py_tape_t *tape) {
+static int tape_gather(PyObject* sequence, char const* field, uform_py_element_t element, uform_py_tape_t* tape) {
     Py_ssize_t const count = PySequence_Fast_GET_SIZE(sequence);
-    Py_buffer *const views = (Py_buffer *)PyMem_Calloc(count ? (size_t)count : 1, sizeof(Py_buffer));
+    Py_buffer* const views = (Py_buffer*)PyMem_Calloc(count ? (size_t)count : 1, sizeof(Py_buffer));
     if (!views) {
         PyErr_NoMemory();
         return -1;
@@ -2275,9 +2275,9 @@ static int tape_gather(PyObject *sequence, char const *field, uform_py_element_t
         failed = 1;
     }
     if (!failed) {
-        size_t *const offsets = (size_t *)tape->gathered;
-        uint32_t *const extents = extents_count ? (uint32_t *)(offsets + count + 1) : NULL;
-        char *const data = (char *)tape->gathered + head;
+        size_t* const offsets = (size_t*)tape->gathered;
+        uint32_t* const extents = extents_count ? (uint32_t*)(offsets + count + 1) : NULL;
+        char* const data = (char*)tape->gathered + head;
         size_t written = 0;
         offsets[0] = 0;
         for (Py_ssize_t position = 0; position != count; ++position) {
@@ -2299,7 +2299,7 @@ static int tape_gather(PyObject *sequence, char const *field, uform_py_element_t
     return failed ? -1 : 0;
 }
 
-int uform_py_tape_from_object(PyObject *object, char const *field, uform_py_element_t element, uform_py_tape_t *tape) {
+int uform_py_tape_from_object(PyObject* object, char const* field, uform_py_element_t element, uform_py_tape_t* tape) {
     memset(tape, 0, sizeof(*tape));
     if (PyUnicode_Check(object) || PyBytes_Check(object) || PyByteArray_Check(object) || PyMemoryView_Check(object)) {
         PyErr_Format(PyExc_TypeError, "the '%s' argument takes a sequence or a (data, offsets) pair, got one %S", field,
@@ -2309,37 +2309,37 @@ int uform_py_tape_from_object(PyObject *object, char const *field, uform_py_elem
     if (element != uform_py_element_pixels_k && PyTuple_Check(object) && PyTuple_GET_SIZE(object) == 2 &&
         tape_offsets_acquire(PyTuple_GET_ITEM(object, 1), tape))
         return tape_lend(PyTuple_GET_ITEM(object, 0), field, element, tape);
-    PyObject *const sequence = PySequence_Fast(object, "expected a sequence");
+    PyObject* const sequence = PySequence_Fast(object, "expected a sequence");
     if (!sequence) return -1;
     int const gathered = tape_gather(sequence, field, element, tape);
     Py_DECREF(sequence);
     return gathered;
 }
 
-void uform_py_words_release(uform_py_words_t *words) {
+void uform_py_words_release(uform_py_words_t* words) {
     PyMem_Free(words->gathered);
     if (words->buffer.obj) PyBuffer_Release(&words->buffer);
     memset(words, 0, sizeof(*words));
 }
 
-int uform_py_words_from_object(PyObject *object, char const *field, size_t count, uform_py_words_t *words) {
+int uform_py_words_from_object(PyObject* object, char const* field, size_t count, uform_py_words_t* words) {
     if (!object || object == Py_None) return 0;
     if (buffer_acquire(object, 0, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT, &words->buffer) == 0) {
         if (words->buffer.itemsize != sizeof(uint32_t) || buffer_format(&words->buffer) != 'I')
             return uform_py_raise(uform_status_unsupported_layout_k, "the '%s' buffer must hold uint32 words", field);
         if ((size_t)words->buffer.len != count * sizeof(uint32_t))
             return uform_py_raise(uform_status_shape_mismatch_k, "the '%s' buffer must hold %zu words", field, count);
-        words->data = (uint32_t const *)words->buffer.buf;
+        words->data = (uint32_t const*)words->buffer.buf;
         return 0;
     }
     PyErr_Clear();
-    PyObject *const sequence = PySequence_Fast(object, "expected a buffer of uint32 or a sequence of integers");
+    PyObject* const sequence = PySequence_Fast(object, "expected a buffer of uint32 or a sequence of integers");
     if (!sequence) return -1;
     if ((size_t)PySequence_Fast_GET_SIZE(sequence) != count) {
         Py_DECREF(sequence);
         return uform_py_raise(uform_status_shape_mismatch_k, "the '%s' option must hold %zu entries", field, count);
     }
-    words->gathered = (uint32_t *)PyMem_Malloc((count ? count : 1) * sizeof(uint32_t));
+    words->gathered = (uint32_t*)PyMem_Malloc((count ? count : 1) * sizeof(uint32_t));
     int failed = !words->gathered;
     if (failed) PyErr_NoMemory();
     for (size_t position = 0; !failed && position != count; ++position) {
@@ -2376,13 +2376,13 @@ char const doc_capabilities_available[] =                                       
     "The hardware capabilities this machine offers at runtime, comma-separated.\n" //
     "Calls `uform_capabilities_available`.";
 
-PyObject *api_version(PyObject *self, PyObject *unused) { return PyUnicode_FromString(uform_version_name()); }
+PyObject* api_version(PyObject* self, PyObject* unused) { return PyUnicode_FromString(uform_version_name()); }
 
-PyObject *api_capabilities_compiled(PyObject *self, PyObject *unused) {
+PyObject* api_capabilities_compiled(PyObject* self, PyObject* unused) {
     return PyUnicode_FromString(uform_capabilities_compiled());
 }
 
-PyObject *api_capabilities_available(PyObject *self, PyObject *unused) {
+PyObject* api_capabilities_available(PyObject* self, PyObject* unused) {
     return PyUnicode_FromString(uform_capabilities_available());
 }
 
@@ -2411,7 +2411,7 @@ char const doc_gpu_devices[] =                                                  
     "Calls `uform_gpu_devices`.";
 
 /** Lists up to @p capacity devices into @p devices; returns how many there are, or -1. */
-static Py_ssize_t gpu_devices_list(uform_gpu_device_t *devices, size_t capacity) {
+static Py_ssize_t gpu_devices_list(uform_gpu_device_t* devices, size_t capacity) {
     size_t devices_count = 0;
     uform_outcome_t outcome = {0};
     uform_gpu_devices_t arguments = {.outcome = &outcome,
@@ -2424,24 +2424,24 @@ static Py_ssize_t gpu_devices_list(uform_gpu_device_t *devices, size_t capacity)
     return uform_py_raise_on_outcome(&outcome) == 0 ? (Py_ssize_t)devices_count : -1;
 }
 
-PyObject *api_gpu_devices(PyObject *self, PyObject *unused) {
+PyObject* api_gpu_devices(PyObject* self, PyObject* unused) {
     Py_ssize_t const counted = gpu_devices_list(NULL, 0);
     if (counted < 0) return NULL;
-    uform_gpu_device_t *const devices = (uform_gpu_device_t *)PyMem_Calloc(counted ? (size_t)counted : 1,
-                                                                           sizeof(uform_gpu_device_t));
+    uform_gpu_device_t* const devices = (uform_gpu_device_t*)PyMem_Calloc(counted ? (size_t)counted : 1,
+                                                                          sizeof(uform_gpu_device_t));
     if (!devices) return PyErr_NoMemory();
     Py_ssize_t const listed = gpu_devices_list(devices, (size_t)counted);
-    PyObject *tuple = listed < 0 ? NULL : PyTuple_New(listed < counted ? listed : counted);
+    PyObject* tuple = listed < 0 ? NULL : PyTuple_New(listed < counted ? listed : counted);
     for (Py_ssize_t index = 0; tuple && index != PyTuple_GET_SIZE(tuple); ++index) {
-        uform_gpu_device_t const *const device = &devices[index];
-        PyObject *fields[6] = {NULL, NULL, NULL, NULL, NULL, NULL};
+        uform_gpu_device_t const* const device = &devices[index];
+        PyObject* fields[6] = {NULL, NULL, NULL, NULL, NULL, NULL};
         (void)((fields[0] = uform_py_enum_to_object(&uform_py_gpu_vendor, (int)device->vendor)) &&
                (fields[1] = PyLong_FromUnsignedLong(device->vendor_ordinal)) &&
                (fields[2] = uform_py_class_to_object(&uform_py_gpu_class, (int)device->gpu_class)) &&
                (fields[3] = PyLong_FromUnsignedLong(device->compute_units)) &&
                (fields[4] = PyLong_FromUnsignedLongLong(device->memory_bytes)) &&
                (fields[5] = PyUnicode_FromString(device->name)));
-        PyObject *const entry = uform_py_struct_sequence_steal(&GPUDeviceType, fields, 6);
+        PyObject* const entry = uform_py_struct_sequence_steal(&GPUDeviceType, fields, 6);
         if (!entry) Py_CLEAR(tuple);
         else PyTuple_SET_ITEM(tuple, index, entry);
     }

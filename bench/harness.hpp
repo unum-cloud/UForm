@@ -38,20 +38,20 @@
 namespace unum::uform::bench {
 
 /** The text of the environment variable @p name , empty when it is unset. */
-[[nodiscard]] inline std::string_view environment_text(char const *name) noexcept {
-    char const *const text = std::getenv(name);
+[[nodiscard]] inline std::string_view environment_text(char const* name) noexcept {
+    char const* const text = std::getenv(name);
     return text == nullptr ? std::string_view {} : std::string_view {text};
 }
 
 /** Exits with status 1, naming the variable @p name whose @p text does not parse as @p wanted . */
-[[noreturn]] inline void refuse_setting(char const *name, std::string_view text, char const *wanted) noexcept {
+[[noreturn]] inline void refuse_setting(char const* name, std::string_view text, char const* wanted) noexcept {
     fmt::println(stderr, "{}=\"{}\" does not parse, expected {}", name, text, wanted);
     std::exit(1);
 }
 
 /** The duration the variable @p name spells as an unsigned integer and @c ms or @c s , or
  *  @p fallback when it is unset; exits with status 1 when it does not parse. */
-[[nodiscard]] inline std::chrono::milliseconds environment_duration(char const *name,
+[[nodiscard]] inline std::chrono::milliseconds environment_duration(char const* name,
                                                                     std::chrono::milliseconds fallback) noexcept {
     std::string_view const text = environment_text(name);
     if (text.empty()) return fallback;
@@ -80,7 +80,7 @@ struct filter_t {
             filter.pattern.assign(text.begin(), text.end(),
                                   std::regex_constants::ECMAScript | std::regex_constants::nosubs);
         }
-        catch (std::regex_error const &) {
+        catch (std::regex_error const&) {
         }
         return filter;
     }
@@ -115,7 +115,7 @@ struct settings_t {
     std::string_view const seed_text = environment_text("UFORM_SEED");
     if (seed_text == "random") settings.seed = std::random_device {}();
     else if (!seed_text.empty()) {
-        char const *const seed_end = seed_text.data() + seed_text.size();
+        char const* const seed_end = seed_text.data() + seed_text.size();
         auto const [parsed_end, parse_status] = std::from_chars(seed_text.data(), seed_end, settings.seed);
         if (parse_status != std::errc {} || parsed_end != seed_end)
             refuse_setting("UFORM_SEED", seed_text, "an unsigned integer or random");
@@ -126,7 +126,7 @@ struct settings_t {
 }
 
 /** Prints the version, the capabilities and the settings, one per line. */
-inline void print(settings_t const &settings) noexcept {
+inline void print(settings_t const& settings) noexcept {
     fmt::println("UForm {}", uform_version_name());
     fmt::println("- Compiled for: {}", uform_capabilities_compiled());
     fmt::println("- This machine: {}", uform_capabilities_available());
@@ -192,7 +192,7 @@ class loop_t {
   public:
     struct end_t {};
     struct iterator_t {
-        loop_t *loop;
+        loop_t* loop;
         bool operator!=(end_t) noexcept { return loop->keep_running(); }
         std::size_t operator*() const noexcept { return loop->calls_; }
         void operator++() noexcept { ++loop->calls_; }
@@ -260,8 +260,8 @@ class loop_t {
  *  to compile here.
  */
 template <typename... parameters_types_>
-[[nodiscard]] bool run(settings_t const &settings, std::string_view name,
-                       void (*bench_function)(loop_t &, parameters_types_...),
+[[nodiscard]] bool run(settings_t const& settings, std::string_view name,
+                       void (*bench_function)(loop_t&, parameters_types_...),
                        std::type_identity_t<parameters_types_>... arguments) noexcept {
     if (!settings.filter.selects(name)) return false;
     loop_t loop {settings.warmup, settings.time_limit};

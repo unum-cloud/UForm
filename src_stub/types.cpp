@@ -28,18 +28,18 @@ struct calls_t {
     std::uint64_t finished = 0;
 
     /** Calls running on some caller's thread right now, each owned by the frame that runs it. */
-    std::vector<call_t const *> running;
+    std::vector<call_t const*> running;
 };
 
 static calls_t calls;
 
-void uf::release_arena(uform_arena_t arena, uform_outcome_t const *call) {
+void uf::release_arena(uform_arena_t arena, uform_outcome_t const* call) {
     if (!arena) return;
     std::lock_guard<std::mutex> lock(calls.guard);
     if (arena->holder == call) arena->holder = nullptr;
 }
 
-bool uf::hold_arena(uform_arena_t arena, uform_outcome_t const *call) {
+bool uf::hold_arena(uform_arena_t arena, uform_outcome_t const* call) {
     if (!arena) return true;
     std::lock_guard<std::mutex> lock(calls.guard);
     if (arena->holder && arena->holder != call) return false;
@@ -49,33 +49,33 @@ bool uf::hold_arena(uform_arena_t arena, uform_outcome_t const *call) {
 
 /** Runs @p call, which the caller already listed as running, then delists it and
  *  wakes every waiter. */
-static void run_listed(call_t &call) {
-    std::visit([&](auto &arguments) { call.verb(&arguments); }, call.arguments);
+static void run_listed(call_t& call) {
+    std::visit([&](auto& arguments) { call.verb(&arguments); }, call.arguments);
     std::lock_guard<std::mutex> lock(calls.guard);
     calls.running.erase(std::find(calls.running.begin(), calls.running.end(), &call));
     serial_atomic_ref<std::uint64_t> {calls.finished}.fetch_add(1, std::memory_order_release);
 }
 
-void uf::run_holding(call_t call, uform_outcome_t *outcome) {
+void uf::run_holding(call_t call, uform_outcome_t* outcome) {
     {
         std::lock_guard<std::mutex> lock(calls.guard);
         if (std::any_of(calls.running.begin(), calls.running.end(),
-                        [&](call_t const *running) { return running->held_executor == call.held_executor; }))
+                        [&](call_t const* running) { return running->held_executor == call.held_executor; }))
             return propagate_error(uform_status_contended_k, outcome, "Another call holds the executor"), void();
         calls.running.push_back(&call);
     }
     run_listed(call);
 }
 
-void uf::wait_for_calls_using(void const *handle) {
+void uf::wait_for_calls_using(void const* handle) {
     if (!handle) return;
-    auto const names_handle = [=](call_t const &call) {
+    auto const names_handle = [=](call_t const& call) {
         return std::find(call.handles.begin(), call.handles.end(), handle) != call.handles.end();
     };
     std::unique_lock<std::mutex> lock(calls.guard);
     for (;;) {
         if (std::any_of(calls.running.begin(), calls.running.end(),
-                        [&](call_t const *running) { return names_handle(*running); })) {
+                        [&](call_t const* running) { return names_handle(*running); })) {
             serial_atomic_ref<std::uint64_t> const finished {calls.finished};
             std::uint64_t const seen = finished.load(std::memory_order_relaxed);
             lock.unlock(); // the running call delists itself under this lock
@@ -89,17 +89,17 @@ void uf::wait_for_calls_using(void const *handle) {
 
 extern "C" {
 
-void uform_version(int *major, int *minor, int *patch) {
+void uform_version(int* major, int* minor, int* patch) {
     if (major) *major = UFORM_VERSION_MAJOR;
     if (minor) *minor = UFORM_VERSION_MINOR;
     if (patch) *patch = UFORM_VERSION_PATCH;
 }
 
-char const *uform_version_name(void) { return "4.0.0-rc.1"; }
-char const *uform_capabilities_compiled(void) { return "serial"; }
-char const *uform_capabilities_available(void) { return "serial"; }
+char const* uform_version_name(void) { return "4.0.0-rc.1"; }
+char const* uform_capabilities_compiled(void) { return "serial"; }
+char const* uform_capabilities_available(void) { return "serial"; }
 
-uform_status_t uform_outcome_wait(uform_outcome_t *outcome) {
+uform_status_t uform_outcome_wait(uform_outcome_t* outcome) {
     if (!outcome) return uform_status_invalid_argument_k;
     wait_for_calls_using(outcome);
     serial_atomic_ref<uform_status_t> status {outcome->status};
@@ -109,41 +109,41 @@ uform_status_t uform_outcome_wait(uform_outcome_t *outcome) {
     return current;
 }
 
-uform_status_t uform_outcome_status(uform_outcome_t *outcome) {
+uform_status_t uform_outcome_status(uform_outcome_t* outcome) {
     if (!outcome) return uform_status_invalid_argument_k;
     return serial_atomic_ref<uform_status_t> {outcome->status}.load(std::memory_order_acquire);
 }
 
-void uform_executor_for_ram(uform_executor_for_ram_t *arguments) {
+void uform_executor_for_ram(uform_executor_for_ram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     if (reject_if(!arguments->executor, uform_status_invalid_argument_k, "The executor output must not be null",
                   outcome))
         return;
     *arguments->executor = nullptr;
-    uform_executor_handle_t *const executor = new (std::nothrow) uform_executor_handle_t {};
+    uform_executor_handle_t* const executor = new (std::nothrow) uform_executor_handle_t {};
     if (reject_if(!executor, uform_status_out_of_memory_k, "The executor could not be allocated", outcome)) return;
     *arguments->executor = executor;
 }
 
-void uform_executor_on_pool(uform_executor_on_pool_t *arguments) {
+void uform_executor_on_pool(uform_executor_on_pool_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     if (reject_if(!arguments->executor, uform_status_invalid_argument_k, "The executor output must not be null",
                   outcome))
         return;
     *arguments->executor = nullptr;
     if (reject_if(!arguments->pool, uform_status_invalid_argument_k, "The lent pool must not be null", outcome)) return;
-    uform_executor_handle_t *const executor = new (std::nothrow) uform_executor_handle_t {};
+    uform_executor_handle_t* const executor = new (std::nothrow) uform_executor_handle_t {};
     if (reject_if(!executor, uform_status_out_of_memory_k, "The executor could not be allocated", outcome)) return;
     *arguments->executor = executor;
 }
 
-void uform_executor_for_vram(uform_executor_for_vram_t *arguments) {
+void uform_executor_for_vram(uform_executor_for_vram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     if (arguments->executor) *arguments->executor = nullptr;
     propagate_error(uform_status_device_k, outcome, "This build carries no GPU backends");
 }
 
-void uform_executor_drain(uform_executor_drain_t *arguments) {
+void uform_executor_drain(uform_executor_drain_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     if (arguments->executor) wait_for_calls_using(arguments->executor);
 }
@@ -153,12 +153,12 @@ void uform_executor_free(uform_executor_t executor) {
     delete executor;
 }
 
-void uform_arena_init(uform_arena_init_t *arguments) {
+void uform_arena_init(uform_arena_init_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     if (reject_if(!arguments->arena, uform_status_invalid_argument_k, "The arena output must not be null", outcome))
         return;
     *arguments->arena = nullptr;
-    uform_arena_handle_t *const arena = new (std::nothrow) uform_arena_handle_t {};
+    uform_arena_handle_t* const arena = new (std::nothrow) uform_arena_handle_t {};
     if (reject_if(!arena, uform_status_out_of_memory_k, "The arena could not be allocated", outcome)) return;
     *arguments->arena = arena;
 }
@@ -168,7 +168,7 @@ void uform_arena_free(uform_arena_t arena) {
     delete arena;
 }
 
-void uform_arena_describe(uform_arena_describe_t *arguments) {
+void uform_arena_describe(uform_arena_describe_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     if (reject_if(!arguments->arena || !arguments->description, uform_status_invalid_argument_k,
                   "The arena and its description must not be null", outcome))
@@ -176,7 +176,7 @@ void uform_arena_describe(uform_arena_describe_t *arguments) {
     *arguments->description = {uform_residency_ram_k, -1};
 }
 
-char const *uform_status_name(uform_status_t status) {
+char const* uform_status_name(uform_status_t status) {
     switch (status) {
     case uform_status_success_k: return "success";
     case uform_status_deferred_k: return "deferred";
@@ -197,7 +197,7 @@ char const *uform_status_name(uform_status_t status) {
     }
 }
 
-uform_status_t uform_status_from_name(uform_bytes_view_t name, uform_status_t *status) {
+uform_status_t uform_status_from_name(uform_bytes_view_t name, uform_status_t* status) {
     return read_name<uform_status_t>(
         name,
         {uform_status_success_k, uform_status_deferred_k, uform_status_out_of_memory_k, uform_status_shape_mismatch_k,
@@ -207,7 +207,7 @@ uform_status_t uform_status_from_name(uform_bytes_view_t name, uform_status_t *s
         uform_status_name, status);
 }
 
-char const *uform_scalar_name(uform_scalar_t scalar) {
+char const* uform_scalar_name(uform_scalar_t scalar) {
     switch (scalar) {
     case uform_scalar_unknown_k: return "unknown";
     case uform_scalar_f64_k: return "f64";
@@ -228,7 +228,7 @@ char const *uform_scalar_name(uform_scalar_t scalar) {
     }
 }
 
-uform_status_t uform_scalar_from_name(uform_bytes_view_t name, uform_scalar_t *scalar) {
+uform_status_t uform_scalar_from_name(uform_bytes_view_t name, uform_scalar_t* scalar) {
     return read_name<uform_scalar_t>(
         name,
         {uform_scalar_f64_k, uform_scalar_f32_k, uform_scalar_bf16_k, uform_scalar_f16_k, uform_scalar_e5m2_k,
@@ -237,7 +237,7 @@ uform_status_t uform_scalar_from_name(uform_bytes_view_t name, uform_scalar_t *s
         uform_scalar_name, scalar);
 }
 
-char const *uform_mood_name(uform_mood_t mood) {
+char const* uform_mood_name(uform_mood_t mood) {
     switch (mood) {
     case uform_mood_parked_k: return "parked";
     case uform_mood_spinning_k: return "spinning";
@@ -245,11 +245,11 @@ char const *uform_mood_name(uform_mood_t mood) {
     }
 }
 
-uform_status_t uform_mood_from_name(uform_bytes_view_t name, uform_mood_t *mood) {
+uform_status_t uform_mood_from_name(uform_bytes_view_t name, uform_mood_t* mood) {
     return read_name<uform_mood_t>(name, {uform_mood_parked_k, uform_mood_spinning_k}, uform_mood_name, mood);
 }
 
-char const *uform_cpu_class_name(uform_cpu_class_t cpu_class) {
+char const* uform_cpu_class_name(uform_cpu_class_t cpu_class) {
     switch (cpu_class) {
     case uform_cpu_class_unknown_k: return "unknown";
     case uform_cpu_class_serial_k: return "serial";
@@ -275,7 +275,7 @@ char const *uform_cpu_class_name(uform_cpu_class_t cpu_class) {
     }
 }
 
-uform_status_t uform_cpu_class_from_name(uform_bytes_view_t name, uform_cpu_class_t *cpu_class) {
+uform_status_t uform_cpu_class_from_name(uform_bytes_view_t name, uform_cpu_class_t* cpu_class) {
     return read_name<uform_cpu_class_t>(
         name, {uform_cpu_class_unknown_k,       uform_cpu_class_serial_k,         uform_cpu_class_monoversioned_k,
                uform_cpu_class_intel_haswell_k, uform_cpu_class_intel_sierra_k,   uform_cpu_class_intel_skylake_k,
@@ -287,7 +287,7 @@ uform_status_t uform_cpu_class_from_name(uform_bytes_view_t name, uform_cpu_clas
         uform_cpu_class_name, cpu_class);
 }
 
-char const *uform_gpu_class_name(uform_gpu_class_t gpu_class) {
+char const* uform_gpu_class_name(uform_gpu_class_t gpu_class) {
     switch (gpu_class) {
     case uform_gpu_class_unknown_k: return "unknown";
     case uform_gpu_class_nvidia_ampere_k: return "nvidia-ampere";
@@ -306,7 +306,7 @@ char const *uform_gpu_class_name(uform_gpu_class_t gpu_class) {
     }
 }
 
-uform_status_t uform_gpu_class_from_name(uform_bytes_view_t name, uform_gpu_class_t *gpu_class) {
+uform_status_t uform_gpu_class_from_name(uform_bytes_view_t name, uform_gpu_class_t* gpu_class) {
     return read_name<uform_gpu_class_t>(
         name,
         {uform_gpu_class_nvidia_ampere_k, uform_gpu_class_nvidia_ada_k, uform_gpu_class_nvidia_hopper_k,
@@ -316,7 +316,7 @@ uform_status_t uform_gpu_class_from_name(uform_bytes_view_t name, uform_gpu_clas
         uform_gpu_class_name, gpu_class);
 }
 
-void uform_gpu_devices(uform_gpu_devices_t *arguments) {
+void uform_gpu_devices(uform_gpu_devices_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     if (reject_if(!arguments->devices_count, uform_status_invalid_argument_k, "The count output must not be null",
                   outcome))

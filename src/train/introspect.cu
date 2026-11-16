@@ -29,7 +29,7 @@ inline constexpr std::size_t telemetry_sample_budget_k = 32u * 256u;
  *  dynamic shared memory.
  */
 static __global__ void telemetry_signal_probe_kernel_(f32r1_view_t values, nk::tensor_span<telemetry_row_t, 1> row,
-                                                      telemetry_policy_t policy, u32_t row_index, gpu_fault_t *fault) {
+                                                      telemetry_policy_t policy, u32_t row_index, gpu_fault_t* fault) {
     if (threadIdx.x >= 32u) return;
     std::size_t const scalars = values.extent(0);
     std::size_t const samples = scalars < telemetry_sample_budget_k ? scalars : telemetry_sample_budget_k;
@@ -51,7 +51,7 @@ static __global__ void telemetry_signal_probe_kernel_(f32r1_view_t values, nk::t
         checksum ^= __shfl_down_sync(0xFFFFFFFFu, checksum, offset);
     }
     if (threadIdx.x != 0u) return;
-    telemetry_row_t &state = row[0];
+    telemetry_row_t& state = row[0];
     state.updates += 1u;
     state.last_scalar = std::sqrt(energy);
     state.last_checksum = checksum;
@@ -75,15 +75,15 @@ static __global__ void telemetry_signal_probe_kernel_(f32r1_view_t values, nk::t
 static __global__ void telemetry_round_probe_kernel_(multimem_member_t member,
                                                      nk::tensor_span<telemetry_row_t, 1> row) {
     if (threadIdx.x != 0u || blockIdx.x != 0u) return;
-    telemetry_row_t &state = row[0];
+    telemetry_row_t& state = row[0];
     f32_t const value = static_cast<f32_t>(*member.round);
     state.updates += 1u;
     if (value < state.last_scalar) state.violations += 1u;
     state.last_scalar = value;
 }
 
-expected<telemetry_ledger_t> telemetry_ledger_t::make(gpu_arena_t &arena, u32_t channels, u32_t max_probes,
-                                                      gpu_stream_t &stream) noexcept {
+expected<telemetry_ledger_t> telemetry_ledger_t::make(gpu_arena_t& arena, u32_t channels, u32_t max_probes,
+                                                      gpu_stream_t& stream) noexcept {
     using result_t = expected<telemetry_ledger_t>;
     telemetry_ledger_t ledger;
     ledger.channels_ = channels;
@@ -126,8 +126,8 @@ expected<telemetry_probe_t> telemetry_ledger_t::register_probe(sz::string_view_t
     return result_t {telemetry_probe_t {registered_}};
 }
 
-expected_t telemetry_ledger_t::probe_signal(telemetry_probe_t probe, f32r1_view_t values, gpu_fault_t *fault,
-                                            gpu_stream_t &stream) noexcept {
+expected_t telemetry_ledger_t::probe_signal(telemetry_probe_t probe, f32r1_view_t values, gpu_fault_t* fault,
+                                            gpu_stream_t& stream) noexcept {
     if (probe.row == 0u || values.extent(0) == 0) return {};
     nk::tensor_span<telemetry_row_t, 1> const row {rows_.data() + probe.row, 1u};
     return launch_kernel(&telemetry_signal_probe_kernel_, dim3 {1u, 1u, 1u}, dim3 {32u, 1u, 1u}, stream, values, row,
@@ -135,7 +135,7 @@ expected_t telemetry_ledger_t::probe_signal(telemetry_probe_t probe, f32r1_view_
 }
 
 expected_t telemetry_ledger_t::probe_round(telemetry_probe_t probe, multimem_member_t member,
-                                           gpu_stream_t &stream) noexcept {
+                                           gpu_stream_t& stream) noexcept {
     if (probe.row == 0u) return {};
     nk::tensor_span<telemetry_row_t, 1> const row {rows_.data() + probe.row, 1u};
     return launch_kernel(&telemetry_round_probe_kernel_, dim3 {1u, 1u, 1u}, dim3 {32u, 1u, 1u}, stream, member, row);
@@ -143,7 +143,7 @@ expected_t telemetry_ledger_t::probe_round(telemetry_probe_t probe, multimem_mem
 
 void telemetry_ledger_t::scalar(telemetry_probe_t probe, f64_t sum, f64_t count) noexcept {
     if (probe.row == 0u || count == 0.0) return;
-    telemetry_loss_stats_t &stats = loss_stats_[probe.row];
+    telemetry_loss_stats_t& stats = loss_stats_[probe.row];
     stats.weighted_sum += sum;
     stats.weight += count;
     stats.scored_steps += 1u;
@@ -157,7 +157,7 @@ telemetry_loss_stats_t telemetry_ledger_t::losses(telemetry_probe_t probe) const
     return loss_stats_[probe.row];
 }
 
-expected<telemetry_row_t> telemetry_ledger_t::row(telemetry_probe_t probe, gpu_stream_t &stream) noexcept {
+expected<telemetry_row_t> telemetry_ledger_t::row(telemetry_probe_t probe, gpu_stream_t& stream) noexcept {
     using result_t = expected<telemetry_row_t>;
     if (probe.row == 0u) return result_t {telemetry_row_t {}};
     switch_to_gpu_t gpu_scope {stream};
@@ -171,7 +171,7 @@ expected<telemetry_row_t> telemetry_ledger_t::row(telemetry_probe_t probe, gpu_s
     return result_t {state};
 }
 
-expected_t telemetry_ledger_t::report(gpu_stream_t &stream) noexcept {
+expected_t telemetry_ledger_t::report(gpu_stream_t& stream) noexcept {
     if (channels_ == 0u || registered_ == 0u) return {};
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "ledger report context entry failed");
@@ -185,8 +185,8 @@ expected_t telemetry_ledger_t::report(gpu_stream_t &stream) noexcept {
         copied != CUDA_SUCCESS)
         return cuda_failure(copied, "ledger report readback failed");
     for (u32_t index = 1; index <= registered_; ++index) {
-        telemetry_row_t const &state = states[index];
-        telemetry_loss_stats_t const &stats = loss_stats_[index];
+        telemetry_row_t const& state = states[index];
+        telemetry_loss_stats_t const& stats = loss_stats_[index];
         sz::string_t line;
         if (!format_into(line,
                          "uform-telemetry: {} — updates={} zeros={} nonfinite={} violations={} last={} | " //

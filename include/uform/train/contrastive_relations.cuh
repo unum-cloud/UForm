@@ -239,7 +239,7 @@ struct contrastive_relations_view_t {
  *  @param[in] neighbor_global Position on the @b global vertex axis.
  */
 [[nodiscard]] __device__ inline contrastive_pair_relation_t contrastive_pair_relation(
-    contrastive_relations_view_t const &relations, u32_t vertex_index, u32_t neighbor_global) noexcept {
+    contrastive_relations_view_t const& relations, u32_t vertex_index, u32_t neighbor_global) noexcept {
 
     if (!relations.from_vertex_effective_length.empty() && relations.from_vertex_effective_length[vertex_index] == 0u)
         return {0.0f, 0.0f};
@@ -418,7 +418,7 @@ using contrastive_edges_pinned_t = contrastive_edges<pinned_alloc_t>;
 template <typename alloc_type_>
 [[nodiscard]] expected_t relate_roles(u32r1_view_t bags, nk::tensor_view<segment_role_t, 1> roles, u32r1_view_t lengths,
                                       f32r1_view_t weights, u32_t vertex_base,
-                                      contrastive_edges<alloc_type_> &edges) noexcept {
+                                      contrastive_edges<alloc_type_>& edges) noexcept {
     using set_t = contrastive_edge_set_t;
     u32_t const segments = static_cast<u32_t>(lengths.extent(0));
     if (bags.extent(0) != segments || roles.extent(0) != segments || edges.rows() != segments ||
@@ -456,7 +456,7 @@ template <typename alloc_type_>
         u32_t const runs[2][2] = {{other_first ? other_begin : begin, other_first ? other_end : end},
                                   {other_first ? begin : other_begin, other_first ? end : other_end}};
         segment_role_t const role = roles[segment];
-        for (auto const &run : runs)
+        for (auto const& run : runs)
             for (u32_t partner_segment = run[0]; live && partner_segment < run[1]; ++partner_segment) {
                 if (partner_segment == segment || lengths[partner_segment] == 0u) continue;
                 set_t set = set_t::attract_k;
@@ -472,7 +472,7 @@ template <typename alloc_type_>
                     weight = weights.empty() ? 1.0f : weights[negative_segment];
                 }
                 else if (negative || partner_negative) set = set_t::ignore_k;
-                u32_t &count = written[static_cast<u32_t>(set)];
+                u32_t& count = written[static_cast<u32_t>(set)];
                 if (count == edges.capacity())
                     return expected_t::fail(status_t::invalid_argument_k, "a GPU's bags name over {} edges in one set",
                                             edges.capacity());
@@ -518,7 +518,7 @@ struct contrastive_relations_t {
      *  @param[in] max_vertices Most local vertex rows any step will carry.
      *  @param[in] max_edges Most explicit edges any step will carry, per edge set.
      */
-    [[nodiscard]] static expected<contrastive_relations_t> make(gpu_arena_t &arena, u32_t max_vertices,
+    [[nodiscard]] static expected<contrastive_relations_t> make(gpu_arena_t& arena, u32_t max_vertices,
                                                                 u32_t max_edges) noexcept {
         if (max_vertices == 0)
             return expected<contrastive_relations_t>::fail(status_t::invalid_argument_k,
@@ -584,7 +584,7 @@ struct contrastive_relations_t {
                                     u32r1_view_t to_vertex_effective_length, u64r1_view_t from_vertex_key,
                                     u64r1_view_t to_vertex_key, std::size_t to_vertices_per_mesh,
                                     std::size_t self_edge_base, f32_t ambient_repulsion_weight,
-                                    gpu_stream_t &stream) noexcept {
+                                    gpu_stream_t& stream) noexcept {
 
         if (attract.offsets.extent(0) < 2 || attract.offsets.extent(0) != repel.offsets.extent(0))
             return expected_t::fail( //
@@ -658,7 +658,7 @@ struct contrastive_relations_t {
      *  columns are adopted as in @ref upload . */
     [[nodiscard]] expected_t upload_self_edges(u32_t from_vertices_per_gpu, u32r1_view_t from_vertex_effective_length,
                                                u32r1_view_t to_vertex_effective_length, std::size_t self_edge_base,
-                                               f32_t ambient_repulsion_weight, gpu_stream_t &stream) noexcept {
+                                               f32_t ambient_repulsion_weight, gpu_stream_t& stream) noexcept {
         bool resized = from_vertices_per_gpu != 0 &&
                        nk::succeeded(attract_offsets_.resize({from_vertices_per_gpu + 1u}));
         resized = resized && nk::succeeded(repel_offsets_.resize({from_vertices_per_gpu + 1u}));

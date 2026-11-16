@@ -46,11 +46,11 @@ set(NUMKONG_CUDA_ARCH "${UFORM_CUDA_ARCH}")
 set(NUMKONG_ROCM_ARCH "${UFORM_ROCM_ARCH}")
 uform_sibling(
     numkong FETCHCONTENT_SOURCE_DIR_NUMKONG https://github.com/ashvardanian/NumKong
-    a0b958f5bc8f1d678ea35b8c282c00beeace3f4d
+    fd06437efc7f1cdf299b85f09bff85ecf1b1d320
 )
 uform_sibling(
     stringzilla FETCHCONTENT_SOURCE_DIR_STRINGZILLA https://github.com/ashvardanian/StringZilla
-    e224583f7477e5a858e99897229e9665862bc071
+    a01d3e34da6049b871e3d647333688e216325f1b
 )
 uform_sibling(
     forkunion FETCHCONTENT_SOURCE_DIR_FORKUNION https://github.com/ashvardanian/ForkUnion

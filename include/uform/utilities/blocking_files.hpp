@@ -324,13 +324,13 @@ using path_character_t = char;
 class mapped_file_t {
   public:
     mapped_file_t() noexcept = default;
-    mapped_file_t(mapped_file_t &&other) noexcept : bytes_(std::exchange(other.bytes_, {})) {}
-    mapped_file_t &operator=(mapped_file_t &&other) noexcept {
+    mapped_file_t(mapped_file_t&& other) noexcept : bytes_(std::exchange(other.bytes_, {})) {}
+    mapped_file_t& operator=(mapped_file_t&& other) noexcept {
         std::swap(bytes_, other.bytes_);
         return *this;
     }
-    mapped_file_t(mapped_file_t const &) = delete;
-    mapped_file_t &operator=(mapped_file_t const &) = delete;
+    mapped_file_t(mapped_file_t const&) = delete;
+    mapped_file_t& operator=(mapped_file_t const&) = delete;
     ~mapped_file_t() noexcept;
 
     /** Maps @p path whole, where an empty file maps to an empty view. */
@@ -361,7 +361,7 @@ inline expected<mapped_file_t> mapped_file_t::map(sz::string_view_t path) noexce
     HANDLE const section = capacity && *capacity != 0
                                ? ::CreateFileMappingW(*file, nullptr, PAGE_READONLY, 0, 0, nullptr)
                                : nullptr;
-    void *const begin = section != nullptr ? ::MapViewOfFile(section, FILE_MAP_READ, 0, 0, 0) : nullptr;
+    void* const begin = section != nullptr ? ::MapViewOfFile(section, FILE_MAP_READ, 0, 0, 0) : nullptr;
     DWORD const reason = begin == nullptr ? ::GetLastError() : ERROR_SUCCESS;
     if (section != nullptr) { [[maybe_unused]] BOOL const closed_section = ::CloseHandle(section); }
     [[maybe_unused]] expected_t closed = close_native_file(*file);
@@ -369,7 +369,7 @@ inline expected<mapped_file_t> mapped_file_t::map(sz::string_view_t path) noexce
     if (*capacity == 0) return mapped;
     if (begin == nullptr)
         return mapped_t::fail(native_file_status(reason), "mapping {} failed (error={})", path, reason);
-    mapped.bytes_ = {static_cast<b8_t *>(begin), static_cast<std::size_t>(*capacity)};
+    mapped.bytes_ = {static_cast<b8_t*>(begin), static_cast<std::size_t>(*capacity)};
     return mapped;
 }
 
@@ -386,8 +386,8 @@ inline expected<mapped_file_t> mapped_file_t::map(sz::string_view_t path) noexce
     expected<u64_t> capacity = native_file_capacity(*file);
     mapped_file_t mapped;
     if (capacity && *capacity != 0) {
-        void *const copy = std::malloc(static_cast<std::size_t>(*capacity));
-        if (copy != nullptr) mapped.bytes_ = {static_cast<b8_t *>(copy), static_cast<std::size_t>(*capacity)};
+        void* const copy = std::malloc(static_cast<std::size_t>(*capacity));
+        if (copy != nullptr) mapped.bytes_ = {static_cast<b8_t*>(copy), static_cast<std::size_t>(*capacity)};
     }
     expected<std::size_t> arrived = mapped.bytes_.empty() ? expected<std::size_t> {0}
                                                           : read_native_file(*file, 0, mapped.bytes_);
@@ -414,7 +414,7 @@ inline expected<mapped_file_t> mapped_file_t::map(sz::string_view_t path) noexce
     expected<u64_t> capacity = native_file_capacity(*file);
     mapped_file_t mapped;
     // A mapping outlives the descriptor it came from, which closes on return.
-    void *const begin = capacity && *capacity != 0
+    void* const begin = capacity && *capacity != 0
                             ? ::mmap(nullptr, static_cast<std::size_t>(*capacity), PROT_READ, MAP_PRIVATE, *file, 0)
                             : MAP_FAILED;
     int const reason = begin == MAP_FAILED ? errno : 0;
@@ -423,7 +423,7 @@ inline expected<mapped_file_t> mapped_file_t::map(sz::string_view_t path) noexce
     if (*capacity == 0) return mapped;
     if (begin == MAP_FAILED)
         return mapped_t::fail(native_file_status(reason), "mapping {} failed (error={})", path, reason);
-    mapped.bytes_ = {static_cast<b8_t *>(begin), static_cast<std::size_t>(*capacity)};
+    mapped.bytes_ = {static_cast<b8_t*>(begin), static_cast<std::size_t>(*capacity)};
     return mapped;
 }
 
@@ -545,8 +545,8 @@ inline expected<mapped_file_t> mapped_file_t::map(sz::string_view_t path) noexce
 class file_appender_t {
   public:
     explicit file_appender_t(native_file_t file) noexcept : file_(file) {}
-    file_appender_t(file_appender_t const &) = delete;
-    file_appender_t &operator=(file_appender_t const &) = delete;
+    file_appender_t(file_appender_t const&) = delete;
+    file_appender_t& operator=(file_appender_t const&) = delete;
 
     /** Writes @p bytes after everything appended before, failing on a full volume too. */
     [[nodiscard]] expected_t append(bytes_view_t bytes) noexcept {
@@ -578,7 +578,7 @@ class file_appender_t {
  *  @param[in] writer Called once with a @c file_appender_t&, answering an @c expected_t.
  */
 template <typename writer_type_>
-[[nodiscard]] expected_t replace_file_durably(sz::string_view_t path, writer_type_ &&writer) noexcept {
+[[nodiscard]] expected_t replace_file_durably(sz::string_view_t path, writer_type_&& writer) noexcept {
     constexpr char suffix[] = ".tmp";
     constexpr std::size_t suffix_length = sizeof(suffix) - 1;
     char temporary_text[path_capacity_k];

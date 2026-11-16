@@ -62,9 +62,7 @@ struct rows_span_t {
     rows_span_t() = default;
     template <typename value_type_>
     rows_span_t(nk::tensor_span<value_type_, 2> typed, nk_dtype_t dtype) noexcept
-        : bytes(static_cast<b8_t *>(static_cast<void *>(typed.data())), typed.extent(0),
-                typed.extent(1) * sizeof(value_type_)),
-          dtype(dtype) {}
+        : bytes(nk::as_writable_bytes(typed)), dtype(dtype) {}
 
     [[nodiscard]] bool empty() const noexcept { return bytes.empty(); }
 
@@ -214,8 +212,8 @@ struct scratch_cursor_t {
     [[nodiscard]] nk::tensor_span<value_type_, 1> take(std::size_t count) noexcept {
         std::size_t const offset = used;
         used += uu::round_up_to_multiple(count * sizeof(value_type_), nk_default_alignment_k);
-        if (scratch.empty()) return {static_cast<value_type_ *>(nullptr), count};
-        return {static_cast<value_type_ *>(static_cast<void *>(scratch.data() + offset)), count};
+        if (scratch.empty()) return {static_cast<value_type_*>(nullptr), count};
+        return nk::as_writable_values<value_type_>(scratch.subspan(offset, count * sizeof(value_type_)));
     }
 
     /** The next @b [rows,columns] values of @p value_type_ . */
@@ -244,7 +242,7 @@ struct activations_t {
 };
 
 /** Patch scalars of the widest present media modality, zero for a text-only tower. */
-[[nodiscard]] inline static std::size_t patch_scalars(geometry_t const &geometry) noexcept {
+[[nodiscard]] inline static std::size_t patch_scalars(geometry_t const& geometry) noexcept {
     std::size_t scalars = 0;
     if (geometry.image_patch_side) scalars = fu::max_of<std::size_t>(scalars, geometry.image_scalars());
     if (geometry.video_patch_side) scalars = fu::max_of<std::size_t>(scalars, geometry.video_scalars());
@@ -253,7 +251,7 @@ struct activations_t {
 }
 
 /** Reserve every activation for @p tokens rows in @p segments items behind @p cursor . */
-[[nodiscard]] inline static activations_t reserve_activations(scratch_cursor_t &cursor, geometry_t const &geometry,
+[[nodiscard]] inline static activations_t reserve_activations(scratch_cursor_t& cursor, geometry_t const& geometry,
                                                               std::size_t tokens, std::size_t segments,
                                                               std::size_t keys_values_bytes) noexcept {
     std::size_t const hidden = geometry.hidden, ffn = geometry.ffn();
@@ -286,7 +284,7 @@ struct activations_t {
 
 /** The K/V pack bytes the widest of the block attention and the pool needs. */
 template <typename attention_kit_type_>
-[[nodiscard]] static expected<std::size_t> keys_values_bytes(geometry_t const &geometry, precision_t precision,
+[[nodiscard]] static expected<std::size_t> keys_values_bytes(geometry_t const& geometry, precision_t precision,
                                                              std::size_t tokens, std::size_t segments) noexcept {
     nk_size_t block_bytes = 0, pool_bytes = 0;
     nk_status_t status = precision == precision_t::bf16_k
@@ -305,7 +303,7 @@ template <typename attention_kit_type_>
 
 /** The scratch bytes one call over @p tokens live tokens in @p segments items needs. */
 template <typename attention_kit_type_>
-[[nodiscard]] static expected<std::size_t> scratch_bytes_of(tower_weights_t const &weights, std::size_t tokens,
+[[nodiscard]] static expected<std::size_t> scratch_bytes_of(tower_weights_t const& weights, std::size_t tokens,
                                                             std::size_t segments) noexcept {
     expected<std::size_t> keys_values = keys_values_bytes<attention_kit_type_>(weights.geometry, weights.precision,
                                                                                tokens, segments);
@@ -322,12 +320,12 @@ template <typename attention_kit_type_>
 
 /** Every scalar of the contiguous @p tensor , rows back to back. */
 [[nodiscard]] inline static std::span<nk_bf16_t const> scalars_of(bf16r2_view_t tensor) noexcept {
-    nk_bf16_t const *const first = tensor.data();
+    nk_bf16_t const* const first = tensor.data();
     return {first, first + tensor.numel()};
 }
 
 /** The checkpoint tensor @p name , which must be @b [rows,columns] . */
-[[nodiscard]] inline static expected<bf16r2_view_t> lookup_tensor(uu::checkpoint_to_load_t const &checkpoint,
+[[nodiscard]] inline static expected<bf16r2_view_t> lookup_tensor(uu::checkpoint_to_load_t const& checkpoint,
                                                                   sz::string_view_t name, std::size_t rows,
                                                                   std::size_t columns) noexcept {
     bf16r2_view_t const tensor = checkpoint[name];
@@ -340,9 +338,9 @@ template <typename attention_kit_type_>
 /** Widen the checkpoint gain @p name of @p width scalars on the host through @p staging_kit_type_
  *  and place it into @p gain . */
 template <typename staging_kit_type_, typename placer_type_>
-[[nodiscard]] static expected_t widen_gain(uu::checkpoint_to_load_t const &checkpoint, sz::string_view_t name,
-                                           std::size_t width, placer_type_ const &placer,
-                                           placed_array<f32_t> &gain) noexcept {
+[[nodiscard]] static expected_t widen_gain(uu::checkpoint_to_load_t const& checkpoint, sz::string_view_t name,
+                                           std::size_t width, placer_type_ const& placer,
+                                           placed_array<f32_t>& gain) noexcept {
     expected<bf16r2_view_t> tensor = lookup_tensor(checkpoint, name, 1, width);
     if (!tensor) return expected_t::fail(std::move(tensor));
     st::basic_vector<f32_t> wide;
@@ -359,8 +357,8 @@ template <typename staging_kit_type_, typename placer_type_>
  *  without E4M3 products refuses it. The operand is placed beside the pack first, as a device pack
  *  reads device memory. */
 template <typename products_kit_type_, typename staging_kit_type_, typename placer_type_>
-[[nodiscard]] static expected_t pack_product(bf16r2_view_t weight, precision_t precision, placer_type_ const &placer,
-                                             packed_weight_t &packed) noexcept {
+[[nodiscard]] static expected_t pack_product(bf16r2_view_t weight, precision_t precision, placer_type_ const& placer,
+                                             packed_weight_t& packed) noexcept {
     std::size_t const outputs = weight.extent(0), inputs = weight.extent(1), scalars = outputs * inputs;
     packed.outputs = outputs, packed.inputs = inputs;
     nk_size_t bytes = 0;
@@ -405,9 +403,9 @@ template <typename products_kit_type_, typename staging_kit_type_, typename plac
 
 /** Look up @p name as @b [rows,columns] and pack it. */
 template <typename products_kit_type_, typename staging_kit_type_, typename placer_type_>
-[[nodiscard]] static expected_t load_product(uu::checkpoint_to_load_t const &checkpoint, sz::string_view_t name,
+[[nodiscard]] static expected_t load_product(uu::checkpoint_to_load_t const& checkpoint, sz::string_view_t name,
                                              std::size_t rows, std::size_t columns, precision_t precision,
-                                             placer_type_ const &placer, packed_weight_t &packed) noexcept {
+                                             placer_type_ const& placer, packed_weight_t& packed) noexcept {
     expected<bf16r2_view_t> tensor = lookup_tensor(checkpoint, name, rows, columns);
     if (!tensor) return expected_t::fail(std::move(tensor));
     return pack_product<products_kit_type_, staging_kit_type_>(*tensor, precision, placer, packed);
@@ -423,9 +421,9 @@ template <typename products_kit_type_, typename staging_kit_type_, typename plac
  *  - @c status_t::unsupported_k E4M3 asked of a products kit without E4M3 kernels.
  */
 template <typename products_kit_type_, typename staging_kit_type_, typename placer_type_>
-[[nodiscard]] static expected<tower_weights_t> pack_weights(uu::checkpoint_to_load_t const &checkpoint,
-                                                            geometry_t const &geometry, precision_t precision,
-                                                            placer_type_ const &placer) noexcept {
+[[nodiscard]] static expected<tower_weights_t> pack_weights(uu::checkpoint_to_load_t const& checkpoint,
+                                                            geometry_t const& geometry, precision_t precision,
+                                                            placer_type_ const& placer) noexcept {
     using result_t = expected<tower_weights_t>;
     std::size_t const hidden = geometry.hidden, ffn = geometry.ffn();
     tower_weights_t weights;
@@ -438,7 +436,7 @@ template <typename products_kit_type_, typename staging_kit_type_, typename plac
     sz::string_view_t const parts[4] = {"qkv", "out", "gate_up", "down"};
     std::size_t const extents[4][2] = {{3 * hidden, hidden}, {hidden, hidden}, {2 * ffn, hidden}, {hidden, ffn}};
     for (std::size_t index = 0; index != geometry.depth; ++index) {
-        block_weights_t &block = weights.blocks[index];
+        block_weights_t& block = weights.blocks[index];
         expected_t loaded {};
         for (std::size_t product = 0; loaded && product != 4; ++product) {
             name.clear();
@@ -459,7 +457,7 @@ template <typename products_kit_type_, typename staging_kit_type_, typename plac
         if (!loaded) return result_t::fail(std::move(loaded));
     }
 
-    entry_weights_t &entries = weights.entries;
+    entry_weights_t& entries = weights.entries;
     expected<bf16r2_view_t> embedding = lookup_tensor(checkpoint, "model.embedding", geometry.vocabulary, hidden);
     if (!embedding) return result_t::fail(std::move(embedding));
     expected_t loaded = placer.place(scalars_of(*embedding), entries.embedding, "embedding");
@@ -494,7 +492,7 @@ template <typename products_kit_type_, typename staging_kit_type_, typename plac
                               entries.video_inverse_std, "pixel statistics");
     if (!loaded) return result_t::fail(std::move(loaded));
 
-    pool_weights_t &pool = weights.pool;
+    pool_weights_t& pool = weights.pool;
     expected<bf16r2_view_t> query = lookup_tensor(checkpoint, "model.pool_query", 1, hidden);
     if (!query) return result_t::fail(std::move(query));
     loaded = placer.place(std::span<nk_bf16_t const> {query->data(), hidden}, pool.query, "pool query");
@@ -509,7 +507,7 @@ template <typename products_kit_type_, typename staging_kit_type_, typename plac
     if (!loaded) return result_t::fail(std::move(loaded));
 
     if (std::size_t const width = geometry.token_width) {
-        token_head_weights_t &head = weights.token_head;
+        token_head_weights_t& head = weights.token_head;
         loaded = widen_gain<staging_kit_type_>(checkpoint, "model.token_head.norm", hidden, placer, head.norm);
         if (loaded)
             loaded = load_product<products_kit_type_, staging_kit_type_>(
@@ -517,7 +515,7 @@ template <typename products_kit_type_, typename staging_kit_type_, typename plac
         st::basic_vector<f32_t> unit_gain;
         if (loaded && st::failed(unit_gain.resize(st::assume_uninitialized, width)))
             return result_t::fail(uu::status_t::bad_alloc_k, "unit gain staging failed");
-        for (f32_t &gain : unit_gain) gain = 1.0f / std::sqrt(static_cast<f32_t>(width));
+        for (f32_t& gain : unit_gain) gain = 1.0f / std::sqrt(static_cast<f32_t>(width));
         if (loaded)
             loaded = placer.place(std::span<f32_t const> {unit_gain.data(), width}, head.unit_gain, "unit gain");
         if (!loaded) return result_t::fail(std::move(loaded));
@@ -551,13 +549,13 @@ template <typename products_kit_type_, typename staging_kit_type_, typename plac
  *  @c stage_frames , @c mrope , @c quantize and @c rescale .
  */
 template <typename steps_type_>
-[[nodiscard]] static expected_t encode_steps(steps_type_ &steps, tower_weights_t const &weights,
+[[nodiscard]] static expected_t encode_steps(steps_type_& steps, tower_weights_t const& weights,
                                              multimodal_batch_view_t batch, outputs_t outputs,
                                              bytes_span_t scratch) noexcept {
     using products_kit_t = typename steps_type_::products_kit_t;
     using attention_kit_t = typename steps_type_::attention_kit_t;
     using elementwise_kit_t = typename steps_type_::elementwise_kit_t;
-    geometry_t const &geometry = weights.geometry;
+    geometry_t const& geometry = weights.geometry;
     precision_t const precision = weights.precision;
 
     std::size_t const segments = batch.segment_lengths.extent(0);
@@ -603,7 +601,7 @@ template <typename steps_type_>
     };
     auto add = [&](f32r2_span_t values, f32r2_view_t addend) noexcept {
         return steps.split(tokens, rows_share, "residual", [&](std::size_t first, std::size_t count) noexcept {
-            f32_t *const slice = values.row(first).data();
+            f32_t* const slice = values.row(first).data();
             return elementwise_kit_t::sum_f32(slice, addend.row(first).data(), count * hidden, slice, stream);
         });
     };
@@ -624,18 +622,18 @@ template <typename steps_type_>
                                                    target.stride_bytes(0), epsilon, stream);
         });
     };
-    auto project = [&](packed_weight_t const &weight, rows_span_t activations, f32r2_span_t products) noexcept {
+    auto project = [&](packed_weight_t const& weight, rows_span_t activations, f32r2_span_t products) noexcept {
         std::size_t const rows = activations.bytes.extent(0), outputs = weight.outputs, inputs = weight.inputs;
         return steps.split(rows, product_tile_rows_k, "product", [&](std::size_t first, std::size_t count) noexcept {
-            void const *const tile_inputs = activations.bytes.row(first).data();
-            f32_t *const tile = products.row(first).data();
+            void const* const tile_inputs = activations.bytes.row(first).data();
+            f32_t* const tile = products.row(first).data();
             std::size_t const stride = activations.bytes.stride_bytes(0);
             if (activations.dtype == nk_bf16_k)
-                return products_kit_t::multiply_bf16(static_cast<nk_bf16_t const *>(tile_inputs), weight.bytes.data(),
+                return products_kit_t::multiply_bf16(static_cast<nk_bf16_t const*>(tile_inputs), weight.bytes.data(),
                                                      tile, count, outputs, inputs, stride, products.stride_bytes(0),
                                                      nullptr, 0, stream);
             if constexpr (e4m3_products<products_kit_t>)
-                return products_kit_t::multiply_e4m3(static_cast<nk_e4m3_t const *>(tile_inputs), weight.bytes.data(),
+                return products_kit_t::multiply_e4m3(static_cast<nk_e4m3_t const*>(tile_inputs), weight.bytes.data(),
                                                      tile, count, outputs, inputs, stride, products.stride_bytes(0),
                                                      nullptr, 0, stream);
             else return nk_missing_kernel_k; // a kit without E4M3 products refused the load
@@ -645,28 +643,28 @@ template <typename steps_type_>
         return f32r2_span_t {a.products.data(), rows, width};
     };
 
-    entry_weights_t const &entries = weights.entries;
-    pool_weights_t const &pool = weights.pool;
+    entry_weights_t const& entries = weights.entries;
+    pool_weights_t const& pool = weights.pool;
     expected_t staged = steps.fill_layout(batch.segment_lengths, a.packed_offsets, a.pool_offsets);
     segment_layout_t const layout {batch.segment_offsets, batch.segment_lengths, a.packed_offsets,
                                    batch.segment_modality};
-    if (staged) staged = steps.zero(uu::bytes_of(a.coords));
+    if (staged) staged = steps.zero(nk::as_writable_bytes(a.coords).values().value);
     if (staged)
         staged = steps.fill_coords(layout, batch.image_shapes, batch.video_shapes, geometry.video_tube_frames,
                                    geometry.video_frame_stride, geometry.context, a.coords);
 
-    if (staged) staged = steps.zero(uu::bytes_of(a.narrow_residual));
+    if (staged) staged = steps.zero(nk::as_writable_bytes(a.narrow_residual).values().value);
     if (staged)
         staged = steps.gather_bytes(layout, batch.tokens.flatten<1>(),
                                     {entries.embedding.data(), geometry.vocabulary, hidden}, a.narrow_residual);
     if (staged) staged = cast({a.narrow_residual, nk_bf16_k}, {a.wide_residual, nk_f32_k});
-    auto present = [&](modality_t modality, packed_weight_t const &weight, std::size_t content_scalars) noexcept {
+    auto present = [&](modality_t modality, packed_weight_t const& weight, std::size_t content_scalars) noexcept {
         if (weight.bytes.empty() || content_scalars == 0) return false;
         for (std::size_t segment = 0; segment != segments; ++segment)
             if (batch.segment_modality[segment] == modality && batch.segment_lengths[segment] != 0) return true;
         return false;
     };
-    auto add_projection = [&](packed_weight_t const &weight, bf16r2_span_t patches) noexcept {
+    auto add_projection = [&](packed_weight_t const& weight, bf16r2_span_t patches) noexcept {
         expected_t projected = project(weight, {patches, nk_bf16_k}, products_of(tokens, hidden));
         return projected ? add(a.wide_residual, products_of(tokens, hidden)) : std::move(projected);
     };
@@ -676,7 +674,7 @@ template <typename steps_type_>
         std::size_t const cells = batch.images.extent(0) * batch.images.extent(1);
         std::size_t const spatial = batch.images.extent(2) * batch.images.extent(3);
         bf16r2_span_t const patches {a.patches.data(), tokens, geometry.image_scalars()};
-        staged = steps.zero(uu::bytes_of(patches));
+        staged = steps.zero(nk::as_writable_bytes(patches).values().value);
         if (staged)
             staged = steps.stage_patches(layout, modality_t::image_k,
                                          batch.images.reshape<3>({cells, spatial, batch.images.extent(4)}),
@@ -689,7 +687,7 @@ template <typename steps_type_>
         std::size_t const cells = batch.videos.extent(0) * batch.videos.extent(1);
         std::size_t const spatial = batch.videos.extent(2) * batch.videos.extent(3) * batch.videos.extent(4);
         bf16r2_span_t const patches {a.patches.data(), tokens, geometry.video_scalars()};
-        staged = steps.zero(uu::bytes_of(patches));
+        staged = steps.zero(nk::as_writable_bytes(patches).values().value);
         if (staged)
             staged = steps.stage_patches(layout, modality_t::video_k,
                                          batch.videos.reshape<3>({cells, spatial, batch.videos.extent(5)}),
@@ -702,7 +700,7 @@ template <typename steps_type_>
         std::size_t const cells = batch.audio_samples.extent(0) * batch.audio_samples.extent(1);
         std::size_t const samples = batch.audio_samples.extent(2);
         bf16r2_span_t const frames {a.patches.data(), tokens, samples};
-        staged = steps.zero(uu::bytes_of(frames));
+        staged = steps.zero(nk::as_writable_bytes(frames).values().value);
         if (staged) staged = steps.stage_frames(layout, batch.audio_samples.reshape<2>({cells, samples}), frames);
         if (staged) staged = add_projection(entries.audio, frames);
     }
@@ -711,23 +709,25 @@ template <typename steps_type_>
     if (!staged) return staged;
 
     auto attend = [&](rows_span_t qkv) noexcept {
-        std::size_t const stride = qkv.bytes.stride_bytes(0), role_bytes = qkv.bytes.extent(1) / 3;
-        b8_t const *const queries = qkv.bytes.data();
-        b8_t const *const keys = queries + role_bytes, *const values = queries + 2 * role_bytes;
+        std::size_t const role_columns = qkv.columns() / 3;
+        auto const queries = nk::range(0, role_columns), keys = nk::range(role_columns, 2 * role_columns);
+        auto const values = nk::range(2 * role_columns, 3 * role_columns);
+        nk::tensor_view<nk_bf16_t, 2> const bf16_rows = nk::as_values<nk_bf16_t>(qkv.bytes);
+        nk::tensor_view<nk_e4m3_t, 2> const e4m3_rows = nk::as_values<nk_e4m3_t>(qkv.bytes);
         expected_t packed = steps.split(
             segments * heads, steps.share(segments * heads), "attention pack",
             [&](std::size_t first, std::size_t count) noexcept {
                 if (qkv.dtype == nk_bf16_k)
-                    return attention_kit_t::pack_bf16(heads, head_width, a.packed_offsets.data(), nullptr, segments,
-                                                      static_cast<nk_bf16_t const *>(static_cast<void const *>(keys)),
-                                                      stride,
-                                                      static_cast<nk_bf16_t const *>(static_cast<void const *>(values)),
-                                                      stride, a.keys_values.data(), first, first + count, stream);
+                    return attention_kit_t::pack_bf16(
+                        heads, head_width, a.packed_offsets.data(), nullptr, segments,
+                        bf16_rows[nk::all, keys, nk::slice].data(), bf16_rows.stride_bytes(0),
+                        bf16_rows[nk::all, values, nk::slice].data(), bf16_rows.stride_bytes(0), a.keys_values.data(),
+                        first, first + count, stream);
                 return attention_kit_t::pack_e4m3(heads, head_width, a.packed_offsets.data(), nullptr, segments,
-                                                  static_cast<nk_e4m3_t const *>(static_cast<void const *>(keys)),
-                                                  stride,
-                                                  static_cast<nk_e4m3_t const *>(static_cast<void const *>(values)),
-                                                  stride, a.keys_values.data(), first, first + count, stream);
+                                                  e4m3_rows[nk::all, keys, nk::slice].data(), e4m3_rows.stride_bytes(0),
+                                                  e4m3_rows[nk::all, values, nk::slice].data(),
+                                                  e4m3_rows.stride_bytes(0), a.keys_values.data(), first, first + count,
+                                                  stream);
             });
         if (!packed) return packed;
         f32r2_span_t const attended = products_of(tokens, hidden);
@@ -737,14 +737,14 @@ template <typename steps_type_>
                                    return attention_kit_t::attend_bf16(
                                        heads, heads, head_width, a.packed_offsets.data(), tokens, scale,
                                        NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX,
-                                       static_cast<nk_bf16_t const *>(static_cast<void const *>(queries)), stride,
+                                       bf16_rows[nk::all, queries, nk::slice].data(), bf16_rows.stride_bytes(0),
                                        a.keys_values.data(), attended.data(), attended.stride_bytes(0), nullptr, first,
                                        first + count, nullptr, 0, stream);
                                return attention_kit_t::attend_e4m3(
                                    heads, heads, head_width, a.packed_offsets.data(), tokens, scale, NUMKONG_SIZE_MAX,
-                                   NUMKONG_SIZE_MAX, static_cast<nk_e4m3_t const *>(static_cast<void const *>(queries)),
-                                   stride, a.keys_values.data(), attended.data(), attended.stride_bytes(0), nullptr,
-                                   first, first + count, nullptr, 0, stream);
+                                   NUMKONG_SIZE_MAX, e4m3_rows[nk::all, queries, nk::slice].data(),
+                                   e4m3_rows.stride_bytes(0), a.keys_values.data(), attended.data(),
+                                   attended.stride_bytes(0), nullptr, first, first + count, nullptr, 0, stream);
                            });
     };
     auto rotate = [&]() noexcept { // the Q and K heads lie back to back, so one angle row turns both
@@ -754,7 +754,7 @@ template <typename steps_type_>
         e4m3r2_span_t const shadow {a.shadow.data(), tokens, values.extent(1)};
         return steps.quantize(values, shadow, a.token_scales);
     };
-    auto rescale = [&](block_weights_t const &block, std::size_t product, bf16r2_view_t residual,
+    auto rescale = [&](block_weights_t const& block, std::size_t product, bf16r2_view_t residual,
                        bf16r2_span_t values) noexcept {
         std::size_t const width = block.products[product].outputs;
         return steps.rescale(products_of(tokens, width), a.token_scales, block.products[product].descale, residual,
@@ -764,8 +764,8 @@ template <typename steps_type_>
         return rows_span_t {e4m3r2_span_t {a.shadow.data(), tokens, width}, nk_e4m3_k};
     };
 
-    for (block_weights_t const &block : weights.blocks) {
-        packed_weight_t const *const products = block.products;
+    for (block_weights_t const& block : weights.blocks) {
+        packed_weight_t const* const products = block.products;
         if (precision == precision_t::bf16_k) {
             f32r2_span_t const qkv_products = products_of(tokens, 3 * hidden);
             f32r2_span_t const gate_up_products = products_of(tokens, 2 * ffn);
@@ -782,7 +782,7 @@ template <typename steps_type_>
             if (staged) staged = project(products[product_gate_up_k], {a.normalized, nk_bf16_k}, gate_up_products);
             if (staged)
                 staged = steps.split(tokens, rows_share, "SwiGLU", [&](std::size_t first, std::size_t count) noexcept {
-                    f32_t const *const gate = gate_up_products.row(first).data();
+                    f32_t const* const gate = gate_up_products.row(first).data();
                     return elementwise_kit_t::swiglu_f32(gate, gate + ffn, a.wide_activated.row(first).data(), count,
                                                          ffn, gate_up_products.stride_bytes(0),
                                                          gate_up_products.stride_bytes(0),
@@ -800,7 +800,7 @@ template <typename steps_type_>
         if (staged) staged = rescale(block, product_qkv_k, {}, a.qkv);
         if (staged)
             staged = steps.split(tokens, rows_share, "QK-norm", [&](std::size_t first, std::size_t count) noexcept {
-                nk_bf16_t *const rows = a.qkv.row(first).data();
+                nk_bf16_t* const rows = a.qkv.row(first).data();
                 return elementwise_kit_t::rmsnorm_bf16(rows, nullptr, rows, count, 2 * heads, head_width,
                                                        a.qkv.stride_bytes(0), a.qkv.stride_bytes(0), epsilon, stream);
             });
@@ -818,7 +818,7 @@ template <typename steps_type_>
         if (staged) staged = rescale(block, product_gate_up_k, {}, a.gate_up);
         if (staged)
             staged = steps.split(tokens, rows_share, "SwiGLU", [&](std::size_t first, std::size_t count) noexcept {
-                nk_bf16_t const *const gate = a.gate_up.row(first).data();
+                nk_bf16_t const* const gate = a.gate_up.row(first).data();
                 return elementwise_kit_t::swiglu_bf16(gate, gate + ffn, a.narrow_activated.row(first).data(), count,
                                                       ffn, a.gate_up.stride_bytes(0), a.gate_up.stride_bytes(0),
                                                       a.narrow_activated.stride_bytes(0), 1.0f, 1.0f, stream);
@@ -834,7 +834,7 @@ template <typename steps_type_>
     if (staged && !outputs.states.empty()) staged = cast({a.states, nk_bf16_k}, outputs.states);
 
     if (staged && !outputs.token_vectors.empty()) { // the block activations are dead, so they lend the heads room
-        token_head_weights_t const &head = weights.token_head;
+        token_head_weights_t const& head = weights.token_head;
         std::size_t const width = head.projection.outputs;
         f32r2_span_t const projected = products_of(tokens, width);
         bf16r2_span_t const unit {a.qkv.data(), tokens, width};
@@ -848,7 +848,8 @@ template <typename steps_type_>
         for (std::size_t segment = 0; staged && segment != segments; ++segment) {
             std::size_t const length = batch.segment_lengths[segment];
             if (length)
-                staged = steps.copy(uu::bytes_of(a.pooled.row(segment)), uu::bytes_of(a.states.row(row + length - 1)));
+                staged = steps.copy(nk::as_writable_bytes(a.pooled.row(segment)).values().value,
+                                    nk::as_bytes(a.states.row(row + length - 1)).values().value);
             row += length;
         }
         if (staged) staged = project(weights.masked_tokens.decoder, {a.pooled, nk_bf16_k}, outputs.masked_logits);
@@ -879,7 +880,7 @@ template <typename steps_type_>
     if (staged)
         staged = steps.split(
             segments, steps.share(segments), "SiLU", [&](std::size_t first, std::size_t count) noexcept {
-                nk_bf16_t *const rows = a.head.row(first).data();
+                nk_bf16_t* const rows = a.head.row(first).data();
                 return elementwise_kit_t::swiglu_bf16(rows, nullptr, rows, count, hidden, a.head.stride_bytes(0), 0,
                                                       a.head.stride_bytes(0), 1.0f, 1.0f, stream);
             });

@@ -238,7 +238,7 @@ struct matryoshka_prefixes_t {
 
 /** The per-vertex logit scale β: the device entry selected by the from-vertex's temperature group,
  *  or the host fallback when no device view is bound. */
-[[nodiscard]] __device__ inline f32_t contrastive_from_vertex_beta_(contrastive_recipe_t const &recipe,
+[[nodiscard]] __device__ inline f32_t contrastive_from_vertex_beta_(contrastive_recipe_t const& recipe,
                                                                     u32_t vertex_index) noexcept {
     if (recipe.inverse_temperature_device.empty()) return recipe.inverse_temperature;
     temperature_group_t const temperature_group = recipe.from_vertex_temperature_group.empty()
@@ -248,7 +248,7 @@ struct matryoshka_prefixes_t {
 }
 
 /** The per-vertex additive logit bias — the sibling of @ref contrastive_from_vertex_beta_ . */
-[[nodiscard]] __device__ inline f32_t contrastive_from_vertex_bias_(contrastive_recipe_t const &recipe,
+[[nodiscard]] __device__ inline f32_t contrastive_from_vertex_bias_(contrastive_recipe_t const& recipe,
                                                                     u32_t vertex_index) noexcept {
     if (recipe.bias_device.empty()) return recipe.bias;
     temperature_group_t const temperature_group = recipe.from_vertex_temperature_group.empty()
@@ -274,7 +274,7 @@ struct contrastive_pair_loss_t {
 
     /** Allocate the @b [3,rows] accumulator, and under @c ranked_k the @b [rows,candidates_per_row]
      *  gradient stash the positives' scores must outlive. */
-    [[nodiscard]] static expected<contrastive_pair_loss_t> make(gpu_arena_t &arena, u32_t rows,
+    [[nodiscard]] static expected<contrastive_pair_loss_t> make(gpu_arena_t& arena, u32_t rows,
                                                                 u32_t candidates_per_row,
                                                                 contrastive_pair_loss_form_t form) noexcept;
 
@@ -296,7 +296,7 @@ struct contrastive_pair_loss_t {
      */
     [[nodiscard]] expected_t operator()(f32r4_span_t logits, contrastive_relations_view_t relations,
                                         contrastive_recipe_t recipe, f32r1_view_t live_anchors, f32r1_span_t loss_out,
-                                        gpu_stream_t &stream, f32r1_span_t log_inverse_temperature_grad = {},
+                                        gpu_stream_t& stream, f32r1_span_t log_inverse_temperature_grad = {},
                                         f32r1_span_t bias_grad = {}) noexcept;
 
   private:
@@ -354,9 +354,9 @@ struct contrastive_segments_t {
      *      on NumKong's 16-byte boundary.
      *  @param[in] numerics The NumKong kernels every product calls.
      */
-    [[nodiscard]] static expected<contrastive_segments_t> make(gpu_arena_t &arena, contrastive_segments_config_t config,
+    [[nodiscard]] static expected<contrastive_segments_t> make(gpu_arena_t& arena, contrastive_segments_config_t config,
                                                                u32r1_view_t prefix_dims,
-                                                               gpu_numerics_t const &numerics) noexcept;
+                                                               gpu_numerics_t const& numerics) noexcept;
 
     /**
      *  @brief Rank-local forward + backward for one step — enqueue-only, capture-safe. Inputs and
@@ -380,7 +380,7 @@ struct contrastive_segments_t {
      */
     [[nodiscard]] expected_t operator()(bf16r2_view_t from_vertices, nk::tensor_view<gpu_subgraph_t, 1> gpu_subgraphs,
                                         contrastive_relations_view_t relations, contrastive_recipe_t recipe,
-                                        f32r1_span_t loss_out, bf16r2_span_t from_vertices_grad, gpu_stream_t &stream,
+                                        f32r1_span_t loss_out, bf16r2_span_t from_vertices_grad, gpu_stream_t& stream,
                                         f32r1_span_t log_inverse_temperature_grad = {},
                                         f32r1_span_t bias_grad = {}) noexcept;
 
@@ -388,7 +388,7 @@ struct contrastive_segments_t {
      *  row's retrieval into the @b [rows,retrieval_columns] table @ref retrieval reads. */
     [[nodiscard]] expected_t evaluate(bf16r2_view_t from_vertices, nk::tensor_view<gpu_subgraph_t, 1> gpu_subgraphs,
                                       contrastive_relations_view_t relations, contrastive_recipe_t recipe,
-                                      gpu_stream_t &stream) noexcept;
+                                      gpu_stream_t& stream) noexcept;
 
     /** The @b [rows,retrieval_columns] table of the last @ref evaluate , in
      *  @ref retrieval_column_t order. */
@@ -400,7 +400,7 @@ struct contrastive_segments_t {
      *  @ref logits_ . */
     [[nodiscard]] expected_t score_(bf16r2_view_t from_vertices, nk::tensor_view<gpu_subgraph_t, 1> gpu_subgraphs,
                                     contrastive_relations_view_t relations, contrastive_recipe_t recipe,
-                                    gpu_stream_t &stream) noexcept;
+                                    gpu_stream_t& stream) noexcept;
 
     /** The baked geometry and the validated prefix ladder — every capacity a call
      *  is checked against. */
@@ -482,7 +482,7 @@ struct distributed_contrastive_segments_t {
      *  temperature gradients share one window, and a world no single process holds whole also needs
      *  the BFloat16 world tower, staged in member 0's window. */
     [[nodiscard]] static constexpr std::size_t payload_scalars_needed(contrastive_segments_config_t config,
-                                                                      mesh_shape_t const &shape) noexcept {
+                                                                      mesh_shape_t const& shape) noexcept {
         std::size_t const forces = static_cast<std::size_t>(config.gpu_subgraphs_per_step) *
                                    config.from_vertices_per_gpu * config.hidden;
         std::size_t const window = forces + world_scalar_count_(config);
@@ -517,10 +517,10 @@ struct distributed_contrastive_segments_t {
      *  @param[in] numerics The NumKong kernels every rank's products call.
      */
     [[nodiscard]] static expected<distributed_contrastive_segments_t> make(
-        multimem_domain_t &domain, colocated_domain_t &colocated, std::span<gpu_arena_t> arenas,
+        multimem_domain_t& domain, colocated_domain_t& colocated, std::span<gpu_arena_t> arenas,
         std::span<gpu_stream_t> streams, std::span<bf16r2_view_t const> towers,
         std::span<contrastive_relations_view_t const> relations, std::span<bf16r2_span_t const> from_vertices_grads,
-        contrastive_segments_config_t config, u32r1_view_t prefix_dims, gpu_numerics_t const &numerics,
+        contrastive_segments_config_t config, u32r1_view_t prefix_dims, gpu_numerics_t const& numerics,
         f64_t timeout_seconds = 120.0) noexcept;
 
     /** The @b [gpus] rank-local loss summands of the last call — sum for the global mean. */
@@ -553,11 +553,11 @@ struct distributed_contrastive_segments_t {
      *  and a second barrier releases the readers. All views were baked at @ref make ; the only
      *  per-call argument is the recipe. Ranks must be enqueued in order @c 0..gpus-1 within a step.
      */
-    [[nodiscard]] expected_t operator()(std::size_t rank, contrastive_recipe_t recipe, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t operator()(std::size_t rank, contrastive_recipe_t recipe, gpu_stream_t& stream) noexcept;
 
     /** Local rank @p rank 's evaluation of the world tower, staged as a call stages it, without the
      *  loss and its forces; ranks are enqueued in order within one evaluation. */
-    [[nodiscard]] expected_t evaluate(std::size_t rank, contrastive_recipe_t recipe, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t evaluate(std::size_t rank, contrastive_recipe_t recipe, gpu_stream_t& stream) noexcept;
 
     /** Local rank @p rank 's retrieval table of the last evaluation, on its device. */
     [[nodiscard]] f32r2_view_t retrieval(std::size_t rank) const noexcept { return losses_[rank].retrieval(); }
@@ -582,19 +582,19 @@ struct distributed_contrastive_segments_t {
     /** Make the world tower readable for rank @p rank : a whole world waits for every peer's
      *  tower in place, otherwise the rank stages its tower into member 0's window and gathers
      *  the remote domains. */
-    [[nodiscard]] expected_t stage_world_tower_(std::size_t rank, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t stage_world_tower_(std::size_t rank, gpu_stream_t& stream) noexcept;
 
     /** Copy this domain's staged towers into the gather member's own block, all-gather the remote
      *  domains' blocks, and copy the world tower back into member 0's window. Gateway stream only,
      *  caller already inside its context. */
-    [[nodiscard]] expected_t gather_world_tower_(gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t gather_world_tower_(gpu_stream_t& stream) noexcept;
 
     /** Member 0's window as the @b [subgraphs,rows,hidden] BFloat16 world tower
      *  every member reads. */
     [[nodiscard]] bf16r3_span_t world_tower_() noexcept {
         std::size_t const subgraphs = config_.gpu_subgraphs_per_step, rows = config_.from_vertices_per_gpu;
         std::size_t const hidden = config_.hidden;
-        bf16r1_span_t const window = typed_span<bf16_t>(domain_->window_bytes(0, world_tower_window_));
+        bf16r1_span_t const window = nk::as_writable_values<bf16_t>(domain_->window_bytes(0, world_tower_window_));
         return window[nk::range(0, subgraphs * rows * hidden), nk::slice].reshape<3>({subgraphs, rows, hidden});
     }
 
@@ -619,8 +619,8 @@ struct distributed_contrastive_segments_t {
     /** Level-1 reduce of @p rank 's world columns — one switch-reduced window per domain into the
      *  rank's reduce member — then the level-2 recursive-doubling sum; @p column_force receives the
      *  rank's own reduced window. Caller holds the rank's context. */
-    [[nodiscard]] expected_t reduce_world_columns_(std::size_t rank, gpu_stream_t &stream,
-                                                   f32r1_view_t &column_force) noexcept;
+    [[nodiscard]] expected_t reduce_world_columns_(std::size_t rank, gpu_stream_t& stream,
+                                                   f32r1_view_t& column_force) noexcept;
 
     /** The baked world geometry every capacity check keys on. */
     contrastive_segments_config_t config_ {};
@@ -629,11 +629,11 @@ struct distributed_contrastive_segments_t {
     per_gpu_array<contrastive_segments_t> losses_ {};
 
     /** The main-owned level-1 surface — borrowed; its replicas carry the column forces. */
-    multimem_domain_t *domain_ = nullptr;
+    multimem_domain_t* domain_ = nullptr;
 
     /** The main-owned level-2 surface — borrowed; retained so @ref world_domains derives the
      *  multimem_domain span from its topology rather than caching it as a fact. */
-    colocated_domain_t *colocated_ = nullptr;
+    colocated_domain_t* colocated_ = nullptr;
 
     /** This consumer's disjoint window of the domain payload, reserved at @ref make . */
     multimem_window_t window_ {};

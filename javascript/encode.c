@@ -53,22 +53,22 @@ typedef struct uform_js_encode_arguments_t {
     uform_arena_t arena;
     uform_scalar_t outputs_scalar;
     uform_progress_t progress;
-    uform_rows_view_t *embeddings;
-    uform_rows_tape_view_t *states;
-    uform_rows_tape_view_t *token_vectors;
+    uform_rows_view_t* embeddings;
+    uform_rows_tape_view_t* states;
+    uform_rows_tape_view_t* token_vectors;
 } uform_js_encode_arguments_t;
 
 /** Builds the @c {truncated, tokens} report every encode and choose call fills. */
-static napi_value uform_js_stats_object(napi_env env, uform_text_encode_stats_t const *stats) {
-    static char const *const names[] = {"truncated", "tokens"};
+static napi_value uform_js_stats_object(napi_env env, uform_text_encode_stats_t const* stats) {
+    static char const* const names[] = {"truncated", "tokens"};
     napi_value const values[] = {uform_js_number(env, stats->truncated), uform_js_number(env, stats->tokens)};
     return uform_js_object(env, 2, names, values);
 }
 
 /** Views the ragged rows of @p count items as @c {data, rows, columns, stride, scalar, offsets},
  *  set as @p name of @p object; @c false with an exception pending. */
-static bool uform_js_rows_tape_set(napi_env env, napi_value object, char const *name, napi_value arena,
-                                   uform_rows_tape_view_t const *tape, size_t count) {
+static bool uform_js_rows_tape_set(napi_env env, napi_value object, char const* name, napi_value arena,
+                                   uform_rows_tape_view_t const* tape, size_t count) {
     size_t const rows = tape->offsets ? tape->offsets[count] : 0;
     napi_value const offsets = uform_js_offsets_view(env, arena, tape->offsets, count);
     napi_value const viewed = offsets ? uform_js_rows_object(env, arena, &tape->rows, rows) : NULL;
@@ -76,8 +76,8 @@ static bool uform_js_rows_tape_set(napi_env env, napi_value object, char const *
            napi_set_named_property(env, object, name, viewed) == napi_ok;
 }
 
-static napi_value uform_js_finish_encode(napi_env env, uform_js_call_t *call, napi_value const *slots) {
-    uform_js_encode_call_t const *const encode = (uform_js_encode_call_t const *)call;
+static napi_value uform_js_finish_encode(napi_env env, uform_js_call_t* call, napi_value const* slots) {
+    uform_js_encode_call_t const* const encode = (uform_js_encode_call_t const*)call;
     napi_value const arena = slots[uform_js_slot_arena_k];
     napi_value object = NULL, stats = NULL, embeddings = NULL;
     if (!(stats = uform_js_stats_object(env, &encode->stats.text)) || napi_create_object(env, &object) != napi_ok ||
@@ -104,16 +104,16 @@ static napi_value uform_js_finish_encode(napi_env env, uform_js_call_t *call, na
  *      @p tail on.
  *  @return The call, or @c NULL with an exception pending.
  */
-static uform_js_encode_call_t *uform_js_encode_open(napi_env env, napi_callback_info info, size_t wanted,
-                                                    napi_value *arguments, napi_value *self,
-                                                    uform_js_encode_call_t *local, napi_typedarray_type element_type,
-                                                    size_t tail, uform_model_t *model,
-                                                    uform_js_encode_arguments_t *parsed) {
-    uform_js_model_t *const wrapped = (uform_js_model_t *)uform_js_self(env, info, wanted, arguments, self);
+static uform_js_encode_call_t* uform_js_encode_open(napi_env env, napi_callback_info info, size_t wanted,
+                                                    napi_value* arguments, napi_value* self,
+                                                    uform_js_encode_call_t* local, napi_typedarray_type element_type,
+                                                    size_t tail, uform_model_t* model,
+                                                    uform_js_encode_arguments_t* parsed) {
+    uform_js_model_t* const wrapped = (uform_js_model_t*)uform_js_self(env, info, wanted, arguments, self);
     if (wrapped && !wrapped->handle) uform_js_throw(env, uform_status_invalid_argument_k, "The model was freed");
     if (!wrapped || !wrapped->handle) return NULL;
     *model = wrapped->handle;
-    uform_js_encode_call_t *const call = (uform_js_encode_call_t *)uform_js_call_open_on(
+    uform_js_encode_call_t* const call = (uform_js_encode_call_t*)uform_js_call_open_on(
         env, arguments, &local->call, sizeof(*local), &parsed->executor, &parsed->completion);
     if (!call) return NULL;
     size_t outputs = 0;
@@ -154,12 +154,12 @@ static napi_value uform_js_encode_files(napi_env env, napi_callback_info info, u
     uform_js_encode_call_t local;
     uform_js_encode_arguments_t parsed;
     uform_model_t model = NULL;
-    uform_js_encode_call_t *const call = uform_js_encode_open(env, info, 8, arguments, &self, &local, napi_uint8_array,
+    uform_js_encode_call_t* const call = uform_js_encode_open(env, info, 8, arguments, &self, &local, napi_uint8_array,
                                                               4, &model, &parsed);
     if (!call) return NULL;
     napi_value const slots[uform_js_slots_k] = {self, arguments[0], arguments[4], arguments[2], arguments[3]};
     if (!uform_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
-    uform_outcome_t *const outcome = &call->call.outcome;
+    uform_outcome_t* const outcome = &call->call.outcome;
     switch (verb) {
     case uform_js_files_text_k: {
         uform_text_encode_t encode = {.model = model,
@@ -252,7 +252,7 @@ static napi_value uform_js_image_encode_pixels(napi_env env, napi_callback_info 
     uform_js_encode_call_t local;
     uform_js_encode_arguments_t parsed;
     uform_model_t model = NULL;
-    uform_js_encode_call_t *const call = uform_js_encode_open(env, info, 10, arguments, &self, &local, napi_uint8_array,
+    uform_js_encode_call_t* const call = uform_js_encode_open(env, info, 10, arguments, &self, &local, napi_uint8_array,
                                                               6, &model, &parsed);
     if (!call) return NULL;
     void *heights = NULL, *widths = NULL;
@@ -276,8 +276,8 @@ static napi_value uform_js_image_encode_pixels(napi_env env, napi_callback_info 
                                           .completion = parsed.completion,
                                           .count = call->count,
                                           .pixels = parsed.tape,
-                                          .heights = (uint32_t const *)heights,
-                                          .widths = (uint32_t const *)widths,
+                                          .heights = (uint32_t const*)heights,
+                                          .widths = (uint32_t const*)widths,
                                           .embeddings = parsed.embeddings,
                                           .states = parsed.states,
                                           .token_vectors = parsed.token_vectors,
@@ -296,7 +296,7 @@ static napi_value uform_js_audio_encode_samples(napi_env env, napi_callback_info
     uform_js_encode_call_t local;
     uform_js_encode_arguments_t parsed;
     uform_model_t model = NULL;
-    uform_js_encode_call_t *const call = uform_js_encode_open(env, info, 9, arguments, &self, &local,
+    uform_js_encode_call_t* const call = uform_js_encode_open(env, info, 9, arguments, &self, &local,
                                                               napi_float32_array, 5, &model, &parsed);
     if (!call) return NULL;
     size_t sample_rate = 0;
@@ -345,8 +345,8 @@ typedef struct uform_js_choose_call_t {
     size_t choices;
 } uform_js_choose_call_t;
 
-static napi_value uform_js_finish_choose(napi_env env, uform_js_call_t *call, napi_value const *slots) {
-    uform_js_choose_call_t const *const choose = (uform_js_choose_call_t const *)call;
+static napi_value uform_js_finish_choose(napi_env env, uform_js_call_t* call, napi_value const* slots) {
+    uform_js_choose_call_t const* const choose = (uform_js_choose_call_t const*)call;
     napi_value const arena = slots[uform_js_slot_arena_k];
     napi_value const offsets = uform_js_offsets_view(env, arena, choose->probabilities.offsets, choose->count);
     napi_value const probabilities = offsets ? uform_js_arena_view(env, arena, napi_float32_array,
@@ -355,7 +355,7 @@ static napi_value uform_js_finish_choose(napi_env env, uform_js_call_t *call, na
                                              : NULL;
     napi_value const stats = probabilities ? uform_js_stats_object(env, &choose->stats) : NULL;
     if (!stats) return NULL;
-    static char const *const names[] = {"probabilities", "offsets", "stats"};
+    static char const* const names[] = {"probabilities", "offsets", "stats"};
     napi_value const values[] = {probabilities, offsets, stats};
     return uform_js_object(env, sizeof(names) / sizeof(names[0]), names, values);
 }
@@ -364,12 +364,12 @@ static napi_value uform_js_finish_choose(napi_env env, uform_js_call_t *call, na
  *  arena, progress) → @c {probabilities, offsets, stats}, viewed inside @p arena. */
 static napi_value uform_js_text_choose(napi_env env, napi_callback_info info) {
     napi_value arguments[9], self = NULL, deferred = NULL;
-    uform_js_model_t *const model = (uform_js_model_t *)uform_js_self(env, info, 9, arguments, &self);
+    uform_js_model_t* const model = (uform_js_model_t*)uform_js_self(env, info, 9, arguments, &self);
     if (model && !model->handle) uform_js_throw(env, uform_status_invalid_argument_k, "The model was freed");
     if (!model || !model->handle) return NULL;
     uform_js_choose_call_t local;
     uform_text_choose_t choose = {.model = model->handle};
-    uform_js_choose_call_t *const call = (uform_js_choose_call_t *)uform_js_call_open_on(
+    uform_js_choose_call_t* const call = (uform_js_choose_call_t*)uform_js_call_open_on(
         env, arguments, &local.call, sizeof(local), &choose.executor, &choose.completion);
     if (!call) return NULL;
     size_t choices_count = 0;
@@ -402,7 +402,7 @@ static napi_value uform_js_text_choose(napi_env env, napi_callback_info info) {
 
 #pragma endregion Verbs
 
-napi_property_descriptor const *uform_js_encode_properties(size_t *count) {
+napi_property_descriptor const* uform_js_encode_properties(size_t* count) {
     static napi_property_descriptor const properties[] = {
         {"textEncode", NULL, uform_js_text_encode, NULL, NULL, NULL, napi_default_method, NULL},
         {"imageEncode", NULL, uform_js_image_encode, NULL, NULL, NULL, napi_default_method, NULL},

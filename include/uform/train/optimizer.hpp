@@ -110,10 +110,10 @@ struct adafactor_t {
     /** Resolve the weights table into combined-state offsets, allocate the state, zero the
      *  moments, and seed the vector masters through the casts of @p numerics — once, on
      *  @p stream , outside any capture. */
-    [[nodiscard]] static expected<adafactor_t> make(gpu_arena_t &arena,
+    [[nodiscard]] static expected<adafactor_t> make(gpu_arena_t& arena,
                                                     std::span<differentiable_weights_t const> weights,
-                                                    adafactor_config_t config, gpu_numerics_t const &numerics,
-                                                    gpu_stream_t &stream) noexcept;
+                                                    adafactor_config_t config, gpu_numerics_t const& numerics,
+                                                    gpu_stream_t& stream) noexcept;
 
     /** The resolved states, for the distributed sibling's staging pass. */
     [[nodiscard]] nk::tensor_view<adafactor_state_t, 1> states() const noexcept {
@@ -123,13 +123,13 @@ struct adafactor_t {
     /** One optimizer step: moments, clip scales, apply — per state, pure enqueue. A non-empty
      *  @p reduced_gradients redirects every gradient read to the Float32 world sum. The scheduled
      *  @p learning_rate is this step's rate — the caller's warmup / decay policy, host-computed. */
-    [[nodiscard]] expected_t step(f32_t learning_rate, gpu_stream_t &stream,
+    [[nodiscard]] expected_t step(f32_t learning_rate, gpu_stream_t& stream,
                                   f32r1_view_t reduced_gradients = {}) noexcept;
 
     /** Insert every state's moments into @p checkpoint as @c optimizer.{name}.row_moments and
      *  @c optimizer.{name}.column_moments , and each vector weight's master as
      *  @c optimizer.{name}.master ; drains @p stream . */
-    [[nodiscard]] expected_t save(checkpoint_to_save_t &checkpoint, gpu_stream_t &stream) const noexcept;
+    [[nodiscard]] expected_t save(checkpoint_to_save_t& checkpoint, gpu_stream_t& stream) const noexcept;
 
     /**
      *  @brief Continue from @p checkpoint : the moments and masters it holds are uploaded on
@@ -141,7 +141,7 @@ struct adafactor_t {
      *  @par Statuses:
      *  - @c status_t::unsupported_k A saved state of another shape.
      */
-    [[nodiscard]] expected_t load(checkpoint_to_load_t const &checkpoint, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t load(checkpoint_to_load_t const& checkpoint, gpu_stream_t& stream) noexcept;
 
   private:
 
@@ -152,7 +152,7 @@ struct adafactor_t {
      *  from the live state extents rather than stored. */
     [[nodiscard]] std::size_t gradient_scalars() const noexcept {
         std::size_t scalars = 0;
-        for (adafactor_state_t const &state : states_) scalars += state.weights.extent(0) * state.weights.extent(1);
+        for (adafactor_state_t const& state : states_) scalars += state.weights.extent(0) * state.weights.extent(1);
         return scalars;
     }
 
@@ -205,7 +205,7 @@ struct distributed_adafactor_t {
     [[nodiscard]] static std::size_t payload_scalars_needed(
         std::span<differentiable_weights_t const> weights) noexcept {
         std::size_t scalars = 0;
-        for (differentiable_weights_t const &matrix : weights)
+        for (differentiable_weights_t const& matrix : weights)
             scalars += matrix.weights.extent(0) * matrix.weights.extent(1);
         return scalars;
     }
@@ -237,9 +237,9 @@ struct distributed_adafactor_t {
      *  @param[in,out] ledger The run's telemetry ledger, borrowed.
      */
     [[nodiscard]] static expected<distributed_adafactor_t> make(
-        multimem_domain_t &domain, infiniband_all_reduce<f32_t> &world_reduce, std::span<gpu_arena_t> arenas,
+        multimem_domain_t& domain, infiniband_all_reduce<f32_t>& world_reduce, std::span<gpu_arena_t> arenas,
         std::span<differentiable_weights_t const> weights, std::size_t weights_per_rank, adafactor_config_t config,
-        gpu_numerics_t const &numerics, std::span<gpu_stream_t> streams, telemetry_ledger_t &ledger) noexcept;
+        gpu_numerics_t const& numerics, std::span<gpu_stream_t> streams, telemetry_ledger_t& ledger) noexcept;
 
     /**
      *  @brief Local rank @p rank 's slice of one world step — pure enqueue onto @p stream , the shape a
@@ -254,42 +254,42 @@ struct distributed_adafactor_t {
      *  order @c 0..gpus-1 within a step. The scheduled @p learning_rate must be identical on every
      *  rank of the step — replicas step in lockstep.
      */
-    [[nodiscard]] expected_t step(std::size_t rank, f32_t learning_rate, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t step(std::size_t rank, f32_t learning_rate, gpu_stream_t& stream) noexcept;
 
     /** The eager convenience: every rank's slice in order over the per-rank streams. */
     [[nodiscard]] expected_t step(f32_t learning_rate, std::span<gpu_stream_t> streams) noexcept;
 
     /** Insert the first rank's state into @p checkpoint — the ranks are identical. */
-    [[nodiscard]] expected_t save(checkpoint_to_save_t &checkpoint, gpu_stream_t &stream) const noexcept {
+    [[nodiscard]] expected_t save(checkpoint_to_save_t& checkpoint, gpu_stream_t& stream) const noexcept {
         return ranks_[0].state.save(checkpoint, stream);
     }
 
     /** Continue every rank from @p checkpoint on its stream; see @ref adafactor_t::load . */
-    [[nodiscard]] expected_t load(checkpoint_to_load_t const &checkpoint, std::span<gpu_stream_t> streams) noexcept;
+    [[nodiscard]] expected_t load(checkpoint_to_load_t const& checkpoint, std::span<gpu_stream_t> streams) noexcept;
 
   private:
 
     /** The D>1 tail of one rank's step: the gateway materialises the domain sum into its world
      *  buffer, all-reduces it across domains and copies the world mean into its window; after a domain
      *  barrier every rank steps against that window. Caller holds the rank's context. */
-    [[nodiscard]] expected_t world_gradient_step_(std::size_t rank, f32_t learning_rate, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t world_gradient_step_(std::size_t rank, f32_t learning_rate, gpu_stream_t& stream) noexcept;
 
     /** One Adafactor state (and, in single-domain worlds, one reduced buffer) per local GPU. */
     per_gpu_array<optimizer_rank_t> ranks_ {};
 
     /** The main-owned level-1 surface — borrowed; its replicas carry the staged gradients. */
-    multimem_domain_t *domain_ = nullptr;
+    multimem_domain_t* domain_ = nullptr;
 
     /** This consumer's disjoint gradient window of the domain payload, reserved at @ref make . */
     multimem_window_t window_ {};
 
     /** The main-owned cross-domain all-reduce buffer — borrowed, like @c domain_ ; its typed
      *  payload is the world gradient, and its @c identity() marks single-domain worlds. */
-    infiniband_all_reduce<f32_t> *world_reduce_ = nullptr;
+    infiniband_all_reduce<f32_t>* world_reduce_ = nullptr;
 
     /** The run's telemetry ledger — borrowed, like @c domain_ ; the per-rank probes above feed
      *  it at the gradient boundaries, inert whenever the signals channel is dark. */
-    telemetry_ledger_t *ledger_ = nullptr;
+    telemetry_ledger_t* ledger_ = nullptr;
 };
 
 /**
@@ -307,17 +307,17 @@ struct adafactor_temperatures_t {
     /** Allocate and zero the @b [2·groups] second moment off @p arena on @p stream ,
      *  checkpointed as @c temperature_moments under the loss's @p prefix , such as
      *  @c contrastive . */
-    [[nodiscard]] static expected<adafactor_temperatures_t> make(gpu_arena_t &arena, u32_t groups,
+    [[nodiscard]] static expected<adafactor_temperatures_t> make(gpu_arena_t& arena, u32_t groups,
                                                                  adafactor_config_t config, sz::string_view_t prefix,
-                                                                 gpu_stream_t &stream) noexcept;
+                                                                 gpu_stream_t& stream) noexcept;
 
     /** One step of the @b [groups] @p inverse_temperatures and @p biases in place, from the
      *  @b [2·groups] @p gradients : every group's log-β gradient, then its bias gradient. */
     [[nodiscard]] expected_t step(f32r1_span_t inverse_temperatures, f32r1_span_t biases, f32r1_view_t gradients,
-                                  f32_t learning_rate, gpu_stream_t &stream) noexcept;
+                                  f32_t learning_rate, gpu_stream_t& stream) noexcept;
 
     /** Insert the second moment into @p checkpoint under its key, draining @p stream . */
-    [[nodiscard]] expected_t save(checkpoint_to_save_t &checkpoint, gpu_stream_t &stream) const noexcept;
+    [[nodiscard]] expected_t save(checkpoint_to_save_t& checkpoint, gpu_stream_t& stream) const noexcept;
 
     /**
      *  @brief Upload the second moment @p checkpoint holds on @p stream ; a file without one
@@ -326,7 +326,7 @@ struct adafactor_temperatures_t {
      *  @par Statuses:
      *  - @c status_t::unsupported_k A saved moment of another group count.
      */
-    [[nodiscard]] expected_t load(checkpoint_to_load_t const &checkpoint, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t load(checkpoint_to_load_t const& checkpoint, gpu_stream_t& stream) noexcept;
 
   private:
     adafactor_config_t config_ {};

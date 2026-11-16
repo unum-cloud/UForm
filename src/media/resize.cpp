@@ -1,9 +1,9 @@
 /**
- *  @brief The host Lanczos resize of @ref unum::uform::media::resize_image , over decoded pixels
- *      and no codec, so a build without the codecs resizes the pixels its caller decoded.
  *  @file src/media/resize.cpp
  *  @author Ash Vardanian
  *  @date July 4, 2026
+ *  @brief The host Lanczos resize of @ref unum::uform::media::resize_image , over decoded pixels
+ *      and no codec, so a build without the codecs resizes the pixels its caller decoded.
  */
 #include <cmath> // `std::sin`, `std::floor`, `std::lround`
 
@@ -46,14 +46,14 @@ struct lanczos_tap_t {
  *  resample. Output pixel centers map onto source pixel centers, @c (target+0.5) · scale − 0.5 ,
  *  and the window keeps its six-tap support whatever the scale. */
 [[nodiscard]] static status_t lanczos_taps_(u32_t source_length, u32_t target_length,
-                                            st::basic_vector<lanczos_tap_t> &taps) noexcept {
+                                            st::basic_vector<lanczos_tap_t>& taps) noexcept {
     if (st::failed(taps.resize(target_length))) return status_t::bad_alloc_k;
     f64_t const scale = static_cast<f64_t>(source_length) / static_cast<f64_t>(target_length);
     i64_t const last = static_cast<i64_t>(source_length) - 1;
     for (u32_t target = 0; target != target_length; ++target) {
         f64_t const center = (target + 0.5) * scale - 0.5;
         i64_t const first = static_cast<i64_t>(std::floor(center)) - (lanczos_lobes_k - 1);
-        lanczos_tap_t &tap = taps[target];
+        lanczos_tap_t& tap = taps[target];
         f64_t weights[lanczos_taps_k] = {}, total = 0.0;
         for (u32_t k = 0; k != lanczos_taps_k; ++k) {
             i64_t const position = first + static_cast<i64_t>(k);
@@ -93,7 +93,7 @@ expected_t um::resize_image(pixel_image_view_t source, pixel_patches_span_t out)
     nk::tensor_span<f32_t, 3> const staged_rows {staged.data(), {crop.height, target.width, image_channels_k}};
     for (u32_t y = 0; y != crop.height; ++y)
         for (u32_t x = 0; x != target.width; ++x) {
-            lanczos_tap_t const &tap = horizontal[x];
+            lanczos_tap_t const& tap = horizontal[x];
             for (u32_t channel = 0; channel != image_channels_k; ++channel) staged_rows[y, x, channel] = 0.0f;
             for (u32_t k = 0; k != lanczos_taps_k; ++k)
                 for (u32_t channel = 0; channel != image_channels_k; ++channel)
@@ -101,7 +101,7 @@ expected_t um::resize_image(pixel_image_view_t source, pixel_patches_span_t out)
         }
 
     for (u32_t y = 0; y != target.height; ++y) {
-        lanczos_tap_t const &tap = vertical[y];
+        lanczos_tap_t const& tap = vertical[y];
         for (u32_t x = 0; x != target.width; ++x)
             for (u32_t channel = 0; channel != image_channels_k; ++channel) {
                 f32_t sum = 0.0f;

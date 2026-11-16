@@ -77,7 +77,7 @@ static tape_t random_letters(std::uint64_t seed, std::size_t count, std::size_t 
     tape_t tape {std::vector<std::uint8_t>(count * length), std::vector<std::size_t>(count + 1)};
     std::mt19937_64 generator {seed};
     std::uniform_int_distribution<int> letters {'a', 'z'};
-    for (std::uint8_t &byte : tape.bytes) byte = static_cast<std::uint8_t>(letters(generator));
+    for (std::uint8_t& byte : tape.bytes) byte = static_cast<std::uint8_t>(letters(generator));
     for (std::size_t item = 0; item <= count; ++item) tape.offsets[item] = item * length;
     return tape;
 }
@@ -92,17 +92,17 @@ static tape_t repeated_item(std::string_view item, std::size_t count) {
 }
 
 /** The outcome's message, or its status's name where it carries none. */
-static std::string_view message_of(uform_outcome_t const &outcome) noexcept {
+static std::string_view message_of(uform_outcome_t const& outcome) noexcept {
     return outcome.message ? outcome.message : uform_status_name(outcome.status);
 }
 
 /** The bytes of @p text as the C interface borrows a name or a path. */
 static uform_bytes_view_t bytes_of(std::string_view text) noexcept {
-    return {reinterpret_cast<std::uint8_t const *>(text.data()), text.size()};
+    return {reinterpret_cast<std::uint8_t const*>(text.data()), text.size()};
 }
 
 /** One @c uform_text_encode of @p batch texts filling the context to pooled embeddings. */
-static void encode_texts(loop_t &loop, session_t const &session, std::size_t batch) {
+static void encode_texts(loop_t& loop, session_t const& session, std::size_t batch) {
     tape_t const texts = random_letters(session.seed, batch, session.description.context);
     uform_outcome_t outcome {};
     uform_rows_view_t embeddings {};
@@ -129,7 +129,7 @@ static void encode_texts(loop_t &loop, session_t const &session, std::size_t bat
 
 /** One @c uform_text_choose of @p batch states, each ending a token short of the context so the
  *  mask byte fits, over @ref choice_letters_k . */
-static void choose_items(loop_t &loop, session_t const &session, std::size_t batch) {
+static void choose_items(loop_t& loop, session_t const& session, std::size_t batch) {
     tape_t const texts = random_letters(session.seed, batch, session.description.context - 1);
     tape_t const choices = repeated_item(choice_letters_k, batch);
     uform_outcome_t outcome {};
@@ -151,7 +151,7 @@ static void choose_items(loop_t &loop, session_t const &session, std::size_t bat
     }
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
     char const *checkpoint = nullptr, *residency = "ram", *cpu_class_text = "", *gpu_class_text = "",
                *precision_text = "bf16";
     for (int index = 1; index + 1 < argc; index += 2) {
@@ -234,7 +234,7 @@ int main(int argc, char **argv) {
     uform_model_describe(&describe_arguments);
     if (outcome.status != uform_status_success_k)
         return fmt::println(stderr, "uform_bench_encoder: {}", message_of(outcome)), 1;
-    char const *const class_name = home == "vram" ? uform_gpu_class_name(session.description.gpu_class)
+    char const* const class_name = home == "vram" ? uform_gpu_class_name(session.description.gpu_class)
                                                   : uform_cpu_class_name(session.description.cpu_class);
     fmt::println("- Model: {} in {} as {}, {} dimensions, context {}", class_name, home,
                  uform_scalar_name(session.description.quantization), session.description.dimensions,

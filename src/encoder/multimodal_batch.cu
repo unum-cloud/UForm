@@ -69,7 +69,7 @@ static __global__ void fill_coords_kernel_(u32r1_view_t segment_offsets, u32r1_v
 
 expected_t ue::fill_coords(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths, modality_view_t segment_modality,
                            image_shape_view_t image_shapes, video_shape_view_t video_shapes, u32_t tube_frames,
-                           u32_t frame_stride, i16r2_span_t coords, gpu_stream_t &stream) noexcept {
+                           u32_t frame_stride, i16r2_span_t coords, gpu_stream_t& stream) noexcept {
     if (coords.extent(1) != 3)
         return expected_t::fail(status_t::unsupported_k, "coordinate table must be [{},3]", coords.extent(0));
     std::size_t const segments = segment_lengths.extent(0);
@@ -89,7 +89,7 @@ expected_t ue::fill_coords(u32r1_view_t segment_offsets, u32r1_view_t segment_le
                          frame_stride == 0u ? 1u : frame_stride, coords);
 }
 
-expected_t ue::pad_choices(multimodal_batch_on_gpu_t &batch, gpu_stream_t &stream) noexcept {
+expected_t ue::pad_choices(multimodal_batch_on_gpu_t& batch, gpu_stream_t& stream) noexcept {
     if (batch.segment_choices.empty()) return {};
     if (CUresult result = cuMemsetD16Async(device_address(batch.segment_choices.data()), byte_pad_k,
                                            batch.segment_choices.numel(), stream.get());
@@ -155,13 +155,13 @@ struct batch_sources_t_ {
     batch_source_t_ entries[max_gpus_per_host_k] {};
     u32_t count = 0;
 
-    [[nodiscard]] __device__ batch_source_t_ const &operator[](u32_t gpu) const noexcept { return entries[gpu]; }
+    [[nodiscard]] __device__ batch_source_t_ const& operator[](u32_t gpu) const noexcept { return entries[gpu]; }
 };
 
 /** The first segment of @p peer in @c [from,end) whose membership in the live run of @p bag equals
  *  @p inside , or @p end when none: a warp tests 32 segments per step and every lane returns the
  *  same lowest match. */
-[[nodiscard]] static __device__ u32_t find_run_edge_(batch_source_t_ const &peer, u32_t bag, u32_t from, u32_t end,
+[[nodiscard]] static __device__ u32_t find_run_edge_(batch_source_t_ const& peer, u32_t bag, u32_t from, u32_t end,
                                                      bool inside) noexcept {
     u32_t const lane = threadIdx.x % warp_size_k;
     for (u32_t base = from; base < end; base += warp_size_k) {
@@ -195,7 +195,7 @@ struct batch_sources_t_ {
  *  nowhere and reports no drop.
  */
 template <typename sources_type_>
-static __device__ u32_t route_destination_(sources_type_ const &sources, u32r1_span_t mixed_offsets,
+static __device__ u32_t route_destination_(sources_type_ const& sources, u32r1_span_t mixed_offsets,
                                            u32r1_span_t mixed_lengths, u32r1_span_t mixed_sources,
                                            u32r1_span_t mixed_bags, u32_t member_index, data_epoch_t data_epoch,
                                            u64_t seed, u32_t segments_per_gpu, u32_t rows_per_gpu,
@@ -212,7 +212,7 @@ static __device__ u32_t route_destination_(sources_type_ const &sources, u32r1_s
         for (u32_t segment = 0; segment != segments_per_gpu; ++segment) {
             std::size_t const destination = static_cast<std::size_t>(member_index) * segments_per_gpu + segment;
             std::size_t const source = epoch_permutation(seed, data_epoch, destination, world_segments);
-            batch_source_t_ const &peer = sources[static_cast<u32_t>(source / segments_per_gpu)];
+            batch_source_t_ const& peer = sources[static_cast<u32_t>(source / segments_per_gpu)];
             u32_t columns = peer.segment_lengths[source % segments_per_gpu];
             cursor = row_aligned_cursor_(cursor, columns, peer.segment_modality[source % segments_per_gpu],
                                          columns_per_row);
@@ -246,7 +246,7 @@ static __device__ u32_t route_destination_(sources_type_ const &sources, u32r1_s
         for (u32_t bag = 0; bag != max_bags_per_gpu; ++bag) {
             std::size_t const destination_bag = static_cast<std::size_t>(member_index) * max_bags_per_gpu + bag;
             std::size_t const source_bag_world = epoch_permutation(seed, data_epoch, destination_bag, world_bags);
-            batch_source_t_ const &peer = sources[static_cast<u32_t>(source_bag_world / max_bags_per_gpu)];
+            batch_source_t_ const& peer = sources[static_cast<u32_t>(source_bag_world / max_bags_per_gpu)];
             u32_t const source_bag = static_cast<u32_t>(source_bag_world % max_bags_per_gpu);
             u32_t const source_gpu_base = static_cast<u32_t>(source_bag_world / max_bags_per_gpu) * segments_per_gpu;
 
@@ -261,7 +261,7 @@ static __device__ u32_t route_destination_(sources_type_ const &sources, u32r1_s
             bool fits = lead_segments + trail_segments + (run_end - run_begin) <= segments_per_gpu;
             for (u32_t source_segment = run_begin; source_segment != run_end && fits; ++source_segment) {
                 u32_t const columns = peer.segment_lengths[source_segment];
-                u32_t &trial = trails(source_segment) ? trail_trial : lead_trial;
+                u32_t& trial = trails(source_segment) ? trail_trial : lead_trial;
                 trial = row_aligned_cursor_(trial, columns, peer.segment_modality[source_segment], columns_per_row) +
                         columns;
                 fits = divide_round_up(lead_trial, columns_per_row) + divide_round_up(trail_trial, columns_per_row) <=
@@ -274,7 +274,7 @@ static __device__ u32_t route_destination_(sources_type_ const &sources, u32r1_s
             for (u32_t source_segment = run_begin; source_segment != run_end; ++source_segment) {
                 bool const trailing = trails(source_segment);
                 u32_t const columns = peer.segment_lengths[source_segment];
-                u32_t &cursor = trailing ? trail_cursor : lead_cursor;
+                u32_t& cursor = trailing ? trail_cursor : lead_cursor;
                 cursor = row_aligned_cursor_(cursor, columns, peer.segment_modality[source_segment], columns_per_row);
                 u32_t const destination_segment = trailing ? lead_total + trail_segments : lead_segments;
                 if (writes && leader) {
@@ -379,7 +379,7 @@ static __global__ void batch_gather_kernel_(sources_type_ sources, batch_dest_t_
         }
         return;
     }
-    batch_source_t_ const &peer = sources[source / segments_per_gpu];
+    batch_source_t_ const& peer = sources[source / segments_per_gpu];
     u32_t const source_segment = source % segments_per_gpu;
 
     // Descriptors travel for every routed segment, PAD included, so the mixed batch
@@ -409,7 +409,7 @@ static __global__ void batch_gather_kernel_(sources_type_ sources, batch_dest_t_
     if (columns == 0u) return;
     std::size_t const source_begin = peer.segment_offsets[source_segment];
     std::size_t const destination_begin = mixed_offsets[segment];
-    auto const copy_cells = [&](auto const &from, auto const &to) noexcept {
+    auto const copy_cells = [&](auto const& from, auto const& to) noexcept {
         if (from.empty() || to.empty()) return;
         auto const source_run = from[nk::range(source_begin, source_begin + columns), nk::slice].template flatten<1>();
         auto const destination_run =
@@ -445,7 +445,7 @@ static __global__ void batch_world_keys_kernel_(sources_type_ sources, u32r2_vie
         u32_t const source = world_sources[gpu, segment];
         u64_t key = 0u;
         if (source != mixed_source_absent_k && world_lengths[gpu, segment] != 0u) {
-            batch_source_t_ const &peer = sources[source / segments_per_gpu];
+            batch_source_t_ const& peer = sources[source / segments_per_gpu];
             if (!peer.segment_key.empty()) key = peer.segment_key[source % segments_per_gpu];
         }
         world_keys[gpu, segment] = key;
@@ -514,7 +514,7 @@ struct batch_block_layout_t_ {
  *  derives the identical map with no exchanged descriptor, and the mixer re-derives it on demand
  *  instead of storing it. */
 [[nodiscard]] static constexpr batch_block_layout_t_ batch_block_layout_(
-    multimodal_batch_shape_t const &shape) noexcept {
+    multimodal_batch_shape_t const& shape) noexcept {
     batch_block_layout_t_ layout;
     std::size_t const segments = shape.max_segments_per_gpu;
     std::size_t const cells = static_cast<std::size_t>(shape.max_rows_per_gpu) * shape.max_columns_per_row;
@@ -558,7 +558,7 @@ struct batch_block_layout_t_ {
 /** Build the read view of a member's own loaded batch, a direct NVLink peer read for a source GPU
  *  on this multimem_domain. A modality absent from the batch leaves an empty view, exactly as the
  *  gather kernels expect. */
-static batch_source_t_ source_from_loaded_(multimodal_batch_on_gpu_t const &loaded) noexcept {
+static batch_source_t_ source_from_loaded_(multimodal_batch_on_gpu_t const& loaded) noexcept {
     std::size_t const cells = loaded.tokens.numel();
     batch_source_t_ source;
     source.tokens = loaded.tokens.flatten<1>();
@@ -585,23 +585,22 @@ static batch_source_t_ source_from_loaded_(multimodal_batch_on_gpu_t const &load
  *  no table bounds the world; a dead modality's zero-byte region reads as null, exactly as the
  *  gather kernels expect. */
 struct batch_windows_t_ {
-    b8_t const *first_window = nullptr; // device-boundary
+    b8_t const* first_window = nullptr; // device-boundary
     std::size_t member_stride = 0;
     batch_block_layout_t_ layout {};
     u32_t members = 0;
     u32_t count = 0;
 
     template <typename value_type_>
-    [[nodiscard]] __device__ nk::tensor_view<value_type_, 1> region_(b8_t const *block,
+    [[nodiscard]] __device__ nk::tensor_view<value_type_, 1> region_(b8_t const* block,
                                                                      batch_block_tensor_t_ tensor) const noexcept {
         std::size_t const bytes = layout.byte_counts[tensor];
         if (bytes == 0u) return {};
-        return {static_cast<value_type_ const *>(static_cast<void const *>(block + layout.offsets[tensor])),
-                bytes / sizeof(value_type_)};
+        return nk::as_values<value_type_>(bytes_view_t {block + layout.offsets[tensor], bytes});
     }
 
     [[nodiscard]] __device__ batch_source_t_ operator[](u32_t gpu) const noexcept {
-        b8_t const *block = first_window + (gpu % members) * member_stride + (gpu / members) * layout.block_bytes;
+        b8_t const* block = first_window + (gpu % members) * member_stride + (gpu / members) * layout.block_bytes;
         batch_source_t_ source;
         source.segment_offsets = region_<u32_t>(block, block_segment_offsets_k);
         source.segment_lengths = region_<u32_t>(block, block_segment_lengths_k);
@@ -628,15 +627,15 @@ struct batch_windows_t_ {
  *  pair so the pack loop is a plain table walk rather than fourteen hand-spelled copies. */
 struct block_copy_t_ {
     batch_block_tensor_t_ tensor;
-    void const *source;
+    void const* source;
 };
 
 /** Serialize a member's loaded batch into its outgoing block: one device → device copy per live
  *  tensor into that tensor's shared block offset, enqueued on @p stream ahead of the exchange. A
  *  dead modality's zero-byte tensor (and any null source) is skipped; the landing's source view
  *  nulls the same modality, so those bytes are never read. */
-static expected_t pack_batch_into_block_(multimodal_batch_on_gpu_t const &loaded, b8r1_span_t destination,
-                                         batch_block_layout_t_ const &layout, gpu_stream_t &stream) noexcept {
+static expected_t pack_batch_into_block_(multimodal_batch_on_gpu_t const& loaded, b8r1_span_t destination,
+                                         batch_block_layout_t_ const& layout, gpu_stream_t& stream) noexcept {
     block_copy_t_ const copies[block_tensor_count_k] = {
         {block_segment_offsets_k, loaded.segment_offsets.data()},
         {block_segment_lengths_k, loaded.segment_lengths.data()},
@@ -655,7 +654,7 @@ static expected_t pack_batch_into_block_(multimodal_batch_on_gpu_t const &loaded
         {block_segment_choices_k, loaded.segment_choices.data()},
         {block_segment_choice_targets_k, loaded.segment_choice_targets.data()},
     };
-    for (block_copy_t_ const &copy : copies) {
+    for (block_copy_t_ const& copy : copies) {
         std::size_t const bytes = layout.byte_count(copy.tensor);
         if (bytes == 0u || copy.source == nullptr) continue;
         // vendor-boundary: device → device pack of one batch tensor into its block region — the
@@ -676,10 +675,10 @@ static expected_t pack_batch_into_block_(multimodal_batch_on_gpu_t const &loaded
  *  world pass into @p world_lengths and @p world_sources , whose own slice the gather reads. The
  *  geometry pass adds @p loaded_dropped , the member's own loaded drops, to the mixed batch's. */
 template <typename sources_type_>
-static expected_t mix_(sources_type_ const &sources, u32r1_view_t loaded_dropped, multimodal_batch_on_gpu_t &mixed,
+static expected_t mix_(sources_type_ const& sources, u32r1_view_t loaded_dropped, multimodal_batch_on_gpu_t& mixed,
                        u32r2_span_t world_lengths, u32r2_span_t world_sources, u64r2_span_t world_keys,
                        u32_t gpu_index_in_colocated_domain, data_epoch_t data_epoch, u64_t seed,
-                       multimodal_batch_shape_t const &shape, gpu_stream_t &stream) noexcept {
+                       multimodal_batch_shape_t const& shape, gpu_stream_t& stream) noexcept {
     u32r1_span_t const mixed_sources = world_sources[gpu_index_in_colocated_domain, nk::slice];
     // This member's mixed batch is the scatter target; an absent modality leaves an empty span.
     std::size_t const cells = mixed.tokens.numel();
@@ -724,7 +723,7 @@ static expected_t mix_(sources_type_ const &sources, u32r1_view_t loaded_dropped
 }
 
 expected<multimodal_batch_mixer_t> multimodal_batch_mixer_t::make(
-    multimem_domain_t &multimem, colocated_domain_t &colocated, std::span<gpu_arena_t> arenas,
+    multimem_domain_t& multimem, colocated_domain_t& colocated, std::span<gpu_arena_t> arenas,
     multimodal_batch_shape_t shape, u64_t seed, std::span<gpu_stream_t> streams, f64_t timeout_seconds) noexcept {
     using result_t = expected<multimodal_batch_mixer_t>;
     std::size_t const members = multimem.local_member_count();
@@ -800,15 +799,15 @@ expected<multimodal_batch_mixer_t> multimodal_batch_mixer_t::make(
     return result_t {std::move(mixer)};
 }
 
-std::size_t multimodal_batch_mixer_t::payload_scalars_needed(multimodal_batch_shape_t const &shape,
-                                                             mesh_shape_t const &mesh) noexcept {
+std::size_t multimodal_batch_mixer_t::payload_scalars_needed(multimodal_batch_shape_t const& shape,
+                                                             mesh_shape_t const& mesh) noexcept {
     if (mesh.gpus_per_host_domain == mesh.gpus_per_colocated_domain) return 0;
     return mesh.multimem_domain_count() * batch_block_layout_(shape).total_bytes() / sizeof(f32_t);
 }
 
 expected_t multimodal_batch_mixer_t::operator()(std::size_t local, data_epoch_t data_epoch,
                                                 std::span<multimodal_batch_on_gpu_t const> loaded,
-                                                multimodal_batch_on_gpu_t &mixed, gpu_stream_t &stream) noexcept {
+                                                multimodal_batch_on_gpu_t& mixed, gpu_stream_t& stream) noexcept {
     std::size_t const members = world_sources_.size();
     if (local >= members) return expected_t::fail(status_t::invalid_argument_k, "member {} of {}", local, members);
     if (loaded.size() != members)
@@ -818,7 +817,7 @@ expected_t multimodal_batch_mixer_t::operator()(std::size_t local, data_epoch_t 
     if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed ({})", local);
     std::size_t const member_index = multimem_->member_offset() + local;
 
-    auto local_source = [&](std::size_t member, batch_source_t_ &source) noexcept -> expected_t {
+    auto local_source = [&](std::size_t member, batch_source_t_& source) noexcept -> expected_t {
         source = source_from_loaded_(loaded[member]);
         if (source.tokens.empty() || source.segment_offsets.empty() || source.segment_lengths.empty() ||
             source.segment_modality.empty())
@@ -839,7 +838,7 @@ expected_t multimodal_batch_mixer_t::operator()(std::size_t local, data_epoch_t 
         expected_t packed {};
         if (domains_ == 1u) packed = pack_batch_into_block_(loaded[local], window, block_layout, stream);
         else {
-            infiniband_all_gather<b8_t> &gather = gather_buffers_[local];
+            infiniband_all_gather<b8_t>& gather = gather_buffers_[local];
             packed = pack_batch_into_block_(loaded[local], gather.own_block(), block_layout, stream);
             if (packed) packed = gather(stream);
             if (packed) packed = copy_device_to_device(gather.payload(), window, stream);

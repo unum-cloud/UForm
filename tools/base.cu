@@ -34,7 +34,7 @@
 /** Prints a StringZilla view as the text it spans. */
 template <>
 struct fmt::formatter<ashvardanian::stringzilla::string_view_t> : fmt::formatter<std::string_view> {
-    auto format(std::string_view text, fmt::format_context &context) const {
+    auto format(std::string_view text, fmt::format_context& context) const {
         return fmt::formatter<std::string_view>::format(text, context);
     }
 };
@@ -42,7 +42,7 @@ struct fmt::formatter<ashvardanian::stringzilla::string_view_t> : fmt::formatter
 /** Prints an owning StringZilla string as the text it holds. */
 template <>
 struct fmt::formatter<ashvardanian::stringzilla::string_t> : fmt::formatter<std::string_view> {
-    auto format(std::string_view text, fmt::format_context &context) const {
+    auto format(std::string_view text, fmt::format_context& context) const {
         return fmt::formatter<std::string_view>::format(text, context);
     }
 };
@@ -60,7 +60,7 @@ using namespace unum::uform::train;
 /** Step @p trainer from its completed steps to @c config.steps over @p source , with
  *  telemetry, checkpoints and held-out evaluations over @p held_out on cadence, and a
  *  checkpoint at the end. */
-[[nodiscard]] static int step_(trainer_t &trainer, trainer_config_t const &config, batch_source_t source,
+[[nodiscard]] static int step_(trainer_t& trainer, trainer_config_t const& config, batch_source_t source,
                                batch_source_t held_out) noexcept {
     auto checkpoint = [&]() noexcept {
         expected_t saved = trainer.save(config.checkpoint);
@@ -147,7 +147,7 @@ using namespace unum::uform::train;
     if (expected_t built = trainer_t::make(trainer, mesh, config, devices, gpu_numerics_of(options.capabilities));
         !built)
         return fail_out_(built.description_.view());
-    envelope_t const &envelope = trainer.envelope;
+    envelope_t const& envelope = trainer.envelope;
     f64_t const mebibyte = 1024.0 * 1024.0;
     fmt::println(
         "uform_base: {} rows of {} columns and {} segments per GPU: {:.1f} MiB free, {:.1f} MiB fixed + "      //
@@ -180,7 +180,7 @@ using namespace unum::uform::train;
     return stepped;
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
     // Lazy module loading deadlocks against the InfiniBand doorbell kernels' flag spins (see the
     // mixer and base conformance suites); eager loading before `cuInit` front-loads every module.
     ::setenv("CUDA_MODULE_LOADING", "EAGER", 1);
@@ -195,7 +195,7 @@ int main(int argc, char **argv) {
         if (!read) return fail_out_(read.description_.view());
         mixture = std::move(read.value_);
         bool queried = false;
-        for (mixture_entry_t const &entry : mixture.datasets)
+        for (mixture_entry_t const& entry : mixture.datasets)
             for (late_interaction_side_t const side : {entry.sides.anchor, entry.sides.positive, entry.sides.negative})
                 queried |= side == late_interaction_side_t::query_k ||
                            side == late_interaction_side_t::query_and_document_k;
@@ -220,11 +220,11 @@ int main(int argc, char **argv) {
     mesh_options_t options;
     options.host_domain_index = host_domain_index_from_environment();
     options.host_domain_count = host_domain_count_from_environment();
-    if (char const *multimem = std::getenv("UFORM_GPUS_PER_MULTIMEM_DOMAIN"); multimem != nullptr)
+    if (char const* multimem = std::getenv("UFORM_GPUS_PER_MULTIMEM_DOMAIN"); multimem != nullptr)
         options.gpus_per_multimem_domain = static_cast<u32_t>(std::atoi(multimem));
-    if (char const *directory = std::getenv("UFORM_EXCHANGE_DIR"); directory != nullptr)
+    if (char const* directory = std::getenv("UFORM_EXCHANGE_DIR"); directory != nullptr)
         options.directory = sz::string_view_t {directory, std::strlen(directory)};
-    if (char const *job = std::getenv("UFORM_JOB_ID"); job != nullptr)
+    if (char const* job = std::getenv("UFORM_JOB_ID"); job != nullptr)
         options.job = sz::string_view_t {job, std::strlen(job)};
     return train_(config, options, std::move(mixture));
 }

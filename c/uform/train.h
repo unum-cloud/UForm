@@ -99,7 +99,7 @@ UFORM_EXPORT char const* uform_modality_name(uform_modality_t modality);
 
 /** Reads a modality back from its spelling into @p modality, or fails with
  *  @c uform_status_invalid_argument_k. */
-UFORM_EXPORT uform_status_t uform_modality_from_name(uform_bytes_view_t name, uform_modality_t *modality);
+UFORM_EXPORT uform_status_t uform_modality_from_name(uform_bytes_view_t name, uform_modality_t* modality);
 
 /** The image slice of a batch envelope; a zero @c patch_side leaves images out of the run. */
 typedef struct uform_image_shape_t {
@@ -185,7 +185,7 @@ UFORM_EXPORT char const* uform_objective_name(uform_objective_t objective);
 
 /** Reads an objective back from its spelling into @p objective, or fails with
  *  @c uform_status_invalid_argument_k. */
-UFORM_EXPORT uform_status_t uform_objective_from_name(uform_bytes_view_t name, uform_objective_t *objective);
+UFORM_EXPORT uform_status_t uform_objective_from_name(uform_bytes_view_t name, uform_objective_t* objective);
 
 /** How the masked objective corrupts a batch and weighs its heads; every zero derives
  *  the default named. */
@@ -240,7 +240,7 @@ UFORM_EXPORT char const* uform_negatives_name(uform_negatives_t negatives);
 
 /** Reads a negatives policy back from its spelling into @p negatives, or fails with
  *  @c uform_status_invalid_argument_k. */
-UFORM_EXPORT uform_status_t uform_negatives_from_name(uform_bytes_view_t name, uform_negatives_t *negatives);
+UFORM_EXPORT uform_status_t uform_negatives_from_name(uform_bytes_view_t name, uform_negatives_t* negatives);
 
 /** How a contrastive term turns a row of scores into forces, mirroring the trainer's pair-loss
  *  forms; zero keeps the term's own form: sigmoid for pooled vertices, ranked for token vectors. */
@@ -496,7 +496,7 @@ UFORM_EXPORT char const* uform_multimem_tier_name(uform_multimem_tier_t tier);
 
 /** Reads a multimem tier back from its spelling into @p tier, or fails with
  *  @c uform_status_invalid_argument_k. */
-UFORM_EXPORT uform_status_t uform_multimem_tier_from_name(uform_bytes_view_t name, uform_multimem_tier_t *tier);
+UFORM_EXPORT uform_status_t uform_multimem_tier_from_name(uform_bytes_view_t name, uform_multimem_tier_t* tier);
 
 /** A training run: the tower replicas, gradients, optimizer moments, heads, temperatures and the
  *  collectives sized by them, on the executor's devices. */

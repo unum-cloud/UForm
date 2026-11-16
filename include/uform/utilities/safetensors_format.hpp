@@ -93,10 +93,10 @@ struct checkpoint_metadata_t {
 struct checkpoint_to_save_t {
 
     checkpoint_to_save_t() noexcept = default;
-    checkpoint_to_save_t(checkpoint_to_save_t const &) = delete;
-    checkpoint_to_save_t &operator=(checkpoint_to_save_t const &) = delete;
-    checkpoint_to_save_t(checkpoint_to_save_t &&) noexcept = default;
-    checkpoint_to_save_t &operator=(checkpoint_to_save_t &&) noexcept = default;
+    checkpoint_to_save_t(checkpoint_to_save_t const&) = delete;
+    checkpoint_to_save_t& operator=(checkpoint_to_save_t const&) = delete;
+    checkpoint_to_save_t(checkpoint_to_save_t&&) noexcept = default;
+    checkpoint_to_save_t& operator=(checkpoint_to_save_t&&) noexcept = default;
     ~checkpoint_to_save_t() noexcept = default;
 
     /** Optional hoist: pre-size the payload to @p total_bytes and the entry table to
@@ -164,10 +164,10 @@ struct checkpoint_to_save_t {
 struct checkpoint_to_load_t {
 
     checkpoint_to_load_t() noexcept = default;
-    checkpoint_to_load_t(checkpoint_to_load_t const &) = delete;
-    checkpoint_to_load_t &operator=(checkpoint_to_load_t const &) = delete;
-    checkpoint_to_load_t(checkpoint_to_load_t &&) noexcept = default;
-    checkpoint_to_load_t &operator=(checkpoint_to_load_t &&) noexcept = default;
+    checkpoint_to_load_t(checkpoint_to_load_t const&) = delete;
+    checkpoint_to_load_t& operator=(checkpoint_to_load_t const&) = delete;
+    checkpoint_to_load_t(checkpoint_to_load_t&&) noexcept = default;
+    checkpoint_to_load_t& operator=(checkpoint_to_load_t&&) noexcept = default;
     ~checkpoint_to_load_t() noexcept = default;
 
     /** Map @p path read-only and index it; the mapping lives as long as the container. */
@@ -215,7 +215,7 @@ struct checkpoint_to_load_t {
     st::hash_map<u64_t, u32_t> index_ {};
 
     /** The entry named @p name in @p dtype , or null. */
-    [[nodiscard]] checkpoint_entry_t const *find_(sz::string_view_t name, checkpoint_dtype_t dtype) const noexcept;
+    [[nodiscard]] checkpoint_entry_t const* find_(sz::string_view_t name, checkpoint_dtype_t dtype) const noexcept;
 
     /** The metadata pairs. */
     st::basic_vector<checkpoint_metadata_t> metadata_ {};

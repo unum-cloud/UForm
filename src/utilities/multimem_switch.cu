@@ -15,7 +15,7 @@
 using namespace unum::uform::utilities;
 
 /** One switch-reduced load: the sum of this address across every bound replica. */
-[[nodiscard]] static __device__ inline f32_t multimem_load_reduce_add_(f32_t const *multimem_address) noexcept {
+[[nodiscard]] static __device__ inline f32_t multimem_load_reduce_add_(f32_t const* multimem_address) noexcept {
     f32_t value;
     asm volatile("multimem.ld_reduce.relaxed.sys.global.add.f32 %0, [%1];"
                  : "=f"(value)
@@ -25,7 +25,7 @@ using namespace unum::uform::utilities;
 }
 
 /** One multicast release-add on the arrival counter of every replica. */
-static __device__ inline void multimem_red_add_release_(u32_t *multimem_address, u32_t value) noexcept {
+static __device__ inline void multimem_red_add_release_(u32_t* multimem_address, u32_t value) noexcept {
     asm volatile("multimem.red.release.sys.global.add.u32 [%0], %1;" : : "l"(multimem_address), "r"(value) : "memory");
 }
 

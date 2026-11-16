@@ -122,8 +122,8 @@ struct contrastive_tokens_t {
 
     /** Validate @p config and allocate every tile, pack and scratch tensor off @p arena ,
      *  calling the kernels of @p numerics . */
-    [[nodiscard]] static expected<contrastive_tokens_t> make(gpu_arena_t &arena, contrastive_tokens_config_t config,
-                                                             gpu_numerics_t const &numerics) noexcept;
+    [[nodiscard]] static expected<contrastive_tokens_t> make(gpu_arena_t& arena, contrastive_tokens_config_t config,
+                                                             gpu_numerics_t const& numerics) noexcept;
 
     /**
      *  @brief Single-GPU forward and backward for one step.
@@ -142,16 +142,16 @@ struct contrastive_tokens_t {
      *  @param[out] bias_grad Optional @b [temperature_groups] summands.
      */
     [[nodiscard]] expected_t operator()(bf16r2_view_t token_vectors, u32r1_view_t token_offsets,
-                                        multimodal_batch_view_t const &batch, contrastive_relations_view_t relations,
+                                        multimodal_batch_view_t const& batch, contrastive_relations_view_t relations,
                                         contrastive_recipe_t recipe, f32r1_span_t loss_out,
-                                        bf16r2_span_t token_vectors_grad, gpu_stream_t &stream,
+                                        bf16r2_span_t token_vectors_grad, gpu_stream_t& stream,
                                         f32r1_span_t log_inverse_temperature_grad = {},
                                         f32r1_span_t bias_grad = {}) noexcept;
 
     /** Lay out this GPU's query tile and documents from the token head's rows, and
      *  pack the documents. */
     [[nodiscard]] expected_t stage(bf16r2_view_t token_vectors, u32r1_view_t token_offsets,
-                                   multimodal_batch_view_t const &batch, gpu_stream_t &stream) noexcept;
+                                   multimodal_batch_view_t const& batch, gpu_stream_t& stream) noexcept;
 
     /** This GPU's own query tile, as every GPU scores it. */
     [[nodiscard]] gpu_query_subgraph_t query_subgraph() const noexcept {
@@ -161,14 +161,14 @@ struct contrastive_tokens_t {
     /** Score query tile @p subgraph , numbered @p subgraph_index , against this GPU's
      *  documents into @p raw_scores @b [segments_per_gpu,segments_per_gpu] , query segments
      *  by document segments. */
-    [[nodiscard]] expected_t score(std::size_t subgraph_index, gpu_query_subgraph_t const &subgraph,
-                                   f32r2_span_t raw_scores, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t score(std::size_t subgraph_index, gpu_query_subgraph_t const& subgraph,
+                                   f32r2_span_t raw_scores, gpu_stream_t& stream) noexcept;
 
     /** Differentiate @ref score for @p subgraph under @p score_grad , the gradient of its raw
      *  scores: the query-tile force into @p query_grad , overwritten, and the document force added
      *  onto this GPU's own. */
-    [[nodiscard]] expected_t force(std::size_t subgraph_index, gpu_query_subgraph_t const &subgraph,
-                                   f32r2_view_t score_grad, f32r2_span_t query_grad, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t force(std::size_t subgraph_index, gpu_query_subgraph_t const& subgraph,
+                                   f32r2_view_t score_grad, f32r2_span_t query_grad, gpu_stream_t& stream) noexcept;
 
     /** Turn the @b [1,subgraphs,segments,segments] raw score rows of this GPU's queries into the
      *  score gradient in place, through the pair loss over @p relations whose PAD columns are
@@ -176,13 +176,13 @@ struct contrastive_tokens_t {
      *  document spans and query count. */
     [[nodiscard]] expected_t relax(f32r4_span_t scores, contrastive_relations_view_t relations,
                                    contrastive_recipe_t recipe, u32r1_view_t world_document_lengths,
-                                   f32r1_view_t live_queries, f32r1_span_t loss_out, gpu_stream_t &stream,
+                                   f32r1_view_t live_queries, f32r1_span_t loss_out, gpu_stream_t& stream,
                                    f32r1_span_t log_inverse_temperature_grad, f32r1_span_t bias_grad) noexcept;
 
     /** Fold this GPU's summed query-tile force and document force into @p token_vectors_grad . */
     [[nodiscard]] expected_t finish(f32r2_view_t query_grad, u32r1_view_t token_offsets,
-                                    multimodal_batch_view_t const &batch, bf16r2_span_t token_vectors_grad,
-                                    gpu_stream_t &stream) noexcept;
+                                    multimodal_batch_view_t const& batch, bf16r2_span_t token_vectors_grad,
+                                    gpu_stream_t& stream) noexcept;
 
     /** @b [segments_per_gpu] this GPU's document token spans by segment, zero for the rest. */
     [[nodiscard]] u32r1_view_t document_lengths() const noexcept { return document_lengths_.view(); }
@@ -262,7 +262,7 @@ struct contrastive_tokens_t {
     f32r1_tensor_arena_t scores_ {};
 
     /** Band @p band_index 's pack inside @p packs , band after band of @p band_bytes each. */
-    [[nodiscard]] static b8r1_span_t packed_band_(b8r1_tensor_arena_t &packs, std::size_t band_bytes,
+    [[nodiscard]] static b8r1_span_t packed_band_(b8r1_tensor_arena_t& packs, std::size_t band_bytes,
                                                   std::size_t band_index) noexcept {
         nk::tensor_span<b8_t, 2> const bands = packs.span().reshape<2>({packs.extent(0) / band_bytes, band_bytes});
         return bands[band_index, nk::slice];
@@ -335,8 +335,8 @@ struct distributed_contrastive_tokens_t {
      *  @param[in] numerics The NumKong kernels every GPU's products call.
      */
     [[nodiscard]] static expected<distributed_contrastive_tokens_t> make(
-        multimem_domain_t &domain, colocated_domain_t &colocated, std::span<gpu_arena_t> arenas,
-        std::span<gpu_stream_t> streams, contrastive_tokens_config_t config, gpu_numerics_t const &numerics,
+        multimem_domain_t& domain, colocated_domain_t& colocated, std::span<gpu_arena_t> arenas,
+        std::span<gpu_stream_t> streams, contrastive_tokens_config_t config, gpu_numerics_t const& numerics,
         f64_t timeout_seconds = 120.0) noexcept;
 
     /** One step over every local GPU, enqueued phase by phase across @p inputs and @p streams . */
@@ -395,12 +395,12 @@ struct distributed_contrastive_tokens_t {
     [[nodiscard]] f32r3_view_t world_scores_(std::size_t world_gpu, std::size_t block) noexcept;
 
     /** The step's phases for GPU @p rank , each enqueued before the barrier that closes it. */
-    [[nodiscard]] expected_t stage_(std::size_t rank, gpu_tokens_inputs_t const &inputs, gpu_stream_t &stream) noexcept;
-    [[nodiscard]] expected_t score_(std::size_t rank, gpu_tokens_inputs_t const &inputs, gpu_stream_t &stream) noexcept;
-    [[nodiscard]] expected_t relax_(std::size_t rank, gpu_tokens_inputs_t const &inputs, gpu_stream_t &stream) noexcept;
-    [[nodiscard]] expected_t force_(std::size_t rank, gpu_tokens_inputs_t const &inputs, gpu_stream_t &stream) noexcept;
-    [[nodiscard]] expected_t reduce_(std::size_t rank, gpu_tokens_inputs_t const &inputs,
-                                     gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t stage_(std::size_t rank, gpu_tokens_inputs_t const& inputs, gpu_stream_t& stream) noexcept;
+    [[nodiscard]] expected_t score_(std::size_t rank, gpu_tokens_inputs_t const& inputs, gpu_stream_t& stream) noexcept;
+    [[nodiscard]] expected_t relax_(std::size_t rank, gpu_tokens_inputs_t const& inputs, gpu_stream_t& stream) noexcept;
+    [[nodiscard]] expected_t force_(std::size_t rank, gpu_tokens_inputs_t const& inputs, gpu_stream_t& stream) noexcept;
+    [[nodiscard]] expected_t reduce_(std::size_t rank, gpu_tokens_inputs_t const& inputs,
+                                     gpu_stream_t& stream) noexcept;
 
     /** The baked geometry. */
     contrastive_tokens_config_t config_ {};
@@ -409,10 +409,10 @@ struct distributed_contrastive_tokens_t {
     per_gpu_array<contrastive_tokens_t> losses_ {};
 
     /** The main-owned level-1 surface, borrowed. */
-    multimem_domain_t *domain_ = nullptr;
+    multimem_domain_t* domain_ = nullptr;
 
     /** The main-owned level-2 surface, borrowed; its topology counts the domains. */
-    colocated_domain_t *colocated_ = nullptr;
+    colocated_domain_t* colocated_ = nullptr;
 
     /** This process's own multimem domain coordinate, the world GPU index's major part. */
     u32_t home_domain_index_ = 0;

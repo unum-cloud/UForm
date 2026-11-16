@@ -14,8 +14,8 @@
 
 #pragma region Mesh
 
-static void uform_js_mesh_finalize(napi_env env, void *data, void *hint) {
-    uform_js_mesh_t *const mesh = (uform_js_mesh_t *)data;
+static void uform_js_mesh_finalize(napi_env env, void* data, void* hint) {
+    uform_js_mesh_t* const mesh = (uform_js_mesh_t*)data;
     (void)env;
     (void)hint;
     if (!mesh) return;
@@ -30,7 +30,7 @@ static napi_value uform_js_mesh_bootstrap(napi_env env, napi_callback_info info)
     uform_outcome_t outcome = {uform_status_success_k, NULL};
     uform_mesh_t handle = NULL;
     uform_mesh_bootstrap_t bootstrap = {.mesh = &handle, .outcome = &outcome};
-    uform_mesh_options_t *const options = &bootstrap.options;
+    uform_mesh_options_t* const options = &bootstrap.options;
     char *directory = NULL, *job = NULL;
     if (!uform_js_arguments(env, info, 2, arguments, NULL) ||
         !uform_js_executor_from_value(env, arguments[0], &bootstrap.executor) ||
@@ -57,9 +57,9 @@ static napi_value uform_js_mesh_bootstrap(napi_env env, napi_callback_info info)
     free(job);
     if (!uform_js_succeeded(env, &outcome)) return NULL;
 
-    uform_js_addon_t *const addon = uform_js_addon(env);
+    uform_js_addon_t* const addon = uform_js_addon(env);
     napi_value const instance = addon ? uform_js_instantiate(env, addon->mesh_class) : NULL;
-    uform_js_mesh_t *const mesh = (uform_js_mesh_t *)calloc(1, sizeof(uform_js_mesh_t));
+    uform_js_mesh_t* const mesh = (uform_js_mesh_t*)calloc(1, sizeof(uform_js_mesh_t));
     if (!instance || !mesh || napi_wrap(env, instance, mesh, uform_js_mesh_finalize, NULL, NULL) != napi_ok) {
         free(mesh);
         uform_mesh_free(handle);
@@ -72,14 +72,14 @@ static napi_value uform_js_mesh_bootstrap(napi_env env, napi_callback_info info)
 
 /** @c describe() → the mesh's shape and this process's place in it. */
 static napi_value uform_js_mesh_describe(napi_env env, napi_callback_info info) {
-    uform_js_mesh_t *const mesh = (uform_js_mesh_t *)uform_js_self(env, info, 0, NULL, NULL);
+    uform_js_mesh_t* const mesh = (uform_js_mesh_t*)uform_js_self(env, info, 0, NULL, NULL);
     if (!mesh) return NULL;
     uform_outcome_t outcome = {uform_status_success_k, NULL};
     uform_mesh_description_t description = {0};
     uform_mesh_describe_t describe = {.mesh = mesh->handle, .outcome = &outcome, .description = &description};
     uform_mesh_describe(&describe);
     if (!uform_js_succeeded(env, &outcome)) return NULL;
-    static char const *const names[] = {"gpusPerHostDomain", "gpusPerMultimemDomain", "gpusPerColocatedDomain",
+    static char const* const names[] = {"gpusPerHostDomain", "gpusPerMultimemDomain", "gpusPerColocatedDomain",
                                         "hostDomainIndex",   "firstGpuIndex",         "multimemTier",
                                         "gpuClass"};
     napi_value const values[] = {uform_js_number(env, description.gpus_per_host_domain),
@@ -94,7 +94,7 @@ static napi_value uform_js_mesh_describe(napi_env env, napi_callback_info info) 
 
 /** @c free() - leaves the mesh now; every trainer borrowing it must be freed first; idempotent. */
 static napi_value uform_js_mesh_release(napi_env env, napi_callback_info info) {
-    uform_js_mesh_t *const mesh = (uform_js_mesh_t *)uform_js_self(env, info, 0, NULL, NULL);
+    uform_js_mesh_t* const mesh = (uform_js_mesh_t*)uform_js_self(env, info, 0, NULL, NULL);
     if (!mesh) return NULL;
     uform_mesh_free(mesh->handle);
     mesh->handle = NULL;
@@ -130,8 +130,8 @@ typedef struct uform_js_trainer_call_t {
     size_t count;
 } uform_js_trainer_call_t;
 
-static void uform_js_trainer_finalize(napi_env env, void *data, void *hint) {
-    uform_js_trainer_t *const trainer = (uform_js_trainer_t *)data;
+static void uform_js_trainer_finalize(napi_env env, void* data, void* hint) {
+    uform_js_trainer_t* const trainer = (uform_js_trainer_t*)data;
     (void)hint;
     if (!trainer) return;
     uform_trainer_free(trainer->handle);
@@ -140,12 +140,12 @@ static void uform_js_trainer_finalize(napi_env env, void *data, void *hint) {
 }
 
 /** Reads a named size of an options object. */
-static bool uform_js_size_field(napi_env env, napi_value object, char const *name, size_t *result) {
+static bool uform_js_size_field(napi_env env, napi_value object, char const* name, size_t* result) {
     return uform_js_size_from_value(env, uform_js_property(env, object, name), name, result);
 }
 
 /** Reads a named real of an options object into a single-precision field. */
-static bool uform_js_float_field(napi_env env, napi_value object, char const *name, float *result) {
+static bool uform_js_float_field(napi_env env, napi_value object, char const* name, float* result) {
     double wide = 0;
     if (!uform_js_double_from_value(env, uform_js_property(env, object, name), name, &wide)) return false;
     *result = (float)wide;
@@ -154,7 +154,7 @@ static bool uform_js_float_field(napi_env env, napi_value object, char const *na
 
 /** Reads a batch envelope: the row, segment, column, bag and choice capacities, and the image,
  *  video and audio slices. */
-static bool uform_js_batch_from_value(napi_env env, napi_value value, uform_batch_shape_t *batch) {
+static bool uform_js_batch_from_value(napi_env env, napi_value value, uform_batch_shape_t* batch) {
     napi_value const image = uform_js_property(env, value, "image");
     napi_value const video = uform_js_property(env, value, "video");
     napi_value const audio = uform_js_property(env, value, "audio");
@@ -174,7 +174,7 @@ static bool uform_js_batch_from_value(napi_env env, napi_value value, uform_batc
 }
 
 /** Reads the masked objective's corruption and head weights. */
-static bool uform_js_masking_from_value(napi_env env, napi_value value, uform_masking_t *masking) {
+static bool uform_js_masking_from_value(napi_env env, napi_value value, uform_masking_t* masking) {
     return uform_js_float_field(env, value, "tokenMaskProbability", &masking->token_mask_probability) &&
            uform_js_float_field(env, value, "tokenMeanSpan", &masking->token_mean_span) &&
            uform_js_float_field(env, value, "replaceFraction", &masking->replace_fraction) &&
@@ -189,8 +189,8 @@ static bool uform_js_masking_from_value(napi_env env, napi_value value, uform_ma
 }
 
 /** Reads the contrastive loss's scoring; the Matryoshka widths land in a block the caller frees. */
-static bool uform_js_contrastive_from_value(napi_env env, napi_value value, uform_contrastive_t *contrastive,
-                                            size_t **widths) {
+static bool uform_js_contrastive_from_value(napi_env env, napi_value value, uform_contrastive_t* contrastive,
+                                            size_t** widths) {
     size_t negatives = 0, pair_loss = 0;
     if (!uform_js_size_field(env, value, "temperatureGroups", &contrastive->temperature_groups) ||
         !uform_js_float_field(env, value, "inverseTemperature", &contrastive->inverse_temperature) ||
@@ -202,12 +202,12 @@ static bool uform_js_contrastive_from_value(napi_env env, napi_value value, ufor
         return false;
     contrastive->negatives = (uform_negatives_t)negatives;
     contrastive->pair_loss = (uform_pair_loss_form_t)pair_loss;
-    int32_t *ordinals = NULL;
+    int32_t* ordinals = NULL;
     size_t count = 0;
     if (!uform_js_ordinals_from_value(env, uform_js_property(env, value, "matryoshkaDimensions"),
                                       "matryoshkaDimensions", &ordinals, &count))
         return false;
-    *widths = count ? (size_t *)malloc(count * sizeof(size_t)) : NULL;
+    *widths = count ? (size_t*)malloc(count * sizeof(size_t)) : NULL;
     if (count && !*widths) {
         free(ordinals);
         return uform_js_throw(env, uform_status_out_of_memory_k, "Could not copy the Matryoshka widths");
@@ -221,7 +221,7 @@ static bool uform_js_contrastive_from_value(napi_env env, napi_value value, ufor
 
 /** Reads the late-interaction loss's scoring of the per-token vectors. */
 static bool uform_js_late_interaction_from_value(napi_env env, napi_value value,
-                                                 uform_late_interaction_t *late_interaction) {
+                                                 uform_late_interaction_t* late_interaction) {
     size_t pair_loss = 0;
     if (!uform_js_float_field(env, value, "weight", &late_interaction->weight) ||
         !uform_js_size_field(env, value, "width", &late_interaction->width) ||
@@ -245,12 +245,12 @@ static napi_value uform_js_trainer_init_vram(napi_env env, napi_callback_info in
     uform_outcome_t outcome = {uform_status_success_k, NULL};
     uform_trainer_t handle = NULL;
     uform_trainer_init_vram_t init = {.trainer = &handle, .outcome = &outcome};
-    uform_js_addon_t *const addon = uform_js_addon(env);
+    uform_js_addon_t* const addon = uform_js_addon(env);
     if (!addon || !uform_js_arguments(env, info, 3, arguments, NULL) ||
         !uform_js_executor_from_value(env, arguments[0], &init.executor))
         return NULL;
     if (!uform_js_value_absent(env, arguments[1])) {
-        uform_js_mesh_t const *const mesh = (uform_js_mesh_t const *)uform_js_unwrap_instance(
+        uform_js_mesh_t const* const mesh = (uform_js_mesh_t const*)uform_js_unwrap_instance(
             env, arguments[1], addon->mesh_class, "mesh", "must be a Mesh");
         if (!mesh) return NULL;
         init.mesh = mesh->handle;
@@ -260,8 +260,8 @@ static napi_value uform_js_trainer_init_vram(napi_env env, napi_callback_info in
     napi_value const choices = uform_js_property(env, config, "choices");
     napi_value const resume = uform_js_property(env, config, "resume");
     size_t objective = 0, seed = 0;
-    size_t *widths = NULL;
-    char *resume_path = NULL;
+    size_t* widths = NULL;
+    char* resume_path = NULL;
     if (!uform_js_size_field(env, config, "depth", &init.depth) ||
         !uform_js_size_field(env, config, "hidden", &init.hidden) ||
         !uform_js_size_field(env, config, "objective", &objective) ||
@@ -292,7 +292,7 @@ static napi_value uform_js_trainer_init_vram(napi_env env, napi_callback_info in
     if (!uform_js_succeeded(env, &outcome)) return NULL;
 
     napi_value const instance = uform_js_instantiate(env, addon->trainer_class);
-    uform_js_trainer_t *const trainer = (uform_js_trainer_t *)calloc(1, sizeof(uform_js_trainer_t));
+    uform_js_trainer_t* const trainer = (uform_js_trainer_t*)calloc(1, sizeof(uform_js_trainer_t));
     bool const held = !init.mesh ||
                       (trainer && napi_create_reference(env, arguments[1], 1, &trainer->mesh_reference) == napi_ok);
     if (!instance || !trainer || !held ||
@@ -308,9 +308,9 @@ static napi_value uform_js_trainer_init_vram(napi_env env, napi_callback_info in
 }
 
 /** Reads the receiver of a trainer verb, refusing a freed one. */
-static uform_js_trainer_t *uform_js_trainer_live(napi_env env, napi_callback_info info, size_t wanted,
-                                                 napi_value *arguments, napi_value *self) {
-    uform_js_trainer_t *const trainer = (uform_js_trainer_t *)uform_js_self(env, info, wanted, arguments, self);
+static uform_js_trainer_t* uform_js_trainer_live(napi_env env, napi_callback_info info, size_t wanted,
+                                                 napi_value* arguments, napi_value* self) {
+    uform_js_trainer_t* const trainer = (uform_js_trainer_t*)uform_js_self(env, info, wanted, arguments, self);
     if (trainer && !trainer->handle) {
         uform_js_throw(env, uform_status_invalid_argument_k, "The trainer was freed");
         return NULL;
@@ -318,10 +318,10 @@ static uform_js_trainer_t *uform_js_trainer_live(napi_env env, napi_callback_inf
     return trainer;
 }
 
-static napi_value uform_js_finish_step(napi_env env, uform_js_call_t *call, napi_value const *slots) {
-    uform_js_trainer_call_t const *const step = (uform_js_trainer_call_t const *)call;
-    uform_trainer_step_stats_t const *const stats = &step->stats;
-    static char const *const names[] = {"step",
+static napi_value uform_js_finish_step(napi_env env, uform_js_call_t* call, napi_value const* slots) {
+    uform_js_trainer_call_t const* const step = (uform_js_trainer_call_t const*)call;
+    uform_trainer_step_stats_t const* const stats = &step->stats;
+    static char const* const names[] = {"step",
                                         "learningRate",
                                         "loss",
                                         "contrastiveLoss",
@@ -360,8 +360,8 @@ static napi_value uform_js_finish_step(napi_env env, uform_js_call_t *call, napi
 
 /** Reads one edge set: its widened offsets, its borrowed ids, and its @b optional
  *  borrowed weights. */
-static bool uform_js_edges_from_value(napi_env env, napi_value const *arguments, uform_js_call_t *call,
-                                      uform_edges_view_t *edges) {
+static bool uform_js_edges_from_value(napi_env env, napi_value const* arguments, uform_js_call_t* call,
+                                      uform_edges_view_t* edges) {
     size_t count = 0, ids_count = 0, weights_count = 0;
     void *ids = NULL, *weights = NULL;
     if (!uform_js_offsets_from_value(env, arguments[0], "edges", call, &edges->offsets, &count)) return false;
@@ -372,15 +372,15 @@ static bool uform_js_edges_from_value(napi_env env, napi_value const *arguments,
         return false;
     if (edges->offsets[count] > ids_count || (weights && weights_count != ids_count))
         return uform_js_throw(env, uform_status_shape_mismatch_k, "The edges reach past their ids or weights");
-    edges->ids = (uint32_t const *)ids;
-    edges->weights = (float const *)weights;
+    edges->ids = (uint32_t const*)ids;
+    edges->weights = (float const*)weights;
     return true;
 }
 
 /** Reads the @b optional choices and their targets, two tapes of one entry per item each, or
  *  neither; the library checks each target entry is as long as its choice entry. */
-static bool uform_js_choices_from_value(napi_env env, napi_value const *arguments, size_t count, uform_js_call_t *call,
-                                        uform_tape_view_t *choices, uform_tape_view_t *targets) {
+static bool uform_js_choices_from_value(napi_env env, napi_value const* arguments, size_t count, uform_js_call_t* call,
+                                        uform_tape_view_t* choices, uform_tape_view_t* targets) {
     bool const with_choices = !uform_js_value_absent(env, arguments[1]);
     if (with_choices == uform_js_value_absent(env, arguments[3]))
         return uform_js_throw(env, uform_status_invalid_argument_k, "Pass both the choices and their targets");
@@ -402,11 +402,11 @@ static bool uform_js_choices_from_value(napi_env env, napi_value const *argument
  *  outputsScalar) → @c {stats, embeddings}, the embeddings present when an arena was given. */
 static napi_value uform_js_trainer_step(napi_env env, napi_callback_info info) {
     napi_value arguments[22], self = NULL, deferred = NULL;
-    uform_js_trainer_t *const trainer = uform_js_trainer_live(env, info, 22, arguments, &self);
+    uform_js_trainer_t* const trainer = uform_js_trainer_live(env, info, 22, arguments, &self);
     if (!trainer) return NULL;
     uform_js_trainer_call_t local;
     uform_trainer_step_t step = {.trainer = trainer->handle};
-    uform_js_trainer_call_t *const call = (uform_js_trainer_call_t *)uform_js_call_open_on(
+    uform_js_trainer_call_t* const call = (uform_js_trainer_call_t*)uform_js_call_open_on(
         env, arguments, &local.call, sizeof(local), &step.executor, &step.completion);
     if (!call) return NULL;
     void *modalities = NULL, *sides = NULL;
@@ -441,8 +441,8 @@ static napi_value uform_js_trainer_step(napi_env env, napi_callback_info info) {
         arguments[13], arguments[14], arguments[15], arguments[16], arguments[17], arguments[18], arguments[19]};
     call->call.finish = uform_js_finish_step;
     call->count = step.count;
-    step.modalities = (uform_modality_t const *)modalities;
-    step.sides = (uform_late_interaction_side_t const *)sides;
+    step.modalities = (uform_modality_t const*)modalities;
+    step.sides = (uform_late_interaction_side_t const*)sides;
     step.outcome = &call->call.outcome;
     step.embeddings = with_arena ? &call->embeddings : NULL;
     step.stats = &call->stats;
@@ -451,7 +451,7 @@ static napi_value uform_js_trainer_step(napi_env env, napi_callback_info info) {
     return uform_js_call_answer(env, &call->call, &local.call, slots, deferred);
 }
 
-static napi_value uform_js_finish_nothing(napi_env env, uform_js_call_t *call, napi_value const *slots) {
+static napi_value uform_js_finish_nothing(napi_env env, uform_js_call_t* call, napi_value const* slots) {
     (void)call;
     (void)slots;
     return uform_js_undefined(env);
@@ -460,11 +460,11 @@ static napi_value uform_js_finish_nothing(napi_env env, uform_js_call_t *call, n
 /** @c save(executor, completion, path) - writes the checkpoint, renamed into place once whole. */
 static napi_value uform_js_trainer_save(napi_env env, napi_callback_info info) {
     napi_value arguments[3], self = NULL, deferred = NULL;
-    uform_js_trainer_t *const trainer = uform_js_trainer_live(env, info, 3, arguments, &self);
+    uform_js_trainer_t* const trainer = uform_js_trainer_live(env, info, 3, arguments, &self);
     if (!trainer) return NULL;
     uform_js_call_t local;
     uform_trainer_save_t save = {.trainer = trainer->handle};
-    uform_js_call_t *const call = uform_js_call_open_on(env, arguments, &local, sizeof(local), &save.executor,
+    uform_js_call_t* const call = uform_js_call_open_on(env, arguments, &local, sizeof(local), &save.executor,
                                                         &save.completion);
     if (!call) return NULL;
     if (!(call->owned[0] = uform_js_string_from_value(env, arguments[2], "path", &save.path))) {
@@ -481,7 +481,7 @@ static napi_value uform_js_trainer_save(napi_env env, napi_callback_info info) {
 
 /** @c free() - releases the trainer and lets go of its mesh; idempotent. */
 static napi_value uform_js_trainer_release(napi_env env, napi_callback_info info) {
-    uform_js_trainer_t *const trainer = (uform_js_trainer_t *)uform_js_self(env, info, 0, NULL, NULL);
+    uform_js_trainer_t* const trainer = (uform_js_trainer_t*)uform_js_self(env, info, 0, NULL, NULL);
     if (!trainer) return NULL;
     uform_trainer_free(trainer->handle);
     trainer->handle = NULL;

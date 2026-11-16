@@ -37,7 +37,7 @@ struct entries_rows_t {
 /** Reserve the entries rows of @p threads threads for a tower of @p geometry behind @p cursor :
  *  each as wide as the widest block product, which also holds M-RoPE's angle, cosine and sine rows
  *  and a widened head behind them, or the widest patch. */
-[[nodiscard]] inline static entries_rows_t reserve_entries(scratch_cursor_t &cursor, geometry_t const &geometry,
+[[nodiscard]] inline static entries_rows_t reserve_entries(scratch_cursor_t& cursor, geometry_t const& geometry,
                                                            std::size_t threads) noexcept {
     std::size_t const patch = patch_scalars(geometry);
     std::size_t const width = fu::max_of<std::size_t>(fu::max_of<std::size_t>(3 * geometry.hidden, 2 * geometry.ffn()),
@@ -52,7 +52,7 @@ struct ram_placer_t {
 
     /** Copy @p values into @p target , a fresh array in host memory. */
     template <typename value_type_>
-    [[nodiscard]] expected_t place(std::span<value_type_ const> values, placed_array<value_type_> &target,
+    [[nodiscard]] expected_t place(std::span<value_type_ const> values, placed_array<value_type_>& target,
                                    sz::string_view_t what) const noexcept {
         target = placed_array<value_type_> {nk::allocator<value_type_> {allocator}};
         if (values.empty()) return {};
@@ -88,7 +88,7 @@ struct ram_steps {
     /** Run @p body once per task of @p tasks , each with its thread's row of
      *  @ref entries_rows_t::workers , reporting the first NumKong failure. */
     template <typename body_type_>
-    [[nodiscard]] expected_t each(std::size_t tasks, sz::string_view_t what, body_type_ const &body) noexcept {
+    [[nodiscard]] expected_t each(std::size_t tasks, sz::string_view_t what, body_type_ const& body) noexcept {
         std::size_t const width = rows.workers.extent(1);
         nk_status_t failure = nk_success_k;
         uu::status_t const status = pool.for_n(tasks, [&](std::size_t task, std::size_t thread) noexcept {
@@ -104,7 +104,7 @@ struct ram_steps {
      *  first NumKong failure. */
     template <typename body_type_>
     [[nodiscard]] expected_t split(std::size_t tasks, std::size_t tile, sz::string_view_t what,
-                                   body_type_ const &body) noexcept {
+                                   body_type_ const& body) noexcept {
         return each(uu::divide_round_up(tasks, tile), what, [&](std::size_t index, f32r1_span_t) noexcept {
             std::size_t const first = index * tile;
             return body(first, fu::min_of(tile, tasks - first));
@@ -134,7 +134,7 @@ struct ram_steps {
     }
 
     /** The host @c mrope clamps each coordinate itself, so @p positions goes unused. */
-    [[nodiscard]] expected_t fill_coords(segment_layout_t const &layout, nk::tensor_view<u16_t, 2> image_shapes,
+    [[nodiscard]] expected_t fill_coords(segment_layout_t const& layout, nk::tensor_view<u16_t, 2> image_shapes,
                                          nk::tensor_view<u16_t, 2> video_shapes, u32_t tube_frames, u32_t frame_stride,
                                          u32_t, i16r2_span_t coords) noexcept {
         return dispatched(
@@ -142,7 +142,7 @@ struct ram_steps {
             "coordinate fill");
     }
 
-    [[nodiscard]] expected_t gather_bytes(segment_layout_t const &layout, nk::tensor_view<token_id_t, 1> tokens,
+    [[nodiscard]] expected_t gather_bytes(segment_layout_t const& layout, nk::tensor_view<token_id_t, 1> tokens,
                                           bf16r2_view_t table, bf16r2_span_t rows) noexcept {
         return dispatched(encoder::gather_bytes(layout, tokens, table, rows, pool), "byte gather");
     }
@@ -153,7 +153,7 @@ struct ram_steps {
         return expected_t::fail(status, "{} dispatch was refused by the pool", what);
     }
 
-    [[nodiscard]] expected_t stage_patches(segment_layout_t const &layout, modality_t target,
+    [[nodiscard]] expected_t stage_patches(segment_layout_t const& layout, modality_t target,
                                            nk::tensor_view<pixel_t, 3> pixels, f32r1_view_t mean,
                                            f32r1_view_t inverse_std, bf16r2_span_t patches) noexcept {
         f32r2_span_t const affine {rows.affine.data(), 2, pixels.extent(1) * pixels.extent(2)};
@@ -163,7 +163,7 @@ struct ram_steps {
         });
     }
 
-    [[nodiscard]] expected_t stage_frames(segment_layout_t const &layout, nk::tensor_view<f32_t, 2> samples,
+    [[nodiscard]] expected_t stage_frames(segment_layout_t const& layout, nk::tensor_view<f32_t, 2> samples,
                                           bf16r2_span_t frames) noexcept {
         return each(layout.lengths.extent(0), "frame staging", [&](std::size_t segment, f32r1_span_t) noexcept {
             return encoder::stage_frames<elementwise_kit_t>(layout, segment, samples, frames);
@@ -207,8 +207,8 @@ struct ram_tower {
      *  @par Statuses:
      *  - @c status_t::invalid_argument_k A tensor is missing or misshapen.
      */
-    [[nodiscard]] static expected<ram_tower> make(uu::checkpoint_to_load_t const &checkpoint,
-                                                  geometry_t const &geometry, precision_t precision) noexcept {
+    [[nodiscard]] static expected<ram_tower> make(uu::checkpoint_to_load_t const& checkpoint,
+                                                  geometry_t const& geometry, precision_t precision) noexcept {
         nk_allocator_t policy {};
         if (nk_status_t const status = nk_allocator_init_heap(&policy, nk_default_alignment_k); status != nk_success_k)
             return expected<ram_tower>::fail(tower_status_of(status), "tower memory setup failed: {}",
@@ -244,7 +244,7 @@ struct ram_tower {
         return encode_steps(steps, weights_, batch, outputs, scratch.subspan(cursor.used));
     }
 
-    [[nodiscard]] tower_weights_t const &weights() const noexcept { return weights_; }
+    [[nodiscard]] tower_weights_t const& weights() const noexcept { return weights_; }
 
   private:
     tower_weights_t weights_ {};

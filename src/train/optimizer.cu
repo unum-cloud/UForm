@@ -18,7 +18,7 @@ using namespace unum::uform::utilities;
 /** Read one gradient scalar at @p row , @p column : the reduced Float32 world sum when present —
  *  through a rank-2 view over this state's block of the packed world tape — the local BFloat16
  *  buffer otherwise, read straight through its rank-2 handle. */
-[[nodiscard]] __device__ inline f32_t adafactor_gradient_(adafactor_state_t const &state, f32r1_view_t reduced,
+[[nodiscard]] __device__ inline f32_t adafactor_gradient_(adafactor_state_t const& state, f32r1_view_t reduced,
                                                           u32_t row, u32_t column) noexcept {
     if (!reduced.empty()) {
         std::size_t const rows = state.weights_grad.extent(0), cols = state.weights_grad.extent(1);
@@ -78,7 +78,7 @@ static __global__ void __launch_bounds__(kernel_block_size_default_k, 1)
 
 /** The mean of @p state 's row moments, folded by the whole CTA in a fixed order, so every CTA of
  *  every pass that calls it gets the same bits. */
-[[nodiscard]] __device__ inline f32_t adafactor_row_mean_(adafactor_state_t const &state,
+[[nodiscard]] __device__ inline f32_t adafactor_row_mean_(adafactor_state_t const& state,
                                                           f32r1_view_t moments) noexcept {
     u32_t const rows = static_cast<u32_t>(state.weights.extent(0));
     f32_t thread_row_sum = 0.0f;
@@ -160,7 +160,7 @@ static __global__ void adafactor_apply_kernel_(adafactor_state_t state, f32r1_vi
         f32_t const gradient = adafactor_gradient_(state, reduced_gradients, row, column);
         f32_t step = learning_rate * clip_scale * gradient * rsqrtf(variance);
         if (!first_moments.empty()) {
-            f32_t &moment = first_moments[state.gradient_offset + index];
+            f32_t& moment = first_moments[state.gradient_offset + index];
             moment = beta1 * moment + (1.0f - beta1) * clip_scale * gradient * rsqrtf(variance);
             step = learning_rate * moment / first_moment_correction;
         }
@@ -194,7 +194,7 @@ static __global__ void adafactor_reduce_gradient_peer_kernel_(multimem_member_t 
          index += stride) {
         f32_t total_value = 0.0f;
         for (u32_t peer = 0; peer != member.member_count; ++peer) {
-            f32_t const *peer_payload = member.peer_payload(peer);
+            f32_t const* peer_payload = member.peer_payload(peer);
             total_value = __fadd_rn(total_value, peer_payload[shard_begin + index]);
         }
         destination[index] = total_value * world_scale;
@@ -203,9 +203,9 @@ static __global__ void adafactor_reduce_gradient_peer_kernel_(multimem_member_t 
 
 /** Enqueue the domain-reduced gradient of member @p member into @p destination on the tier
  *  @p domain runs. */
-[[nodiscard]] static expected_t reduce_gradient_(multimem_domain_t &domain, std::size_t member,
+[[nodiscard]] static expected_t reduce_gradient_(multimem_domain_t& domain, std::size_t member,
                                                  f32r1_span_t destination, std::size_t shard_begin, f32_t world_scale,
-                                                 gpu_stream_t &stream) noexcept {
+                                                 gpu_stream_t& stream) noexcept {
     dim3 const grid_shape {grid_size_for(destination.extent(0)), 1u, 1u};
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     switch (domain.tier()) {
@@ -222,17 +222,17 @@ static __global__ void adafactor_reduce_gradient_peer_kernel_(multimem_member_t 
 
 /** Enqueue the seeding of @p state 's Float32 master inside @p masters from its
  *  live BFloat16 weights. */
-[[nodiscard]] static expected_t seed_master_(adafactor_state_t const &state, f32r1_tensor_arena_t &masters,
-                                             gpu_numerics_t const &numerics, gpu_stream_t &stream) noexcept {
+[[nodiscard]] static expected_t seed_master_(adafactor_state_t const& state, f32r1_tensor_arena_t& masters,
+                                             gpu_numerics_t const& numerics, gpu_stream_t& stream) noexcept {
     std::size_t const cols = state.weights.extent(1);
     return numkong_result(numerics.cast(state.weights.data(), nk_bf16_k, masters.data() + state.master_offset, nk_f32_k,
                                         cols, stream.numkong()),
                           "master seeding");
 }
 
-expected<adafactor_t> adafactor_t::make(gpu_arena_t &arena, std::span<differentiable_weights_t const> weights,
-                                        adafactor_config_t config, gpu_numerics_t const &numerics,
-                                        gpu_stream_t &stream) noexcept {
+expected<adafactor_t> adafactor_t::make(gpu_arena_t& arena, std::span<differentiable_weights_t const> weights,
+                                        adafactor_config_t config, gpu_numerics_t const& numerics,
+                                        gpu_stream_t& stream) noexcept {
     using result_t = expected<adafactor_t>;
     std::size_t const count = weights.size();
     if (count == 0) return result_t::fail(status_t::invalid_argument_k, "an optimizer needs weights");
@@ -243,14 +243,14 @@ expected<adafactor_t> adafactor_t::make(gpu_arena_t &arena, std::span<differenti
         return result_t::fail(status_t::bad_alloc_k, "state table allocation failed ({})", count);
     std::size_t moment_scalars = 0, master_scalars = 0, gradient_scalars = 0;
     for (std::size_t index = 0; index != count; ++index) {
-        differentiable_weights_t const &matrix = weights[index];
+        differentiable_weights_t const& matrix = weights[index];
         std::size_t const rows = matrix.weights.extent(0), cols = matrix.weights.extent(1);
         if (rows == 0 || cols == 0 || matrix.weights_grad.extent(0) != rows || matrix.weights_grad.extent(1) != cols)
             return result_t::fail(status_t::unsupported_k, "weights {} [{}x{}] disagree with grads [{}x{}]", index,
                                   rows, cols, matrix.weights_grad.extent(0), matrix.weights_grad.extent(1));
         if (sz::failed(optimizer.names_[index].assign(matrix.name.view())))
             return result_t::fail(status_t::bad_alloc_k, "weight name copy failed: {}", matrix.name.view());
-        adafactor_state_t &state = optimizer.states_[index];
+        adafactor_state_t& state = optimizer.states_[index];
         state.weights = matrix.weights;
         state.weights_grad = matrix.weights_grad;
         state.row_moment_offset = moment_scalars;
@@ -281,14 +281,14 @@ expected<adafactor_t> adafactor_t::make(gpu_arena_t &arena, std::span<differenti
         return result_t::fail(status_t::bad_alloc_k, "optimizer state allocation failed ({} moments)", moment_scalars);
     if (expected_t zeroed = zero_async(optimizer.moments_.span(), stream); !zeroed)
         return result_t::fail(std::move(zeroed));
-    for (adafactor_state_t const &state : optimizer.states_)
+    for (adafactor_state_t const& state : optimizer.states_)
         if (state.weights.extent(0) == 1u)
             if (expected_t seeded = seed_master_(state, optimizer.masters_, numerics, stream); !seeded)
                 return result_t::fail(std::move(seeded));
     return result_t {std::move(optimizer)};
 }
 
-expected_t adafactor_t::save(checkpoint_to_save_t &checkpoint, gpu_stream_t &stream) const noexcept {
+expected_t adafactor_t::save(checkpoint_to_save_t& checkpoint, gpu_stream_t& stream) const noexcept {
     st::basic_vector<f32_t> moments, masters, first_moments;
     if (st::failed(moments.resize(st::assume_uninitialized, moments_.numel())) ||
         st::failed(masters.resize(st::assume_uninitialized, masters_.numel())) ||
@@ -302,8 +302,8 @@ expected_t adafactor_t::save(checkpoint_to_save_t &checkpoint, gpu_stream_t &str
     if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
         return cuda_failure(result, "optimizer state download failed");
     for (std::size_t index = 0; index != states_.size(); ++index) {
-        adafactor_state_t const &state = states_[index];
-        auto insert = [&](char const *part, std::span<f32_t const> values) noexcept {
+        adafactor_state_t const& state = states_[index];
+        auto insert = [&](char const* part, std::span<f32_t const> values) noexcept {
             sz::string_t name;
             if (!format_into(name, "optimizer.{}.{}", names_[index].view(), part))
                 return expected_t::fail(status_t::bad_alloc_k, "optimizer state name format failed");
@@ -320,11 +320,11 @@ expected_t adafactor_t::save(checkpoint_to_save_t &checkpoint, gpu_stream_t &str
     return {};
 }
 
-expected_t adafactor_t::load(checkpoint_to_load_t const &checkpoint, gpu_stream_t &stream) noexcept {
+expected_t adafactor_t::load(checkpoint_to_load_t const& checkpoint, gpu_stream_t& stream) noexcept {
     for (std::size_t index = 0; index != states_.size(); ++index) {
-        adafactor_state_t const &state = states_[index];
+        adafactor_state_t const& state = states_[index];
         // Upload the saved part into `destination`, or `restart` it when the file misses that part.
-        auto restore = [&](char const *part, f32r1_span_t destination, auto const &restart) noexcept {
+        auto restore = [&](char const* part, f32r1_span_t destination, auto const& restart) noexcept {
             sz::string_t name;
             if (!format_into(name, "optimizer.{}.{}", names_[index].view(), part))
                 return expected_t::fail(status_t::bad_alloc_k, "optimizer state name format failed");
@@ -358,14 +358,14 @@ expected_t adafactor_t::load(checkpoint_to_load_t const &checkpoint, gpu_stream_
     return {};
 }
 
-expected_t adafactor_t::step(f32_t learning_rate, gpu_stream_t &stream, f32r1_view_t reduced_gradients) noexcept {
+expected_t adafactor_t::step(f32_t learning_rate, gpu_stream_t& stream, f32r1_view_t reduced_gradients) noexcept {
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     ++steps_;
     f32_t const decay = fu::min_of(config_.beta2, 1.0f - std::pow(static_cast<f32_t>(steps_), -config_.decay_exponent));
     // Adam's bias correction, so the first steps move as far as steps without momentum.
     f32_t const first_moment_correction = 1.0f - std::pow(config_.beta1, static_cast<f32_t>(steps_));
     for (std::size_t index = 0; index != states_.size(); ++index) {
-        adafactor_state_t const &state = states_[index];
+        adafactor_state_t const& state = states_[index];
         u32_t const rows = static_cast<u32_t>(state.weights.extent(0));
         std::size_t const cols = state.weights.extent(1);
         u32_t const column_tiles = static_cast<u32_t>(divide_round_up(cols, warp_size_k));
@@ -386,9 +386,9 @@ expected_t adafactor_t::step(f32_t learning_rate, gpu_stream_t &stream, f32r1_vi
 }
 
 expected<distributed_adafactor_t> distributed_adafactor_t::make(
-    multimem_domain_t &domain, infiniband_all_reduce<f32_t> &world_reduce, std::span<gpu_arena_t> arenas,
+    multimem_domain_t& domain, infiniband_all_reduce<f32_t>& world_reduce, std::span<gpu_arena_t> arenas,
     std::span<differentiable_weights_t const> weights, std::size_t weights_per_rank, adafactor_config_t config,
-    gpu_numerics_t const &numerics, std::span<gpu_stream_t> streams, telemetry_ledger_t &ledger) noexcept {
+    gpu_numerics_t const& numerics, std::span<gpu_stream_t> streams, telemetry_ledger_t& ledger) noexcept {
     using result_t = expected<distributed_adafactor_t>;
     std::size_t const gpus = arenas.size();
     bool const single_domain = world_reduce.identity();
@@ -423,7 +423,7 @@ expected<distributed_adafactor_t> distributed_adafactor_t::make(
         }
         // The rank's gradient-boundary probes — inert zero handles when the signals channel is
         // dark. A zero gradient is a legal clean no-op, so every boundary registers as finite-only.
-        auto signal_probe = [&](sz::string_view_t stage, telemetry_probe_t &into) -> expected_t {
+        auto signal_probe = [&](sz::string_view_t stage, telemetry_probe_t& into) -> expected_t {
             sz::string_t name;
             if (!format_into(name, "adafactor/{}/{}", stage, domain.member_offset() + rank))
                 return expected_t::fail(status_t::bad_alloc_k, "probe name formatting failed");
@@ -453,20 +453,20 @@ expected<distributed_adafactor_t> distributed_adafactor_t::make(
     return result_t {std::move(optimizer)};
 }
 
-expected_t distributed_adafactor_t::step(std::size_t rank, f32_t learning_rate, gpu_stream_t &stream) noexcept {
+expected_t distributed_adafactor_t::step(std::size_t rank, f32_t learning_rate, gpu_stream_t& stream) noexcept {
     std::size_t const gpus = ranks_.size();
     if (rank >= gpus) return expected_t::fail(status_t::invalid_argument_k, "rank {} of {}", rank, gpus);
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed ({})", rank);
     std::size_t const member = domain_->member_offset() + rank;
-    gpu_fault_t *const fault = domain_->member(member).fault;
-    f32_t *const window_base = domain_->payload(member).data() + window_.offset;
-    gpu_numerics_t const &numerics = ranks_[rank].state.numerics_;
+    gpu_fault_t* const fault = domain_->member(member).fault;
+    f32_t* const window_base = domain_->payload(member).data() + window_.offset;
+    gpu_numerics_t const& numerics = ranks_[rank].state.numerics_;
     auto stage = [&]() noexcept -> expected_t {
         expected_t staged {};
         nk::tensor_view<adafactor_state_t, 1> const states = ranks_[rank].state.states();
         for (std::size_t index = 0; index != states.extent(0) && staged; ++index) {
-            adafactor_state_t const &state = states[index];
+            adafactor_state_t const& state = states[index];
             std::size_t const scalars = state.weights.extent(0) * state.weights.extent(1);
             staged = numkong_result(
                 numerics.cast(state.weights_grad.data(), nk_bf16_k, window_base + state.gradient_offset, nk_f32_k,
@@ -511,7 +511,7 @@ expected_t distributed_adafactor_t::step(f32_t learning_rate, std::span<gpu_stre
     return {};
 }
 
-expected_t distributed_adafactor_t::load(checkpoint_to_load_t const &checkpoint,
+expected_t distributed_adafactor_t::load(checkpoint_to_load_t const& checkpoint,
                                          std::span<gpu_stream_t> streams) noexcept {
     std::size_t const gpus = ranks_.size();
     if (streams.size() != gpus)
@@ -525,16 +525,16 @@ expected_t distributed_adafactor_t::load(checkpoint_to_load_t const &checkpoint,
 }
 
 expected_t distributed_adafactor_t::world_gradient_step_(std::size_t rank, f32_t learning_rate,
-                                                         gpu_stream_t &stream) noexcept {
+                                                         gpu_stream_t& stream) noexcept {
     std::size_t const scalars = ranks_[rank].state.gradient_scalars();
     std::size_t const member = domain_->member_offset() + rank;
-    gpu_fault_t *const fault = domain_->member(member).fault;
+    gpu_fault_t* const fault = domain_->member(member).fault;
     f32r1_span_t const world_mean {domain_->payload(0).data() + window_.offset, scalars};
     expected_t staged {};
     if (member == 0) {
         // Each domain stages its sum pre-scaled by 1/world; the elementwise cross-domain sum of
         // those terms lands exactly on the world mean (the scale is linear either side of the sum).
-        f32_t *const world_gradient = world_reduce_->payload().data();
+        f32_t* const world_gradient = world_reduce_->payload().data();
         f32_t const world_scale = 1.0f /
                                   static_cast<f32_t>(domain_->member_count() * world_reduce_->multimem_domain_count());
         staged = reduce_gradient_(*domain_, member, f32r1_span_t {world_gradient, scalars}, window_.offset, world_scale,
@@ -582,9 +582,9 @@ static __global__ void adafactor_temperatures_kernel_(f32r1_span_t inverse_tempe
     }
 }
 
-expected<adafactor_temperatures_t> adafactor_temperatures_t::make(gpu_arena_t &arena, u32_t groups,
+expected<adafactor_temperatures_t> adafactor_temperatures_t::make(gpu_arena_t& arena, u32_t groups,
                                                                   adafactor_config_t config, sz::string_view_t prefix,
-                                                                  gpu_stream_t &stream) noexcept {
+                                                                  gpu_stream_t& stream) noexcept {
     using result_t = expected<adafactor_temperatures_t>;
     adafactor_temperatures_t optimizer;
     optimizer.config_ = config;
@@ -600,7 +600,7 @@ expected<adafactor_temperatures_t> adafactor_temperatures_t::make(gpu_arena_t &a
 }
 
 expected_t adafactor_temperatures_t::step(f32r1_span_t inverse_temperatures, f32r1_span_t biases,
-                                          f32r1_view_t gradients, f32_t learning_rate, gpu_stream_t &stream) noexcept {
+                                          f32r1_view_t gradients, f32_t learning_rate, gpu_stream_t& stream) noexcept {
     std::size_t const scalars = moments_.numel();
     if (inverse_temperatures.extent(0) * 2u != scalars || biases.extent(0) * 2u != scalars ||
         gradients.extent(0) != scalars)
@@ -611,7 +611,7 @@ expected_t adafactor_temperatures_t::step(f32r1_span_t inverse_temperatures, f32
                          stream, inverse_temperatures, biases, gradients, moments_.span(), config_, learning_rate);
 }
 
-expected_t adafactor_temperatures_t::save(checkpoint_to_save_t &checkpoint, gpu_stream_t &stream) const noexcept {
+expected_t adafactor_temperatures_t::save(checkpoint_to_save_t& checkpoint, gpu_stream_t& stream) const noexcept {
     st::basic_vector<f32_t> moments;
     if (st::failed(moments.resize(st::assume_uninitialized, moments_.numel())))
         return expected_t::fail(status_t::bad_alloc_k, "temperature moments staging failed");
@@ -622,7 +622,7 @@ expected_t adafactor_temperatures_t::save(checkpoint_to_save_t &checkpoint, gpu_
     return checkpoint.insert(key_.view(), f32r2_view_t {moments.data(), 1, moments.size()});
 }
 
-expected_t adafactor_temperatures_t::load(checkpoint_to_load_t const &checkpoint, gpu_stream_t &stream) noexcept {
+expected_t adafactor_temperatures_t::load(checkpoint_to_load_t const& checkpoint, gpu_stream_t& stream) noexcept {
     f32r2_view_t const saved = checkpoint.float32(key_.view());
     if (saved.empty()) return zero_async(moments_.span(), stream);
     if (saved.extent(0) != 1u || saved.extent(1) != moments_.numel())

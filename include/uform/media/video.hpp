@@ -101,7 +101,7 @@ struct demuxed_t {
  *  - @c status_t::unsupported_k @p out disagrees with @p grid and @p shape .
  *  - @c status_t::invalid_argument_k The stream does not decode, or decodes no frame.
  */
-[[nodiscard]] expected_t decode_video_frames(demuxed_t const &clip, video_grid_t grid, video_batch_shape_t const &shape,
+[[nodiscard]] expected_t decode_video_frames(demuxed_t const& clip, video_grid_t grid, video_batch_shape_t const& shape,
                                              pixel_tubes_span_t out) noexcept;
 
 } // namespace unum::uform::media

@@ -70,7 +70,7 @@ struct pooled_spectrum_config_t {
 
 /** One gradient matrix the spike gate's energy kernel reads, flattened. */
 struct spectrum_gradient_range_t {
-    bf16_t const *data = nullptr; // device-boundary
+    bf16_t const* data = nullptr; // device-boundary
     std::size_t count = 0;
 };
 
@@ -109,9 +109,9 @@ struct distributed_pooled_spectrum_t {
      *  @param[in] timeout_seconds Deadline on the all-reduces' rendezvous and flag waits.
      */
     [[nodiscard]] static expected<distributed_pooled_spectrum_t> make(
-        multimem_domain_t &domain, colocated_domain_t &colocated, std::span<gpu_arena_t> arenas,
+        multimem_domain_t& domain, colocated_domain_t& colocated, std::span<gpu_arena_t> arenas,
         std::span<gpu_stream_t> streams, std::span<differentiable_weights_t const> weights,
-        std::size_t weights_per_rank, pooled_spectrum_config_t config, gpu_numerics_t const &numerics,
+        std::size_t weights_per_rank, pooled_spectrum_config_t config, gpu_numerics_t const& numerics,
         f64_t timeout_seconds = 120.0) noexcept;
 
     /**
@@ -123,7 +123,7 @@ struct distributed_pooled_spectrum_t {
      *  @param[in,out] stream The rank's stream.
      */
     [[nodiscard]] expected_t operator()(std::size_t rank, bf16r2_view_t pooled, bf16r2_span_t pooled_grad,
-                                        gpu_stream_t &stream) noexcept;
+                                        gpu_stream_t& stream) noexcept;
 
     /** Local rank @p rank 's @b [2] terms of the last call on its device: the world coding rate
      *  @c R , identical on every rank, then the rank's top Gram eigenvalue @c σ² . */
@@ -131,7 +131,7 @@ struct distributed_pooled_spectrum_t {
 
     /** Enqueue local rank @p rank 's squared gradient L2 norm and its sum over the world, after
      *  the rank's backward; ranks are enqueued in order within a step. */
-    [[nodiscard]] expected_t measure_gradients(std::size_t rank, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t measure_gradients(std::size_t rank, gpu_stream_t& stream) noexcept;
 
     /**
      *  @brief Read the world's gradient L2 norm off rank 0 through @p stream , its stream, and
@@ -143,7 +143,7 @@ struct distributed_pooled_spectrum_t {
      *  @par Statuses:
      *  - @c status_t::internal_k The step's gradient spiked; the optimizer must not apply it.
      */
-    [[nodiscard]] expected_t admit_gradients(gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t admit_gradients(gpu_stream_t& stream) noexcept;
 
   private:
 
@@ -193,11 +193,11 @@ struct distributed_pooled_spectrum_t {
     /** Sum @p destination 's extent of scalars from window offset @p begin over the world into
      *  @p destination : a barrier, the domain reduce, the gateway's @p world all-reduce and its
      *  publication across domains, and a closing barrier before any member rewrites its window. */
-    [[nodiscard]] expected_t world_sum_(std::size_t rank, std::size_t begin, infiniband_all_reduce<f32_t> &world,
-                                        f32r1_span_t destination, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t world_sum_(std::size_t rank, std::size_t begin, infiniband_all_reduce<f32_t>& world,
+                                        f32r1_span_t destination, gpu_stream_t& stream) noexcept;
 
     /** Rank @p rank 's world Gram of @p pooled , its factorization and the coding rate. */
-    [[nodiscard]] expected_t coding_rate_(std::size_t rank, bf16r2_view_t pooled, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t coding_rate_(std::size_t rank, bf16r2_view_t pooled, gpu_stream_t& stream) noexcept;
 
     /** The baked geometry and weights. */
     pooled_spectrum_config_t config_ {};
@@ -206,7 +206,7 @@ struct distributed_pooled_spectrum_t {
     per_gpu_array<spectrum_rank_t> ranks_ {};
 
     /** The main-owned level-1 surface, borrowed; its replicas carry the Gram and the energy. */
-    multimem_domain_t *domain_ = nullptr;
+    multimem_domain_t* domain_ = nullptr;
 
     /** This consumer's window of the domain payload: the Gram, then the energy. */
     multimem_window_t window_ {};

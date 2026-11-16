@@ -72,7 +72,7 @@ using uu::topology_t;
 
 /** Append @p count trivially copyable @p items onto @p values , or report the refusal. */
 template <typename value_type_>
-[[nodiscard]] static bool append_(st::basic_vector<value_type_> &values, std::span<value_type_ const> items) noexcept {
+[[nodiscard]] static bool append_(st::basic_vector<value_type_>& values, std::span<value_type_ const> items) noexcept {
     std::size_t const size = values.size();
     if (st::failed(values.resize(st::assume_uninitialized, size + items.size()))) return false;
     if (!items.empty()) std::memcpy(values.data() + size, items.data(), items.size_bytes());
@@ -103,8 +103,8 @@ enum class media_t { image_k, video_k, audio_k };
 
 /** One split: its media files, its captions, and the medium each caption describes. */
 struct split_t {
-    char const *name = "";
-    char const *media_name = "";
+    char const* name = "";
+    char const* media_name = "";
     media_t media = media_t::image_k;
     strings_t files {};
     strings_t captions {};
@@ -126,11 +126,11 @@ struct encoder_t {
 enum class encoded_t { ok_k, skipped_k, failed_k };
 
 /** Read @p path whole onto the end of @p bytes . */
-[[nodiscard]] static bool read_file_(std::string_view path, st::basic_vector<std::uint8_t> &bytes) noexcept {
+[[nodiscard]] static bool read_file_(std::string_view path, st::basic_vector<std::uint8_t>& bytes) noexcept {
     char terminated[4096];
     if (path.size() >= sizeof(terminated)) return false;
     std::memcpy(terminated, path.data(), path.size()), terminated[path.size()] = '\0';
-    std::FILE *file = std::fopen(terminated, "rb");
+    std::FILE* file = std::fopen(terminated, "rb");
     if (!file) return fmt::println(stderr, "uform_eval: cannot open {}", path), false;
     std::fseek(file, 0, SEEK_END);
     long const length = std::ftell(file);
@@ -144,26 +144,26 @@ enum class encoded_t { ok_k, skipped_k, failed_k };
 }
 
 /** Parse the JSON at @p directory / @p name , or print why not. */
-[[nodiscard]] static yyjson_doc *read_json_(std::string_view directory, std::string_view name) noexcept {
+[[nodiscard]] static yyjson_doc* read_json_(std::string_view directory, std::string_view name) noexcept {
     strings_t path;
     if (!path.append({directory, "/", name, std::string_view {"\0", 1}})) return nullptr;
-    yyjson_doc *document = yyjson_read_file(path.bytes.data(), 0, nullptr, nullptr);
+    yyjson_doc* document = yyjson_read_file(path.bytes.data(), 0, nullptr, nullptr);
     if (!document) fmt::println(stderr, "uform_eval: cannot parse {}/{}", directory, name);
     return document;
 }
 
-[[nodiscard]] static bool load_coco_(std::string_view directory, split_t &split) noexcept {
+[[nodiscard]] static bool load_coco_(std::string_view directory, split_t& split) noexcept {
     split.name = "coco val2017 (not Karpathy)", split.media_name = "image", split.media = media_t::image_k;
-    yyjson_doc *document = read_json_(directory, "annotations/captions_val2017.json");
+    yyjson_doc* document = read_json_(directory, "annotations/captions_val2017.json");
     if (!document) return false;
-    yyjson_val *root = yyjson_doc_get_root(document);
+    yyjson_val* root = yyjson_doc_get_root(document);
     yyjson_val *images = yyjson_obj_get(root, "images"), *annotations = yyjson_obj_get(root, "annotations");
     st::hash_map<std::uint64_t, std::uint32_t> files_by_id;
     bool loaded = images && annotations;
     std::size_t index, count;
-    yyjson_val *entry;
+    yyjson_val* entry;
     yyjson_arr_foreach(images, index, count, entry) {
-        char const *file = yyjson_get_str(yyjson_obj_get(entry, "file_name"));
+        char const* file = yyjson_get_str(yyjson_obj_get(entry, "file_name"));
         st::mapping<std::uint64_t, std::uint32_t> const id {yyjson_get_uint(yyjson_obj_get(entry, "id")),
                                                             std::uint32_t(split.files.count())};
         loaded = loaded && file && !st::failed(files_by_id.upsert(id)) &&
@@ -171,7 +171,7 @@ enum class encoded_t { ok_k, skipped_k, failed_k };
     }
     yyjson_arr_foreach(annotations, index, count, entry) {
         std::uint64_t const image = yyjson_get_uint(yyjson_obj_get(entry, "image_id"));
-        char const *caption = yyjson_get_str(yyjson_obj_get(entry, "caption"));
+        char const* caption = yyjson_get_str(yyjson_obj_get(entry, "caption"));
         auto const owner = files_by_id.find(image);
         if (owner == files_by_id.end() || !caption) continue;
         loaded = loaded && split.captions.append({caption}) &&
@@ -181,16 +181,16 @@ enum class encoded_t { ok_k, skipped_k, failed_k };
     return loaded;
 }
 
-[[nodiscard]] static bool load_msrvtt_(std::string_view directory, split_t &split) noexcept {
+[[nodiscard]] static bool load_msrvtt_(std::string_view directory, split_t& split) noexcept {
     split.name = "msrvtt 1K-A", split.media_name = "video", split.media = media_t::video_k;
-    yyjson_doc *document = read_json_(directory, "msrvtt_test_1k.json");
+    yyjson_doc* document = read_json_(directory, "msrvtt_test_1k.json");
     if (!document) return false;
     bool loaded = true;
     std::size_t index, count;
-    yyjson_val *entry;
+    yyjson_val* entry;
     yyjson_arr_foreach(yyjson_doc_get_root(document), index, count, entry) {
-        char const *file = yyjson_get_str(yyjson_obj_get(entry, "video"));
-        char const *caption = yyjson_get_str(yyjson_obj_get(entry, "caption"));
+        char const* file = yyjson_get_str(yyjson_obj_get(entry, "video"));
+        char const* caption = yyjson_get_str(yyjson_obj_get(entry, "caption"));
         loaded = loaded && file && caption && split.files.append({directory, "/videos/", file}) &&
                  split.captions.append({caption}) &&
                  !st::failed(split.owners.push_back(std::uint32_t(split.files.count() - 1)));
@@ -199,18 +199,18 @@ enum class encoded_t { ok_k, skipped_k, failed_k };
     return loaded && split.files.count();
 }
 
-[[nodiscard]] static bool load_clotho_(std::string_view directory, split_t &split) noexcept {
+[[nodiscard]] static bool load_clotho_(std::string_view directory, split_t& split) noexcept {
     split.name = "clotho v2 evaluation", split.media_name = "audio", split.media = media_t::audio_k;
-    yyjson_doc *document = read_json_(directory, "manifest.json");
+    yyjson_doc* document = read_json_(directory, "manifest.json");
     if (!document) return false;
     bool loaded = true;
     std::size_t index, count;
-    yyjson_val *entry;
+    yyjson_val* entry;
     yyjson_arr_foreach(yyjson_obj_get(yyjson_doc_get_root(document), "items"), index, count, entry) {
-        char const *file = yyjson_get_str(yyjson_obj_get(entry, "file"));
+        char const* file = yyjson_get_str(yyjson_obj_get(entry, "file"));
         loaded = loaded && file && split.files.append({directory, "/", file});
         std::size_t caption_index, caption_count;
-        yyjson_val *caption;
+        yyjson_val* caption;
         yyjson_arr_foreach(yyjson_obj_get(entry, "captions"), caption_index, caption_count, caption) {
             loaded = loaded && split.captions.append({yyjson_get_str(caption)}) &&
                      !st::failed(split.owners.push_back(std::uint32_t(split.files.count() - 1)));
@@ -223,19 +223,19 @@ enum class encoded_t { ok_k, skipped_k, failed_k };
 /** Load one COCO-SM language's @p entries into @p split : its images under @p images the first
  *  time, and every later time the check that they name the same files in the same order, so the
  *  image embeddings carry over. */
-[[nodiscard]] static bool load_coco_sm_(std::string_view images, yyjson_val *entries, split_t &split) noexcept {
+[[nodiscard]] static bool load_coco_sm_(std::string_view images, yyjson_val* entries, split_t& split) noexcept {
     bool const first = !split.files.count();
     bool loaded = yyjson_arr_size(entries) && (first || yyjson_arr_size(entries) == split.files.count());
     split.captions = {}, split.owners = {};
     std::size_t index, count;
-    yyjson_val *entry;
+    yyjson_val* entry;
     yyjson_arr_foreach(entries, index, count, entry) {
-        char const *file = yyjson_get_str(yyjson_obj_get(entry, "filename"));
+        char const* file = yyjson_get_str(yyjson_obj_get(entry, "filename"));
         loaded = loaded && file &&
                  (first ? split.files.append({images, "/", file})
                         : split.files[index].substr(images.size() + 1) == std::string_view {file});
         std::size_t caption_index, caption_count;
-        yyjson_val *caption;
+        yyjson_val* caption;
         yyjson_arr_foreach(yyjson_obj_get(entry, "captions"), caption_index, caption_count, caption) {
             loaded = loaded && split.captions.append({yyjson_get_str(caption)}) &&
                      !st::failed(split.owners.push_back(std::uint32_t(index)));
@@ -246,12 +246,12 @@ enum class encoded_t { ok_k, skipped_k, failed_k };
 
 /** Append the @p count F32 rows @p embeddings holds onto @p rows , each scaled to unit length,
  *  copying them off the device first when @p encoder runs on one. */
-[[nodiscard]] static bool keep_rows_(encoder_t const &encoder, uform_rows_view_t const &embeddings, std::size_t count,
-                                     st::basic_vector<float> &rows) noexcept {
+[[nodiscard]] static bool keep_rows_(encoder_t const& encoder, uform_rows_view_t const& embeddings, std::size_t count,
+                                     st::basic_vector<float>& rows) noexcept {
     std::size_t const columns = embeddings.columns, size = rows.size();
     if (st::failed(rows.resize(st::assume_uninitialized, size + count * columns))) return false;
-    float *const landed = rows.data() + size;
-    void const *data = embeddings.data;
+    float* const landed = rows.data() + size;
+    void const* data = embeddings.data;
     std::size_t stride = embeddings.stride;
     if (encoder.context) {
         // Arena rows are packed, so the device's come over in one copy and scale in place.
@@ -260,18 +260,18 @@ enum class encoded_t { ok_k, skipped_k, failed_k };
         data = landed, stride = columns * sizeof(float);
     }
     for (std::size_t item = 0; item != count; ++item) {
-        float const *row = reinterpret_cast<float const *>(static_cast<std::uint8_t const *>(data) + item * stride);
+        float const* row = reinterpret_cast<float const*>(static_cast<std::uint8_t const*>(data) + item * stride);
         float squares = 0;
         for (std::size_t column = 0; column != columns; ++column) squares += row[column] * row[column];
         float const scale = squares > 0 ? 1.0f / std::sqrt(squares) : 0.0f;
-        float *kept = landed + item * columns;
+        float* kept = landed + item * columns;
         for (std::size_t column = 0; column != columns; ++column) kept[column] = row[column] * scale;
     }
     return true;
 }
 
 /** Map the outcome of one batch onto how its split's encoding goes on. */
-[[nodiscard]] static encoded_t judge_(uform_outcome_t const &outcome, split_t const &split) noexcept {
+[[nodiscard]] static encoded_t judge_(uform_outcome_t const& outcome, split_t const& split) noexcept {
     if (outcome.status == uform_status_success_k) return encoded_t::ok_k;
     if (outcome.status == uform_status_unsupported_k)
         return fmt::println("skip {}: {}", split.name, outcome.message ? outcome.message : "unsupported"),
@@ -280,8 +280,8 @@ enum class encoded_t { ok_k, skipped_k, failed_k };
     return encoded_t::failed_k;
 }
 
-[[nodiscard]] static encoded_t embed_captions_(encoder_t &encoder, split_t const &split,
-                                               st::basic_vector<float> &rows) noexcept {
+[[nodiscard]] static encoded_t embed_captions_(encoder_t& encoder, split_t const& split,
+                                               st::basic_vector<float>& rows) noexcept {
     strings_t framed;
     for (std::size_t caption = 0; caption != split.captions.count(); ++caption)
         if (!framed.append({encoder.query_prefix, split.captions[caption]})) return encoded_t::failed_k;
@@ -304,8 +304,8 @@ enum class encoded_t { ok_k, skipped_k, failed_k };
     return encoded_t::ok_k;
 }
 
-[[nodiscard]] static encoded_t embed_media_(encoder_t &encoder, split_t const &split,
-                                            st::basic_vector<float> &rows) noexcept {
+[[nodiscard]] static encoded_t embed_media_(encoder_t& encoder, split_t const& split,
+                                            st::basic_vector<float>& rows) noexcept {
     for (std::size_t first = 0; first < split.files.count(); first += encoder.batch) {
         std::size_t const count = fu::min_of(encoder.batch, split.files.count() - first);
         st::basic_vector<std::uint8_t> bytes;
@@ -359,7 +359,7 @@ enum class encoded_t { ok_k, skipped_k, failed_k };
 }
 
 /** Print Recall@1, @5 and @10 of @p recalls_at , text-to-media then media-to-text, a line each. */
-static void report_(split_t const &split, std::span<double const[3], 2> recalls_at) noexcept {
+static void report_(split_t const& split, std::span<double const[3], 2> recalls_at) noexcept {
     std::size_t const counts[2] = {split.captions.count(), split.files.count()};
     char directions[2][32];
     *fmt::format_to_n(directions[0], sizeof(directions[0]) - 1, "text → {}", split.media_name).out = '\0';
@@ -381,8 +381,8 @@ static constexpr std::size_t score_block_rows_k = 64;
  *  @p offsets [query] to @p offsets [query + 1], and its rank counts the items scoring strictly
  *  above the best of them. */
 [[nodiscard]] static bool count_hits_(pool_view_t pool, nk_capability_t capabilities,
-                                      st::basic_vector<float> const &queries, st::basic_vector<float> const &items,
-                                      std::size_t dimensions, std::size_t const *offsets, std::uint32_t const *targets,
+                                      st::basic_vector<float> const& queries, st::basic_vector<float> const& items,
+                                      std::size_t dimensions, std::size_t const* offsets, std::uint32_t const* targets,
                                       std::span<std::size_t, 3> hits) noexcept {
     std::size_t const queries_count = queries.size() / dimensions, items_count = items.size() / dimensions;
     nk_size_t packed_bytes = 0;
@@ -396,35 +396,35 @@ static constexpr std::size_t score_block_rows_k = 64;
         return false;
     bool scored = true;
     std::size_t const blocks_count = uu::divide_round_up(queries_count, score_block_rows_k);
-    uu::status_t const dispatched = pool.for_n_dynamic(blocks_count, [&](std::size_t block,
-                                                                         std::size_t thread) noexcept {
-        std::size_t const first = block * score_block_rows_k;
-        std::size_t const count = fu::min_of(score_block_rows_k, queries_count - first);
-        nk_f64_t *const scores = blocks.data() + thread * score_block_rows_k * items_count;
-        if (nk_dots_packed_f32_best(queries.data() + first * dimensions, packed.data(), scores, count, items_count,
-                                    dimensions, dimensions * sizeof(float), items_count * sizeof(nk_f64_t), nullptr, 0,
-                                    capabilities, nullptr) != nk_success_k)
-            return fu::standard_atomic_ref<bool> {scored}.store(false, std::memory_order_relaxed);
-        std::size_t block_hits[3] = {};
-        for (std::size_t query = first; query != first + count; ++query) {
-            nk_f64_t const *row = scores + (query - first) * items_count;
-            nk_f64_t best = -2;
-            for (std::size_t position = offsets[query]; position != offsets[query + 1]; ++position)
-                best = fu::max_of(best, row[targets[position]]);
-            std::size_t rank = 0;
-            for (std::size_t item = 0; item != items_count; ++item) rank += row[item] > best;
-            for (std::size_t k = 0; k != 3; ++k) block_hits[k] += rank < recall_depths_k[k];
-        }
-        for (std::size_t k = 0; k != 3; ++k)
-            fu::standard_atomic_ref<std::size_t> {hits[k]}.fetch_add(block_hits[k], std::memory_order_relaxed);
-    });
+    uu::status_t const dispatched = pool.for_n_dynamic(
+        blocks_count, [&](std::size_t block, std::size_t thread) noexcept {
+            std::size_t const first = block * score_block_rows_k;
+            std::size_t const count = fu::min_of(score_block_rows_k, queries_count - first);
+            nk_f64_t* const scores = blocks.data() + thread * score_block_rows_k * items_count;
+            if (nk_dots_packed_f32_best(queries.data() + first * dimensions, packed.data(), scores, count, items_count,
+                                        dimensions, dimensions * sizeof(float), items_count * sizeof(nk_f64_t), nullptr,
+                                        0, capabilities, nullptr) != nk_success_k)
+                return fu::standard_atomic_ref<bool> {scored}.store(false, std::memory_order_relaxed);
+            std::size_t block_hits[3] = {};
+            for (std::size_t query = first; query != first + count; ++query) {
+                nk_f64_t const* row = scores + (query - first) * items_count;
+                nk_f64_t best = -2;
+                for (std::size_t position = offsets[query]; position != offsets[query + 1]; ++position)
+                    best = fu::max_of(best, row[targets[position]]);
+                std::size_t rank = 0;
+                for (std::size_t item = 0; item != items_count; ++item) rank += row[item] > best;
+                for (std::size_t k = 0; k != 3; ++k) block_hits[k] += rank < recall_depths_k[k];
+            }
+            for (std::size_t k = 0; k != 3; ++k)
+                fu::standard_atomic_ref<std::size_t> {hits[k]}.fetch_add(block_hits[k], std::memory_order_relaxed);
+        });
     return dispatched == uu::status_t::success_k && scored; // `for_n_dynamic` joined every thread
 }
 
 /** Score every caption against every medium on @p encoder 's thread count, report both directions,
  *  and keep their @p recalls_at . */
-[[nodiscard]] static bool score_(encoder_t const &encoder, split_t const &split,
-                                 st::basic_vector<float> const &captions, st::basic_vector<float> const &media,
+[[nodiscard]] static bool score_(encoder_t const& encoder, split_t const& split,
+                                 st::basic_vector<float> const& captions, st::basic_vector<float> const& media,
                                  std::span<double[3], 2> recalls_at) noexcept {
     std::size_t const queries = split.captions.count(), items = split.files.count();
     // Every medium's captions, gathered once by counting, so a medium ranks over its own alone.
@@ -465,7 +465,7 @@ static constexpr std::size_t score_block_rows_k = 64;
     return true;
 }
 
-[[nodiscard]] static bool evaluate_(encoder_t &encoder, split_t const &split) noexcept {
+[[nodiscard]] static bool evaluate_(encoder_t& encoder, split_t const& split) noexcept {
     st::basic_vector<float> captions, media;
     encoded_t encoded = embed_media_(encoder, split, media);
     if (encoded == encoded_t::ok_k) encoded = embed_captions_(encoder, split, captions);
@@ -476,15 +476,15 @@ static constexpr std::size_t score_block_rows_k = 64;
 
 /** Evaluate COCO-SM: encode its images once, score every translator's every language against them,
  *  and report each translator's mean over its languages. */
-[[nodiscard]] static bool evaluate_coco_sm_(encoder_t &encoder, std::string_view directory,
+[[nodiscard]] static bool evaluate_coco_sm_(encoder_t& encoder, std::string_view directory,
                                             std::string_view images) noexcept {
     split_t split;
     split.media_name = "image", split.media = media_t::image_k;
     st::basic_vector<float> media;
     char name[64];
-    for (char const *translator : {"google", "bing", "nllb"}) {
+    for (char const* translator : {"google", "bing", "nllb"}) {
         *fmt::format_to_n(name, sizeof(name) - 1, "meta/{}.json", translator).out = '\0';
-        yyjson_doc *document = read_json_(directory, name);
+        yyjson_doc* document = read_json_(directory, name);
         if (!document) return false;
         double means_at[2][3] = {};
         std::size_t index, count;
@@ -520,17 +520,17 @@ struct choices_t {
 
 /** Read the JSON lines at @p path , each `{"state": text, "choices": bytes, "targets": [p...],
  *  "group": n}` with one target per choice byte and @c group optional, into @p loaded . */
-[[nodiscard]] static bool load_choices_(std::string_view path, choices_t &loaded) noexcept {
+[[nodiscard]] static bool load_choices_(std::string_view path, choices_t& loaded) noexcept {
     st::basic_vector<std::uint8_t> bytes;
     if (!read_file_(path, bytes)) return false;
-    std::string_view text {reinterpret_cast<char const *>(bytes.data()), bytes.size()};
+    std::string_view text {reinterpret_cast<char const*>(bytes.data()), bytes.size()};
     for (std::size_t line_number = 1; !text.empty(); ++line_number) {
         std::size_t const end = fu::min_of(text.find('\n'), text.size());
         std::string_view const line = text.substr(0, end);
         text.remove_prefix(fu::min_of(end + 1, text.size()));
         if (line.find_first_not_of(" \t\r") == std::string_view::npos) continue;
-        yyjson_doc *document = yyjson_read(line.data(), line.size(), 0);
-        yyjson_val *root = yyjson_doc_get_root(document);
+        yyjson_doc* document = yyjson_read(line.data(), line.size(), 0);
+        yyjson_val* root = yyjson_doc_get_root(document);
         yyjson_val *state = yyjson_obj_get(root, "state"), *offered = yyjson_obj_get(root, "choices");
         yyjson_val *targets = yyjson_obj_get(root, "targets"), *group = yyjson_obj_get(root, "group");
         bool parsed = yyjson_is_str(state) && yyjson_is_str(offered) && yyjson_is_arr(targets) &&
@@ -548,7 +548,7 @@ struct choices_t {
 
 /** The mean negative log-likelihood of @p targets under the softmax of @p logits at inverse
  *  temperature @p beta , over the items @p group holds, or every item for a group past them. */
-[[nodiscard]] static double choice_loss_(choices_t const &held_out, std::span<double const> logits, double beta,
+[[nodiscard]] static double choice_loss_(choices_t const& held_out, std::span<double const> logits, double beta,
                                          std::uint32_t group) noexcept {
     double total = 0;
     std::size_t items = 0;
@@ -567,7 +567,7 @@ struct choices_t {
 
 /** The share of items whose highest logit is the target's most likely choice, the same
  *  under every temperature. */
-[[nodiscard]] static double top_choice_accuracy_(choices_t const &held_out, std::span<double const> logits) noexcept {
+[[nodiscard]] static double top_choice_accuracy_(choices_t const& held_out, std::span<double const> logits) noexcept {
     std::size_t const items = held_out.states.count();
     std::size_t correct = 0;
     for (std::size_t item = 0; item != items; ++item) {
@@ -584,7 +584,7 @@ struct choices_t {
 
 /** The top-choice expected calibration error over 15 equal confidence bins, a choice correct when
  *  it is the target's most likely, under @p beta per group. */
-[[nodiscard]] static double calibration_error_(choices_t const &held_out, std::span<double const> logits,
+[[nodiscard]] static double calibration_error_(choices_t const& held_out, std::span<double const> logits,
                                                std::span<double const> betas) noexcept {
     double confidence_sums[15] = {}, correct_sums[15] = {};
     std::size_t const items = held_out.states.count();
@@ -618,8 +618,8 @@ struct choices_t {
  *  then minimizes its mean negative log-likelihood, convex in it, by a golden-section search over
  *  its logarithm in Float64.
  */
-[[nodiscard]] static bool calibrate_(encoder_t &encoder, std::string_view checkpoint_path,
-                                     std::string_view choices_path, char const *output_path) noexcept {
+[[nodiscard]] static bool calibrate_(encoder_t& encoder, std::string_view checkpoint_path,
+                                     std::string_view choices_path, char const* output_path) noexcept {
     choices_t held_out;
     if (!load_choices_(choices_path, held_out)) return false;
     std::size_t const items = held_out.states.count(), offered = held_out.targets.size();
@@ -654,7 +654,7 @@ struct choices_t {
             return fmt::println(stderr, "uform_eval: choosing failed: {}", outcome.message), false;
         std::size_t const begin = held_out.choices.offsets[first],
                           scored = held_out.choices.offsets[first + count] - begin;
-        float *const landed = probabilities.data() + begin;
+        float* const landed = probabilities.data() + begin;
         if (!encoder.context) std::memcpy(landed, chosen.data, scored * sizeof(float));
         else if (cuMemcpyDtoH(landed, reinterpret_cast<CUdeviceptr>(chosen.data), scored * sizeof(float)) !=
                  CUDA_SUCCESS)
@@ -695,15 +695,15 @@ struct choices_t {
     uu::checkpoint_to_save_t calibrated; // Float32 entries go first, packed ahead of the BFloat16 weights
     uu::expected_t written = calibrated.insert("choices.inverse_temperatures",
                                                uu::f32r2_view_t {fitted.data(), 1, groups});
-    for (uu::checkpoint_entry_t const &entry : source->entries())
+    for (uu::checkpoint_entry_t const& entry : source->entries())
         if (written && entry.dtype == uu::checkpoint_dtype_t::f32_k &&
             entry.name.view() != "choices.inverse_temperatures")
             written = calibrated.insert(entry.name.view(), source->float32(entry.name.view()));
-    uu::checkpoint_to_load_t const &weights = *source;
-    for (uu::checkpoint_entry_t const &entry : weights.entries())
+    uu::checkpoint_to_load_t const& weights = *source;
+    for (uu::checkpoint_entry_t const& entry : weights.entries())
         if (written && entry.dtype == uu::checkpoint_dtype_t::bf16_k)
             written = calibrated.insert(entry.name.view(), weights[entry.name.view()]);
-    for (uu::checkpoint_metadata_t const &pair : weights.metadata())
+    for (uu::checkpoint_metadata_t const& pair : weights.metadata())
         if (written) written = calibrated.metadata(pair.key.view(), pair.value.view());
     if (written) written = calibrated.save(output_path);
     if (!written) return fmt::println(stderr, "uform_eval: {}", std::string_view {written.description_}), false;
@@ -711,7 +711,7 @@ struct choices_t {
     return true;
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
     if (argc < 2) {
         fmt::println(stderr, "Usage: uform_eval <checkpoint> [--coco <dir>] [--msrvtt <dir>] [--clotho <dir>] " //
                              "[--coco-sm <dir> --coco-sm-images <dir>] [--gpu <ordinal>] "                      //
@@ -769,7 +769,7 @@ int main(int argc, char **argv) {
     uform_arena_init(&arena_arguments);
     if (outcome.status != uform_status_success_k) return fmt::println(stderr, "uform_eval: {}", outcome.message), 1;
     std::string_view const checkpoint = argv[1];
-    uform_bytes_view_t const path = {reinterpret_cast<std::uint8_t const *>(checkpoint.data()), checkpoint.size()};
+    uform_bytes_view_t const path = {reinterpret_cast<std::uint8_t const*>(checkpoint.data()), checkpoint.size()};
     if (gpu) {
         uform_model_load_vram_t load_arguments {.model = &encoder.model,
                                                 .executor = encoder.executor,
@@ -802,10 +802,10 @@ int main(int argc, char **argv) {
 
     bool evaluated = true;
     struct named_t {
-        char const *directory;
-        bool (*load)(std::string_view, split_t &) noexcept;
+        char const* directory;
+        bool (*load)(std::string_view, split_t&) noexcept;
     } const splits[] = {{coco, load_coco_}, {msrvtt, load_msrvtt_}, {clotho, load_clotho_}};
-    for (named_t const &named : splits) {
+    for (named_t const& named : splits) {
         if (!named.directory) continue;
         split_t split;
         if (!named.load(named.directory, split)) {

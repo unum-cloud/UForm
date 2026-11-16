@@ -37,7 +37,7 @@ constexpr status_t status_from_(fu_status_t status) noexcept {
 
 /** A callable run once per task, with the task index and the index of the thread running it. */
 template <typename callback_>
-concept task_callback = std::is_nothrow_invocable_v<callback_ &, std::size_t, std::size_t>;
+concept task_callback = std::is_nothrow_invocable_v<callback_&, std::size_t, std::size_t>;
 
 /** What the thread that spawns a pool does on every dispatch it makes afterwards. */
 enum class caller_exclusivity_t : std::uint8_t {
@@ -64,10 +64,10 @@ class pool_view_t {
 
     /** Runs @p callback over @p count similar-cost tasks split evenly across the threads. */
     template <task_callback callback_>
-    [[nodiscard]] status_t for_n(std::size_t count, callback_ &&callback) const noexcept {
+    [[nodiscard]] status_t for_n(std::size_t count, callback_&& callback) const noexcept {
         fu_for_task_t const trampoline = [](fu_lambda_context_t context, std::size_t task, std::size_t thread,
                                             std::size_t) noexcept {
-            (*static_cast<std::remove_reference_t<callback_> *>(context))(task, thread);
+            (*static_cast<std::remove_reference_t<callback_>*>(context))(task, thread);
         };
         return status_from_(fu_pool_for_n(pool_, count, trampoline, &callback));
     }
@@ -75,10 +75,10 @@ class pool_view_t {
     /** Runs @p callback over @p count tasks of uneven cost, each thread taking the next task as
      *  it finishes one. */
     template <task_callback callback_>
-    [[nodiscard]] status_t for_n_dynamic(std::size_t count, callback_ &&callback) const noexcept {
+    [[nodiscard]] status_t for_n_dynamic(std::size_t count, callback_&& callback) const noexcept {
         fu_for_task_t const trampoline = [](fu_lambda_context_t context, std::size_t task, std::size_t thread,
                                             std::size_t) noexcept {
-            (*static_cast<std::remove_reference_t<callback_> *>(context))(task, thread);
+            (*static_cast<std::remove_reference_t<callback_>*>(context))(task, thread);
         };
         return status_from_(fu_pool_for_n_dynamic(pool_, count, trampoline, &callback));
     }
@@ -102,15 +102,15 @@ class pool_view_t {
  *  and deleted here. */
 class topology_t {
   public:
-    topology_t(topology_t &&other) noexcept : topology_(std::exchange(other.topology_, nullptr)) {}
+    topology_t(topology_t&& other) noexcept : topology_(std::exchange(other.topology_, nullptr)) {}
 
-    topology_t &operator=(topology_t &&other) noexcept {
+    topology_t& operator=(topology_t&& other) noexcept {
         std::swap(topology_, other.topology_);
         return *this;
     }
 
-    topology_t(topology_t const &) = delete;
-    topology_t &operator=(topology_t const &) = delete;
+    topology_t(topology_t const&) = delete;
+    topology_t& operator=(topology_t const&) = delete;
 
     ~topology_t() noexcept { fu_topology_delete(topology_); }
 
@@ -172,9 +172,9 @@ class topology_t {
 
 /** Allocates @p bytes on the memory domain @p domain , answering an empty span on failure. */
 [[nodiscard]] inline bytes_span_t allocate_on_memory_domain(fu_memory_domain_id_t domain, std::size_t bytes) noexcept {
-    void *memory = nullptr;
+    void* memory = nullptr;
     if (fu_allocate_on_domain_id(domain, bytes, &memory) != fu_success_k) return {};
-    return {static_cast<b8_t *>(memory), bytes};
+    return {static_cast<b8_t*>(memory), bytes};
 }
 
 /** Frees @p memory , which @ref allocate_on_memory_domain placed on @p domain . */
@@ -198,15 +198,15 @@ class executor_t {
     /** An executor holding no pool, as a moved-from one does, until @ref make assigns one. */
     constexpr executor_t() noexcept = default;
 
-    executor_t(executor_t &&other) noexcept : pool_(std::exchange(other.pool_, nullptr)) {}
+    executor_t(executor_t&& other) noexcept : pool_(std::exchange(other.pool_, nullptr)) {}
 
-    executor_t &operator=(executor_t &&other) noexcept {
+    executor_t& operator=(executor_t&& other) noexcept {
         std::swap(pool_, other.pool_);
         return *this;
     }
 
-    executor_t(executor_t const &) = delete;
-    executor_t &operator=(executor_t const &) = delete;
+    executor_t(executor_t const&) = delete;
+    executor_t& operator=(executor_t const&) = delete;
 
     ~executor_t() noexcept { fu_pool_delete(pool_); }
 
@@ -224,7 +224,7 @@ class executor_t {
 
     /** Spawns @p threads threads interleaved across every compute domain of @p topology , or only
      *  the caller in a build without OS threads, such as WebAssembly's. */
-    [[nodiscard]] static expected<executor_t> make(topology_t const &topology, std::size_t threads,
+    [[nodiscard]] static expected<executor_t> make(topology_t const& topology, std::size_t threads,
                                                    caller_exclusivity_t exclusivity) noexcept {
         if ((fu_comptime_capabilities() & fu_capability_os_threads_k) == 0) threads = 1;
         executor_t executor;

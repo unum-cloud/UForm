@@ -103,14 +103,14 @@ static std::string metadata_json() {
         {"audio_sample_rate", "16000"},
     };
     std::string json = "\"__metadata__\":{";
-    for (auto const &entry : entries) {
+    for (auto const& entry : entries) {
         if (json.back() != '{') json += ',';
         json += "\"" + entry[0] + "\":\"" + entry[1] + "\"";
     }
     return json + '}';
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
     if (argc != 2) {
         std::fputs("Usage: tiny_checkpoint <output.safetensors>\n", stderr);
         return 1;
@@ -119,7 +119,7 @@ int main(int argc, char **argv) {
 
     std::string header = "{" + metadata_json();
     std::uint64_t offset = 0;
-    for (tensor_plan_t const &plan : plans) {
+    for (tensor_plan_t const& plan : plans) {
         std::uint64_t const end = offset + plan.rows * plan.columns * sizeof(std::uint16_t);
         header += ",\"" + plan.name + "\":{\"dtype\":\"BF16\",\"shape\":[" + std::to_string(plan.rows) + "," +
                   std::to_string(plan.columns) + "],\"data_offsets\":[" + std::to_string(offset) + "," +
@@ -134,7 +134,7 @@ int main(int argc, char **argv) {
     std::vector<std::uint16_t> payload;
     payload.reserve(offset / sizeof(std::uint16_t));
     std::uint64_t state = 42;
-    for (tensor_plan_t const &plan : plans)
+    for (tensor_plan_t const& plan : plans)
         for (std::size_t scalar = 0; scalar != plan.rows * plan.columns; ++scalar) {
             if (plan.fill == tensor_plan_t::fill_t::ones_k) {
                 payload.push_back(to_bf16(1.0f));
@@ -145,7 +145,7 @@ int main(int argc, char **argv) {
             payload.push_back(to_bf16((unit * 2.0f - 1.0f) * 0.02f));
         }
 
-    std::FILE *const file = std::fopen(argv[1], "wb");
+    std::FILE* const file = std::fopen(argv[1], "wb");
     if (!file) {
         std::fputs("tiny_checkpoint: the output could not be opened for writing\n", stderr);
         return 1;

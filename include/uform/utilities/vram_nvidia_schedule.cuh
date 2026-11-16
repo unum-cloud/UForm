@@ -116,13 +116,13 @@ struct gpu_stream_t {
     gpu_stream_t() noexcept = default;
 
   public:
-    gpu_stream_t(gpu_stream_t const &) = delete;
-    gpu_stream_t &operator=(gpu_stream_t const &) = delete;
+    gpu_stream_t(gpu_stream_t const&) = delete;
+    gpu_stream_t& operator=(gpu_stream_t const&) = delete;
 
-    gpu_stream_t(gpu_stream_t &&other) noexcept
+    gpu_stream_t(gpu_stream_t&& other) noexcept
         : stream_(std::exchange(other.stream_, nullptr)), context_(std::exchange(other.context_, nullptr)),
           device_(std::exchange(other.device_, -1)) {}
-    gpu_stream_t &operator=(gpu_stream_t &&other) noexcept {
+    gpu_stream_t& operator=(gpu_stream_t&& other) noexcept {
         if (this != &other) {
             destroy_();
             stream_ = std::exchange(other.stream_, nullptr);
@@ -165,7 +165,9 @@ struct gpu_stream_t {
     operator CUstream() const noexcept { return stream_; }
 
     /** The same handle as NumKong's opaque stream, for its kernels and runtime calls. */
-    [[nodiscard]] nk_stream_t numkong() const noexcept { return reinterpret_cast<nk_stream_t>(stream_); }
+    [[nodiscard]] nk_stream_t numkong() const noexcept {
+        return reinterpret_cast<nk_stream_t>(stream_); // vendor-boundary: NumKong's opaque stream handle
+    }
 
     /** The retained primary context the stream lives in. */
     [[nodiscard]] CUcontext context() const noexcept { return context_; }
@@ -203,7 +205,7 @@ struct gpu_stream_t {
 template <typename value_type_>
 [[nodiscard]] inline expected_t copy_host_to_device(std::type_identity_t<nk::tensor_view<value_type_, 1>> host_source,
                                                     nk::tensor_span<value_type_, 1> device_destination,
-                                                    gpu_stream_t &stream) noexcept {
+                                                    gpu_stream_t& stream) noexcept {
     if (host_source.empty()) return {};
     if (device_destination.extent(0) < host_source.extent(0))
         return expected_t::fail(status_t::invalid_argument_k,
@@ -225,7 +227,7 @@ template <typename value_type_>
 template <typename value_type_>
 [[nodiscard]] inline expected_t copy_device_to_host(
     nk::tensor_view<value_type_, 1> device_source,
-    std::type_identity_t<nk::tensor_span<value_type_, 1>> host_destination, gpu_stream_t &stream) noexcept {
+    std::type_identity_t<nk::tensor_span<value_type_, 1>> host_destination, gpu_stream_t& stream) noexcept {
     if (device_source.empty()) return {};
     if (host_destination.extent(0) < device_source.extent(0))
         return expected_t::fail(status_t::invalid_argument_k,
@@ -245,7 +247,7 @@ template <typename value_type_>
 template <typename value_type_>
 [[nodiscard]] inline expected_t copy_device_to_device(std::type_identity_t<nk::tensor_view<value_type_, 1>> source,
                                                       nk::tensor_span<value_type_, 1> destination,
-                                                      gpu_stream_t &stream) noexcept {
+                                                      gpu_stream_t& stream) noexcept {
     if (source.empty()) return {};
     if (destination.extent(0) < source.extent(0))
         return expected_t::fail(status_t::invalid_argument_k,
@@ -262,7 +264,7 @@ template <typename value_type_>
  *  spelling of @c cuMemsetD8Async . A strided @p destination is a loud failure. */
 template <typename value_type_, std::size_t rank_>
 [[nodiscard]] inline expected_t zero_async(nk::tensor_span<value_type_, rank_> destination,
-                                           gpu_stream_t &stream) noexcept {
+                                           gpu_stream_t& stream) noexcept {
     if (destination.empty()) return {};
     if (!destination.is_contiguous())
         return expected_t::fail(status_t::invalid_argument_k, "cannot zero a strided device span");
@@ -273,94 +275,78 @@ template <typename value_type_, std::size_t rank_>
     return {};
 }
 
-/** The NumKong C ABI spelling of BFloat16 @p scalars — the one place UForm's CUDA
- *  scalar becomes NumKong's. */
-[[nodiscard]] inline nk_bf16_t const *numkong_scalars(bf16_t const *scalars) noexcept {
-    return reinterpret_cast<nk_bf16_t const *>(scalars);
-}
-
-/** The mutable twin of the BFloat16 @ref numkong_scalars . */
-[[nodiscard]] inline nk_bf16_t *numkong_scalars(bf16_t *scalars) noexcept {
-    return reinterpret_cast<nk_bf16_t *>(scalars);
-}
-
-/** The NumKong C ABI spelling of E4M3 @p scalars . */
-[[nodiscard]] inline nk_e4m3_t const *numkong_scalars(e4m3_t const *scalars) noexcept {
-    return reinterpret_cast<nk_e4m3_t const *>(scalars);
-}
-
 #pragma region Numerics
 
 /** NumKong's per-capability kernel shapes the training engine calls, where they
  *  take typed scalars. */
-using dots_pack_bf16_kernel_t = nk_status_t (*)(nk_bf16_t const *b, nk_size_t columns, nk_size_t depth,
-                                                nk_size_t b_stride, void *b_packed, nk_size_t columns_begin,
+using dots_pack_bf16_kernel_t = nk_status_t (*)(nk_bf16_t const* b, nk_size_t columns, nk_size_t depth,
+                                                nk_size_t b_stride, void* b_packed, nk_size_t columns_begin,
                                                 nk_size_t columns_end, nk_stream_t stream);
-using dots_pack_e4m3_kernel_t = nk_status_t (*)(nk_e4m3_t const *b, nk_size_t columns, nk_size_t depth,
-                                                nk_size_t b_stride, void *b_packed, nk_size_t columns_begin,
+using dots_pack_e4m3_kernel_t = nk_status_t (*)(nk_e4m3_t const* b, nk_size_t columns, nk_size_t depth,
+                                                nk_size_t b_stride, void* b_packed, nk_size_t columns_begin,
                                                 nk_size_t columns_end, nk_stream_t stream);
-using dots_packed_bf16_kernel_t = nk_status_t (*)(nk_bf16_t const *a, void const *b_packed, nk_f32_t *c, nk_size_t rows,
+using dots_packed_bf16_kernel_t = nk_status_t (*)(nk_bf16_t const* a, void const* b_packed, nk_f32_t* c, nk_size_t rows,
                                                   nk_size_t columns, nk_size_t depth, nk_size_t a_stride,
-                                                  nk_size_t c_stride, void *workspace, nk_size_t workspace_bytes,
+                                                  nk_size_t c_stride, void* workspace, nk_size_t workspace_bytes,
                                                   nk_stream_t stream);
-using dots_symmetric_bf16_kernel_t = nk_status_t (*)(nk_bf16_t const *vectors, nk_size_t vector_count, nk_size_t depth,
-                                                     nk_size_t stride, nk_f32_t *result, nk_size_t result_stride,
-                                                     nk_size_t rows_begin, nk_size_t rows_end, void *workspace,
+using dots_symmetric_bf16_kernel_t = nk_status_t (*)(nk_bf16_t const* vectors, nk_size_t vector_count, nk_size_t depth,
+                                                     nk_size_t stride, nk_f32_t* result, nk_size_t result_stride,
+                                                     nk_size_t rows_begin, nk_size_t rows_end, void* workspace,
                                                      nk_size_t workspace_bytes, nk_stream_t stream);
-using dots_packed_e4m3_kernel_t = nk_status_t (*)(nk_e4m3_t const *a, void const *b_packed, nk_f32_t *c, nk_size_t rows,
+using dots_packed_e4m3_kernel_t = nk_status_t (*)(nk_e4m3_t const* a, void const* b_packed, nk_f32_t* c, nk_size_t rows,
                                                   nk_size_t columns, nk_size_t depth, nk_size_t a_stride,
-                                                  nk_size_t c_stride, void *workspace, nk_size_t workspace_bytes,
+                                                  nk_size_t c_stride, void* workspace, nk_size_t workspace_bytes,
                                                   nk_stream_t stream);
 using attention_pack_bf16_kernel_t = nk_status_t (*)(nk_size_t key_value_head_count, nk_size_t depth,
-                                                     nk_u32_t const *key_offsets, nk_u32_t const *key_lengths,
-                                                     nk_size_t segment_count, nk_bf16_t const *keys,
-                                                     nk_size_t key_stride, nk_bf16_t const *values,
-                                                     nk_size_t value_stride, void *key_value_packed,
+                                                     nk_u32_t const* key_offsets, nk_u32_t const* key_lengths,
+                                                     nk_size_t segment_count, nk_bf16_t const* keys,
+                                                     nk_size_t key_stride, nk_bf16_t const* values,
+                                                     nk_size_t value_stride, void* key_value_packed,
                                                      nk_size_t tasks_begin, nk_size_t tasks_end, nk_stream_t stream);
 using attention_pack_e4m3_kernel_t = nk_status_t (*)(nk_size_t key_value_head_count, nk_size_t depth,
-                                                     nk_u32_t const *key_offsets, nk_u32_t const *key_lengths,
-                                                     nk_size_t segment_count, nk_e4m3_t const *keys,
-                                                     nk_size_t key_stride, nk_e4m3_t const *values,
-                                                     nk_size_t value_stride, void *key_value_packed,
+                                                     nk_u32_t const* key_offsets, nk_u32_t const* key_lengths,
+                                                     nk_size_t segment_count, nk_e4m3_t const* keys,
+                                                     nk_size_t key_stride, nk_e4m3_t const* values,
+                                                     nk_size_t value_stride, void* key_value_packed,
                                                      nk_size_t tasks_begin, nk_size_t tasks_end, nk_stream_t stream);
 using attention_packed_bf16_kernel_t = nk_status_t (*)(
-    nk_size_t head_count, nk_size_t key_value_head_count, nk_size_t depth, nk_u32_t const *query_offsets,
-    nk_size_t query_token_count, nk_f32_t scale, nk_size_t keys_before, nk_size_t keys_after, nk_bf16_t const *queries,
-    nk_size_t query_stride, void const *key_value_packed, nk_f32_t *output, nk_size_t output_stride,
-    nk_f32_t *log_sum_exp, nk_size_t tasks_begin, nk_size_t tasks_end, void *workspace, nk_size_t workspace_bytes,
+    nk_size_t head_count, nk_size_t key_value_head_count, nk_size_t depth, nk_u32_t const* query_offsets,
+    nk_size_t query_token_count, nk_f32_t scale, nk_size_t keys_before, nk_size_t keys_after, nk_bf16_t const* queries,
+    nk_size_t query_stride, void const* key_value_packed, nk_f32_t* output, nk_size_t output_stride,
+    nk_f32_t* log_sum_exp, nk_size_t tasks_begin, nk_size_t tasks_end, void* workspace, nk_size_t workspace_bytes,
     nk_stream_t stream);
 using attention_packed_e4m3_kernel_t = nk_status_t (*)(
-    nk_size_t head_count, nk_size_t key_value_head_count, nk_size_t depth, nk_u32_t const *query_offsets,
-    nk_size_t query_token_count, nk_f32_t scale, nk_size_t keys_before, nk_size_t keys_after, nk_e4m3_t const *queries,
-    nk_size_t query_stride, void const *key_value_packed, nk_f32_t *output, nk_size_t output_stride,
-    nk_f32_t *log_sum_exp, nk_size_t tasks_begin, nk_size_t tasks_end, void *workspace, nk_size_t workspace_bytes,
+    nk_size_t head_count, nk_size_t key_value_head_count, nk_size_t depth, nk_u32_t const* query_offsets,
+    nk_size_t query_token_count, nk_f32_t scale, nk_size_t keys_before, nk_size_t keys_after, nk_e4m3_t const* queries,
+    nk_size_t query_stride, void const* key_value_packed, nk_f32_t* output, nk_size_t output_stride,
+    nk_f32_t* log_sum_exp, nk_size_t tasks_begin, nk_size_t tasks_end, void* workspace, nk_size_t workspace_bytes,
     nk_stream_t stream);
 using attention_packed_gradients_bf16_kernel_t = nk_status_t (*)(
-    nk_size_t head_count, nk_size_t key_value_head_count, nk_size_t depth, nk_u32_t const *query_offsets,
-    nk_size_t query_token_count, nk_f32_t scale, nk_size_t keys_before, nk_size_t keys_after, nk_bf16_t const *queries,
-    nk_size_t query_stride, void const *key_value_packed, nk_f32_t const *output, nk_f32_t const *output_gradient,
-    nk_size_t output_stride, nk_f32_t const *log_sum_exp, nk_f32_t *query_gradient, nk_size_t query_gradient_stride,
-    nk_f32_t *key_gradient, nk_f32_t *value_gradient, nk_size_t key_value_gradient_stride, nk_size_t tasks_begin,
-    nk_size_t tasks_end, void *workspace, nk_size_t workspace_bytes, nk_stream_t stream);
-using attention_rope_bf16_kernel_t = nk_status_t (*)(nk_bf16_t const *x, nk_f32_t const *cos, nk_f32_t const *sin,
-                                                     nk_bf16_t *y, nk_size_t rows, nk_size_t head_count,
+    nk_size_t head_count, nk_size_t key_value_head_count, nk_size_t depth, nk_u32_t const* query_offsets,
+    nk_size_t query_token_count, nk_f32_t scale, nk_size_t keys_before, nk_size_t keys_after, nk_bf16_t const* queries,
+    nk_size_t query_stride, void const* key_value_packed, nk_f32_t const* output, nk_f32_t const* output_gradient,
+    nk_size_t output_stride, nk_f32_t const* log_sum_exp, nk_f32_t* query_gradient, nk_size_t query_gradient_stride,
+    nk_f32_t* key_gradient, nk_f32_t* value_gradient, nk_size_t key_value_gradient_stride, nk_size_t tasks_begin,
+    nk_size_t tasks_end, void* workspace, nk_size_t workspace_bytes, nk_stream_t stream);
+using attention_rope_bf16_kernel_t = nk_status_t (*)(nk_bf16_t const* x, nk_f32_t const* cos, nk_f32_t const* sin,
+                                                     nk_bf16_t* y, nk_size_t rows, nk_size_t head_count,
                                                      nk_size_t depth, nk_size_t x_stride, nk_size_t y_stride,
                                                      nk_stream_t stream);
-using each_sum_f32_kernel_t = nk_status_t (*)(nk_f32_t const *a, nk_f32_t const *b, nk_size_t count, nk_f32_t *result,
+using each_sum_f32_kernel_t = nk_status_t (*)(nk_f32_t const* a, nk_f32_t const* b, nk_size_t count, nk_f32_t* result,
                                               nk_stream_t stream);
-using each_rmsnorm_bf16_kernel_t = nk_status_t (*)(nk_bf16_t const *x, nk_f32_t const *gamma, nk_bf16_t *y,
+using each_rmsnorm_bf16_kernel_t = nk_status_t (*)(nk_bf16_t const* x, nk_f32_t const* gamma, nk_bf16_t* y,
                                                    nk_size_t rows, nk_size_t groups, nk_size_t columns,
                                                    nk_size_t x_stride, nk_size_t y_stride, nk_f32_t epsilon,
                                                    nk_stream_t stream);
-using each_rmscast_bf16_kernel_t = nk_status_t (*)(nk_f32_t const *x, nk_f32_t const *gamma, nk_bf16_t *y,
+using each_rmscast_bf16_kernel_t = nk_status_t (*)(nk_f32_t const* x, nk_f32_t const* gamma, nk_bf16_t* y,
                                                    nk_size_t rows, nk_size_t groups, nk_size_t columns,
                                                    nk_size_t x_stride, nk_size_t y_stride, nk_f32_t epsilon,
                                                    nk_stream_t stream);
-using each_swiglu_f32_kernel_t = nk_status_t (*)(nk_f32_t const *gate, nk_f32_t const *up, nk_f32_t *y, nk_size_t rows,
+using each_swiglu_f32_kernel_t = nk_status_t (*)(nk_f32_t const* gate, nk_f32_t const* up, nk_f32_t* y, nk_size_t rows,
                                                  nk_size_t columns, nk_size_t gate_stride, nk_size_t up_stride,
                                                  nk_size_t y_stride, nk_f32_t gate_scale, nk_f32_t output_scale,
                                                  nk_stream_t stream);
-using each_swiglu_bf16_kernel_t = nk_status_t (*)(nk_bf16_t const *gate, nk_bf16_t const *up, nk_bf16_t *y,
+using each_swiglu_bf16_kernel_t = nk_status_t (*)(nk_bf16_t const* gate, nk_bf16_t const* up, nk_bf16_t* y,
                                                   nk_size_t rows, nk_size_t columns, nk_size_t gate_stride,
                                                   nk_size_t up_stride, nk_size_t y_stride, nk_f32_t gate_scale,
                                                   nk_f32_t output_scale, nk_stream_t stream);
@@ -413,11 +399,11 @@ inline constexpr unsigned kernel_grid_cap_k = 4096u;
  *  driver copies raw bytes. */
 template <typename... arg_types_>
 [[nodiscard]] inline expected_t launch_function(CUfunction function, dim3 grid_size, dim3 block_size,
-                                                gpu_stream_t &stream, arg_types_... args) noexcept {
+                                                gpu_stream_t& stream, arg_types_... args) noexcept {
     static_assert(sizeof...(arg_types_) != 0, "a kernel without arguments has nothing to compute");
     static_assert((std::is_trivially_copyable_v<arg_types_> && ...), "kernels take their arguments by bytes");
     if (function == nullptr) return expected_t::fail(status_t::invalid_argument_k, "no kernel to launch");
-    void *argument_addresses[] = {&args...};
+    void* argument_addresses[] = {&args...};
     if (CUresult result = cuLaunchKernel(function, grid_size.x, grid_size.y, grid_size.z, block_size.x, block_size.y,
                                          block_size.z, 0, stream.get(), argument_addresses, nullptr);
         result != CUDA_SUCCESS)
@@ -445,8 +431,8 @@ template <typename... arg_types_>
  *  loaded module resolved.
  */
 template <typename... arg_types_>
-[[nodiscard]] inline expected_t launch_kernel(void const *kernel_symbol, dim3 grid_size, dim3 block_size,
-                                              gpu_stream_t &stream, arg_types_ const &...args) noexcept {
+[[nodiscard]] inline expected_t launch_kernel(void const* kernel_symbol, dim3 grid_size, dim3 block_size,
+                                              gpu_stream_t& stream, arg_types_ const&... args) noexcept {
     CUfunction function = nullptr;
     if (int result = static_cast<int>(cudaGetFuncBySymbol(&function, kernel_symbol)); result != 0)
         return expected_t::fail(status_t::device_error_k, "kernel symbol resolution failed (code={})", result);
@@ -458,9 +444,10 @@ template <typename... arg_types_>
  *  become views, and an argument no parameter accepts fails to compile. */
 template <typename... parameter_types_>
 [[nodiscard]] inline expected_t launch_kernel(void (*kernel)(parameter_types_...), dim3 grid_size, dim3 block_size,
-                                              gpu_stream_t &stream,
-                                              std::type_identity_t<parameter_types_> const &...arguments) noexcept {
-    return launch_kernel(reinterpret_cast<void const *>(kernel), grid_size, block_size, stream, arguments...);
+                                              gpu_stream_t& stream,
+                                              std::type_identity_t<parameter_types_> const&... arguments) noexcept {
+    return launch_kernel(reinterpret_cast<void const*>(kernel), grid_size, block_size, stream, // vendor-boundary
+                         arguments...);
 }
 
 /**
@@ -480,7 +467,7 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
 /** Enqueue @p destination = @p source ᵀ for BFloat16 matrices: one capture-safe launch of
  *  @ref transpose_bf16_kernel on @p stream . */
 [[nodiscard]] inline expected_t transpose_bf16(bf16r2_view_t source, bf16r2_span_t destination,
-                                               gpu_stream_t &stream) noexcept {
+                                               gpu_stream_t& stream) noexcept {
     if (destination.extent(0) != source.extent(1) || destination.extent(1) != source.extent(0))
         return expected_t::fail(status_t::unsupported_k, "[{}x{}] cannot hold the transposed [{}x{}]",
                                 destination.extent(0), destination.extent(1), source.extent(0), source.extent(1));
@@ -498,24 +485,24 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
 
 /** The bytes the pack of a @b [columns,depth] BFloat16 B operand takes under @p numerics . */
 [[nodiscard]] expected<std::size_t> pack_bytes_bf16(std::size_t columns, std::size_t depth,
-                                                    gpu_numerics_t const &numerics) noexcept;
+                                                    gpu_numerics_t const& numerics) noexcept;
 
 /** Allocate off @p arena a buffer for the NumKong pack of a @b [columns,depth]
  *  BFloat16 B operand. */
 [[nodiscard]] expected<b8r1_tensor_arena_t> allocate_pack_bf16(std::size_t columns, std::size_t depth,
-                                                               gpu_numerics_t const &numerics,
-                                                               gpu_arena_t &arena) noexcept;
+                                                               gpu_numerics_t const& numerics,
+                                                               gpu_arena_t& arena) noexcept;
 
 /** Enqueue NumKong's pack of @p b , read row-major as the @b [columns,depth] B operand of
  *  @ref multiply_bf16 , into @p packed , sized by @ref pack_bytes_bf16 . */
-[[nodiscard]] expected_t pack_bf16(bf16r2_view_t b, b8r1_span_t packed, gpu_numerics_t const &numerics,
-                                   gpu_stream_t &stream) noexcept;
+[[nodiscard]] expected_t pack_bf16(bf16r2_view_t b, b8r1_span_t packed, gpu_numerics_t const& numerics,
+                                   gpu_stream_t& stream) noexcept;
 
 /** Enqueue the Float32 product @c c=a · Bᵀ against @p packed_b , the pack of a
  *  @b [columns,depth] B with @c columns=c.extent(1) and @c depth=a.extent(1) . NumKong
  *  products replay bit-identically. */
 [[nodiscard]] expected_t multiply_bf16(bf16r2_view_t a, b8r1_view_t packed_b, f32r2_span_t c,
-                                       gpu_numerics_t const &numerics, gpu_stream_t &stream) noexcept;
+                                       gpu_numerics_t const& numerics, gpu_stream_t& stream) noexcept;
 
 /**
  *  @brief Pack @p weight @b [outputs,inputs] as the B operand of its forward product into @p packed , and its
@@ -524,15 +511,15 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
  *  @param[in] transposed At least @c inputs · round_up(outputs,8) scalars of scratch.
  */
 [[nodiscard]] expected_t pack_weight_bf16(bf16r2_view_t weight, bf16r1_span_t transposed, b8r1_span_t packed,
-                                          b8r1_span_t packed_transposed, gpu_numerics_t const &numerics,
-                                          gpu_stream_t &stream) noexcept;
+                                          b8r1_span_t packed_transposed, gpu_numerics_t const& numerics,
+                                          gpu_stream_t& stream) noexcept;
 
 /** The workspace bytes @ref weight_gradient_bf16 takes for a @b [outputs,inputs] weight over
  *  @p tokens under @p numerics , where NumKong splits the token depth into slices it sums in
  *  a fixed order. */
 [[nodiscard]] expected<std::size_t> weight_gradient_workspace_bytes_bf16(std::size_t outputs, std::size_t inputs,
                                                                          std::size_t tokens,
-                                                                         gpu_numerics_t const &numerics) noexcept;
+                                                                         gpu_numerics_t const& numerics) noexcept;
 
 /**
  *  @brief One weight gradient @c dW=dYᵀ · X : transposes @p output_grad and @p input with token
@@ -552,7 +539,7 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
 [[nodiscard]] expected_t weight_gradient_bf16(bf16r2_view_t output_grad, bf16r2_view_t input, bf16r2_span_t weight_grad,
                                               bf16r1_span_t transposed_grad, bf16r1_span_t transposed_input,
                                               b8r1_span_t packed_input, f32r1_span_t product, b8r1_span_t workspace,
-                                              gpu_numerics_t const &numerics, gpu_stream_t &stream) noexcept;
+                                              gpu_numerics_t const& numerics, gpu_stream_t& stream) noexcept;
 
 /**
  *  @brief All-lanes-get-the-total shuffle sum of one warp — the fixed-order tree every
@@ -633,11 +620,11 @@ enum capture_t : u32_t {
 struct gpu_replay_graph_t {
 
     gpu_replay_graph_t() noexcept = default;
-    gpu_replay_graph_t(gpu_replay_graph_t const &) = delete;
-    gpu_replay_graph_t &operator=(gpu_replay_graph_t const &) = delete;
+    gpu_replay_graph_t(gpu_replay_graph_t const&) = delete;
+    gpu_replay_graph_t& operator=(gpu_replay_graph_t const&) = delete;
 
-    gpu_replay_graph_t(gpu_replay_graph_t &&other) noexcept : exec_(std::exchange(other.exec_, nullptr)) {}
-    gpu_replay_graph_t &operator=(gpu_replay_graph_t &&other) noexcept {
+    gpu_replay_graph_t(gpu_replay_graph_t&& other) noexcept : exec_(std::exchange(other.exec_, nullptr)) {}
+    gpu_replay_graph_t& operator=(gpu_replay_graph_t&& other) noexcept {
         if (this != &other) {
             destroy_();
             exec_ = std::exchange(other.exec_, nullptr);
@@ -655,7 +642,7 @@ struct gpu_replay_graph_t {
      *      @p stream .
      */
     template <typename body_type_>
-    [[nodiscard]] static expected<gpu_replay_graph_t> make(CUstream stream, body_type_ &&body) noexcept {
+    [[nodiscard]] static expected<gpu_replay_graph_t> make(CUstream stream, body_type_&& body) noexcept {
         if (stream == nullptr)
             return expected<gpu_replay_graph_t>::fail(status_t::invalid_argument_k,
                                                       "capture needs a real stream, not the null stream");
@@ -689,7 +676,7 @@ struct gpu_replay_graph_t {
      */
     template <typename body_type_>
     [[nodiscard]] static expected<gpu_replay_graph_t> make(std::span<CUstream const> streams,
-                                                           body_type_ &&body) noexcept {
+                                                           body_type_&& body) noexcept {
         if (streams.empty())
             return expected<gpu_replay_graph_t>::fail(status_t::invalid_argument_k,
                                                       "capture needs at least one stream");
@@ -741,7 +728,7 @@ struct gpu_replay_graph_t {
                 outcome = cuda_failure(ended, "stream capture end failed (trunk)");
         }
         (void)destroy_event_(fork_event);
-        for (CUevent &event : join_events) (void)destroy_event_(event);
+        for (CUevent& event : join_events) { [[maybe_unused]] auto const join_destroyed = destroy_event_(event); }
         if (!outcome) {
             if (graph != nullptr) cuGraphDestroy(graph);
             return expected<gpu_replay_graph_t>::fail(std::move(outcome));
@@ -811,7 +798,7 @@ struct gpu_replay_graph_t {
     }
 
     /** Create a timing-free event in @p stream 's own context, so recording it there is legal. */
-    [[nodiscard]] static expected_t make_event_for_(CUstream stream, CUevent &event) noexcept {
+    [[nodiscard]] static expected_t make_event_for_(CUstream stream, CUevent& event) noexcept {
         CUcontext stream_context = nullptr;
         if (CUresult result = cuStreamGetCtx(stream, &stream_context); result != CUDA_SUCCESS)
             return cuda_failure(result, "stream context query failed");
@@ -823,7 +810,7 @@ struct gpu_replay_graph_t {
         return {};
     }
 
-    static bool destroy_event_(CUevent &event) noexcept {
+    static bool destroy_event_(CUevent& event) noexcept {
         if (event == nullptr) return true;
         bool const destroyed = cuEventDestroy(event) == CUDA_SUCCESS;
         event = nullptr;
@@ -842,10 +829,10 @@ struct gpu_replay_graph_t {
  *  boundaries, gather-ready signals) with the timing machinery disabled. */
 struct gpu_event_t {
     gpu_event_t() noexcept = default;
-    gpu_event_t(gpu_event_t const &) = delete;
-    gpu_event_t &operator=(gpu_event_t const &) = delete;
-    gpu_event_t(gpu_event_t &&other) noexcept : event_(std::exchange(other.event_, nullptr)) {}
-    gpu_event_t &operator=(gpu_event_t &&other) noexcept {
+    gpu_event_t(gpu_event_t const&) = delete;
+    gpu_event_t& operator=(gpu_event_t const&) = delete;
+    gpu_event_t(gpu_event_t&& other) noexcept : event_(std::exchange(other.event_, nullptr)) {}
+    gpu_event_t& operator=(gpu_event_t&& other) noexcept {
         if (this != &other) {
             if (event_ != nullptr) cuEventDestroy(event_);
             event_ = std::exchange(other.event_, nullptr);
@@ -885,10 +872,10 @@ struct gpu_event_t {
 struct barrier_round_t {
 
     barrier_round_t() noexcept = default;
-    barrier_round_t(barrier_round_t const &) = delete;
-    barrier_round_t &operator=(barrier_round_t const &) = delete;
-    barrier_round_t(barrier_round_t &&) noexcept = default;
-    barrier_round_t &operator=(barrier_round_t &&) noexcept = default;
+    barrier_round_t(barrier_round_t const&) = delete;
+    barrier_round_t& operator=(barrier_round_t const&) = delete;
+    barrier_round_t(barrier_round_t&&) noexcept = default;
+    barrier_round_t& operator=(barrier_round_t&&) noexcept = default;
 
     /**
      *  @brief Seed the device round scalar — once, at setup, with a current context.
@@ -899,7 +886,7 @@ struct barrier_round_t {
      *      first @ref advance.
      */
     [[nodiscard]] static expected<barrier_round_t> make(u32r1_span_t device_round, u32_t increment,
-                                                        gpu_stream_t &stream) noexcept {
+                                                        gpu_stream_t& stream) noexcept {
         barrier_round_t counter;
         counter.device_round_ = device_round;
         counter.increment_ = increment;
@@ -913,7 +900,7 @@ struct barrier_round_t {
 
     /** Enqueue the one-thread device increment — once per step, on the surface's lead stream,
      *  before any barrier. Capture-safe: a captured region re-runs the bump on every replay. */
-    [[nodiscard]] expected_t advance(gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t advance(gpu_stream_t& stream) noexcept;
 
   private:
 
@@ -935,9 +922,9 @@ struct barrier_round_t {
  *  from a separate retain path. Check @ref ok() before relying on the scope.
  */
 struct switch_to_gpu_t {
-    explicit switch_to_gpu_t(gpu_stream_t &stream) noexcept : ok_(cuCtxPushCurrent(stream.context()) == CUDA_SUCCESS) {}
-    switch_to_gpu_t(switch_to_gpu_t const &) = delete;
-    switch_to_gpu_t &operator=(switch_to_gpu_t const &) = delete;
+    explicit switch_to_gpu_t(gpu_stream_t& stream) noexcept : ok_(cuCtxPushCurrent(stream.context()) == CUDA_SUCCESS) {}
+    switch_to_gpu_t(switch_to_gpu_t const&) = delete;
+    switch_to_gpu_t& operator=(switch_to_gpu_t const&) = delete;
     ~switch_to_gpu_t() noexcept {
         if (ok_) cuCtxPopCurrent(nullptr);
     }
@@ -956,7 +943,7 @@ struct switch_to_gpu_t {
  *  @c static_assert s it, so a drifted signature fails at compile time and generic code (mixer,
  *  telemetry, tests) can name any collective uniformly. */
 template <typename buffer_type_>
-concept collective_buffer = requires(buffer_type_ buffer, gpu_stream_t &stream) {
+concept collective_buffer = requires(buffer_type_ buffer, gpu_stream_t& stream) {
     typename buffer_type_::value_type;
     { buffer(stream) };
 };

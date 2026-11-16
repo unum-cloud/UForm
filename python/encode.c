@@ -24,7 +24,7 @@ enum {
     outputs_all_k = outputs_embeddings_k | outputs_states_k | outputs_token_vectors_k,
 };
 
-static char const *spell_outputs(int value) {
+static char const* spell_outputs(int value) {
     switch (value) {
     case outputs_embeddings_k: return "embeddings";
     case outputs_states_k: return "states";
@@ -41,7 +41,7 @@ uform_py_enum_t uform_py_outputs = {.name = "Outputs",
 
 /** Reads an `Outputs` flag set, defaulting to embeddings alone; returns 0 or -1 with
  *  an exception set. */
-static int outputs_from_object(PyObject *object, int *outputs) {
+static int outputs_from_object(PyObject* object, int* outputs) {
     *outputs = outputs_embeddings_k;
     if (!object) return 0;
     if (!PyLong_Check(object) || PyBool_Check(object)) {
@@ -56,17 +56,13 @@ static int outputs_from_object(PyObject *object, int *outputs) {
     return 0;
 }
 
-static PyStructSequence_Field
-    Encoded_fields
-        [] =
-            {
-                {"embeddings",
-                 "The (count, dimensions) `ArenaBuffer` of pooled embeddings, or None when not asked for."},
-                {"states", "The (tokens, dimensions) `RowsTape` of final-norm states and its offsets, or None when not "
-                           "asked for."},
-                {"token_vectors", "The (tokens, token_width) `RowsTape` of the token head's unit vectors, offset as "
-                                  "the " "states, or " "None when not " "asked for."},
-                {NULL, NULL},
+static PyStructSequence_Field Encoded_fields[] = {
+    {"embeddings", "The (count, dimensions) `ArenaBuffer` of pooled embeddings, or None when not asked for."},
+    {"states", "The (tokens, dimensions) `RowsTape` of final-norm states and its offsets, or None when not " //
+               "asked for."},
+    {"token_vectors", "The (tokens, token_width) `RowsTape` of the token head's unit vectors, offset as the " //
+                      "states, or None when not asked for."},
+    {NULL, NULL},
 };
 
 PyStructSequence_Desc uform_py_encoded_desc = {
@@ -92,7 +88,7 @@ typedef struct EncodeStats {
     } stats;
 } EncodeStats;
 
-static PyObject *EncodeStats_tp_new(PyTypeObject *type, PyObject *args, PyObject *keywords) {
+static PyObject* EncodeStats_tp_new(PyTypeObject* type, PyObject* args, PyObject* keywords) {
     if (PyTuple_GET_SIZE(args) != 0 || (keywords && PyDict_Size(keywords) != 0)) {
         PyErr_Format(PyExc_TypeError, "%s() takes no arguments", type->tp_name + sizeof("uform.") - 1);
         return NULL;
@@ -100,20 +96,20 @@ static PyObject *EncodeStats_tp_new(PyTypeObject *type, PyObject *args, PyObject
     return type->tp_alloc(type, 0); // Zeroed, so a fresh report has counted nothing.
 }
 
-static void EncodeStats_dealloc(EncodeStats *self) { Py_TYPE(self)->tp_free((PyObject *)self); }
+static void EncodeStats_dealloc(EncodeStats* self) { Py_TYPE(self)->tp_free((PyObject*)self); }
 
-static PyObject *EncodeStats_repr(EncodeStats *self) {
+static PyObject* EncodeStats_repr(EncodeStats* self) {
     return PyUnicode_FromFormat("%s(truncated=%zu, tokens=%zu)", Py_TYPE(self)->tp_name + sizeof("uform.") - 1,
                                 self->stats.text.truncated, self->stats.text.tokens);
 }
 
 /** Reads the @c size_t counter at the byte offset @p closure names inside the report. */
-static PyObject *EncodeStats_get_counter(EncodeStats *self, void *closure) {
+static PyObject* EncodeStats_get_counter(EncodeStats* self, void* closure) {
     size_t counter = 0;
 #if PY_VERSION_HEX >= 0x030D0000
     Py_BEGIN_CRITICAL_SECTION(self);
 #endif
-    counter = *(size_t const *)(void const *)((char const *)&self->stats + (size_t)closure);
+    counter = *(size_t const*)(void const*)((char const*)&self->stats + (size_t)closure);
 #if PY_VERSION_HEX >= 0x030D0000
     Py_END_CRITICAL_SECTION();
 #endif
@@ -122,9 +118,9 @@ static PyObject *EncodeStats_get_counter(EncodeStats *self, void *closure) {
 
 static PyGetSetDef EncodeStats_getset[] = {
     {"truncated", (getter)EncodeStats_get_counter, NULL, "Items cut at the model's context.",
-     (void *)offsetof(uform_text_encode_stats_t, truncated)},
+     (void*)offsetof(uform_text_encode_stats_t, truncated)},
     {"tokens", (getter)EncodeStats_get_counter, NULL, "Tokens the call encoded, after truncation.",
-     (void *)offsetof(uform_text_encode_stats_t, tokens)},
+     (void*)offsetof(uform_text_encode_stats_t, tokens)},
     {NULL, NULL, NULL, NULL, NULL},
 };
 
@@ -229,26 +225,26 @@ typedef struct encode_call_t {
     } stats;
 
     /** The caller's report the stats are copied into once the call succeeds, held, or NULL. */
-    PyObject *stats_object;
+    PyObject* stats_object;
     uform_py_callback_t progress;
 
     /** The `Outputs` flags the caller named. */
     int outputs;
 } encode_call_t;
 
-static PyObject *encode_answer(void *erased) {
-    encode_call_t *const call = (encode_call_t *)erased;
+static PyObject* encode_answer(void* erased) {
+    encode_call_t* const call = (encode_call_t*)erased;
     if (call->stats_object) {
 #if PY_VERSION_HEX >= 0x030D0000
         Py_BEGIN_CRITICAL_SECTION(call->stats_object);
 #endif
-        ((EncodeStats *)call->stats_object)->stats.text = call->stats.text;
+        ((EncodeStats*)call->stats_object)->stats.text = call->stats.text;
 #if PY_VERSION_HEX >= 0x030D0000
         Py_END_CRITICAL_SECTION();
 #endif
     }
     size_t const count = call->inputs.count, tokens = call->stats.text.tokens;
-    PyObject *fields[3] = {NULL, NULL, NULL};
+    PyObject* fields[3] = {NULL, NULL, NULL};
     fields[0] = call->outputs & outputs_embeddings_k
                     ? uform_py_rows_answer(&ArenaBufferType, call->call.arena, &call->embeddings, count)
                     : Py_NewRef(Py_None);
@@ -263,16 +259,16 @@ static PyObject *encode_answer(void *erased) {
     return uform_py_struct_sequence_steal(&EncodedType, fields, 3);
 }
 
-static void encode_release(void *erased) {
-    encode_call_t *const call = (encode_call_t *)erased;
+static void encode_release(void* erased) {
+    encode_call_t* const call = (encode_call_t*)erased;
     uform_py_tape_release(&call->inputs);
     Py_CLEAR(call->progress.callable);
     Py_CLEAR(call->stats_object);
     uform_py_call_release(&call->call);
 }
 
-static int encode_traverse(void *erased, visitproc visit, void *arg) {
-    encode_call_t *const call = (encode_call_t *)erased;
+static int encode_traverse(void* erased, visitproc visit, void* arg) {
+    encode_call_t* const call = (encode_call_t*)erased;
     Py_VISIT(call->progress.callable);
     Py_VISIT(call->stats_object);
     return 0;
@@ -281,9 +277,9 @@ static int encode_traverse(void *erased, visitproc visit, void *arg) {
 /** What tells one encode verb from another: how its inputs gather, the report it fills, and
  *  how it runs. */
 typedef struct encode_verb_t {
-    char const *input_name;
+    char const* input_name;
     uform_py_element_t element;
-    PyTypeObject *stats_type;
+    PyTypeObject* stats_type;
     uform_py_verb_t verb;
 } encode_verb_t;
 
@@ -297,7 +293,7 @@ typedef struct encode_common_t {
     uform_model_t model;
     uform_executor_t executor;
     uform_completion_t completion;
-    uform_rows_view_t *embeddings;
+    uform_rows_view_t* embeddings;
     uform_rows_tape_view_t *states, *token_vectors;
     uform_arena_t arena;
     uform_scalar_t outputs_scalar;
@@ -306,8 +302,8 @@ typedef struct encode_common_t {
 
 /** Binds `(inputs, arena, /, *, outputs, outputs_scalar, progress, progress_steps, stats)`; returns
  *  0 or -1. */
-static int encode_parse(char const *verb, encode_verb_t const *descriptor, PyObject *const *args,
-                        Py_ssize_t positional_args_count, PyObject *args_names_tuple, encode_arguments_t *parsed) {
+static int encode_parse(char const* verb, encode_verb_t const* descriptor, PyObject* const* args,
+                        Py_ssize_t positional_args_count, PyObject* args_names_tuple, encode_arguments_t* parsed) {
     uform_py_argument_t const arguments[] = {
         {descriptor->input_name, &parsed->inputs},
         {"arena", &parsed->arena},
@@ -327,8 +323,8 @@ static int encode_parse(char const *verb, encode_verb_t const *descriptor, PyObj
  *      reading every field the six C structures share into @p common.
  *  @return The call to fill, or NULL with an exception set.
  */
-static encode_call_t *encode_open(PyObject *self, encode_verb_t const *descriptor, encode_arguments_t const *parsed,
-                                  uform_py_receiver_t *receiver, encode_common_t *common, encode_call_t *stack) {
+static encode_call_t* encode_open(PyObject* self, encode_verb_t const* descriptor, encode_arguments_t const* parsed,
+                                  uform_py_receiver_t* receiver, encode_common_t* common, encode_call_t* stack) {
     int outputs = 0;
     size_t progress_steps = 0;
     uform_scalar_t outputs_scalar = uform_scalar_f32_k;
@@ -343,7 +339,7 @@ static encode_call_t *encode_open(PyObject *self, encode_verb_t const *descripto
         return NULL;
     }
 
-    encode_call_t *const call = uform_py_call_open(receiver, &descriptor->verb, stack);
+    encode_call_t* const call = uform_py_call_open(receiver, &descriptor->verb, stack);
     if (!call) return NULL;
     if (uform_py_tape_from_object(parsed->inputs, descriptor->input_name, descriptor->element, &call->inputs) != 0 ||
         uform_py_callback_from_object(parsed->progress, "progress", &call->call, &call->progress) != 0 ||
@@ -354,13 +350,13 @@ static encode_call_t *encode_open(PyObject *self, encode_verb_t const *descripto
     call->outputs = outputs;
     if (parsed->stats && parsed->stats != Py_None) call->stats_object = Py_NewRef(parsed->stats);
     *common = (encode_common_t) {
-        .model = ((Model *)receiver->target)->handle,
+        .model = ((Model*)receiver->target)->handle,
         .executor = receiver->executor,
         .completion = receiver->completion,
         .embeddings = outputs & outputs_embeddings_k ? &call->embeddings : NULL,
         .states = outputs & outputs_states_k ? &call->states : NULL,
         .token_vectors = outputs & outputs_token_vectors_k ? &call->token_vectors : NULL,
-        .arena = ((Arena *)call->call.arena)->handle,
+        .arena = ((Arena*)call->call.arena)->handle,
         .outputs_scalar = outputs_scalar,
         .progress = uform_py_progress_registered(&call->progress, progress_steps),
     };
@@ -371,15 +367,15 @@ static encode_call_t *encode_open(PyObject *self, encode_verb_t const *descripto
 
 #pragma region Verbs
 
-static void text_encode_submit(void *call) { uform_text_encode(&((encode_call_t *)call)->arguments.text); }
-static void image_encode_submit(void *call) { uform_image_encode(&((encode_call_t *)call)->arguments.image); }
-static void image_encode_pixels_submit(void *call) {
-    uform_image_encode_pixels(&((encode_call_t *)call)->arguments.pixels);
+static void text_encode_submit(void* call) { uform_text_encode(&((encode_call_t*)call)->arguments.text); }
+static void image_encode_submit(void* call) { uform_image_encode(&((encode_call_t*)call)->arguments.image); }
+static void image_encode_pixels_submit(void* call) {
+    uform_image_encode_pixels(&((encode_call_t*)call)->arguments.pixels);
 }
-static void video_encode_submit(void *call) { uform_video_encode(&((encode_call_t *)call)->arguments.video); }
-static void audio_encode_submit(void *call) { uform_audio_encode(&((encode_call_t *)call)->arguments.audio); }
-static void audio_encode_samples_submit(void *call) {
-    uform_audio_encode_samples(&((encode_call_t *)call)->arguments.samples);
+static void video_encode_submit(void* call) { uform_video_encode(&((encode_call_t*)call)->arguments.video); }
+static void audio_encode_submit(void* call) { uform_audio_encode(&((encode_call_t*)call)->arguments.audio); }
+static void audio_encode_samples_submit(void* call) {
+    uform_audio_encode_samples(&((encode_call_t*)call)->arguments.samples);
 }
 
 static encode_verb_t const text_encode_verb = {
@@ -445,15 +441,15 @@ static char const doc_Model_text_encode[] =                                     
     "  >>> encoded.embeddings is None, len(encoded.states), len(encoded.states.offsets)\n"              //
     "  (True, 7, 3)";
 
-static PyObject *Model_text_encode(PyObject *self, PyObject *const *args, Py_ssize_t positional_args_count,
-                                   PyObject *args_names_tuple) {
+static PyObject* Model_text_encode(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
+                                   PyObject* args_names_tuple) {
     encode_arguments_t parsed;
     uform_py_receiver_t receiver;
     encode_common_t common;
     encode_call_t stack;
     if (encode_parse("text_encode", &text_encode_verb, args, positional_args_count, args_names_tuple, &parsed) != 0)
         return NULL;
-    encode_call_t *const call = encode_open(self, &text_encode_verb, &parsed, &receiver, &common, &stack);
+    encode_call_t* const call = encode_open(self, &text_encode_verb, &parsed, &receiver, &common, &stack);
     if (!call) return NULL;
     call->arguments.text = (uform_text_encode_t) {
         .model = common.model,
@@ -487,15 +483,15 @@ static char const doc_Model_image_encode[] =                                    
     "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"               //
     "  stats (ImageEncodeStats, optional): Overwritten with this call's report.";
 
-static PyObject *Model_image_encode(PyObject *self, PyObject *const *args, Py_ssize_t positional_args_count,
-                                    PyObject *args_names_tuple) {
+static PyObject* Model_image_encode(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
+                                    PyObject* args_names_tuple) {
     encode_arguments_t parsed;
     uform_py_receiver_t receiver;
     encode_common_t common;
     encode_call_t stack;
     if (encode_parse("image_encode", &image_encode_verb, args, positional_args_count, args_names_tuple, &parsed) != 0)
         return NULL;
-    encode_call_t *const call = encode_open(self, &image_encode_verb, &parsed, &receiver, &common, &stack);
+    encode_call_t* const call = encode_open(self, &image_encode_verb, &parsed, &receiver, &common, &stack);
     if (!call) return NULL;
     call->arguments.image = (uform_image_encode_t) {
         .model = common.model,
@@ -529,8 +525,8 @@ static char const doc_Model_image_encode_pixels[] =                             
     "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"                     //
     "  stats (ImageEncodeStats, optional): Overwritten with this call's report.";
 
-static PyObject *Model_image_encode_pixels(PyObject *self, PyObject *const *args, Py_ssize_t positional_args_count,
-                                           PyObject *args_names_tuple) {
+static PyObject* Model_image_encode_pixels(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
+                                           PyObject* args_names_tuple) {
     encode_arguments_t parsed;
     uform_py_receiver_t receiver;
     encode_common_t common;
@@ -538,7 +534,7 @@ static PyObject *Model_image_encode_pixels(PyObject *self, PyObject *const *args
     if (encode_parse("image_encode_pixels", &image_encode_pixels_verb, args, positional_args_count, args_names_tuple,
                      &parsed) != 0)
         return NULL;
-    encode_call_t *const call = encode_open(self, &image_encode_pixels_verb, &parsed, &receiver, &common, &stack);
+    encode_call_t* const call = encode_open(self, &image_encode_pixels_verb, &parsed, &receiver, &common, &stack);
     if (!call) return NULL;
     size_t const count = call->inputs.count;
     call->arguments.pixels = (uform_image_encode_pixels_t) {
@@ -575,15 +571,15 @@ static char const doc_Model_video_encode[] =                                    
     "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"             //
     "  stats (VideoEncodeStats, optional): Overwritten with this call's report.";
 
-static PyObject *Model_video_encode(PyObject *self, PyObject *const *args, Py_ssize_t positional_args_count,
-                                    PyObject *args_names_tuple) {
+static PyObject* Model_video_encode(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
+                                    PyObject* args_names_tuple) {
     encode_arguments_t parsed;
     uform_py_receiver_t receiver;
     encode_common_t common;
     encode_call_t stack;
     if (encode_parse("video_encode", &video_encode_verb, args, positional_args_count, args_names_tuple, &parsed) != 0)
         return NULL;
-    encode_call_t *const call = encode_open(self, &video_encode_verb, &parsed, &receiver, &common, &stack);
+    encode_call_t* const call = encode_open(self, &video_encode_verb, &parsed, &receiver, &common, &stack);
     if (!call) return NULL;
     call->arguments.video = (uform_video_encode_t) {
         .model = common.model,
@@ -617,15 +613,15 @@ static char const doc_Model_audio_encode[] =                                    
     "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"             //
     "  stats (AudioEncodeStats, optional): Overwritten with this call's report.";
 
-static PyObject *Model_audio_encode(PyObject *self, PyObject *const *args, Py_ssize_t positional_args_count,
-                                    PyObject *args_names_tuple) {
+static PyObject* Model_audio_encode(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
+                                    PyObject* args_names_tuple) {
     encode_arguments_t parsed;
     uform_py_receiver_t receiver;
     encode_common_t common;
     encode_call_t stack;
     if (encode_parse("audio_encode", &audio_encode_verb, args, positional_args_count, args_names_tuple, &parsed) != 0)
         return NULL;
-    encode_call_t *const call = encode_open(self, &audio_encode_verb, &parsed, &receiver, &common, &stack);
+    encode_call_t* const call = encode_open(self, &audio_encode_verb, &parsed, &receiver, &common, &stack);
     if (!call) return NULL;
     call->arguments.audio = (uform_audio_encode_t) {
         .model = common.model,
@@ -660,8 +656,8 @@ static char const doc_Model_audio_encode_samples[] =                            
     "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"                   //
     "  stats (AudioEncodeStats, optional): Overwritten with this call's report.";
 
-static PyObject *Model_audio_encode_samples(PyObject *self, PyObject *const *args, Py_ssize_t positional_args_count,
-                                            PyObject *args_names_tuple) {
+static PyObject* Model_audio_encode_samples(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
+                                            PyObject* args_names_tuple) {
     encode_arguments_t parsed;
     uform_py_receiver_t receiver;
     encode_common_t common;
@@ -683,7 +679,7 @@ static PyObject *Model_audio_encode_samples(PyObject *self, PyObject *const *arg
         return NULL;
     if (sample_rate > UINT32_MAX)
         return uform_py_raise(uform_status_invalid_argument_k, "the 'sample_rate' option exceeds 32 bits"), NULL;
-    encode_call_t *const call = encode_open(self, &audio_encode_samples_verb, &parsed, &receiver, &common, &stack);
+    encode_call_t* const call = encode_open(self, &audio_encode_samples_verb, &parsed, &receiver, &common, &stack);
     if (!call) return NULL;
     call->arguments.samples = (uform_audio_encode_samples_t) {
         .model = common.model,
@@ -715,19 +711,19 @@ typedef struct choose_call_t {
     uform_text_encode_stats_t stats;
 
     /** The caller's report the stats are copied into once the call succeeds, held, or NULL. */
-    PyObject *stats_object;
+    PyObject* stats_object;
     uform_py_callback_t progress;
 } choose_call_t;
 
-static void text_choose_submit(void *call) { uform_text_choose(&((choose_call_t *)call)->arguments); }
+static void text_choose_submit(void* call) { uform_text_choose(&((choose_call_t*)call)->arguments); }
 
-static PyObject *choose_answer(void *erased) {
-    choose_call_t *const call = (choose_call_t *)erased;
+static PyObject* choose_answer(void* erased) {
+    choose_call_t* const call = (choose_call_t*)erased;
     if (call->stats_object) {
 #if PY_VERSION_HEX >= 0x030D0000
         Py_BEGIN_CRITICAL_SECTION(call->stats_object);
 #endif
-        ((EncodeStats *)call->stats_object)->stats.text = call->stats;
+        ((EncodeStats*)call->stats_object)->stats.text = call->stats;
 #if PY_VERSION_HEX >= 0x030D0000
         Py_END_CRITICAL_SECTION();
 #endif
@@ -736,8 +732,8 @@ static PyObject *choose_answer(void *erased) {
     return uform_py_tape_answer(call->call.arena, &call->probabilities, count, offsets[count] - offsets[0]);
 }
 
-static void choose_release(void *erased) {
-    choose_call_t *const call = (choose_call_t *)erased;
+static void choose_release(void* erased) {
+    choose_call_t* const call = (choose_call_t*)erased;
     uform_py_tape_release(&call->texts);
     uform_py_tape_release(&call->choices);
     uform_py_words_release(&call->temperature_groups);
@@ -746,8 +742,8 @@ static void choose_release(void *erased) {
     uform_py_call_release(&call->call);
 }
 
-static int choose_traverse(void *erased, visitproc visit, void *arg) {
-    choose_call_t *const call = (choose_call_t *)erased;
+static int choose_traverse(void* erased, visitproc visit, void* arg) {
+    choose_call_t* const call = (choose_call_t*)erased;
     Py_VISIT(call->progress.callable);
     Py_VISIT(call->stats_object);
     return 0;
@@ -780,8 +776,8 @@ static char const doc_Model_text_choose[] =                                     
     "  RowsTape: A flat (choices,) float32 tape, one probability per choice in `choices` order,\n" //
     "    split by its `offsets`; `(tape, tape.offsets)` is what `Trainer.step` takes as targets.";
 
-static PyObject *Model_text_choose(PyObject *self, PyObject *const *args, Py_ssize_t positional_args_count,
-                                   PyObject *args_names_tuple) {
+static PyObject* Model_text_choose(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
+                                   PyObject* args_names_tuple) {
     PyObject *texts_object, *choices_object, *arena_object, *temperature_groups_object, *progress_object,
         *progress_steps_object, *stats_object;
     uform_py_argument_t const arguments[] = {
@@ -804,7 +800,7 @@ static PyObject *Model_text_choose(PyObject *self, PyObject *const *args, Py_ssi
     }
 
     choose_call_t stack;
-    choose_call_t *const call = uform_py_call_open(&receiver, &text_choose_verb, &stack);
+    choose_call_t* const call = uform_py_call_open(&receiver, &text_choose_verb, &stack);
     if (!call) return NULL;
     if (uform_py_tape_from_object(texts_object, "texts", uform_py_element_text_k, &call->texts) != 0 ||
         uform_py_tape_from_object(choices_object, "choices", uform_py_element_text_k, &call->choices) != 0)
@@ -821,7 +817,7 @@ static PyObject *Model_text_choose(PyObject *self, PyObject *const *args, Py_ssi
         return uform_py_call_discard(&receiver, &text_choose_verb, call);
     if (stats_object && stats_object != Py_None) call->stats_object = Py_NewRef(stats_object);
     call->arguments = (uform_text_choose_t) {
-        .model = ((Model *)receiver.target)->handle,
+        .model = ((Model*)receiver.target)->handle,
         .executor = receiver.executor,
         .outcome = &call->call.outcome,
         .completion = receiver.completion,
@@ -830,7 +826,7 @@ static PyObject *Model_text_choose(PyObject *self, PyObject *const *args, Py_ssi
         .choices = call->choices.view,
         .temperature_groups = call->temperature_groups.data,
         .probabilities = &call->probabilities,
-        .arena = ((Arena *)call->call.arena)->handle,
+        .arena = ((Arena*)call->call.arena)->handle,
         .progress = uform_py_progress_registered(&call->progress, progress_steps),
         .stats = &call->stats,
     };

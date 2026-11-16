@@ -34,17 +34,17 @@ using namespace unum::uform::train;
 /** The media column names each modality goes by: the Hugging Face feature names and the WebDataset
  *  extensions. */
 [[nodiscard]] static modality_t modality_of_(sz::string_view_t column) noexcept {
-    for (char const *name : {"image", "jpg", "jpeg", "png", "webp"})
+    for (char const* name : {"image", "jpg", "jpeg", "png", "webp"})
         if (column == name) return modality_t::image_k;
-    for (char const *name : {"video", "mp4", "webm"})
+    for (char const* name : {"video", "mp4", "webm"})
         if (column == name) return modality_t::video_k;
-    for (char const *name : {"audio", "wav", "flac", "mp3"})
+    for (char const* name : {"audio", "wav", "flac", "mp3"})
         if (column == name) return modality_t::audio_k;
     return modality_t::text_k;
 }
 
 /** Copy the string @p value into @p into , or fail naming @p key . */
-[[nodiscard]] static expected_t read_string_(yyjson_val *value, char const *key, sz::string_t &into) noexcept {
+[[nodiscard]] static expected_t read_string_(yyjson_val* value, char const* key, sz::string_t& into) noexcept {
     if (!yyjson_is_str(value)) return expected_t::fail(status_t::invalid_argument_k, "\"{}\" is not a string", key);
     if (sz::failed(into.assign(sz::string_view_t {yyjson_get_str(value), yyjson_get_len(value)})))
         return expected_t::fail(status_t::bad_alloc_k, "\"{}\" staging failed", key);
@@ -52,7 +52,7 @@ using namespace unum::uform::train;
 }
 
 /** Read a @c query key into @p sides : the named role queries; the bag's others are documents. */
-[[nodiscard]] static expected_t read_query_sides_(yyjson_val *value, role_sides_t &sides) noexcept {
+[[nodiscard]] static expected_t read_query_sides_(yyjson_val* value, role_sides_t& sides) noexcept {
     if (!yyjson_is_str(value)) return expected_t::fail(status_t::invalid_argument_k, "\"query\" is not a string");
     sz::string_view_t const query {yyjson_get_str(value), yyjson_get_len(value)};
     using side_t = late_interaction_side_t;
@@ -64,7 +64,7 @@ using namespace unum::uform::train;
 }
 
 /** Read a @c choices object into @p entry 's state, choices, targets and group columns. */
-[[nodiscard]] static expected_t read_choices_(yyjson_val *object, mixture_entry_t &entry) noexcept {
+[[nodiscard]] static expected_t read_choices_(yyjson_val* object, mixture_entry_t& entry) noexcept {
     if (!yyjson_is_obj(object)) return expected_t::fail(status_t::invalid_argument_k, "\"choices\" is not an object");
     std::size_t index = 0, count = 0;
     yyjson_val *key = nullptr, *value = nullptr;
@@ -85,7 +85,7 @@ using namespace unum::uform::train;
 }
 
 /** Parse one entry of the @c datasets array into @p entry . */
-[[nodiscard]] static expected_t read_entry_(yyjson_val *object, mixture_entry_t &entry) noexcept {
+[[nodiscard]] static expected_t read_entry_(yyjson_val* object, mixture_entry_t& entry) noexcept {
     if (!yyjson_is_obj(object)) return expected_t::fail(status_t::invalid_argument_k, "a dataset is not an object");
     std::size_t index = 0, count = 0;
     yyjson_val *key = nullptr, *value = nullptr;
@@ -143,22 +143,22 @@ expected<mixture_t> mixture_t::read(sz::string_view_t path) noexcept {
     sz::string_t terminated;
     if (sz::failed(terminated.assign(path))) return result_t::fail(status_t::bad_alloc_k, "path staging failed");
     yyjson_read_err error {};
-    yyjson_doc *const document = yyjson_read_file(terminated.c_str(), 0, nullptr, &error);
+    yyjson_doc* const document = yyjson_read_file(terminated.c_str(), 0, nullptr, &error);
     if (document == nullptr)
         return result_t::fail(error.code == YYJSON_READ_ERROR_FILE_OPEN ? status_t::io_k : status_t::invalid_argument_k,
                               "{}: {} at byte {}", path, error.msg, error.pos);
     mixture_t mixture;
     expected_t parsed = [&]() noexcept -> expected_t {
-        yyjson_val *const root = yyjson_doc_get_root(document);
-        yyjson_val *const name = yyjson_obj_get(root, "mixture");
-        yyjson_val *const datasets = yyjson_obj_get(root, "datasets");
+        yyjson_val* const root = yyjson_doc_get_root(document);
+        yyjson_val* const name = yyjson_obj_get(root, "mixture");
+        yyjson_val* const datasets = yyjson_obj_get(root, "datasets");
         if (!yyjson_is_arr(datasets) || yyjson_arr_size(datasets) == 0)
             return expected_t::fail(status_t::invalid_argument_k, "no \"datasets\" array");
         if (expected_t read = read_string_(name, "mixture", mixture.name); !read) return read;
         if (yyjson_obj_size(root) != 2)
             return expected_t::fail(status_t::invalid_argument_k, "keys beside \"mixture\" and \"datasets\"");
         std::size_t index = 0, count = 0;
-        yyjson_val *object = nullptr;
+        yyjson_val* object = nullptr;
         yyjson_arr_foreach(datasets, index, count, object) {
             mixture_entry_t entry;
             if (expected_t read = read_entry_(object, entry); !read) return read;
@@ -166,7 +166,7 @@ expected<mixture_t> mixture_t::read(sz::string_view_t path) noexcept {
                 return expected_t::fail(status_t::bad_alloc_k, "dataset table allocation failed");
         }
         u32_t pairs = 0;
-        for (mixture_entry_t const &entry : mixture.datasets) pairs += !entry.anchor.empty();
+        for (mixture_entry_t const& entry : mixture.datasets) pairs += !entry.anchor.empty();
         if (pairs != 0 && pairs != mixture.datasets.size())
             return expected_t::fail(status_t::invalid_argument_k, "pairs share the mixture with plain text or choices");
         return {};
@@ -177,13 +177,13 @@ expected<mixture_t> mixture_t::read(sz::string_view_t path) noexcept {
 }
 
 bool mixture_t::names(modality_t modality) const noexcept {
-    for (mixture_entry_t const &entry : datasets)
+    for (mixture_entry_t const& entry : datasets)
         if (!entry.media.empty() && entry.modality == modality) return true;
     return false;
 }
 
 bool mixture_t::chooses() const noexcept {
-    for (mixture_entry_t const &entry : datasets)
+    for (mixture_entry_t const& entry : datasets)
         if (!entry.state.empty()) return true;
     return false;
 }
@@ -194,7 +194,7 @@ multimodal_batch_shape_t mixture_t::shape(multimodal_batch_shape_t shape) const 
     std::span<mixture_entry_t const> const entries = datasets;
     if (!entries.empty() && !entries[0].anchor.empty())
         shape.max_bag_segments = std::any_of(entries.begin(), entries.end(),
-                                             [](mixture_entry_t const &entry) { return !entry.negative.empty(); })
+                                             [](mixture_entry_t const& entry) { return !entry.negative.empty(); })
                                      ? 3u
                                      : 2u;
     if (names(modality_t::image_k)) shape.image = image_batch_shape_t {16u};
@@ -215,7 +215,7 @@ expected<mixture_sampler_t> mixture_sampler_t::make(std::span<mixture_entry_t co
     if (st::failed(sampler.weight_prefix_.push_back(0.0)))
         return result_t::fail(status_t::bad_alloc_k, "weight table allocation failed");
     for (std::size_t entry = 0; entry != entries.size(); ++entry) {
-        mixture_entry_t const &dataset = entries[entry];
+        mixture_entry_t const& dataset = entries[entry];
         if (dataset.epochs != 0 && rows[entry] == 0)
             return result_t::fail(status_t::invalid_argument_k,
                                   "{} caps its epochs, but only Parquet footers count rows", dataset.name.view());
@@ -294,10 +294,10 @@ void mixture_sampler_t::reweigh_(u32_t epoch, void (*report)(sz::string_view_t) 
         report(line.view());
 }
 
-expected_t dataset_source_t::open(dataset_source_t &placed, trainer_config_t &config,
-                                  gpu_direct_storage_session_t &session, mixture_t mixture,
+expected_t dataset_source_t::open(dataset_source_t& placed, trainer_config_t& config,
+                                  gpu_direct_storage_session_t& session, mixture_t mixture,
                                   std::size_t batches_per_fill) noexcept {
-    multimodal_batch_shape_t const &shape = config.batch;
+    multimodal_batch_shape_t const& shape = config.batch;
     placed.mixture_ = std::move(mixture);
     std::span<mixture_entry_t const> const entries = placed.mixture_.datasets;
     bool const pairs = !entries.empty() && !entries[0].anchor.empty();
@@ -317,7 +317,7 @@ expected_t dataset_source_t::open(dataset_source_t &placed, trainer_config_t &co
             return expected_t::fail(status_t::bad_alloc_k, "loader table allocation failed");
         return {};
     };
-    for (mixture_entry_t const &entry : entries) {
+    for (mixture_entry_t const& entry : entries) {
         sz::string_view_t const glob = entry.glob.view();
         expected_t made;
         if (!entry.state.empty() && glob.ends_with(".parquet"))
@@ -349,17 +349,17 @@ expected_t dataset_source_t::open(dataset_source_t &placed, trainer_config_t &co
     reservoir_bound_t reservoir;
     f64_t row_bytes = 0.0;
     for (std::size_t index = 0; index != placed.loaders_.size(); ++index) {
-        loader_t const &loader = placed.loaders_[index];
-        std::visit([&](auto const &typed) noexcept { reservoir.charge(typed.reservoir()); }, loader);
+        loader_t const& loader = placed.loaders_[index];
+        std::visit([&](auto const& typed) noexcept { reservoir.charge(typed.reservoir()); }, loader);
         // An entry's widest row group bounds its items' bytes, a byte of text is a cell, and the
         // densest entry sizes the segment budget: a text entry packs a row with documents, a text
         // pair with its roles' texts, and a media pair as many to a row as `media_cells` places.
         std::size_t const item_cells = std::visit(
-            [](auto const &typed) noexcept { return typed.reservoir().row_bytes / reservoir_bound_t::copies_k; },
+            [](auto const& typed) noexcept { return typed.reservoir().row_bytes / reservoir_bound_t::copies_k; },
             loader);
         f64_t const columns = static_cast<f64_t>(shape.max_columns_per_row);
         f64_t density = 1.0, roles = 1.0;
-        if (auto const *paired = std::get_if<paired_loader_parquet_t>(&loader)) {
+        if (auto const* paired = std::get_if<paired_loader_parquet_t>(&loader)) {
             roles = entries[index].negative.empty() ? 2.0 : 3.0;
             density = roles * paired->pairs_per_row(shape.max_columns_per_row);
         }
@@ -371,7 +371,7 @@ expected_t dataset_source_t::open(dataset_source_t &placed, trainer_config_t &co
         // A fill reads one entry, so a batch row costs that entry's own source rows, a pair or a
         // document each.
         f64_t const entry_row_bytes = static_cast<f64_t>(
-            std::visit([](auto const &typed) noexcept { return typed.reservoir().row_bytes; }, loader));
+            std::visit([](auto const& typed) noexcept { return typed.reservoir().row_bytes; }, loader));
         row_bytes = fu::max_of(row_bytes, entry_row_bytes * density / roles);
     }
     // One fill pools the rows of every batch it packs, so the per-row term scales with them.
@@ -380,8 +380,8 @@ expected_t dataset_source_t::open(dataset_source_t &placed, trainer_config_t &co
     return {};
 }
 
-expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer, std::size_t batches_per_fill) noexcept {
-    trainer_config_t const &config = trainer.config;
+expected_t dataset_source_t::make(dataset_source_t& placed, trainer_t& trainer, std::size_t batches_per_fill) noexcept {
+    trainer_config_t const& config = trainer.config;
     multimodal_batch_shape_t shape = config.batch;
     std::size_t const gpus = trainer.replicas.size(), segments = shape.max_segments_per_gpu;
     std::span<mixture_entry_t const> const entries = placed.mixture_.datasets;
@@ -429,11 +429,11 @@ expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer, 
             return expected_t::fail(status_t::bad_alloc_k, "fill phase table full");
     }
     st::basic_vector<std::size_t> rows;
-    for (loader_t const &loader : placed.loaders_) {
+    for (loader_t const& loader : placed.loaders_) {
         std::size_t counted = 0;
-        if (auto const *paired = std::get_if<paired_loader_parquet_t>(&loader)) counted = paired->rows();
-        else if (auto const *parquet = std::get_if<tokens_loader_parquet_t>(&loader)) counted = parquet->rows();
-        else if (auto const *choices = std::get_if<choices_loader_parquet_t>(&loader)) counted = choices->rows();
+        if (auto const* paired = std::get_if<paired_loader_parquet_t>(&loader)) counted = paired->rows();
+        else if (auto const* parquet = std::get_if<tokens_loader_parquet_t>(&loader)) counted = parquet->rows();
+        else if (auto const* choices = std::get_if<choices_loader_parquet_t>(&loader)) counted = choices->rows();
         if (st::failed(rows.push_back(std::size_t {counted})))
             return expected_t::fail(status_t::bad_alloc_k, "row count table allocation failed");
     }
@@ -460,7 +460,7 @@ expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer, 
     return {};
 }
 
-expected_t dataset_source_t::fill(trainer_t &trainer, data_epoch_t data_epoch, step_report_t &) noexcept {
+expected_t dataset_source_t::fill(trainer_t& trainer, data_epoch_t data_epoch, step_report_t&) noexcept {
     std::size_t const gpus = trainer.replicas.size();
     std::size_t const batches_per_fill = filled_[0].size();
     // Each GPU takes its batches in its own phase of the period and refills where that wraps, so a
@@ -485,34 +485,34 @@ expected_t dataset_source_t::fill(trainer_t &trainer, data_epoch_t data_epoch, s
     return relate_(trainer);
 }
 
-expected_t dataset_source_t::fill_member_(trainer_t &trainer, std::size_t member, data_epoch_t data_epoch) noexcept {
-    trainer_config_t const &config = trainer.config;
+expected_t dataset_source_t::fill_member_(trainer_t& trainer, std::size_t member, data_epoch_t data_epoch) noexcept {
+    trainer_config_t const& config = trainer.config;
     u32_t const gpu_index = trainer.mesh->topology.first_gpu_index() + static_cast<u32_t>(member);
     std::size_t const entry = sampler_.draw(config.seed, data_epoch, gpu_index,
                                             trainer.mesh->topology.is_lead() ? &report_line : nullptr);
-    mixture_entry_t const &dataset = mixture_.datasets[entry];
+    mixture_entry_t const& dataset = mixture_.datasets[entry];
     std::span<multimodal_batch_on_gpu_t> const batches = filled_[member];
-    gpu_stream_t &stream = trainer.streams[member];
+    gpu_stream_t& stream = trainer.streams[member];
     u32_t const step = data_epoch.ordinal;
     expected_t filled;
-    for (multimodal_batch_on_gpu_t &batch : batches)
+    for (multimodal_batch_on_gpu_t& batch : batches)
         if (filled) filled = zero_async(batch.dropped.span(), stream);
     if (!filled) return filled;
-    if (auto *parquet = std::get_if<tokens_loader_parquet_t>(&loaders_[entry]))
+    if (auto* parquet = std::get_if<tokens_loader_parquet_t>(&loaders_[entry]))
         filled = parquet->fill(stream, {dataset.text.view()}, gpu_index, step, batches);
-    else if (auto *jsonl = std::get_if<tokens_loader_jsonl_t>(&loaders_[entry]))
+    else if (auto* jsonl = std::get_if<tokens_loader_jsonl_t>(&loaders_[entry]))
         filled = jsonl->fill(stream, {dataset.text.view()}, gpu_index, step, batches);
-    else if (auto *csv = std::get_if<tokens_loader_csv_t>(&loaders_[entry])) {
+    else if (auto* csv = std::get_if<tokens_loader_csv_t>(&loaders_[entry])) {
         // A `.txt` shard is one document per line: a headerless table of one column, as no line
         // holds a tab.
         tokens_base_loader_csv_config_t text {dataset.text.view()};
         if (dataset.glob.view().ends_with(".txt")) text.delimiter = '\t', text.header = csv_header_t::positional_k;
         filled = csv->fill(stream, text, gpu_index, step, batches);
     }
-    else if (auto *choices = std::get_if<choices_loader_parquet_t>(&loaders_[entry]))
+    else if (auto* choices = std::get_if<choices_loader_parquet_t>(&loaders_[entry]))
         filled = choices->fill(stream, gpu_index, step, batches);
     else {
-        paired_loader_parquet_t &paired = std::get<paired_loader_parquet_t>(loaders_[entry]);
+        paired_loader_parquet_t& paired = std::get<paired_loader_parquet_t>(loaders_[entry]);
         if (paired.modality() == modality_t::image_k)
             filled = paired.fill(stream, jpeg_[member], gpu_index, step, batches);
         else if (paired.modality() == modality_t::video_k)
@@ -524,13 +524,13 @@ expected_t dataset_source_t::fill_member_(trainer_t &trainer, std::size_t member
                                 filled.description_.view());
     // Every other loader names no choice, and a batch reused from a choices fill keeps its rows.
     if (dataset.state.empty())
-        for (multimodal_batch_on_gpu_t &batch : batches)
+        for (multimodal_batch_on_gpu_t& batch : batches)
             if (expected_t padded = pad_choices(batch, stream); !padded) return padded;
     return {};
 }
 
-expected_t dataset_source_t::relate_(trainer_t &trainer) noexcept {
-    trainer_config_t const &config = trainer.config;
+expected_t dataset_source_t::relate_(trainer_t& trainer) noexcept {
+    trainer_config_t const& config = trainer.config;
     std::size_t const gpus = trainer.replicas.size();
     u32_t const segments = config.batch.max_segments_per_gpu;
     std::size_t const world_segments = std::size_t {segments} * trainer.mesh->topology.shape.gpus_per_colocated_domain;
@@ -540,7 +540,7 @@ expected_t dataset_source_t::relate_(trainer_t &trainer) noexcept {
         for (std::size_t member = 0; member != gpus; ++member) {
             switch_to_gpu_t gpu_scope {trainer.streams[member]};
             if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed");
-            base_replica_t &replica = trainer.replicas[member];
+            base_replica_t& replica = trainer.replicas[member];
             if (expected_t related = replica.relations.upload_self_edges(
                     segments, replica.batch.segment_lengths.view(), mixer_.world_lengths(member).flatten<1>(),
                     std::size_t {first + member} * segments, config.contrastive.ambient_repulsion_weight,
@@ -555,7 +555,7 @@ expected_t dataset_source_t::relate_(trainer_t &trainer) noexcept {
     for (std::size_t member = 0; member != gpus; ++member) {
         switch_to_gpu_t gpu_scope {trainer.streams[member]};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed");
-        multimodal_batch_on_gpu_t const &mixed = trainer.replicas[member].batch;
+        multimodal_batch_on_gpu_t const& mixed = trainer.replicas[member].batch;
         expected_t copied = copy_device_to_host(mixed.segment_bag.view(), bags_[member, nk::slice],
                                                 trainer.streams[member]);
         if (copied)
@@ -574,8 +574,8 @@ expected_t dataset_source_t::relate_(trainer_t &trainer) noexcept {
             !related)
             return related;
 
-        base_replica_t &replica = trainer.replicas[member];
-        gpu_stream_t &stream = trainer.streams[member];
+        base_replica_t& replica = trainer.replicas[member];
+        gpu_stream_t& stream = trainer.streams[member];
         switch_to_gpu_t gpu_scope {stream};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed");
         expected_t staged = replica.relations.upload(

@@ -52,7 +52,7 @@ image_extent_t um::image_decoded_extent(image_extent_t native, u32_t scale) noex
                            static_cast<u32_t>(divide_round_up(native.height, factor))};
 }
 
-video_grid_t um::video_tube_grid(u32_t frames, image_extent_t native, video_batch_shape_t const &shape,
+video_grid_t um::video_tube_grid(u32_t frames, image_extent_t native, video_batch_shape_t const& shape,
                                  u32_t columns) noexcept {
     u32_t const stride = fu::max_of<u32_t>(shape.frame_stride, 1u);
     u32_t const depth = fu::max_of<u32_t>(shape.tube_frames, 1u);

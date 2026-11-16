@@ -144,7 +144,7 @@ struct image_plan_t {
  *  @param[in] plan The plan from @ref unum::uform::media::plan_image .
  *  @param[out] out The image's @b [plan.grid.rows,plan.grid.columns,P,P,4] cells.
  */
-[[nodiscard]] expected_t decode_image(bytes_view_t encoded, image_plan_t const &plan,
+[[nodiscard]] expected_t decode_image(bytes_view_t encoded, image_plan_t const& plan,
                                       pixel_patches_span_t out) noexcept;
 
 } // namespace unum::uform::media

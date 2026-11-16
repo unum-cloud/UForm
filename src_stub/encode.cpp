@@ -29,7 +29,7 @@ using namespace unum::uform;
 /** One item as a verb reads it: the bytes seeding its rows, and the tokens they
  *  make before truncation. */
 struct item_t {
-    std::byte const *data;
+    std::byte const* data;
     std::size_t length;
     std::size_t tokens;
 };
@@ -37,13 +37,13 @@ struct item_t {
 /** The bytes of entry @p item of @p tape, whose elements are @p element_bytes wide. */
 static item_t entry_of(uform_tape_view_t tape, std::size_t item, std::size_t element_bytes) {
     std::size_t const begin = tape.offsets[item], end = tape.offsets[item + 1];
-    return {static_cast<std::byte const *>(tape.data) + begin * element_bytes, (end - begin) * element_bytes,
+    return {static_cast<std::byte const*>(tape.data) + begin * element_bytes, (end - begin) * element_bytes,
             end - begin};
 }
 
 /** Zeroes every output and report, so a call refused before it lands leaves them null. */
 template <typename arguments_>
-static void clear_outputs(arguments_ &arguments) {
+static void clear_outputs(arguments_& arguments) {
     if (arguments.embeddings) *arguments.embeddings = {};
     if (arguments.states) *arguments.states = {};
     if (arguments.token_vectors) *arguments.token_vectors = {};
@@ -54,8 +54,8 @@ static void clear_outputs(arguments_ &arguments) {
  *  model has no head for, an output scalar it does not write, and a tape without storage or one
  *  holding another element. */
 template <typename arguments_>
-static bool reject_call(arguments_ const &arguments, uform_tape_view_t tape, uform_scalar_t element,
-                        uform_outcome_t *outcome) {
+static bool reject_call(arguments_ const& arguments, uform_tape_view_t tape, uform_scalar_t element,
+                        uform_outcome_t* outcome) {
     if (reject_if(!arguments.model, uform_status_invalid_argument_k, "The model must not be null", outcome))
         return true;
     if (reject_if(!arguments.embeddings && !arguments.states && !arguments.token_vectors,
@@ -81,9 +81,9 @@ static bool reject_call(arguments_ const &arguments, uform_tape_view_t tape, ufo
  *  @param[in] item_at Reads item @c i as an @c item_t.
  */
 template <typename arguments_, typename item_at_>
-static void encode(arguments_ &arguments, std::initializer_list<void const *> inputs, item_at_ item_at,
-                   uform_outcome_t *outcome) {
-    uform_arena_handle_t *const arena = claim_arena(arguments.arena, arguments.outcome, inputs, outcome);
+static void encode(arguments_& arguments, std::initializer_list<void const*> inputs, item_at_ item_at,
+                   uform_outcome_t* outcome) {
+    uform_arena_handle_t* const arena = claim_arena(arguments.arena, arguments.outcome, inputs, outcome);
     if (!arena) return;
     std::size_t const count = arguments.count;
     std::size_t tokens = 0, truncated = 0;
@@ -98,11 +98,11 @@ static void encode(arguments_ &arguments, std::initializer_list<void const *> in
     std::size_t const offsets_bytes = arguments.states ? (count + 1) * sizeof(std::size_t) : 0;
     std::size_t const embeddings_bytes = arguments.embeddings ? count * row_bytes : 0;
     std::size_t const states_bytes = arguments.states ? tokens * row_bytes : 0;
-    void *const base = rewind(*arena, offsets_bytes + embeddings_bytes + states_bytes, outcome);
+    void* const base = rewind(*arena, offsets_bytes + embeddings_bytes + states_bytes, outcome);
     if (!base) return;
-    std::size_t *const offsets = arguments.states ? static_cast<std::size_t *>(base) : nullptr;
-    std::byte *const embeddings = static_cast<std::byte *>(base) + offsets_bytes; // rows after offsets stay aligned
-    std::byte *const states = embeddings + embeddings_bytes;
+    std::size_t* const offsets = arguments.states ? static_cast<std::size_t*>(base) : nullptr;
+    std::byte* const embeddings = static_cast<std::byte*>(base) + offsets_bytes; // rows after offsets stay aligned
+    std::byte* const states = embeddings + embeddings_bytes;
     if (offsets) offsets[0] = 0;
 
     progress_ticks_t const ticks {arguments.progress, count};
@@ -136,7 +136,7 @@ static void encode(arguments_ &arguments, std::initializer_list<void const *> in
 
 /** Encodes a verb whose items are encoded files, a token per 16 of their bytes. */
 template <typename arguments_>
-static void encode_files(arguments_ &arguments, uform_tape_view_t files, uform_outcome_t *outcome) {
+static void encode_files(arguments_& arguments, uform_tape_view_t files, uform_outcome_t* outcome) {
     clear_outputs(arguments);
     if (reject_call(arguments, files, uform_scalar_u8_k, outcome)) return;
     encode(
@@ -151,7 +151,7 @@ static void encode_files(arguments_ &arguments, uform_tape_view_t files, uform_o
 
 extern "C" {
 
-void uform_text_encode(uform_text_encode_t *arguments) {
+void uform_text_encode(uform_text_encode_t* arguments) {
     if (through_executor<uform_text_encode>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     clear_outputs(*arguments);
@@ -161,7 +161,7 @@ void uform_text_encode(uform_text_encode_t *arguments) {
         *arguments, {texts.data, texts.offsets}, [&](std::size_t item) { return entry_of(texts, item, 1); }, outcome);
 }
 
-void uform_text_choose(uform_text_choose_t *arguments) {
+void uform_text_choose(uform_text_choose_t* arguments) {
     if (through_executor<uform_text_choose>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     if (arguments->probabilities) *arguments->probabilities = {};
@@ -170,21 +170,21 @@ void uform_text_choose(uform_text_choose_t *arguments) {
     reject_if(true, uform_status_unsupported_k, "The model carries no byte decoder", outcome);
 }
 
-void uform_image_encode(uform_image_encode_t *arguments) {
+void uform_image_encode(uform_image_encode_t* arguments) {
     if (through_executor<uform_image_encode>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     encode_files(*arguments, arguments->images, outcome);
 }
 
-void uform_image_encode_pixels(uform_image_encode_pixels_t *arguments) {
+void uform_image_encode_pixels(uform_image_encode_pixels_t* arguments) {
     if (through_executor<uform_image_encode_pixels>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     clear_outputs(*arguments);
     uform_tape_view_t const pixels = arguments->pixels;
     if (reject_call(*arguments, pixels, uform_scalar_u8_k, outcome)) return;
     std::size_t const count = arguments->count;
-    uint32_t const *const heights = arguments->heights;
-    uint32_t const *const widths = arguments->widths;
+    uint32_t const* const heights = arguments->heights;
+    uint32_t const* const widths = arguments->widths;
     if (reject_if(count && (!heights || !widths), uform_status_invalid_argument_k,
                   "Every item needs its height and width", outcome))
         return;
@@ -202,19 +202,19 @@ void uform_image_encode_pixels(uform_image_encode_pixels_t *arguments) {
         outcome);
 }
 
-void uform_video_encode(uform_video_encode_t *arguments) {
+void uform_video_encode(uform_video_encode_t* arguments) {
     if (through_executor<uform_video_encode>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     encode_files(*arguments, arguments->videos, outcome);
 }
 
-void uform_audio_encode(uform_audio_encode_t *arguments) {
+void uform_audio_encode(uform_audio_encode_t* arguments) {
     if (through_executor<uform_audio_encode>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     encode_files(*arguments, arguments->recordings, outcome);
 }
 
-void uform_audio_encode_samples(uform_audio_encode_samples_t *arguments) {
+void uform_audio_encode_samples(uform_audio_encode_samples_t* arguments) {
     if (through_executor<uform_audio_encode_samples>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     clear_outputs(*arguments);

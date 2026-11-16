@@ -81,7 +81,7 @@ struct mesh_t {
      *  tray. @p devices are those members in member order: every visible ordinal, ordinal @c d
      *  being member @c index_in_multimem_domain(first_gpu_index()+d) .
      */
-    [[nodiscard]] static expected_t make(mesh_t &placed, mesh_options_t const &options,
+    [[nodiscard]] static expected_t make(mesh_t& placed, mesh_options_t const& options,
                                          std::span<i32_t const> devices) noexcept;
 };
 
@@ -201,19 +201,19 @@ struct batch_source_t {
 
     /** Fill every replica's batch of @p trainer for @p data_epoch , counting cut items into
      *  @p report . */
-    expected_t (*fill)(void *state, trainer_t &trainer, data_epoch_t data_epoch,
-                       step_report_t &report) noexcept = nullptr;
+    expected_t (*fill)(void* state, trainer_t& trainer, data_epoch_t data_epoch,
+                       step_report_t& report) noexcept = nullptr;
 
     /** The source @ref fill casts back to its type. */
-    void *state = nullptr;
+    void* state = nullptr;
 };
 
 /** The batch source of any type with a matching @c fill member, borrowed for as long as the
  *  result is used. */
 template <typename source_type_>
-[[nodiscard]] batch_source_t batch_source_of(source_type_ &source) noexcept {
-    return {[](void *state, trainer_t &trainer, data_epoch_t data_epoch, step_report_t &report) noexcept {
-                return static_cast<source_type_ *>(state)->fill(trainer, data_epoch, report);
+[[nodiscard]] batch_source_t batch_source_of(source_type_& source) noexcept {
+    return {[](void* state, trainer_t& trainer, data_epoch_t data_epoch, step_report_t& report) noexcept {
+                return static_cast<source_type_*>(state)->fill(trainer, data_epoch, report);
             },
             &source};
 }
@@ -221,7 +221,7 @@ template <typename source_type_>
 /** The keyed synthetic draw: every world GPU draws distinct data from the run seed,
  *  with self-edge relations. */
 struct synthetic_source_t {
-    [[nodiscard]] expected_t fill(trainer_t &trainer, data_epoch_t data_epoch, step_report_t &report) noexcept;
+    [[nodiscard]] expected_t fill(trainer_t& trainer, data_epoch_t data_epoch, step_report_t& report) noexcept;
 };
 
 /** One edge set over a step's items as compressed sparse rows, each item's neighbours an entry of
@@ -276,9 +276,9 @@ struct items_source_t {
     training_items_t items {};
 
     /** Allocate the routing state from @p trainer 's arenas and wire the mixer through its mesh. */
-    [[nodiscard]] static expected_t make(items_source_t &placed, trainer_t &trainer) noexcept;
+    [[nodiscard]] static expected_t make(items_source_t& placed, trainer_t& trainer) noexcept;
 
-    [[nodiscard]] expected_t fill(trainer_t &trainer, data_epoch_t data_epoch, step_report_t &report) noexcept;
+    [[nodiscard]] expected_t fill(trainer_t& trainer, data_epoch_t data_epoch, step_report_t& report) noexcept;
 
     /** The mesh-wide vertex item @p item landed on in the last step, or @c ~0u when it
      *  carried no tokens. */
@@ -286,11 +286,11 @@ struct items_source_t {
 
     /** Download every replica's pooled vertices, @b [gpus·max_segments,hidden]
      *  by mesh-wide vertex. */
-    [[nodiscard]] expected<bf16r2_view_t> pooled(trainer_t &trainer) noexcept;
+    [[nodiscard]] expected<bf16r2_view_t> pooled(trainer_t& trainer) noexcept;
 
   private:
-    [[nodiscard]] expected_t pack_(trainer_t &trainer, step_report_t &report) noexcept;
-    [[nodiscard]] expected_t relate_(trainer_t &trainer) noexcept;
+    [[nodiscard]] expected_t pack_(trainer_t& trainer, step_report_t& report) noexcept;
+    [[nodiscard]] expected_t relate_(trainer_t& trainer) noexcept;
 
     per_gpu_array<multimodal_batch_on_gpu_t> loaded_ {};
     per_gpu_array<multimodal_batch_on_cpu_t> staged_ {};
@@ -325,7 +325,7 @@ struct trainer_t {
     trainer_config_t config {};
 
     /** The borrowed mesh this run's collectives wire through. */
-    mesh_t *mesh = nullptr;
+    mesh_t* mesh = nullptr;
 
     /** The device ordinals this process drives. */
     st::basic_vector<i32_t> devices {};
@@ -412,8 +412,8 @@ struct trainer_t {
      *  @par Statuses:
      *  - @c status_t::bad_alloc_k The envelope does not fit, with the measured numbers.
      */
-    [[nodiscard]] static expected_t make(trainer_t &placed, mesh_t &mesh, trainer_config_t const &requested,
-                                         std::span<i32_t const> devices, gpu_numerics_t const &numerics) noexcept;
+    [[nodiscard]] static expected_t make(trainer_t& placed, mesh_t& mesh, trainer_config_t const& requested,
+                                         std::span<i32_t const> devices, gpu_numerics_t const& numerics) noexcept;
 
     /**
      *  @brief Load every replica from the checkpoint at @p path and continue from its saved step,
@@ -434,7 +434,7 @@ struct trainer_t {
      *  forward region, the contrastive collective, the pooled-code regularizers, per replica the
      *  backward region, the spike gate, and per replica the optimizer's slice. */
     [[nodiscard]] expected_t step(batch_source_t source, optimizer_step_t optimizer_step,
-                                  step_report_t &report) noexcept;
+                                  step_report_t& report) noexcept;
 
     /** Fill every replica from @p source at @p data_epoch , encode it forward only, and score the
      *  pooled vertices' retrieval over the world without a loss or an update. */

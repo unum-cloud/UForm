@@ -37,12 +37,12 @@
 
 #include "uform/encoder/multimodal_batch.cuh" // `multimodal_batch_on_gpu_t`, `multimodal_batch_shape_t`
 #include "uform/utilities/types.hpp"          // `expected`, `status_t`, `epoch_permutation`
-#include "uform/loaders/audio_loader.cuh"   // `decode_audios`
-#include "uform/loaders/dataset_shards.hpp" // `parquet_file_t`, `expand_glob`, `column_view_t`
-#include "uform/loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
-#include "uform/loaders/image_loader.cuh"   // `decode_images`, `nvjpeg_session_t`
-#include "uform/loaders/tokens_loader.cuh"  // `pack_tokens`
-#include "uform/loaders/video_loader.cuh"   // `decode_videos`, `nvdec_session_t`
+#include "uform/loaders/audio_loader.cuh"     // `decode_audios`
+#include "uform/loaders/dataset_shards.hpp"   // `parquet_file_t`, `expand_glob`, `column_view_t`
+#include "uform/loaders/direct_storage.hpp"   // `gpu_direct_storage_session_t`
+#include "uform/loaders/image_loader.cuh"     // `decode_images`, `nvjpeg_session_t`
+#include "uform/loaders/tokens_loader.cuh"    // `pack_tokens`
+#include "uform/loaders/video_loader.cuh"     // `decode_videos`, `nvdec_session_t`
 
 namespace unum::uform::loaders {
 using namespace unum::uform::utilities;
@@ -96,11 +96,11 @@ struct paired_loader_parquet_t {
      *      @c text_k .
      *  @param[in] shape The run's batch shape, whose slice of @p modality is the decode's geometry.
      */
-    [[nodiscard]] static expected<paired_loader_parquet_t> make(gpu_direct_storage_session_t &session,
+    [[nodiscard]] static expected<paired_loader_parquet_t> make(gpu_direct_storage_session_t& session,
                                                                 sz::string_view_t path_or_glob, u64_t seed,
                                                                 pool_view_t pool, paired_loader_parquet_config_t config,
                                                                 modality_t modality,
-                                                                multimodal_batch_shape_t const &shape) noexcept;
+                                                                multimodal_batch_shape_t const& shape) noexcept;
 
     /**
      *  @brief Fill @p batches with caption-image pairs on one GPU rank.
@@ -113,7 +113,7 @@ struct paired_loader_parquet_t {
      *  @par Statuses:
      *  - @c status_t::invalid_argument_k The loader's media are not images.
      */
-    [[nodiscard]] expected_t fill(gpu_stream_t &gpu_stream, nvjpeg_session_t &decoder, u32_t gpu_rank,
+    [[nodiscard]] expected_t fill(gpu_stream_t& gpu_stream, nvjpeg_session_t& decoder, u32_t gpu_rank,
                                   u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept;
 
     /**
@@ -127,7 +127,7 @@ struct paired_loader_parquet_t {
      *  @par Statuses:
      *  - @c status_t::invalid_argument_k The loader's media are not videos.
      */
-    [[nodiscard]] expected_t fill(gpu_stream_t &gpu_stream, nvdec_session_t &decoder, u32_t gpu_rank,
+    [[nodiscard]] expected_t fill(gpu_stream_t& gpu_stream, nvdec_session_t& decoder, u32_t gpu_rank,
                                   u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept;
 
     /**
@@ -141,7 +141,7 @@ struct paired_loader_parquet_t {
      *  @par Statuses:
      *  - @c status_t::invalid_argument_k The loader's positives are images or videos.
      */
-    [[nodiscard]] expected_t fill(gpu_stream_t &gpu_stream, u32_t gpu_rank, u32_t training_step,
+    [[nodiscard]] expected_t fill(gpu_stream_t& gpu_stream, u32_t gpu_rank, u32_t training_step,
                                   std::span<multimodal_batch_on_gpu_t> batches) noexcept;
 
     /** The modality of the loader's positives. */
@@ -168,11 +168,11 @@ struct paired_loader_parquet_t {
     /** Read and draw the pairs, decode the positives and negatives through @p decode , pack the
      *  anchors, and pair the segments. */
     template <typename decode_type_>
-    [[nodiscard]] expected_t fill_(gpu_stream_t &gpu_stream, u32_t gpu_rank, u32_t training_step,
-                                   std::span<multimodal_batch_on_gpu_t> batches, decode_type_ &&decode) noexcept;
+    [[nodiscard]] expected_t fill_(gpu_stream_t& gpu_stream, u32_t gpu_rank, u32_t training_step,
+                                   std::span<multimodal_batch_on_gpu_t> batches, decode_type_&& decode) noexcept;
 
     /** The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
-    gpu_direct_storage_session_t *storage_ = nullptr;
+    gpu_direct_storage_session_t* storage_ = nullptr;
 
     /** The run's CPU-decode worker pool — borrowed, never spawned here. */
     pool_view_t pool_ {nullptr};

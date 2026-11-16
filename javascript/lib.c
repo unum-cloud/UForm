@@ -14,8 +14,8 @@
 
 #pragma region Registration
 
-static void uform_js_addon_finalize(napi_env env, void *data, void *hint) {
-    uform_js_addon_t *const addon = (uform_js_addon_t *)data;
+static void uform_js_addon_finalize(napi_env env, void* data, void* hint) {
+    uform_js_addon_t* const addon = (uform_js_addon_t*)data;
     (void)hint;
     if (!addon) return;
     napi_ref const references[] = {addon->executor_class, addon->arena_class,    addon->model_class, addon->mesh_class,
@@ -33,7 +33,7 @@ NAPI_MODULE_INIT() {
         {"gpuDevices", NULL, uform_js_gpu_devices, NULL, NULL, NULL, napi_default, NULL},
     };
 
-    uform_js_addon_t *const addon = (uform_js_addon_t *)calloc(1, sizeof(uform_js_addon_t));
+    uform_js_addon_t* const addon = (uform_js_addon_t*)calloc(1, sizeof(uform_js_addon_t));
     napi_value seal = NULL, scalars = NULL, modalities = NULL, objectives = NULL, negatives = NULL;
     if (!addon) { // the state goes first, since instantiating a class checks the seal
         uform_js_throw(env, uform_status_out_of_memory_k, "Could not allocate the addon state");
@@ -54,9 +54,9 @@ NAPI_MODULE_INIT() {
         uform_js_executor_define(env), uform_js_arena_define(env),   uform_js_model_define(env),
         uform_js_mesh_define(env),     uform_js_trainer_define(env), uform_js_deferred_define(env),
     };
-    napi_ref *const references[] = {&addon->executor_class, &addon->arena_class,   &addon->model_class,
+    napi_ref* const references[] = {&addon->executor_class, &addon->arena_class,   &addon->model_class,
                                     &addon->mesh_class,     &addon->trainer_class, &addon->deferred_class};
-    static char const *const names[] = {"Executor",     "Arena",           "CompiledModel",
+    static char const* const names[] = {"Executor",     "Arena",           "CompiledModel",
                                         "CompiledMesh", "CompiledTrainer", "CompiledDeferred"};
     for (size_t position = 0; position != sizeof(classes) / sizeof(classes[0]); ++position) {
         if (!classes[position]) return NULL;

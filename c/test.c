@@ -85,8 +85,10 @@ static uform_model_t load_model(uform_executor_t executor, uform_model_descripti
                                                     .quantization = uform_scalar_bf16_k});
     expect(!outcome.message, outcome.message);
     expect(model != NULL, "A model must be loaded");
-    uform_model_describe(&(uform_model_describe_t) {
-        .model = model, .executor = executor, .outcome = &outcome, .description = description});
+    uform_model_describe(&(uform_model_describe_t) {.model = model,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .description = description});
     expect(!outcome.message, outcome.message);
     expect(description->dimensions > 0 && description->context > 0, "A model reports its geometry");
     return model;
@@ -225,7 +227,7 @@ static void test_library_probes(void) {
     // the CPU walk starts at "unknown", which a pin spells too.
     for (int value = 0; value != 256; ++value) {
         uform_cpu_class_t const code = (uform_cpu_class_t)value;
-        char const *const spelled = uform_cpu_class_name(code);
+        char const* const spelled = uform_cpu_class_name(code);
         uform_cpu_class_t read = uform_cpu_class_serial_k;
         uform_status_t const status = uform_cpu_class_from_name(view_of(spelled), &read);
         expect(strcmp(spelled, "unrecognized") == 0 ? status == uform_status_invalid_argument_k
@@ -234,7 +236,7 @@ static void test_library_probes(void) {
     }
     for (int value = 1; value != 256; ++value) {
         uform_gpu_class_t const code = (uform_gpu_class_t)value;
-        char const *const spelled = uform_gpu_class_name(code);
+        char const* const spelled = uform_gpu_class_name(code);
         uform_gpu_class_t read = uform_gpu_class_unknown_k;
         uform_status_t const status = uform_gpu_class_from_name(view_of(spelled), &read);
         expect(strcmp(spelled, "unrecognized") == 0 ? status == uform_status_invalid_argument_k
@@ -373,8 +375,10 @@ static void test_model_load(void) {
     expect(!outcome.message, outcome.message);
     free(buffer);
     uform_model_description_t buffered_description = {0};
-    uform_model_describe(&(uform_model_describe_t) {
-        .model = buffered, .executor = executor, .outcome = &outcome, .description = &buffered_description});
+    uform_model_describe(&(uform_model_describe_t) {.model = buffered,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .description = &buffered_description});
     expect(!outcome.message, outcome.message);
     expect(buffered_description.quantization == quantization, "A buffer loads in the quantization asked for");
     expect(buffered_description.dimensions == description.dimensions, "A buffer loads the geometry a path does");
@@ -398,7 +402,7 @@ static void test_model_load(void) {
     uform_model_load_ram(&(uform_model_load_ram_t) {.model = &refused,
                                                     .executor = executor,
                                                     .outcome = &outcome,
-                                                    .path = {(uint8_t const *)nul_path, sizeof(nul_path) - 1},
+                                                    .path = {(uint8_t const*)nul_path, sizeof(nul_path) - 1},
                                                     .quantization = uform_scalar_bf16_k});
     expect(outcome.status == uform_status_invalid_argument_k, "A checkpoint path holding a NUL is refused");
     expect(refused == NULL, "A refused path leaves no model");
@@ -498,8 +502,8 @@ static void test_heads(void) {
         for (size_t item = 0; item <= texts.count; ++item)
             expect(token_vectors.offsets[item] == states.offsets[item], "Token vectors share the states' offsets");
         for (size_t row = 0; row != token_vectors.offsets[texts.count]; ++row) {
-            float const* const vector =
-                (float const*)((char const*)token_vectors.rows.data + row * token_vectors.rows.stride);
+            float const* const vector = (float const*)((char const*)token_vectors.rows.data +
+                                                       row * token_vectors.rows.stride);
             float squares = 0;
             for (size_t column = 0; column != description.token_width; ++column)
                 squares += vector[column] * vector[column];
@@ -534,8 +538,7 @@ static void test_heads(void) {
                    "One probability per choice");
             float sum = 0;
             for (size_t choice = probabilities.offsets[item]; choice != probabilities.offsets[item + 1]; ++choice)
-                expect(values[choice] >= 0 && values[choice] <= 1, "Probabilities lie in [0,1]"),
-                    sum += values[choice];
+                expect(values[choice] >= 0 && values[choice] <= 1, "Probabilities lie in [0,1]"), sum += values[choice];
             expect(sum > 0.999f && sum < 1.001f, "Each item's probabilities sum to one");
         }
         uint32_t const past[] = {0, (uint32_t)description.choice_temperature_groups, 0};
@@ -674,7 +677,8 @@ static void test_media_shapes(void) {
         check_media(&outputs, 2, &model);
         expect(outputs.states.offsets[1] * 2 == outputs.states.offsets[2], "Equal images span equal tokens");
     }
-    else expect(outputs.embeddings.data == NULL && outputs.states.offsets == NULL, "A refused call leaves outputs NULL");
+    else
+        expect(outputs.embeddings.data == NULL && outputs.states.offsets == NULL, "A refused call leaves outputs NULL");
 
     /* A JPEG cut after its frame header plans from the header, then fails whole as malformed, and
      *  the process lives. */
@@ -760,25 +764,26 @@ static void test_media_shapes(void) {
                                                 .stats = &audio_stats});
     outputs.truncated = audio_stats.truncated, outputs.tokens = audio_stats.tokens;
     if (decodes_files) check_media(&outputs, 1, &model);
-    else expect(outputs.embeddings.data == NULL && outputs.states.offsets == NULL, "A refused call leaves outputs NULL");
+    else
+        expect(outputs.embeddings.data == NULL && outputs.states.offsets == NULL, "A refused call leaves outputs NULL");
 
     enum { samples_count = 1000 + 300 };
     float samples[samples_count];
     for (size_t sample = 0; sample != samples_count; ++sample) samples[sample] = (float)(sample % 50) / 50.0f - 0.5f;
     size_t const sample_offsets[] = {0, 1000, samples_count};
     memset(&outputs, 0, sizeof(outputs)), memset(&audio_stats, 0, sizeof(audio_stats));
-    uform_audio_encode_samples(&(uform_audio_encode_samples_t) {.model = handle,
-                                                                .executor = executor,
-                                                                .outcome = &outputs.outcome,
-                                                                .count = 2,
-                                                                .samples = {samples, sample_offsets,
-                                                                            uform_scalar_f32_k},
-                                                                .sample_rate = 16000,
-                                                                .embeddings = &outputs.embeddings,
-                                                                .states = &outputs.states,
-                                                                .arena = arena,
-                                                                .outputs_scalar = uform_scalar_f32_k,
-                                                                .stats = &audio_stats});
+    uform_audio_encode_samples(
+        &(uform_audio_encode_samples_t) {.model = handle,
+                                         .executor = executor,
+                                         .outcome = &outputs.outcome,
+                                         .count = 2,
+                                         .samples = {samples, sample_offsets, uform_scalar_f32_k},
+                                         .sample_rate = 16000,
+                                         .embeddings = &outputs.embeddings,
+                                         .states = &outputs.states,
+                                         .arena = arena,
+                                         .outputs_scalar = uform_scalar_f32_k,
+                                         .stats = &audio_stats});
     outputs.truncated = audio_stats.truncated, outputs.tokens = audio_stats.tokens;
     check_media(&outputs, 2, &model);
     expect(outputs.states.offsets[1] >= outputs.states.offsets[2] - outputs.states.offsets[1],
@@ -894,8 +899,8 @@ typedef struct gate_t {
     atomic_int opened;
 } gate_t;
 
-static uform_continuation_t wait_at_gate(size_t completed, size_t total, void *state) {
-    gate_t *const gate = (gate_t *)state;
+static uform_continuation_t wait_at_gate(size_t completed, size_t total, void* state) {
+    gate_t* const gate = (gate_t*)state;
     gate->completed = completed, gate->total = total;
     atomic_store(&gate->reached, 1);
     while (!atomic_load(&gate->opened)) {}
@@ -1118,10 +1123,10 @@ static void test_progress(void) {
 #if !UFORM_TEST_STUB
 
 /** Loads @p header as a safetensors file over @p payload_bytes zeros, answering the outcome. */
-static uform_outcome_t load_forged(uform_executor_t executor, char const *header, size_t payload_bytes) {
+static uform_outcome_t load_forged(uform_executor_t executor, char const* header, size_t payload_bytes) {
     size_t const header_bytes = strlen(header), header_length = (header_bytes + 7) / 8 * 8;
     size_t const length = 8 + header_length + payload_bytes;
-    uint8_t *const buffer = (uint8_t *)calloc(length, 1);
+    uint8_t* const buffer = (uint8_t*)calloc(length, 1);
     expect(buffer != NULL, "The forged checkpoint must be allocated");
     for (size_t byte = 0; byte != 8; ++byte) buffer[byte] = (uint8_t)((uint64_t)header_length >> (byte * 8));
     memset(buffer + 8, ' ', header_length);
@@ -1139,7 +1144,7 @@ static uform_outcome_t load_forged(uform_executor_t executor, char const *header
 }
 
 /** Whether @p outcome is a malformed load whose stage spells @p message . */
-static bool refused_as(uform_outcome_t outcome, char const *message) {
+static bool refused_as(uform_outcome_t outcome, char const* message) {
     return outcome.status == uform_status_malformed_k && outcome.message && strcmp(outcome.message, message) == 0;
 }
 #endif
@@ -1202,8 +1207,8 @@ static void test_refusals(void) {
                                         .outputs_scalar = uform_scalar_f32_k});
     expect(outcome.status == uform_status_shape_mismatch_k, "Pixels whose three channels wrap 64 bits are refused");
 
-    char const *const reading = "The checkpoint is not a safetensors file";
-    char const *const measuring = "The checkpoint carries no usable geometry";
+    char const* const reading = "The checkpoint is not a safetensors file";
+    char const* const measuring = "The checkpoint carries no usable geometry";
     expect(refused_as(load_forged(executor,
                                   "{\"model.embedding\":{\"dtype\":\"BF16\",\"shape\":[1152921504606846976,8]," //
                                   "\"data_offsets\":[0,0]}}",
@@ -1264,13 +1269,13 @@ static void test_refusals(void) {
 }
 
 /** Writes a small stand-in checkpoint to the temporary directory, answering its path. */
-static char const *write_scratch_checkpoint(void) {
+static char const* write_scratch_checkpoint(void) {
     static char path[1024];
-    char const *directory = getenv("TMPDIR");
+    char const* directory = getenv("TMPDIR");
     if (!directory || !*directory) directory = getenv("TEMP");
     if (!directory || !*directory) directory = "/tmp";
     snprintf(path, sizeof(path), "%s/uform-test-checkpoint.safetensors", directory);
-    FILE *const file = fopen(path, "wb");
+    FILE* const file = fopen(path, "wb");
     expect(file != NULL, "The scratch checkpoint must be writable");
     char const contents[] = "{\"__metadata__\":{\"stand-in\":\"any readable bytes load\"}}";
     uint64_t const header_length = sizeof(contents) - 1;
@@ -1283,23 +1288,23 @@ static char const *write_scratch_checkpoint(void) {
 }
 
 /** Prints the version line, then the capabilities as "- Compiled for:" and "- This machine:". */
-static void print_machine(FILE *stream) {
+static void print_machine(FILE* stream) {
     fprintf(stream, "UForm %s\n- Compiled for: %s\n- This machine: %s\n", uform_version_name(),
             uform_capabilities_compiled(), uform_capabilities_available());
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
     print_machine(stdout);
     // ctest hides passing output, so the job summary is where a green run shows what it covered
-    char const *const summary_path = getenv("GITHUB_STEP_SUMMARY");
-    FILE *const summary = summary_path ? fopen(summary_path, "a") : NULL;
+    char const* const summary_path = getenv("GITHUB_STEP_SUMMARY");
+    FILE* const summary = summary_path ? fopen(summary_path, "a") : NULL;
     if (summary) print_machine(summary), fclose(summary);
-    char const *const filter = getenv("UFORM_FILTER");
+    char const* const filter = getenv("UFORM_FILTER");
     if (filter && *filter) test_filter = filter;
     printf("- Filter: %s\n", test_filter ? test_filter : "none");
 
-    char const *const environment_checkpoint = getenv("UFORM_TEST_CHECKPOINT");
-    char const *scratch = NULL;
+    char const* const environment_checkpoint = getenv("UFORM_TEST_CHECKPOINT");
+    char const* scratch = NULL;
     if (argc > 1) checkpoint_path = argv[1];
     else if (environment_checkpoint && *environment_checkpoint) checkpoint_path = environment_checkpoint;
     else checkpoint_path = scratch = write_scratch_checkpoint();
