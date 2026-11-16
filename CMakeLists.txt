@@ -34,12 +34,12 @@
 #
 # Feature gates.
 #
-# `-DUFORM_CUDA_ARCH=all` adds the NVIDIA residency and `-DUFORM_ROCM_ARCH=all` the AMD one; `-DUFORM_BUILD_TRAIN=ON`
-# adds the trainer, the mesh and the loaders over CUDA, which the `cuda` preset and the machine profiles set. Without
-# them only the host libraries and the
-# media codecs are needed, and with `-DUFORM_WITH_CODECS=OFF`, the default on WebAssembly, not even the codecs. Every
-# native dependency above is required and fails the configure loudly if absent — each is available on every target,
-# including consumer / workstation GPUs. InfiniBand is the sole optional path (absent on those cards):
+# `-DUFORM_CUDA_ARCH=all` adds the NVIDIA residency, `-DUFORM_ROCM_ARCH=all` the AMD one and `-DUFORM_METAL_ARCH=all`
+# the Apple one; `-DUFORM_BUILD_TRAIN=ON` adds the trainer, the mesh and the loaders over CUDA, which the `cuda` preset
+# and the machine profiles set. Without them only the host libraries and the media codecs are needed, and with
+# `-DUFORM_WITH_CODECS=OFF`, the default on WebAssembly, not even the codecs. Every native dependency above is required
+# and fails the configure loudly if absent — each is available on every target, including consumer / workstation GPUs.
+# InfiniBand is the sole optional path (absent on those cards):
 # `-DUFORM_WITH_INFINIBAND=AUTO|ON|OFF` (default `AUTO` — probe and enable when present). `-DUFORM_BUILD_TEST=ON`,
 # `-DUFORM_BUILD_TOOLS=ON` and `-DUFORM_BUILD_BENCH=ON` add the suites in `test/`, the trainer in `tools/` and the
 # benchmarks in `bench/`, which every build leaves out unless asked.
@@ -88,6 +88,10 @@ set(UFORM_CUDA_ARCH
 set(UFORM_ROCM_ARCH
     ""
     CACHE STRING "AMD target the residency builds for: empty for none, all, native or one"
+)
+set(UFORM_METAL_ARCH
+    ""
+    CACHE STRING "Apple GPU family the residency serves: empty for none, all, or one of apple7, apple9 and apple10"
 )
 option(UFORM_BUILD_TRAIN "Add the NVIDIA trainer, the mesh and the loaders, which link the CUDA libraries" OFF)
 option(UFORM_BUILD_SHARED "Compile uform_static and uform_shared in the default build and install them" OFF)

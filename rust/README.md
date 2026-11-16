@@ -19,7 +19,7 @@ Four features swap what is linked, and `build.rs` refuses the stub beside any GP
 
 - `cuda` adds the NVIDIA residency, the trainer and the mesh, and needs a CUDA toolkit at build time.
 - `rocm` adds the AMD residency, and needs ROCm at build time.
-- `metal` adds the Apple residency on macOS, linking Metal, Foundation, IOKit and CoreFoundation; its kernels compile on each device at first use.
+- `metal` adds the Apple residency on macOS, which opens Metal at first use and links only the Metal and Foundation frameworks NumKong's archive needs; its kernels compile on each device at first use.
 - `stub` links a stand-in that answers the same verbs over the C++ standard library alone, with deterministic rows, seconds to build and no codecs, for testing a caller and never for shipping.
 
 CMake builds the NumKong, StringZilla, ForkUnion and SmashTable trees of the crates Cargo resolved, rather than fetching their pinned revisions again.

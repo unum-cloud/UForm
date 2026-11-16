@@ -343,8 +343,7 @@ struct vram_site {
     failure_t finish() noexcept {
         failure_t failure {};
         for (vram_shard_t const& shard : shards)
-            if (nk_status_t const status = nk_stream_synchronize_best(shard.device->capabilities,
-                                                                      shard.device->stream.get());
+            if (nk_status_t const status = entries_kit_t::synchronize(shard.device->stream.get());
                 status != nk_success_k && !failure.message)
                 failure = {status_of(status), "A device failed the work queued on it"};
         return failure;

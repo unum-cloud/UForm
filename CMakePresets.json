@@ -42,6 +42,15 @@
       }
     },
     {
+      "name": "darwin",
+      "hidden": true,
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    },
+    {
       "name": "debug",
       "inherits": "base",
       "displayName": "Debug - unoptimized host code",
@@ -210,6 +219,19 @@
         "CMAKE_HIP_COMPILER": "/opt/rocm/llvm/bin/clang++",
         "UFORM_CUDA_ARCH": "all",
         "UFORM_ROCM_ARCH": "all"
+      }
+    },
+    {
+      "name": "darwin_metal",
+      "inherits": [
+        "library",
+        "darwin"
+      ],
+      "displayName": "Darwin Metal - the C library with the Apple residency",
+      "description": "The C library for Apple silicon with the Apple residency, whose kernels compile on each GPU at first use, for every Metal family from Apple7 on.",
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "UFORM_METAL_ARCH": "all"
       }
     },
     {
@@ -591,6 +613,13 @@
     {
       "name": "linux_cuda_rocm",
       "configurePreset": "linux_cuda_rocm",
+      "targets": [
+        "uform_shared"
+      ]
+    },
+    {
+      "name": "darwin_metal",
+      "configurePreset": "darwin_metal",
       "targets": [
         "uform_shared"
       ]

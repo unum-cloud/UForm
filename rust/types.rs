@@ -1004,8 +1004,8 @@ impl fmt::Debug for GPUDevice {
     }
 }
 
-/// Lists every GPU this process can drive into `devices`, NVIDIA devices first, then AMD, and
-/// answers how many there are, which may exceed what `devices` holds.
+/// Lists every GPU this process can drive into `devices`, NVIDIA devices first, then AMD, then
+/// Apple, and answers how many there are, which may exceed what `devices` holds.
 ///
 /// A vendor this build does not compile, or whose runtime is absent, lists no devices, so a machine
 /// without GPUs answers zero.

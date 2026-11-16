@@ -2374,12 +2374,12 @@ PyTypeObject GPUDeviceType = {
     .tp_getset = GPUDevice_getset,
 };
 
-char const doc_gpu_devices[] =                                                                   //
-    "gpu_devices() -> tuple[GPUDevice, ...]\n"                                                   //
-    "\n"                                                                                         //
-    "Every GPU this process can drive, NVIDIA devices first, then AMD, so a device's position\n" //
-    "is the ordinal `Executor.for_vram` and `Model.load_vram` name it by. A vendor this build\n" //
-    "does not compile, or whose runtime is absent, lists none.\n"                                //
+char const doc_gpu_devices[] =                                                                      //
+    "gpu_devices() -> tuple[GPUDevice, ...]\n"                                                      //
+    "\n"                                                                                            //
+    "Every GPU this process can drive, NVIDIA devices first, then AMD, then Apple, so a device's\n" //
+    "position is the ordinal `Executor.for_vram` and `Model.load_vram` name it by. A vendor this\n" //
+    "build does not compile, or whose runtime is absent, lists none.\n"                             //
     "Calls `uform_gpu_devices`.";
 
 /** Lists up to @p capacity devices into @p devices; returns how many there are, or -1. */

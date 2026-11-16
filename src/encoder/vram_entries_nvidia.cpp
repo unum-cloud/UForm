@@ -159,6 +159,20 @@ template <typename... argument_types_>
     return static_cast<unsigned>(blocks == 0 ? 1 : blocks < grid_blocks_max_k ? blocks : grid_blocks_max_k);
 }
 
+nk_allocator_t ue::vram_nvidia_entries_kit_t::policy(nk_stream_t, uform_residency_t residency) noexcept {
+    // NumKong picks the allocator by the vendor's group alone, so the vendor's bit picks the one
+    // any of its class masks would
+    nk_allocator_t policy {};
+    nk_status_t const status = residency == uform_residency_ram_k
+                                   ? nk_allocator_init_pinned_best(&policy, capability_k)
+                                   : nk_allocator_init_device_best(&policy, capability_k);
+    return status == nk_success_k ? policy : nk_allocator_t {};
+}
+
+nk_status_t ue::vram_nvidia_entries_kit_t::synchronize(nk_stream_t stream) noexcept {
+    return nk_stream_synchronize_best(capability_k, stream);
+}
+
 nk_status_t ue::vram_nvidia_entries_kit_t::describe(std::size_t vendor_ordinal,
                                                     device_description_t& description) noexcept {
     cuda_api_t const& driver = driver_();

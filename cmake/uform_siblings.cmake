@@ -44,9 +44,10 @@ endforeach ()
 # library's GPU code runs in UForm.
 set(NUMKONG_CUDA_ARCH "${UFORM_CUDA_ARCH}")
 set(NUMKONG_ROCM_ARCH "${UFORM_ROCM_ARCH}")
+set(NUMKONG_METAL_ARCH "${UFORM_METAL_ARCH}")
 uform_sibling(
     numkong FETCHCONTENT_SOURCE_DIR_NUMKONG https://github.com/ashvardanian/NumKong
-    fd06437efc7f1cdf299b85f09bff85ecf1b1d320
+    f58322c4bfc83a246bed679b4ba2e57eb1170ec8
 )
 uform_sibling(
     stringzilla FETCHCONTENT_SOURCE_DIR_STRINGZILLA https://github.com/ashvardanian/StringZilla

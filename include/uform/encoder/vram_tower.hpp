@@ -2,12 +2,13 @@
  *  @file include/uform/encoder/vram_tower.hpp
  *  @author Ash Vardanian
  *  @date October 25, 2026
- *  @brief The encoder tower in one GPU's memory, shared by NVIDIA and AMD: weights packed by the
- *      products kit it is handed, every step of @c encode_steps queued once on a stream.
+ *  @brief The encoder tower in one GPU's memory, shared by NVIDIA, AMD and Apple: weights packed by
+ *      the products kit it is handed, every step of @c encode_steps queued once on a stream.
  *
  *  The steps NumKong has no kernel for, and the copies weights move with, come from the vendor's
- *  entries kit, @ref unum::uform::encoder::vram_nvidia_entries_kit_t or
- *  @ref unum::uform::encoder::vram_amd_entries_kit_t ; nothing here names a vendor or a class.
+ *  entries kit, @ref unum::uform::encoder::vram_nvidia_entries_kit_t ,
+ *  @ref unum::uform::encoder::vram_amd_entries_kit_t or
+ *  @ref unum::uform::encoder::vram_apple_entries_kit_t ; nothing here names a vendor or a class.
  *  Every call returns once its steps are queued, and the caller synchronizes the stream before
  *  reading the outputs.
  */

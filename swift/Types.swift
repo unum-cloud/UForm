@@ -339,8 +339,8 @@ public struct GPUDevice: Sendable {
     }
 }
 
-/// Every GPU this process can drive, NVIDIA devices first, then AMD; empty on a machine without
-/// GPUs. Calls `uform_gpu_devices`.
+/// Every GPU this process can drive, NVIDIA devices first, then AMD, then Apple; empty on a machine
+/// without GPUs. Calls `uform_gpu_devices`.
 public func gpuDevices() throws(UFormError) -> [GPUDevice] {
     let landing = Landing()
     let count = landing.slots(0)

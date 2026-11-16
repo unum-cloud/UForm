@@ -14,7 +14,7 @@
 #include <span>        // `std::span` — the scratch a call borrows
 #include <type_traits> // `std::conditional_t`
 
-#include "uform/encoder/vram_kits.hpp" // `vram_nvidia_entries_kit_t`, `vram_amd_entries_kit_t`
+#include "uform/encoder/vram_kits.hpp" // `vram_nvidia_entries_kit_t`, `vram_amd_entries_kit_t`, `vram_apple_entries_kit_t`
 
 #include "lib.hpp" // `vendored_residency_t`, `cpu_class_t`, `gpu_class_t`, the ladders
 
@@ -55,15 +55,21 @@ struct encoder_class_tables {
 
 /** The vendor's capability group a device residency runs on. */
 constexpr nk_capability_t vendor_of(vendored_residency_t residency) noexcept {
-    return residency == vendored_residency_t::vram_amd_k ? nk_cap_rocm_k : nk_cap_cuda_k;
+    switch (residency) {
+    case vendored_residency_t::vram_amd_k: return nk_cap_rocm_k;
+    case vendored_residency_t::vram_apple_k: return nk_cap_metal_k;
+    default: return nk_cap_cuda_k;
+    }
 }
 
 /** The entries kit of a device residency's vendor: the steps and copies every class of the vendor
  *  shares, defined only in a build compiling the vendor, so a caller first asks
  *  @ref gpu_vendor_compiled . */
 template <vendored_residency_t residency_>
-using entries_kit_of = std::conditional_t<residency_ == vendored_residency_t::vram_amd_k,
-                                          encoder::vram_amd_entries_kit_t, encoder::vram_nvidia_entries_kit_t>;
+using entries_kit_of =
+    std::conditional_t<residency_ == vendored_residency_t::vram_amd_k, encoder::vram_amd_entries_kit_t,
+                       std::conditional_t<residency_ == vendored_residency_t::vram_apple_k,
+                                          encoder::vram_apple_entries_kit_t, encoder::vram_nvidia_entries_kit_t>>;
 
 /** The newest compiled class on @p ladder that fits under @p ceiling, as its verbs, one of which
  *  @ref pick_cpu_ceiling made sure of. */
@@ -114,6 +120,8 @@ template <typename visitor_type_>
 bool visit_vram_residency(nk_capability_t device_capabilities, visitor_type_&& visitor) noexcept {
     if (device_capabilities & nk_cap_rocm_k)
         return visitor.template operator()<vendored_residency_t::vram_amd_k, amd_ladder_t>();
+    if (device_capabilities & nk_cap_metal_k)
+        return visitor.template operator()<vendored_residency_t::vram_apple_k, apple_ladder_t>();
     return visitor.template operator()<vendored_residency_t::vram_nvidia_k, nvidia_ladder_t>();
 }
 

@@ -18,6 +18,14 @@ if (UFORM_ROCM_ARCH)
     endif ()
     enable_language(HIP)
 endif ()
+# Metal compiles its kernels on the device, so a family only names the Apple classes the build serves.
+if (UFORM_METAL_ARCH AND NOT UFORM_METAL_ARCH MATCHES "^(all|apple7|apple9|apple10)$")
+    message(FATAL_ERROR "UFORM_METAL_ARCH takes all or one family like apple9, not `${UFORM_METAL_ARCH}`")
+endif ()
+# NumKong's Metal objects read the Apple SDK, so only an Apple platform builds the residency.
+if (UFORM_METAL_ARCH AND NOT APPLE)
+    message(FATAL_ERROR "UFORM_METAL_ARCH builds the Apple residency, which needs an Apple platform")
+endif ()
 
 # C++23: the multidimensional subscript `tensor[row, column]` is the project's indexing default — device code included,
 # which needs `nvcc` >= 13.1 (`-std=c++23` first shipped there; 13.0 rejects it). Host targets declare `cxx_std_23`

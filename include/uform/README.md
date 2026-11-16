@@ -12,7 +12,7 @@ Only the C ABI is versioned, so these headers change with the code that instanti
   - `array.hpp`: fixed-capacity arrays with inline storage, for tables of one entry per GPU.
   - `safetensors_format.hpp`: reading and writing safetensors checkpoints through NumKong views.
   - `vram_nvidia_device.hpp` and `vram_nvidia_schedule.cuh`: the CUDA driver's entry points, single-GPU allocators, owning streams, and graphs captured once and replayed.
-  - `vram_amd_device.hpp`: the HIP runtime's entry points, opened at first use.
+  - `vram_amd_device.hpp` and `vram_apple_device.hpp`: the HIP runtime's entry points, and the Metal executor with its contexts, pipelines, shared buffers and launches, each opened at first use.
   - `mesh.hpp`, `multimem_collectives.cuh` and `infiniband_collectives.cuh`: the multi-level GPU mesh, and the collectives inside one multimem domain and across them.
 - `encoder/`, in `unum::uform::encoder`:
   - `geometry.hpp`: the shape and numerics of one tower, read back from a checkpoint.

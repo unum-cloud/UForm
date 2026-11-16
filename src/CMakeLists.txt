@@ -273,14 +273,21 @@ endforeach ()
 # NumKong enabled the capability after its name for some code UForm names; each vendor's oldest class is its floor, and
 # configure stops on a code no class claims. A monoversioned build keeps one class per vendor, the newest that exists.
 # Their units link NumKong's published `numkong::<vendor>_capabilities_compiled`, which declares the generations its
-# library compiled, and `uform_host` reads each vendor as `UFORM_ARCH_CUDA_` or `UFORM_ARCH_ROCM_` and each class as
-# `UFORM_TARGET_<CLASS>`, 1 when built and 0 otherwise. A device runs a class where NumKong's loader runs all its kits.
-# Rubin runs the Blackwell class through `parent_class_of`, so it compiles nothing of its own.
-set(uform_gpu_gates_ "UFORM_ARCH_CUDA_=$<BOOL:${UFORM_CUDA_ARCH}>" "UFORM_ARCH_ROCM_=$<BOOL:${UFORM_ROCM_ARCH}>")
-# Declares the GPU class @p class_ of @p vendor_, gated as `UFORM_TARGET_<target_macro>`, over NumKong's @p capability_;
-# classes are declared oldest first, so in a monoversioned build each one that exists drops the ones before it.
+# library compiled, and `uform_host` reads each vendor as `UFORM_ARCH_CUDA_`, `UFORM_ARCH_ROCM_` or `UFORM_ARCH_METAL_`
+# and each class as `UFORM_TARGET_<CLASS>`, 1 when built and 0 otherwise. A device runs a class where NumKong's loader
+# runs all its kits. Rubin runs the Blackwell class through `parent_class_of`, so it compiles nothing of its own.
+set(uform_gpu_gates_ "UFORM_ARCH_CUDA_=$<BOOL:${UFORM_CUDA_ARCH}>" "UFORM_ARCH_ROCM_=$<BOOL:${UFORM_ROCM_ARCH}>"
+                     "UFORM_ARCH_METAL_=$<BOOL:${UFORM_METAL_ARCH}>"
+)
+# Declares the GPU class @p class_ of @p vendor_, gated as `UFORM_TARGET_<target_macro>`, over NumKong's @p capability_,
+# or over the vendor's `baseline`, which every build of the vendor compiles; classes are declared oldest first, so in a
+# monoversioned build each one that exists drops the ones before it.
 function (uform_gpu_class vendor_ class_ target_macro_ capability_)
-    set(kept_ ${numkong_target_${capability_}_compiled})
+    if (capability_ STREQUAL "baseline")
+        set(kept_ TRUE)
+    else ()
+        set(kept_ ${numkong_target_${capability_}_compiled})
+    endif ()
     if (kept_)
         set(uform_${vendor_}_claimed_
             ${uform_${vendor_}_claimed_} ${numkong_target_${capability_}_architectures}
@@ -339,7 +346,15 @@ if (UFORM_ROCM_ARCH)
     uform_gpu_class(amd amd_cdna5 AMD_CDNA5 cdna5)
     uform_gpu_codes_claimed(amd ${CMAKE_HIP_ARCHITECTURES})
 endif ()
-foreach (class_ IN LISTS uform_nvidia_classes_ uform_amd_classes_)
+# Metal compiles on the device, so the Apple classes claim no code: the baseline serves every family from Apple7 on,
+# and each later class exists where NumKong embedded its family's kernels.
+if (UFORM_METAL_ARCH)
+    set(uform_apple_classes_)
+    uform_gpu_class(apple apple_metal7 APPLE_METAL7 baseline)
+    uform_gpu_class(apple apple_metal9 APPLE_METAL9 apple9)
+    uform_gpu_class(apple apple_metal10 APPLE_METAL10 apple10)
+endif ()
+foreach (class_ IN LISTS uform_nvidia_classes_ uform_amd_classes_ uform_apple_classes_)
     list(APPEND uform_gpu_gates_ "UFORM_TARGET_${uform_class_${class_}_macro_}=$<BOOL:${uform_class_${class_}_kept_}>")
 endforeach ()
 if (UFORM_MARCH)
@@ -427,6 +442,19 @@ if (UFORM_ROCM_ARCH)
         uform_encoder_vram_amd_variants amd uform_encoder_amd encoder/vram_kernels_amd.hip CODES
         ${CMAKE_HIP_ARCHITECTURES}
     )
+endif ()
+# Apple's kernels travel as source, NumKong's MSL and UForm's embedded alike, and every device compiles them at first
+# use, so no Metal toolchain builds them. Metal, Foundation, I/O Kit and the Objective-C runtime are opened at first
+# use, as the CUDA driver and the HIP runtime are, so the entries link no framework.
+if (UFORM_METAL_ARCH)
+    uform_variants(encoder vram apple ${uform_apple_classes_})
+    target_sources(uform_encoder_vram_apple_variants PRIVATE encoder/vram_entries_apple.cpp)
+    target_link_libraries(
+        uform_encoder_vram_apple_variants
+        PRIVATE $<BUILD_INTERFACE:numkong::metal_capabilities_compiled>
+        PUBLIC ${CMAKE_DL_LIBS}
+    )
+    target_compile_options(uform_encoder_vram_apple_variants PRIVATE "--embed-dir=${numkong_SOURCE_DIR}/include")
 endif ()
 target_compile_definitions(uform_host PUBLIC ${uform_cpu_gates_} ${uform_gpu_gates_})
 # Training runs on NVIDIA alone: without UFORM_BUILD_TRAIN its verbs refuse, and with it `uform_nvidia_train` below

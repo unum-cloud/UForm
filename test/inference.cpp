@@ -43,7 +43,7 @@
 
 #include "uform/uform.h" // `uform_model_load_ram`, `uform_text_encode` - the class cells' path
 
-#include "encoder_punned.hpp" // `encoder_verbs`, `encoder_class_tables`, `pick_gpu_variant`
+#include "encoder_punned.hpp" // `encoder_verbs`, `encoder_class_tables`, `pick_gpu_variant`, `visit_vram_residency`
 #include "harness.hpp"        // `test_suite_t`
 
 using namespace unum::uform;
@@ -93,11 +93,11 @@ static std::vector<float> read_floats(char const* path) {
 }
 
 /** Encodes the texts through @p verbs in @p precision into @p encoded : on @p executor , a pool
- *  for a host variant or a stream for a device one, with the batch and the outputs in memory both
- *  sides address, placed under @p capabilities . */
+ *  for a host variant or a stream for a device one, the batch and the outputs in memory that both
+ *  the host and the device address. */
 template <vendored_residency_t residency_>
 static bool encode(test_suite_t& suite, encoder_verbs<residency_> const& verbs, checkpoint_to_load_t const& checkpoint,
-                   geometry_t const& geometry, precision_t precision, nk_capability_t capabilities,
+                   geometry_t const& geometry, precision_t precision,
                    typename vendored_residency_executor<residency_>::type executor, nk_stream_t stream,
                    encoded_t& encoded) {
     expected<void*> made = verbs.create(checkpoint, geometry, precision, stream);
@@ -106,13 +106,16 @@ static bool encode(test_suite_t& suite, encoder_verbs<residency_> const& verbs, 
     if (!made) return suite.check(false, "tower: {}", made.description_), false;
     void* const tower = *made;
 
-    bool const on_device = (capabilities & nk_cap_gpus_k) != 0;
+    // A device variant takes its vendor's pinned pages for what both sides address, as its kernels
+    // read the batch's segments in place and the host reads the outputs there
     nk_allocator_t shared {}, scratch_policy {};
-    nk_status_t const initialized = on_device ? nk_allocator_init_unified_best(&shared, capabilities)
-                                              : nk_allocator_init_heap(&shared, 64);
-    if (initialized != nk_success_k || (on_device ? nk_allocator_init_device_best(&scratch_policy, capabilities)
-                                                  : nk_allocator_init_heap(&scratch_policy, 64)) != nk_success_k)
-        return verbs.destroy(tower), suite.check(false, "allocators: {}", nk_status_name(initialized)), false;
+    if constexpr (residency_ == vendored_residency_t::ram_k) shared = scratch_policy = host_pages_policy();
+    else {
+        shared = entries_kit_of<residency_>::policy(stream, uform_residency_ram_k);
+        scratch_policy = entries_kit_of<residency_>::policy(stream, uform_residency_vram_k);
+    }
+    if (!shared.allocate || !scratch_policy.allocate)
+        return verbs.destroy(tower), suite.check(false, "allocators: none for the device"), false;
     nk::allocator<b8_t> const allocator {shared, stream};
 
     using batch_t = encoder::multimodal_batch<nk::allocator<b8_t>>;
@@ -154,7 +157,8 @@ static bool encode(test_suite_t& suite, encoder_verbs<residency_> const& verbs, 
                              {f32r2_span_t {token_vectors.data(), tokens, geometry.token_width}, nk_f32_k},
                              {masked_logits.data(), items_k, geometry.masked_vocabulary}};
     expected_t ran = verbs.encode(tower, batch->view(), outputs, scratch, executor);
-    nk_status_t const finished = on_device ? nk_stream_synchronize_best(capabilities, stream) : nk_success_k;
+    nk_status_t finished = nk_success_k;
+    if constexpr (residency_ != vendored_residency_t::ram_k) finished = entries_kit_of<residency_>::synchronize(stream);
     verbs.destroy(tower);
     if (!ran) return suite.check(false, "encode: {}", ran.description_), false;
     if (finished != nk_success_k) return suite.check(false, "encode: {}", nk_status_name(finished)), false;
@@ -257,11 +261,11 @@ static void class_parity(test_suite_t& suite, char const* path, uform_cpu_class_
 template <vendored_residency_t residency_>
 static void check_device_variant(test_suite_t& suite, encoder_verbs<residency_> const* verbs,
                                  checkpoint_to_load_t const& checkpoint, geometry_t const& geometry,
-                                 precision_t precision, nk_capability_t capabilities, nk_stream_t stream,
-                                 encoded_t const& reference, double tolerance) {
+                                 precision_t precision, nk_stream_t stream, encoded_t const& reference,
+                                 double tolerance) {
     if (!verbs) return suite.skip("this build compiles no variant for the device's vendor");
     encoded_t encoded;
-    if (encode(suite, *verbs, checkpoint, geometry, precision, capabilities, stream, stream, encoded))
+    if (encode(suite, *verbs, checkpoint, geometry, precision, stream, stream, encoded))
         check_agreement(suite, uform_gpu_class_name(static_cast<uform_gpu_class_t>(verbs->gpu_class)), encoded,
                         reference, geometry.hidden, tolerance);
 }
@@ -271,26 +275,21 @@ static void check_device_variant(test_suite_t& suite, encoder_verbs<residency_> 
 static void device_parity(test_suite_t& suite, checkpoint_to_load_t const& checkpoint, geometry_t const& geometry,
                           uform_gpu_device_t device, precision_t precision, encoded_t const& reference,
                           double tolerance) {
-    bool const amd = device.vendor == uform_gpu_vendor_amd_k;
-    nk::expected<nk::device_t> const opened = nk::device_t::make(
-        amd ? nk::device_kind_t::rocm_k : nk::device_kind_t::cuda_k, device.vendor_ordinal);
+    nk::device_kind_t kind = nk::device_kind_t::cuda_k;
+    if (device.vendor == uform_gpu_vendor_amd_k) kind = nk::device_kind_t::rocm_k;
+    if (device.vendor == uform_gpu_vendor_apple_k) kind = nk::device_kind_t::metal_k;
+    nk::expected<nk::device_t> const opened = nk::device_t::make(kind, device.vendor_ordinal);
     if (!opened) return suite.check(false, "device: {}", nk::status_name(opened.status));
     nk::expected<nk_capability_t> const capabilities = opened.value.capabilities_enabled();
     if (!capabilities || !capabilities.value) return suite.skip("this build holds no kernels for the device");
     nk::expected<nk::stream_t> const stream = nk::stream_t::make(opened.value);
     if (!stream) return suite.check(false, "device stream: {}", nk::status_name(stream.status));
-    if (amd)
-        check_device_variant(suite,
-                             pick_gpu_variant<vendored_residency_t::vram_amd_k>(
-                                 amd_ladder_t {}, uform_gpu_class_unknown_k, capabilities.value),
-                             checkpoint, geometry, precision, capabilities.value, stream.value.get(), reference,
-                             tolerance);
-    else
-        check_device_variant(suite,
-                             pick_gpu_variant<vendored_residency_t::vram_nvidia_k>(
-                                 nvidia_ladder_t {}, uform_gpu_class_unknown_k, capabilities.value),
-                             checkpoint, geometry, precision, capabilities.value, stream.value.get(), reference,
-                             tolerance);
+    visit_vram_residency(capabilities.value, [&]<vendored_residency_t residency_, typename ladder_type_>() {
+        check_device_variant(
+            suite, pick_gpu_variant<residency_>(ladder_type_ {}, uform_gpu_class_unknown_k, capabilities.value),
+            checkpoint, geometry, precision, stream.value.get(), reference, tolerance);
+        return true;
+    });
 }
 
 /** Compares the serial floor's BFloat16 @p reference with the Rust crate's dumps at @p states_path
@@ -396,12 +395,9 @@ int main(int argc, char** argv) {
 
     encoder_verbs<vendored_residency_t::ram_k> const& reference =
         *encoder_class_tables<vendored_residency_t::ram_k, cpu_ladder_floor_k>::find();
-    nk_capability_t const reference_capabilities = numkong_capabilities_of(cpu_ladder_floor_k);
     encoded_t bf16_reference, e4m3_reference;
-    if (!encode(suite, reference, *checkpoint, *geometry, precision_t::bf16_k, reference_capabilities, pool->view(),
-                nullptr, bf16_reference) ||
-        !encode(suite, reference, *checkpoint, *geometry, precision_t::e4m3_k, reference_capabilities, pool->view(),
-                nullptr, e4m3_reference))
+    if (!encode(suite, reference, *checkpoint, *geometry, precision_t::bf16_k, pool->view(), nullptr, bf16_reference) ||
+        !encode(suite, reference, *checkpoint, *geometry, precision_t::e4m3_k, pool->view(), nullptr, e4m3_reference))
         return suite.finish();
     suite.run("token_vectors/unit_length", token_vectors_unit_length, bf16_reference, geometry->token_width);
     run_class_parity(suite, cpu_ladder_t {}, argv[1], bf16_reference, e4m3_reference);

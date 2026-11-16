@@ -694,8 +694,8 @@ typedef struct uform_gpu_devices_t {
 } uform_gpu_devices_t;
 
 /**
- *  @brief Lists every GPU this process can drive, NVIDIA devices first, then AMD, so the position
- *      of a device is the UForm ordinal @c uform_vram_options_t names it by.
+ *  @brief Lists every GPU this process can drive, NVIDIA devices first, then AMD, then Apple, so
+ *      the position of a device is the UForm ordinal @c uform_vram_options_t names it by.
  *
  *  A vendor this build does not compile, or whose runtime is absent, lists no devices, so the call
  *  succeeds with a zero count on a machine without GPUs.

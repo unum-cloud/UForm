@@ -42,7 +42,8 @@
 #include "uform/utilities/array.hpp"      // `per_gpu_array`
 #include "uform/utilities/ram_device.hpp" // `executor_t`, `lent_pool_t`, `pool_view_t`, `topology_t`
 #include "uform/utilities/types.hpp"      // `status_t`, the integer aliases, `sz::string_view_t`, `st::basic_vector`
-#include "uform/encoder/tower.hpp"        // `geometry_t`, `precision_t`, `outputs_t` - what a model's towers take
+#include "uform/utilities/vram_apple_device.hpp" // `metal_api_t`, `metal_contexts_t`
+#include "uform/encoder/tower.hpp" // `geometry_t`, `precision_t`, `outputs_t` - what a model's towers take
 
 namespace unum::uform {
 
@@ -557,6 +558,10 @@ using nvidia_ladder_t =
 /** The AMD classes newest first, CDNA3 the floor. */
 using amd_ladder_t = gpu_ladder<gpu_class_t::amd_cdna5_k, gpu_class_t::amd_cdna4_k, gpu_class_t::amd_cdna3_k>;
 
+/** The Apple classes newest first, the Metal 7 family the floor. */
+using apple_ladder_t =
+    gpu_ladder<gpu_class_t::apple_metal10_k, gpu_class_t::apple_metal9_k, gpu_class_t::apple_metal7_k>;
+
 /** The rung a GPU class degrades to within its vendor, @c unknown_k past the oldest. */
 constexpr gpu_class_t parent_class_of(gpu_class_t gpu_class) noexcept {
     switch (gpu_class) {
@@ -689,6 +694,15 @@ constexpr bool gpu_class_compiled(gpu_class_t gpu_class) noexcept {
 #if UFORM_TARGET_AMD_CDNA5
     case gpu_class_t::amd_cdna5_k: return true;
 #endif
+#if UFORM_TARGET_APPLE_METAL7
+    case gpu_class_t::apple_metal7_k: return true;
+#endif
+#if UFORM_TARGET_APPLE_METAL9
+    case gpu_class_t::apple_metal9_k: return true;
+#endif
+#if UFORM_TARGET_APPLE_METAL10
+    case gpu_class_t::apple_metal10_k: return true;
+#endif
     default: return false;
     }
 }
@@ -707,17 +721,21 @@ consteval std::size_t compiled_rungs(gpu_ladder<classes_...>) noexcept {
 static_assert(compiled_rungs(cpu_ladder_t {}) <= 1);
 static_assert(compiled_rungs(nvidia_ladder_t {}) <= 1);
 static_assert(compiled_rungs(amd_ladder_t {}) <= 1);
+static_assert(compiled_rungs(apple_ladder_t {}) <= 1);
 #endif
 
 /** Whether the build compiled the units of @p vendor , as CMake told the dispatch unit through
- *  @c UFORM_ARCH_CUDA_ and @c UFORM_ARCH_ROCM_ ; every class CMake kept has a unit, the ones
- *  advancing nothing past their parent answering no table. */
+ *  @c UFORM_ARCH_CUDA_ , @c UFORM_ARCH_ROCM_ and @c UFORM_ARCH_METAL_ ; every class CMake kept has
+ *  a unit, the ones advancing nothing past their parent answering no table. */
 constexpr bool gpu_vendor_compiled([[maybe_unused]] nk_capability_t vendor) noexcept {
 #if UFORM_ARCH_CUDA_
     if (vendor == nk_cap_cuda_k) return true;
 #endif
 #if UFORM_ARCH_ROCM_
     if (vendor == nk_cap_rocm_k) return true;
+#endif
+#if UFORM_ARCH_METAL_
+    if (vendor == nk_cap_metal_k) return true;
 #endif
     return false;
 }
@@ -1064,6 +1082,25 @@ struct device_arena_t {
  *  was opened on. */
 using owned_stream_t = nk::stream_t;
 
+/** Metal's table and Apple's device contexts, which the process builds once, at the first GPU call,
+ *  and every Apple listing, allocation and launch reads; empty off Apple platforms, which then list
+ *  no Apple devices. NVIDIA and AMD devices list through NumKong, and their entries units keep the
+ *  CUDA and HIP tables their own launches take. */
+struct gpu_drivers_t {
+    utilities::metal_api_t metal;
+    utilities::metal_contexts_t metal_contexts;
+
+    gpu_drivers_t() noexcept : metal(utilities::metal_api_t::load()), metal_contexts(metal) {}
+    gpu_drivers_t(gpu_drivers_t const&) = delete;
+    gpu_drivers_t& operator=(gpu_drivers_t const&) = delete;
+};
+
+/** Every vendor's driver, loaded at the first GPU call. */
+[[nodiscard]] inline gpu_drivers_t& gpu_drivers() noexcept {
+    static gpu_drivers_t drivers;
+    return drivers;
+}
+
 /** The host threads of a RAM executor, spawned here or lent by another library, and where its
  *  models place their bytes. */
 struct ram_executor_t {
@@ -1129,6 +1166,7 @@ enum class vendored_residency_t : u32_t {
     ram_k,
     vram_nvidia_k,
     vram_amd_k,
+    vram_apple_k,
 };
 
 /** The executor each residency's verbs take: a host tower's thread pool, a device tower's
@@ -1148,9 +1186,9 @@ struct encoder_verbs;
 
 /** The variant a load picked, as its residency's verb table, which alone casts each tower back
  *  to its type. */
-using encoder_residency_tables_t = std::variant<encoder_verbs<vendored_residency_t::ram_k> const*,
-                                                encoder_verbs<vendored_residency_t::vram_nvidia_k> const*,
-                                                encoder_verbs<vendored_residency_t::vram_amd_k> const*>;
+using encoder_residency_tables_t = std::variant<
+    encoder_verbs<vendored_residency_t::ram_k> const*, encoder_verbs<vendored_residency_t::vram_nvidia_k> const*,
+    encoder_verbs<vendored_residency_t::vram_amd_k> const*, encoder_verbs<vendored_residency_t::vram_apple_k> const*>;
 
 /** One copy of a model's tower on one GPU, matched to an executor's device by its UForm ordinal. */
 struct vram_replica_t {

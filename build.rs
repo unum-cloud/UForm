@@ -20,8 +20,12 @@ use std::path::{Path, PathBuf};
 
 /// Every CMake option an implementation can switch on, with the values switching it on and off,
 /// so a reconfigured tree never keeps an earlier choice.
-const KNOWN_OPTIONS: &[(&str, &str, &str)] =
-    &[("UFORM_BUILD_STUB", "ON", "OFF"), ("UFORM_CUDA_ARCH", "all", ""), ("UFORM_ROCM_ARCH", "all", "")];
+const KNOWN_OPTIONS: &[(&str, &str, &str)] = &[
+    ("UFORM_BUILD_STUB", "ON", "OFF"),
+    ("UFORM_CUDA_ARCH", "all", ""),
+    ("UFORM_ROCM_ARCH", "all", ""),
+    ("UFORM_METAL_ARCH", "all", ""),
+];
 
 /// One implementation of the C interface, and what CMake must be told to produce it.
 #[derive(Clone, Copy)]
@@ -38,6 +42,8 @@ struct Implementation {
     library: &'static str,
     /// The system libraries the archive leaves unresolved, outside WebAssembly.
     dependencies: &'static [&'static str],
+    /// The Apple frameworks the archive leaves unresolved, linked only on Apple platforms.
+    frameworks: &'static [&'static str],
     /// The directories whose contents rebuild it, beside the interface every one of them reads.
     sources: &'static [&'static str],
 }
@@ -50,6 +56,7 @@ const ENGINE: Implementation = Implementation {
     directory: "c",
     library: "uform_static",
     dependencies: &["turbojpeg", "png", "webp", "avformat", "avcodec", "avutil", "swresample", "swscale"],
+    frameworks: &[],
     sources: &["src", "cmake"],
 };
 
@@ -63,6 +70,11 @@ const ENGINE_ROCM: Implementation = Implementation { feature: "rocm", options: &
 const ENGINE_CUDA_ROCM: Implementation =
     Implementation { feature: "cuda and rocm", options: &["UFORM_CUDA_ARCH", "UFORM_ROCM_ARCH"], ..ENGINE };
 
+/// The engine with the Apple residency, whose kernels each device compiles at first use. UForm
+/// opens Metal at first use, so only NumKong's Metal objects need their frameworks linked.
+const ENGINE_METAL: Implementation =
+    Implementation { feature: "metal", options: &["UFORM_METAL_ARCH"], frameworks: &["Metal", "Foundation"], ..ENGINE };
+
 /// The stand-in, which answers the same verbs over the C++ standard library alone.
 const STUB: Implementation = Implementation {
     feature: "stub",
@@ -71,6 +83,7 @@ const STUB: Implementation = Implementation {
     directory: "stub",
     library: "uform_static",
     dependencies: &[],
+    frameworks: &[],
     sources: &["src_stub"],
 };
 
@@ -87,17 +100,31 @@ fn sibling_source(links: &str) -> Result<String, String> {
 /// across the whole dependency graph and never subtracts, so a named default could only be turned
 /// off by every consumer at once.
 fn selected() -> Result<Implementation, String> {
+    let metal = cfg!(feature = "metal");
     match (cfg!(feature = "cuda"), cfg!(feature = "rocm"), cfg!(feature = "stub")) {
+        (false, false, false) if metal => Ok(ENGINE_METAL),
+        (cuda, _, false) if metal => Err(format!(
+            "the metal and {} features are mutually exclusive, and both were enabled - no platform \
+             hosts Apple GPUs beside NVIDIA or AMD ones. Cargo unions features across the dependency \
+             graph, so this usually means a second crate asked for the other one.",
+            if cuda { ENGINE_CUDA.feature } else { ENGINE_ROCM.feature }
+        )),
         (false, false, false) => Ok(ENGINE),
         (true, false, false) => Ok(ENGINE_CUDA),
         (false, true, false) => Ok(ENGINE_ROCM),
         (true, true, false) => Ok(ENGINE_CUDA_ROCM),
-        (false, false, true) => Ok(STUB),
+        (false, false, true) if !metal => Ok(STUB),
         (cuda, _, true) => Err(format!(
             "the stub and {} features are mutually exclusive, and both were enabled - the stub is a whole \
              implementation of the C interface carrying no GPU backend. Cargo unions features across the \
              dependency graph, so this usually means a second crate asked for the other one.",
-            if cuda { ENGINE_CUDA.feature } else { ENGINE_ROCM.feature }
+            if cuda {
+                ENGINE_CUDA.feature
+            } else if metal {
+                ENGINE_METAL.feature
+            } else {
+                ENGINE_ROCM.feature
+            }
         )),
     }
 }
@@ -149,7 +176,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     // The archive is C++, so the standard library it was compiled against has to come along.
     match target_os.as_str() {
         "windows" => {}
-        "macos" | "ios" => println!("cargo:rustc-link-lib=dylib=c++"),
+        "macos" | "ios" => {
+            println!("cargo:rustc-link-lib=dylib=c++");
+            for framework in chosen.frameworks {
+                println!("cargo:rustc-link-lib=framework={framework}");
+            }
+        }
         // wasi-sdk ships libc++ and libc++abi as archives under its sysroot, in the `noeh` multilib
         // the toolchain file compiles against.
         "wasi" => {

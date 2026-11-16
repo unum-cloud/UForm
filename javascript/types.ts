@@ -217,11 +217,9 @@ export function negativesCode(negatives: Negatives): number {
   return code;
 }
 
-/**
- *  Lists every GPU this process can drive, NVIDIA devices first, then AMD, so a device's
- *  position is the ordinal VRAM placements name it by; a machine without GPUs lists
- *  none. Calls `uform_gpu_devices`.
- */
+/** Lists every GPU this process can drive, NVIDIA devices first, then AMD, then Apple, so a
+ *  device's position is the ordinal VRAM placements name it by; a machine without GPUs lists none.
+ *  Calls `uform_gpu_devices`. */
 export function gpuDevices(): GpuDevice[] {
   return backend().gpuDevices() as GpuDevice[];
 }
