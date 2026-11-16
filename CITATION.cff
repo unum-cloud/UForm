@@ -1,10 +1,10 @@
 cff-version: 1.2.0
-title: "UForm: Hardware-Accelerated Distributed Training of Multi-Modal Perception Models across NVLink Domains"
+title: "UForm: Distributed Training & Inference Engine for Multi-Modal Perception"
 message: "If you use this software, please cite it as below."
 type: software
 license: Apache-2.0
 repository-code: https://github.com/unum-cloud/UForm
-url: https://github.com/unum-cloud/UForm
+url: https://www.unum.cloud/docs/uform
 doi: 10.5281/zenodo.8204323
 abstract: >-
   UForm is a family of perception models trained from scratch to share one

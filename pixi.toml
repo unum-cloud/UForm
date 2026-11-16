@@ -4,7 +4,9 @@
 [workspace]
 authors = ["Ash Vardanian <info@unum.cloud>"]
 channels = ["conda-forge", "https://conda.modular.com/max"]
-description = "Distributed training and inference pipeline for multi-modal perception"
+description = "Distributed training and inference engine for multi-modal perception"
+documentation = "https://www.unum.cloud/docs/uform"
+homepage = "https://www.unum.cloud/docs/uform"
 license = "Apache-2.0"
 license-file = "LICENSE"
 name = "uform"
@@ -16,6 +18,7 @@ platforms = [
 ]
 preview = ["pixi-build"]
 readme = "README.md"
+repository = "https://github.com/unum-cloud/UForm"
 version = "4.0.0-rc.1"
 
 [workspace.target.linux-64.build-variants]

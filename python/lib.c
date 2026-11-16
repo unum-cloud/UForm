@@ -12,7 +12,7 @@
 #include "lib.h"
 
 static char const doc_module[] =                                                             //
-    "Distributed training and inference pipeline for multi-modal perception.\n"              //
+    "Distributed training and inference engine for multi-modal perception.\n"                //
     "\n"                                                                                     //
     "Models, executors and trainers sitting directly on the stable C ABI. Every verb is a\n" //
     "batch over buffer-protocol inputs, every output lands in an arena the caller reuses,\n" //

@@ -1,4 +1,4 @@
-"""Distributed training and inference pipeline for multi-modal perception, bound over its C ABI.
+"""Distributed training and inference engine for multi-modal perception, bound over its C ABI.
 
 UForm encodes texts, images, clips and recordings into embeddings with one model per checkpoint,
 and trains those models across GPUs. This package binds the whole C interface: the model and its

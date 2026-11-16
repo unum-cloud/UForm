@@ -3,9 +3,12 @@
 
 [package]
 authors = ["Ash Vardanian <info@unum.cloud>"]
-description = "Distributed training and inference pipeline for multi-modal perception"
+description = "Distributed training and inference engine for multi-modal perception"
+documentation = "https://www.unum.cloud/docs/uform/mojo"
+homepage = "https://www.unum.cloud/docs/uform"
 license = "Apache-2.0"
 name = "uform_mojo"
+repository = "https://github.com/unum-cloud/UForm"
 version = "4.0.0-rc.1"
 
 [package.build]

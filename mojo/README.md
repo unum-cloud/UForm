@@ -22,24 +22,42 @@ On Linux the environment pins a glibc 2.34 sysroot, which the MAX runtime `mojo 
 
 ## Quickstart
 
+Encode two captions and a photo into one space, then pick the caption closest to the photo:
+
 ```mojo
-from uform import Arena, Executor, Library, Model, Outputs, ScalarKind, TapeView, EncodeConfig
+from std.math import sqrt
+from uform import Arena, Executor, Library, Model, Outputs, TapeView
+
+
+def cosine(text: Span[Float32, _], image: Span[Float32, _]) -> Float32:
+    var dot: Float32 = 0  # embeddings come unnormalized
+    var text_norm: Float32 = 0
+    var image_norm: Float32 = 0
+    for i in range(len(image)):
+        dot += text[i] * image[i]
+        text_norm += text[i] * text[i]
+        image_norm += image[i] * image[i]
+    return dot / sqrt(text_norm * image_norm)
+
 
 def main() raises:
-    var library = Library()
-    var executor = Executor.for_ram(library, threads=8)
+    var library = Library()  # opens the engine once; every handle keeps it mapped
+    var executor = Executor.for_ram(library)
     var model = Model.load_ram(executor, "model.safetensors")  # BFloat16 blocks, as the checkpoint stores them
+    var texts_arena = Arena(executor)  # a call rewinds its arena, so two outputs need two
+    var images_arena = Arena(executor)
 
-    var texts = "a cata dog".as_bytes()  # two texts end to end
-    var offsets: List[UInt] = [0, 5, 10]  # one more offset than texts
-    var arena = Arena(executor)
-    var encoded = model.on(executor).text_encode(TapeView.of(texts, offsets), Outputs.EMBEDDINGS, arena)
-    var embeddings = encoded.embeddings().value()
-    print(len(embeddings), embeddings.columns(), embeddings.row[DType.float32](0)[0])
+    var captions: List[String] = ["a cat on a mat", "a sunrise over the bay"]
+    var caption_offsets: List[UInt] = [0, 14, 36]  # one more offset than captions, end to end
+    var photo = open("cat.png", "r").read_bytes()
+    var photo_offsets: List[UInt] = [0, UInt(len(photo))]
+    var tape = TapeView.of("a cat on a mata sunrise over the bay".as_bytes(), caption_offsets)
+    var texts = model.on(executor).text_encode(tape, Outputs.EMBEDDINGS, texts_arena).embeddings().value()
+    var images = model.on(executor).image_encode(TapeView.of(photo, photo_offsets), Outputs.EMBEDDINGS, images_arena)
+    var image = images.embeddings().value().row[DType.float32](0)
+    var best = 1 if cosine(texts.row[DType.float32](1), image) > cosine(texts.row[DType.float32](0), image) else 0
+    print("'" + captions[best] + "' describes the photo best")
 ```
-
-A model owns its weights; an `Executor` owns the threads or streams a call runs on; an `Arena` owns the outputs a call writes.
-`Library()` opens the engine once, and every handle created through it keeps it mapped.
 
 ## Receivers & Deferred Calls
 
@@ -114,12 +132,44 @@ var images = model.image_encode(files, Outputs.EMBEDDINGS | Outputs.TOKEN_VECTOR
 var pixels = model.image_encode_pixels(rgb, heights, widths, Outputs.EMBEDDINGS, arena)
 var clips = model.video_encode(videos, Outputs.EMBEDDINGS, arena)
 var sounds = model.audio_encode_samples(samples, 16000, Outputs.EMBEDDINGS, arena)
-var probabilities = model.text_choose(states, choices, arena)  # one F32 per legal byte
 ```
+
+## Choices
+
+`text_choose` scores each text's legal choices, one byte each, through one forward of the byte decoder, a softmax over them alone at the calibrated inverse temperature of the text's question type:
+
+```mojo
+var states = "keep this candidate? expand which neighbour? ".as_bytes()
+var state_offsets: List[UInt] = [0, 21, 45]
+var letter_offsets: List[UInt] = [0, 2, 6]
+var choices = TapeView.of("ynABCD".as_bytes(), letter_offsets)
+var probabilities = model.text_choose(TapeView.of(states, state_offsets), choices, arena)
+var expand = probabilities.item[DType.float32](1)  # the probabilities of 'A' through 'D'
+```
+
+`TextChooseConfig` names each text's question type in `temperature_groups`, below the model's `choice_temperature_groups`, and an empty span puts every text in group zero.
+A model without the byte decoder, its `choice_temperature_groups` zero, raises `Status.UNSUPPORTED`.
+
+## Models
+
+`Model.load_ram` and `Model.load_vram` copy a safetensors checkpoint into host memory or onto the GPUs of a VRAM executor, and `load_ram_buffer` and `load_vram_buffer` take the checkpoint's bytes instead.
+`quantization` keeps the blocks in `ScalarKind.BF16` as stored or quantizes them to `ScalarKind.E4M3` at load, and `RamOptions` and `VramOptions` name the memory domains or devices and an optional `cpu_class_ceiling` or `gpu_class_ceiling`, under which dispatch runs the best class the hardware runs.
+
+```mojo
+var model = Model.load_vram(streams, "model.safetensors", VramOptions.on(devices), quantization=ScalarKind.E4M3)
+var described = model.describe()
+print(described.dimensions, described.context, described.memory_usage, described.gpu_class)
+```
+
+`describe` reports the `dimensions`, `context`, `quantization`, `memory_usage`, the `cpu_class` a RAM model was packed for or the `gpu_class` a VRAM model runs as, the `token_width` of its token head and the `choice_temperature_groups` of its byte decoder.
+A model frees its weights when Mojo destroys it, which waits for every deferred call naming it.
 
 ## Training
 
-A run joins its processes with `Mesh.bootstrap` over a device executor, then steps one `Trainer` per process:
+Training is GPU-only.
+A run joins its processes with `Mesh.bootstrap` over a device executor, through files in a directory every host sees, then steps one `Trainer` per process.
+Each `step` is one optimizer step over this process's share of the global batch: forward, the losses, backward, the world gradient reduction and the update.
+Items arrive as a tape of contents tagged with their `Modality`, and `Relations` mark which items attract, repel or ignore each other:
 
 ```mojo
 var executor = Executor.for_vram(library, VramOptions.on(devices))
@@ -129,9 +179,14 @@ config.depth = 12
 config.hidden = 768
 config.mesh = Pointer(to=mesh)
 var trainer = Trainer.init_vram(executor, config)
-trainer.on(executor).step(modalities, contents, TrainerStepConfig(relations=relations))
+var stats = TrainerStepStats()
+trainer.on(executor).step(modalities, contents, TrainerStepConfig(relations=relations, stats=Pointer(to=stats)))
+print(stats.step, stats.loss, stats.contrastive_loss)  # world means
 trainer.on(executor).save("checkpoint.safetensors")
 ```
+
+`TrainerStepConfig` also carries the `sides` that make items queries or documents for the late-interaction term and the `choices` and `choice_targets` tapes the byte decoder trains on, each read when the trainer's weight for it is positive.
+`save` writes the safetensors checkpoint the model loads read, and every process of the run bootstraps with the same count, directory and job, or `Mesh.bootstrap` raises `Status.CONFIG_MISMATCH`.
 
 ## Errors
 

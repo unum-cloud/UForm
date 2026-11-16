@@ -16,18 +16,29 @@ The package carries prebuilt addons under `prebuilds/`, and the `uform.mjs` and 
 
 ### Node
 
-Models are tokenizer-free: text arrives as UTF-8 and every byte is a token.
-An executor owns the threads, a model owns the weights, and an arena owns the outputs, so one executor serves many models and one arena serves a steady loop without allocating.
+Encode two captions and a photo into one space, then pick the caption closest to the photo:
 
 ```js
-import { Executor, Arena, Model, Outputs, Scalar, gpuDevices } from "@unum-cloud/uform";
+import { readFileSync } from "node:fs";
+import { Arena, Executor, Model } from "@unum-cloud/uform";
 
-const executor = Executor.forRam();
-const arena = new Arena(executor);
+const executor = Executor.forRam(); // the threads every receiver names
+const textsArena = new Arena(executor); // a call rewinds its arena, so two outputs need two
+const imagesArena = new Arena(executor);
 const model = Model.loadRam("model.safetensors", { executor });
 
-const encoded = await model.deferred(executor).textEncode(["a small red panda"], arena); // or: call.wait()
-const embedding = encoded.embeddings.row(0); // a Float32Array of the model's dimensions
+const captions = ["a cat on a mat", "a sunrise over the bay"];
+const texts = model.on(executor).textEncode(captions, textsArena).embeddings;
+const photo = await model.deferred(executor).imageEncode([readFileSync("cat.png")], imagesArena); // or: call.wait()
+const image = photo.embeddings.row(0); // a Float32Array over the arena, the model's dimensions wide
+
+const cosine = (text) => { // embeddings come unnormalized
+  let dot = 0, textNorm = 0, imageNorm = 0;
+  for (let i = 0; i !== image.length; ++i) dot += text[i] * image[i], textNorm += text[i] ** 2, imageNorm += image[i] ** 2;
+  return dot / Math.sqrt(textNorm * imageNorm);
+};
+const best = cosine(texts.row(1)) > cosine(texts.row(0)) ? 1 : 0;
+console.log(`'${captions[best]}' describes the photo best`);
 ```
 
 ### Browser
@@ -69,7 +80,7 @@ const gpus = Executor.forVram({ devices: [0, 1] });
 const resident = Model.loadVram("model.safetensors", { executor: gpus, devices: [0, 1] });
 ```
 
-Device ordinals are positions in `gpuDevices()`, NVIDIA devices first, then AMD.
+Device ordinals are positions in `gpuDevices()`, NVIDIA devices first, then AMD, then Apple.
 
 ## Arenas
 
@@ -133,12 +144,12 @@ const [keep, drop] = probabilities.item(0);
 
 ## Models
 
-Dispatch picks a CPU or GPU class on its own, and `cpuClass` or `gpuClass` pins one by its name:
+Dispatch picks a CPU or GPU class on its own, and `cpuClassCeiling` or `gpuClassCeiling` caps it by name at the best class under it the hardware runs:
 
 ```js
 for (const { name, gpuClass, memoryBytes } of gpuDevices()) console.log(name, gpuClass, memoryBytes);
-const portable = Model.loadRam("model.safetensors", { cpuClass: "intel-haswell" });
-console.log(portable.describe().cpuClass); // "intel-haswell"
+const portable = Model.loadRam("model.safetensors", { cpuClassCeiling: "intel-haswell" });
+console.log(portable.describe().cpuClass); // "intel-haswell" on an AVX2 machine, "serial" on an Arm one
 ```
 
 ## Training
@@ -209,11 +220,11 @@ The SDK is a thin layer over the C interface, one module per header: `types`, `m
 
 - One method per exported verb, spelled as in C: `textEncode` calls `uform_text_encode`.
 - The receiver chooses and the verb stays: `model.textEncode` runs on the calling thread, `model.on(executor).textEncode` blocks on an executor, and `model.deferred(executor).textEncode` answers a `Deferred`.
-- A `Deferred` is `PromiseLike` and `Disposable`: `await` waits on the libuv pool, `wait` blocks the calling thread, `status` polls, and disposing one waits until it is final.
+- A `Deferred` is `PromiseLike` and `Disposable`: `await` polls `status` between turns of the event loop, `wait` blocks the calling thread, `status` polls, and disposing one waits until it is final.
 - Every output verb takes an arena and answers views borrowing it, detached when the arena rewinds or is freed.
-- Statuses, scalars, moods, modalities, objectives, negatives and multimem tiers are string enums spelled as the C name tables spell them.
-- CPU and GPU classes cross as the strings the C name tables spell, and pair-loss forms, late-interaction sides and GPU vendors as numeric enums of the C numbers.
-- The SDK starts no threads and keeps no queues or caches; the only thread it borrows is the libuv worker an `await` runs its wait on.
+- Statuses, scalars, moods, modalities, objectives, negatives, pair-loss forms and late-interaction sides are string enums spelled as their C names.
+- CPU and GPU classes cross as the strings the C name tables spell, and multimem tiers and GPU vendors come back as string unions of their C names.
+- The SDK starts no threads, borrows none, and keeps no queues or caches.
 - A progress handler runs only on the calling thread, so only a model's own verbs take one.
 - Blocking calls look as they would without asynchrony, deferred calls reach the same verbs through the language's own idioms, and neither costs anything until used.
 - The browser build lays every argument structure into the module's heap at offsets computed once from the C headers, runs it with a `NULL` executor, and copies its outputs out before the next call can grow the heap.

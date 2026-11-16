@@ -24,17 +24,23 @@ uv run pytest test/python
 
 ## Quickstart
 
+Encode two captions and a photo into one space, then pick the caption closest to the photo:
+
 ```python
 import numpy as np
 import uform
 
-executor = uform.Executor.for_ram()  # The threads every receiver names
-arena = uform.Arena(executor)  # The memory outputs land in, made where the executor computes
-model = uform.Model.load_ram("model.safetensors", quantization=uform.Scalar.BF16)
+executor = uform.Executor.for_ram()  # the threads every receiver names
+arena = uform.Arena(executor)  # where outputs land; each call rewinds it
+model = uform.Model.load_ram("model.safetensors")
 
-encoded = model.on(executor).text_encode(["a cat on a mat", "a dog in the fog"], arena)
-embeddings = np.asarray(encoded.embeddings)  # (2, dimensions) float32, zero-copy
-assert embeddings.shape == (2, model.describe().dimensions)
+captions = ["a cat on a mat", "a sunrise over the bay"]
+texts = np.array(model.on(executor).text_encode(captions, arena).embeddings)  # a copy outlives the next call
+with open("cat.png", "rb") as photo:
+    image = np.array(model.on(executor).image_encode([photo.read()], arena).embeddings)[0]
+
+cosines = texts @ image / (np.linalg.norm(texts, axis=1) * np.linalg.norm(image))
+print(f"{captions[cosines.argmax()]!r} describes the photo best")
 ```
 
 ## Receivers & Deferred Calls
@@ -55,9 +61,9 @@ A trainer runs `step` and `save` blocking on the executor it was created on, and
 
 ## Executors
 
-`uform.Executor.for_ram(threads=0, *, memory_domains=None, cpu_class=None)` creates an executor of host threads, and `uform.Executor.for_vram(devices=None, *, scratch_limit=0, gpu_class=None)` opens one stream per device.
-A device is named by its position in `uform.gpu_devices()`, which lists every GPU the process can drive as a `uform.GPUDevice`, NVIDIA devices first, then AMD.
-A `uform.CPUClass` or `uform.GPUClass` pin dispatches as that class, and `None` derives the hardware's own.
+`uform.Executor.for_ram(threads=0, *, memory_domains=None, cpu_class_ceiling=None)` creates an executor of host threads, and `uform.Executor.for_vram(devices=None, *, scratch_limit=0, gpu_class_ceiling=None)` opens one stream per device.
+A device is named by its position in `uform.gpu_devices()`, which lists every GPU the process can drive as a `uform.GPUDevice`, NVIDIA devices first, then AMD, then Apple.
+A `uform.CPUClass` or `uform.GPUClass` ceiling dispatches as the best class under it the hardware runs, and `None` sets no ceiling.
 `uform.Executor.on_pool(pool)` mirrors the C verb that borrows a ForkUnion pool, and raises `UnsupportedError` until borrowing is designed.
 An executor runs one call at a time, and a call finding another one holding it raises `ContendedError` once waited for. A deferred call on the executor's own threads finishes while Python only awaits it, and its progress callbacks run on those threads, holding the GIL while they do.
 `executor.drain(uform.Mood.PARKED)` waits until no call holds the executor and its devices are idle, then applies the mood.
@@ -69,15 +75,14 @@ Every output whose length only the call knows, the embeddings, the states and th
 `uform.Arena(executor)` places it where that executor computes, decided once, and `uform.Arena()` makes host pages for the calling thread.
 Each call rewinds its arena, so the previous call's views die and a steady loop allocates once.
 To keep a result past the next call, pass that call another arena; an arena serves one call at a time, so each deferred call needs its own.
-A NumPy array or `memoryview` over an output pins its arena as a `memoryview` pins a `bytearray`, so the next call naming that arena raises `ContendedError` until the export is released.
-A stale output raises `InvalidArgumentError` when read.
+A NumPy array or `memoryview` over an output views its arena until the next call naming that arena rewinds it, as a C view does, and a call naming an arena another call still holds raises `ContendedError`.
 An arena from a VRAM executor holds device memory: its views export `__cuda_array_interface__` for CuPy, PyTorch or Numba, and host reads raise `DeviceError`.
 
 ```python
 arena = uform.Arena(executor)
 for batch in batches:
     encoded = model.on(executor).text_encode(batch, arena)  # rewinds: the last batch's views are gone
-    index.add(np.array(encoded.embeddings))  # a copy, so nothing pins the arena
+    index.add(np.array(encoded.embeddings))  # a copy, so it outlives the next rewind
 ```
 
 ## Encoding
@@ -112,7 +117,7 @@ offsets = np.asarray(states.offsets)  # item `i` spans rows `offsets[i]` up to `
 `Outputs.TOKEN_VECTORS` keeps the token head's unit vectors, a `RowsTape` of `(tokens, token_width)` on the states' offsets, for late-interaction reranking; a model whose `describe().token_width` is zero raises `UnsupportedError`.
 `outputs_scalar` picks the scalar every output lands as, `Scalar.F32` by default; `Scalar.BF16` outputs export as raw bytes, a `(count, row_bytes)` run of `'B'`.
 `stats=uform.TextEncodeStats()` and its siblings are overwritten with the truncated items and the encoded tokens.
-`progress=handler` is called with `(completed, total)` items, and a handler returning `False` stops the call, which raises `uform.CancelledError`; one that raises stops it too, and its own exception reaches the caller.
+`progress=handler` is called with `(completed, total)` items, and a handler returning `False` stops the call, which raises `uform.CancelledError`; one that raises is reported through `sys.unraisablehook` and stops the call, which raises `CancelledError` too.
 
 ## Choices
 
@@ -130,8 +135,14 @@ A model without the byte decoder, its `choice_temperature_groups` zero, raises `
 
 `uform.Model.load_ram(path)` and `uform.Model.load_vram(path, devices=[0])` copy a safetensors checkpoint into host memory or onto GPUs, and `load_ram_buffer` and `load_vram_buffer` take the checkpoint's bytes instead.
 Each takes `quantization`, `Scalar.BF16` as stored or `Scalar.E4M3` quantized at load, an optional `executor` the load runs on, and a `progress` handler.
-The RAM loads take a `cpu_class` pin and the VRAM loads a `gpu_class` pin, and a class the hardware cannot run raises `UnsupportedError`.
+The RAM loads take a `cpu_class_ceiling` and the VRAM loads a `gpu_class_ceiling`, and devices sharing no class under the ceiling raise `UnsupportedError`.
 `model.describe()` answers a `uform.ModelDescription` of `dimensions`, `context`, `quantization`, `memory_usage`, `cpu_class`, `gpu_class`, `token_width` and `choice_temperature_groups`.
+
+```python
+model = uform.Model.load_ram("model.safetensors", quantization=uform.Scalar.E4M3)  # Float8 blocks, half the bytes
+described = model.describe()
+print(described.dimensions, described.context, described.cpu_class, described.memory_usage)
+```
 
 ## Training
 
@@ -183,6 +194,7 @@ except uform.Error as error:
 - `DEVICE` → `DeviceError`
 - `MALFORMED` → `MalformedError`, a `ValueError`
 - `INTERNAL` → `InternalError`
+- `UNINITIALIZED` → `UninitializedError`
 - `CONFIG_MISMATCH` → `ConfigMismatchError`, a `ValueError`
 - `CONTENDED` → `ContendedError`
 - `CANCELLED` → `CancelledError`
@@ -199,11 +211,11 @@ Arguments the binding refuses raise at the call, while the library's refusals of
 - __The receiver chooses, the verb stays.__
   The model runs a verb on the calling thread, `on(executor)` blocks on an executor, and `deferred(executor)` submits it, all with the same arguments.
 - __Deferred calls use the language's own idioms.__
-  `status` polls through `uform_outcome_status`, `wait` blocks through `uform_outcome_wait`, and `await` hands `wait()` to the running event loop's default executor.
+  `status` polls through `uform_outcome_status`, `wait` blocks through `uform_outcome_wait`, and `await` polls `status` between turns of the running event loop, sleeping 1 µs to 1 ms, so no thread waits.
 - __No life of its own.__
   The binding starts no threads and keeps no queues or caches; releasing a `Deferred` rides reference counting, which waits for the call first.
 - __Arenas are lent and reused, never shared.__
-  Every output verb takes an arena and answers views borrowing it; an exported buffer pins its arena until released, and a view over a rewound one refuses to be read.
+  Every output verb takes an arena and answers views borrowing it; a view lasts until the next call on that arena rewinds it, and the library refuses an arena another call holds.
 - __Nothing costs anything until it is used.__
   Blocking calls take no deferred-table entry, a surface `outputs` leaves out is never computed, and an arena allocates only when a call writes into it.
 - __Blocking calls stay as simple as the language allows.__

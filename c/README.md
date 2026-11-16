@@ -5,81 +5,79 @@ It compiles as plain C11, holds no C++ type, and never logs.
 
 ## Installation
 
-### Building
-
-CMake builds `uform_static` and `uform_shared` from the objects `src/` compiles, and the archive carries the NumKong, StringZilla and yyjson objects it needs, naming only the system codecs to its consumers:
-
 ```sh
-cmake --preset library
+cmake --preset library -D UFORM_BUILD_TEST=ON   # uform_static and uform_shared for the host, and the suites
 cmake --build --preset library
+ctest --test-dir build_library                   # c/test.c and the host suites, on the tiny checkpoint
 ```
 
-The presets choose the residencies a build carries:
-
-- `library` builds the engine for the host alone.
-- `cuda_rocm_library` adds the NVIDIA and AMD residencies, the trainer and the mesh, with Clang hosting both vendors' compilers.
-- `linux_cuda_rocm` adds both residencies without the trainer, and launches UForm's own kernels through drivers opened at first use.
-- `wasm32_emscripten` and `wasm32_wasi` build for WebAssembly, which takes decoded media only.
-- `stub_library` builds `src_stub/`, a stand-in answering the same verbs over the C++ standard library and ForkUnion.
-
-The stand-in's archives carry the engine's file names in a `stub/` directory of their own, so a consumer swaps implementations with one `-L`.
-`c/test.c` runs against both, with the tiny checkpoint `test/tiny_checkpoint.cpp` writes when the suites are built.
-
-### Headers
-
-- `uform/uform.h`: the umbrella over the four headers below.
-- `uform/types.h`: statuses and outcomes, scalars, rows, tapes, progress, CPU and GPU classes, devices, executors, arenas, the name tables and the version probes.
-- `uform/model.h`: loading an encoder into RAM or VRAM, from a file or a buffer, describing it and freeing it.
-- `uform/encode.h`: texts, files, pixels, clips and samples to embeddings, states and token vectors, and scored choices.
-- `uform/train.h`: the mesh, trainers, their steps and checkpoints, on NVIDIA GPUs alone.
-
-A caller only encoding may include `encode.h` alone, since each header pulls in `types.h`.
-Statuses, scalars, rows, tapes, progress, arenas and the executor contract mirror USearch's `types.h` value for value, so embeddings and failures cross between the two libraries unchanged.
-`find_package(uform)` reads an install as `uform::static`, `uform::shared` and `uform::header`.
-An install or the SDK archive also answers `pkg-config --libs uform` with the shared library, which exports the `uform_*` functions alone.
-
-`uform_version`, `uform_capabilities_compiled` and `uform_capabilities_available` report the library this process linked and the hardware it found.
+`cuda_rocm_library` adds the NVIDIA and AMD residencies, the trainer and the mesh; `wasm32_emscripten` and `wasm32_wasi` build for WebAssembly, which takes decoded media only; `stub_library` builds `src_stub/`, a stand-in answering every verb, whose archives carry the engine's names so one `-L` swaps them.
+`find_package(uform)` reads an install as `uform::static`, `uform::shared` and `uform::header`, and `pkg-config --libs uform` names the shared library.
+`uform/uform.h` includes `types.h`, `model.h`, `encode.h` and `train.h`, and a caller only encoding may include `encode.h` alone.
+Statuses, scalars, rows, tapes, arenas and the executor contract mirror USearch's `types.h` value for value, so embeddings and failures cross between the two libraries unchanged.
 
 ## Quickstart
 
+Encode two captions and a photo into one space, then pick the caption closest to the photo:
+
 ```c
-#include <stdio.h>  // `printf`
+#include <math.h>   // `sqrtf`
+#include <stdio.h>  // `fopen`, `fread`, `printf`
 #include <string.h> // `strlen`
 
 #include <uform/uform.h>
 
-int main(int argc, char** argv) {
-    if (argc != 2) return 1;
+/** The cosine of row `i` of `texts` and the one row of `images`; embeddings come unnormalized. */
+static float cosine(uform_rows_view_t texts, size_t i, uform_rows_view_t images) {
+    float const* text = (float const*)((char const*)texts.data + i * texts.stride);
+    float const* image = (float const*)images.data;
+    float dot = 0, texts_norm = 0, images_norm = 0;
+    for (size_t k = 0; k != texts.columns; ++k)
+        dot += text[k] * image[k], texts_norm += text[k] * text[k], images_norm += image[k] * image[k];
+    return dot / sqrtf(texts_norm * images_norm);
+}
+
+int main(void) {
     uform_outcome_t outcome = {0};
     uform_executor_t executor = NULL;
-    uform_executor_for_ram(&(uform_executor_for_ram_t){.executor = &executor, .outcome = &outcome});
-    if (outcome.status != uform_status_success_k) return printf("%s\n", outcome.message), 1;
-
     uform_model_t model = NULL;
-    uform_model_load_ram(&(uform_model_load_ram_t){
-        .model = &model, .executor = executor, .outcome = &outcome,
-        .path = {(uint8_t const*)argv[1], strlen(argv[1])}, .quantization = uform_scalar_bf16_k});
-    if (outcome.status != uform_status_success_k) return printf("%s\n", outcome.message), 1;
+    uform_arena_t texts_arena = NULL, images_arena = NULL; // a call rewinds its arena, so two outputs need two
+    char const path[] = "model.safetensors";
+    uform_executor_for_ram(&(uform_executor_for_ram_t){.executor = &executor, .outcome = &outcome});
+    if (!outcome.status) uform_model_load_ram(&(uform_model_load_ram_t){.model = &model, .executor = executor,
+        .outcome = &outcome, .path = {(uint8_t const*)path, strlen(path)}, .quantization = uform_scalar_bf16_k});
+    if (!outcome.status)
+        uform_arena_init(&(uform_arena_init_t){.arena = &texts_arena, .executor = executor, .outcome = &outcome});
+    if (!outcome.status)
+        uform_arena_init(&(uform_arena_init_t){.arena = &images_arena, .executor = executor, .outcome = &outcome});
 
-    uform_arena_t arena = NULL;
-    uform_arena_init(&(uform_arena_init_t){.arena = &arena, .executor = executor, .outcome = &outcome});
+    char const* captions[] = {"a cat on a mat", "a sunrise over the bay"};
+    char const caption_bytes[] = "a cat on a mata sunrise over the bay";
+    size_t const caption_offsets[] = {0, 14, 36};
+    static unsigned char photo[1 << 20];
+    FILE* file = fopen("cat.png", "rb");
+    size_t const photo_offsets[] = {0, file ? fread(photo, 1, sizeof(photo), file) : 0};
+    if (file) fclose(file);
 
-    char const texts[] = "a cat on a matsunrise over the bay";
-    size_t const offsets[] = {0, 14, 34};
-    uform_rows_view_t embeddings = {0};
-    uform_text_encode(&(uform_text_encode_t){
-        .model = model, .executor = executor, .outcome = &outcome, .count = 2,
-        .texts = {texts, offsets, uform_scalar_u8_k}, .embeddings = &embeddings, .arena = arena,
-        .outputs_scalar = uform_scalar_f32_k});
-    if (outcome.status == uform_status_success_k)
-        printf("%zu embeddings of %zu dimensions\n", (size_t)2, embeddings.columns);
+    uform_rows_view_t texts = {0}, images = {0};
+    if (!outcome.status) uform_text_encode(&(uform_text_encode_t){.model = model, .executor = executor,
+        .outcome = &outcome, .count = 2, .texts = {caption_bytes, caption_offsets, uform_scalar_u8_k},
+        .embeddings = &texts, .arena = texts_arena, .outputs_scalar = uform_scalar_f32_k});
+    if (!outcome.status) uform_image_encode(&(uform_image_encode_t){.model = model, .executor = executor,
+        .outcome = &outcome, .count = 1, .images = {photo, photo_offsets, uform_scalar_u8_k},
+        .embeddings = &images, .arena = images_arena, .outputs_scalar = uform_scalar_f32_k});
 
-    uform_arena_free(arena);
-    uform_model_free(model);
-    uform_executor_free(executor);
-    return outcome.status != uform_status_success_k;
+    if (outcome.status) return printf("%s\n", outcome.message), 1;
+    size_t const best = cosine(texts, 1, images) > cosine(texts, 0, images);
+    printf("'%s' describes the photo best\n", captions[best]);
+
+    uform_arena_free(images_arena), uform_arena_free(texts_arena);
+    uform_model_free(model), uform_executor_free(executor);
+    return 0;
 }
 ```
+
+Every call stores its status in the `uform_outcome_t` it names, `uform_status_success_k` being zero, so a chain of calls proceeds while the status stays zero.
 
 ## Receivers & Deferred Calls
 
@@ -134,20 +132,31 @@ An executor owns what a call runs on but a model does not: host threads or devic
 - `uform_executor_drain` waits until no call holds the executor, then applies the `uform_mood_t` its threads keep until the next call: parked sleeps in the kernel, spinning keeps polling.
 - `uform_executor_free` waits the same way, releases what the executor owns and returns what it borrowed.
 
+```c
+int32_t const nodes[] = {0}, devices[] = {0, 1};
+uform_executor_t host = NULL, gpus = NULL;
+uform_executor_for_ram(&(uform_executor_for_ram_t){.executor = &host, .outcome = &outcome, .threads = 16,
+    .ram = {.memory_domains = nodes, .memory_domains_count = 1}});
+uform_executor_for_vram(&(uform_executor_for_vram_t){.executor = &gpus, .outcome = &outcome,
+    .vram = {.devices = devices, .devices_count = 2}}); // one stream per device, plus host decoders
+uform_executor_drain(&(uform_executor_drain_t){.executor = gpus, .outcome = &outcome, .mood = uform_mood_parked_k});
+uform_executor_free(gpus), uform_executor_free(host);
+```
+
 One executor serves any number of models of its residency, and a call pairing a model with an executor of another residency reports `uform_status_device_k`.
 A `NULL` executor runs the call on the calling thread, final when it returns.
-`cpu_class` and `gpu_class` in the options pin the class a call dispatches as, and `uform_status_unsupported_k` answers a class the machine cannot run.
+`cpu_class_ceiling` and `gpu_class_ceiling` in the options cap the class a call dispatches as, and the call runs the best class under the cap the hardware runs.
 
 ### Classes and Devices
 
 Dispatch picks one tuned variant per CPU or GPU family, named by `uform_cpu_class_t` and `uform_gpu_class_t`, whose enumerators and fixed values are USearch's.
-`uform_ram_options_t::cpu_class` and `uform_vram_options_t::gpu_class` pin one, and the `unknown` zero derives the hardware's own:
+`uform_ram_options_t::cpu_class_ceiling` and `uform_vram_options_t::gpu_class_ceiling` cap one, and the `unknown` zero sets no cap:
 
-- A CPU pin dispatches as if the CPU were of that class, taking every rung whose features it holds, and a class the CPU cannot run reports `uform_status_unsupported_k`.
-- A GPU pin dispatches every named device as that class, and a device that cannot run it reports `uform_status_unsupported_k`.
-- Unpinned devices of one VRAM executor must share a class, or the call reports `uform_status_config_mismatch_k`.
+- A CPU ceiling intersects with what the CPU runs: the newest compiled class whose features both hold runs, so a ceiling above the CPU runs as the CPU's own.
+- A GPU ceiling runs every named device as the best class all of them load at or under it, and devices sharing no such class report `uform_status_unsupported_k`.
+- Devices of one VRAM executor must share a vendor, or the call reports `uform_status_config_mismatch_k`.
 
-`uform_gpu_devices` lists every GPU the process can drive, NVIDIA devices first, then AMD, each as a `uform_gpu_device_t` of its vendor, vendor ordinal, class, compute units, memory and name.
+`uform_gpu_devices` lists every GPU the process can drive, NVIDIA devices first, then AMD, then Apple, each as a `uform_gpu_device_t` of its vendor, vendor ordinal, class, compute units, memory and name.
 A device's position in that listing is the ordinal `uform_vram_options_t::devices` names it by, and a machine without GPUs lists none and succeeds.
 `uform_cpu_class_name` and `uform_gpu_class_name` spell a class, like `intel-haswell` or `nvidia-hopper`, and the `_from_name` verbs read one back.
 
@@ -247,11 +256,23 @@ On NVIDIA, text and JPEG images never leave the device; container demux, PNG and
 `uform_model_describe` reports the model's `dimensions`, `context`, `quantization`, memory usage and the CPU or GPU class it dispatched to.
 It also reports the `cpu_class` a RAM model was packed for or the `gpu_class` a VRAM model runs as, the `token_width` of its token head, and the `choice_temperature_groups` of its byte decoder, each zero when the checkpoint carries no such part.
 
+```c
+uform_model_t model = NULL;
+int32_t const devices[] = {0};
+uform_model_load_vram(&(uform_model_load_vram_t){.model = &model, .executor = gpus, .outcome = &outcome,
+    .path = {(uint8_t const*)path, strlen(path)}, .vram = {.devices = devices, .devices_count = 1},
+    .quantization = uform_scalar_e4m3_k}); // Float8 blocks, quantized at load
+uform_model_description_t description = {0};
+uform_model_describe(&(uform_model_describe_t){.model = model, .executor = gpus, .outcome = &outcome,
+    .description = &description});
+printf("%zu dimensions on %s\n", description.dimensions, uform_gpu_class_name(description.gpu_class));
+```
+
 ## Training
 
 Training is GPU-only.
 `uform_mesh_bootstrap` joins this process to a run once, through files in a directory every host sees, and after it processes talk only over NVLink and InfiniBand.
-The mesh is the process-wide half of the transport, which every trainer borrows; `uform_mesh_describe` reports the topology every process agreed on, its multimem tier, and the `gpu_class` every GPU of the run dispatches as, the executor's pin or the devices' own.
+The mesh is the process-wide half of the transport, which every trainer borrows; `uform_mesh_describe` reports the topology every process agreed on, its multimem tier, and the `gpu_class` every GPU of the run dispatches as, the best class its devices load under the executor's ceiling.
 Every process bootstraps with the same count, multicast extent, directory, job and GPU class, or the call reports `uform_status_config_mismatch_k`.
 
 `uform_trainer_init_vram` makes a trainer on a VRAM executor, owning one replica of the tower per device, its gradients, the Adafactor moments, the reconstruction heads and the learnable temperatures.
@@ -296,6 +317,14 @@ Statuses are numbered as USearch numbers them, so a failure keeps its identity a
 - `uform_status_internal_k`: a defect, reported rather than hung on.
 
 `uform_status_name` spells a status as lowercase words joined by dashes and `uform_status_from_name` reads it back, as the other closed sets' `_name` and `_from_name` pairs do.
+
+```c
+uform_text_encode(&encode);
+if (outcome.status == uform_status_unsupported_k) // a token head this checkpoint lacks: retry without it
+    encode.token_vectors = NULL, uform_text_encode(&encode);
+if (outcome.status != uform_status_success_k)
+    fprintf(stderr, "%s: %s\n", uform_status_name(outcome.status), outcome.message);
+```
 
 ## Design
 

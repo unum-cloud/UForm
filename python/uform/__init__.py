@@ -1,4 +1,4 @@
-"""Distributed training and inference pipeline for multi-modal perception.
+"""Distributed training and inference engine for multi-modal perception.
 
 File: python/uform/__init__.py
 Author: Ash Vardanian

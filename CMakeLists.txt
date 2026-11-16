@@ -61,8 +61,8 @@ project(
     uform
     VERSION ${CMAKE_MATCH_1}
     LANGUAGES C CXX
-    DESCRIPTION "Distributed training and inference pipeline for multi-modal perception"
-    HOMEPAGE_URL "https://github.com/unum-cloud/UForm"
+    DESCRIPTION "Distributed training and inference engine for multi-modal perception"
+    HOMEPAGE_URL "https://www.unum.cloud/docs/uform"
 )
 
 # Enable the in-repo Git hooks. Git will not auto-run hooks shipped inside a clone (that would let any

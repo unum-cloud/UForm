@@ -33,7 +33,7 @@ ctest --test-dir build_library
 ```
 
 - `library` builds the engine for the host alone, and `stub_library` the stand-in in `src_stub/`.
-- `cuda_rocm_library` adds both GPU residencies and the trainer, `linux_cuda_rocm` both residencies alone, the tree whose `readelf` check guards the vendor boundary, while `debug`, `check`, `relwithdebinfo` and `release` also build the trainer and its suites, `check` with warnings as errors.
+- `cuda_rocm_library` adds both GPU residencies and the trainer, `linux_cuda_rocm` both residencies alone, the tree whose `readelf` check guards the vendor boundary, `darwin_metal` the Apple residency on Apple silicon, while `debug`, `check`, `relwithdebinfo` and `release` also build the trainer and its suites, `check` with warnings as errors.
 - `wasm32_emscripten` and `wasm32_wasi` build for WebAssembly, with Node or Wasmtime running the tests.
 - `-D UFORM_BUILD_BENCH=ON` adds the benchmarks [`bench/README.md`](bench/README.md) describes.
 
@@ -206,6 +206,136 @@ The library never prints, and suites, tools and benchmarks print whole lines thr
 Return types are declared before the name, never after an arrow.
 clang-format 22 with the checked-in `.clang-format` judges every changed line, and no file turns a formatter off in-band.
 
+### Query Views
+
+A batched kernel takes its queries as one flat transparent view over a static extent, like a `std::array` of views sized by the batch's extent, never as a span of pointers it chases one query at a time.
+A query type that owns packed storage exposes a view of it, and the kernel reads that view.
+`.githooks/pre-commit` refuses a `std::span` of pointers to const under `include/`, except a span of C strings, which names things rather than batching queries.
+
+### Refusals
+
+A call the library cannot run answers one status, picked by what is wrong, in this order: `invalid_argument`, `read_only`, `config_mismatch`, `unsupported`, `contended`, `overflow`.
+A `NULL` handle the call operates on answers `uninitialized` before any of them.
+A malformed argument or list, one that is empty, `NULL` or names a handle twice, answers `invalid_argument`.
+A write to a handle opened read-only answers `read_only`.
+Handles of another kind, or of a geometry the call cannot join, answer `config_mismatch`.
+A well-formed case nothing implements yet, like UForm's training in a build without CUDA, answers `unsupported`.
+An option the library cannot honour is refused with `unsupported`, never ignored.
+A handle another call holds answers `contended` rather than waiting, and a size past its counter answers `overflow`.
+A refusal moves nothing: every output and handle reads as it did before the call.
+Each header lists a verb's refusals under `@par Statuses` in this order and in these words, and the stub library answers every one of them.
+
+### Statuses
+
+Statuses 0 to 19 carry the same numbers and meanings in every Unum library: success 0, deferred 1, out_of_memory 2, shape_mismatch 3, unsupported_layout 4, unknown_kind 5, read_only 6, io 7, device 8, malformed 9, internal 10, overflow 11, uninitialized 12, config_mismatch 13, contended 14, cancelled 15, unsupported 16, invalid_argument 17, not_found 18, already_exists 19.
+A library leaves out the ones it cannot answer but never renumbers the rest, and numbers its own statuses from 20.
+Every enum the C interface names, statuses included, has a `uform_*_name` answering "unrecognized" for a value it does not know and a `uform_*_from_name(view, &out)` answering `invalid_argument` for a name it does not know, leaving `out` as it was.
+CPU and GPU class values are ABI: each class keeps the number USearch gives the same hardware, written explicitly, with unused numbers reserved rather than reused.
+`uform_version_name` answers the full version, pre-release suffix included, in the engine and in the stub alike.
+
+### Compile-Time Choices
+
+Code picks between alternatives at compile time through three gates, each for one kind of choice.
+
+`#if` picks a toolchain or a platform, and nothing else.
+A feature the compiler or the operating system lacks is a `#if`; a choice between two algorithms is not.
+
+```cpp
+#if defined(_WIN32) // allowed: the platform decides
+using file_handle_t = void*;
+#else
+using file_handle_t = int;
+#endif
+```
+
+A `requires` clause picks an overload when a whole function differs.
+Every constrained overload has an unconstrained fallback beside it, so a type the constraint rejects still finds a function.
+
+```cpp
+template <typename index_type_>
+status_t run_plan(index_type_& index) noexcept requires is_nvme_index<index_type_> { /* NVMe rounds */ }
+
+template <typename index_type_>
+status_t run_plan(index_type_& index) noexcept { /* every other residency */ }
+```
+
+`if constexpr` branches on a named concept or a `constexpr bool`, one level deep.
+An `else if constexpr` chain is still one level.
+
+```cpp
+template <typename query_type_>
+concept hinted_query = requires(query_type_& query) { query.find_hinted(0u); };
+
+if constexpr (hinted_query<query_type_>) seeds = query.find_hinted(shard); // allowed: a named concept
+else if constexpr (serial_class_k) seeds = {};                            // allowed: one chain, one level
+```
+
+The hook refuses each of these, in the directories its `gated_source_directories` names:
+
+```cpp
+if constexpr (requires { query.find_hinted(0u); }) { /* ... */ }   // refused: name the probe as a concept
+
+if constexpr (is_ram_k) {
+    if constexpr (is_serial_k) { /* ... */ }                        // refused: a second choice inside the first
+}
+
+template <typename value_type_, typename = std::enable_if_t<std::is_integral_v<value_type_>>>
+value_type_ clamp(value_type_ value) noexcept;                      // refused: write `requires` on the overload
+
+struct sorted_tag_t {};
+void insert(entry_t entry, sorted_tag_t) noexcept;                  // refused: a tag that only picks an overload
+```
+
+Control flow nests at most three deep: `if`, `for`, `while`, `switch`, `do`, `try` and `catch` each count, and so does `if constexpr`.
+An `else` or `catch` body sits at its `if`'s or `try`'s depth, so an `else if` chain stays flat.
+A body without braces counts like a braced one, while a lambda or a plain block adds nothing.
+Both sides of a `#if` count from the depth the `#if` began at.
+
+```cpp
+for (shard_t& shard : shards)                       // 1
+    for (node_t node : shard.nodes)                 // 2
+        if (node.live)                              // 3
+            while (node.next != end) step(node);    // refused: 4 deep
+```
+
+To flatten, return early from failures, extract the inner loop into a function named for what it does, or split an overload per case.
+
+The checks are `check_constexpr_conditions_named`, `check_constexpr_branches_flat`, `check_enable_if_and_tags_absent` and `check_constexpr_nesting`.
+They judge only the lines a commit adds, so existing code flattens as it is touched.
+
+### Split String Literals
+
+A string literal split across lines by hand ends every fragment but the last with a trailing `//`.
+Without the pin, clang-format joins the fragments or restacks them into a staircase.
+This holds in C, C++, CUDA and HIP sources alike.
+
+```cpp
+char const help[] =                                 //
+    "Usage: probe [options]\n"                      // allowed: every fragment but the last is pinned
+    "Runs one probe.\n";
+
+char const help[] = "Usage: probe [options]\n"
+                    "Runs one probe.\n";            // refused: the first fragment is unpinned
+```
+
+The check is `check_split_string_literal_pinned`.
+A comment that explains the line pins it just as well, and a bare `//` on a member line is not taken for a member's documentation.
+
+### Vocabulary
+
+| Concept                                                          | Word                                  | Refused                                       |
+| :--------------------------------------------------------------- | :------------------------------------ | :-------------------------------------------- |
+| a kind of work in a plan, ended by a barrier                     | phase                                 | stage, step, pass                             |
+| the same work again, counted                                     | repetition, named for what repeats: round, depth, nesting | phase, pass       |
+| an independent unit of one phase, run by any thread in any order | task                                 | step, chunk                                   |
+| sequential work                                                  | step                                  | task                                          |
+| a per-capability kernel bundle                                   | kit                                   | trait                                         |
+| a compiled alternative per class, dtype or residency             | variant                               | arm, cell                                     |
+| RAM, VRAM or NVMe                                                | residency                             | home, memory side                             |
+| an exported operation and its table entry                        | verb; trampoline                      | …                                             |
+| a fixed-shape collection a verb fills                            | outputs                               | landing, lander                               |
+| a member of a plan, cursor or walk                               | what it holds and when it holds it    | bits, current, state, data, flags, tmp, scratch |
+
 ## Tests and Benchmarks
 
 Suites are plain `int main` binaries, one `uform_test_<name>` per cell, built under `UFORM_BUILD_TEST` and sharing `test/harness.hpp` rather than a framework.
@@ -255,6 +385,7 @@ Every CMake option carries the `UFORM_` prefix, and every `UFORM_BUILD_*` switch
 - `UFORM_BUILD_STUB`: `uform_static_stub` and `uform_shared_stub` from `src_stub/`, which the bindings then link instead.
 - `UFORM_CUDA_ARCH`: the NVIDIA residency, for `all` the release set, `native` the family code of each visible GPU, or one code like `100f`; only the GPU classes NumKong compiles for those codes exist.
 - `UFORM_ROCM_ARCH`: the AMD residency, for `all` of `gfx942`, `gfx950`, `gfx1250` and `gfx1251`, `native`, or one target.
+- `UFORM_METAL_ARCH`: the Apple residency, for `all` of `apple7`, `apple9` and `apple10`, or one family, never `native`, as each GPU compiles the kernels at first use; off Apple platforms its units compile as a check and nothing links.
 - `UFORM_BUILD_TRAIN`: the trainer, the mesh and the loaders over CUDA, which needs `UFORM_CUDA_ARCH` and which the `cuda` preset and the machine profiles set; only they link CUDA libraries into the C library.
 - `UFORM_BUILD_TEST`: the suites in `test/` and the C tests.
 - `UFORM_BUILD_TOOLS`: the trainer in `tools/`, with `UFORM_BUILD_TRAIN`.
@@ -265,7 +396,7 @@ Every CMake option carries the `UFORM_` prefix, and every `UFORM_BUILD_*` switch
 - `UFORM_WITH_INFINIBAND`: `AUTO` probes for InfiniBand and enables it when present, `ON` requires it and `OFF` leaves it out.
 - `UFORM_WITH_CODECS`: the host image, video and audio codecs the verbs over files decode with, on by default and off on WebAssembly, Android and Windows presets; CUDA needs it.
 - `UFORM_MARCH`: the `-march` floor of UForm's units and its libraries', an ISA level, `native` or a CPU name like `graniterapids`, and on WebAssembly the module's `serial`, `v128` or `v128relaxed`; empty by default, seeded from the environment.
-- `UFORM_MULTIVERSIONED`: on by default, every CPU class that exists, `serial` included, picked at run time; off, one `monoversioned` CPU class over every capability the libraries enabled, which is what the floor implies and what a preset vouches for with `-D <LIBRARY>_TARGET_<CAPABILITY>=1`, and only the newest GPU class of each vendor, so a pin below it is refused; configure stops when no class runs the one GPU code.
+- `UFORM_MULTIVERSIONED`: on by default, every CPU class that exists, `serial` included, picked at run time; off, one `monoversioned` CPU class over every capability the libraries enabled, which is what the floor implies and what a preset vouches for with `-D <LIBRARY>_TARGET_<CAPABILITY>=1`, and only the newest GPU class of each vendor, so a ceiling below it is refused; configure stops when no class runs the one GPU code.
 - The `xeon4_hopper`, `xeon6_blackwell`, `grace_hopper` and `vera_rubin` presets build the C library for one machine, naming its CPU and its one GPU code.
 
 GPU code follows one policy per build kind.
@@ -275,7 +406,7 @@ AMD compiles one code object per listed target either way.
 
 - `UFORM_SITE_PACKAGES` and `UFORM_CUDF_ROOT`: the directory the libcudf wheel discovery searches, or the prefix holding the libraries themselves.
 
-Binaries take long kebab-case flags with no short forms, as `uform_bench_encoder --checkpoint model.safetensors --cpu-class intel-haswell` does, and spell classes, scalars and statuses as the C name tables do.
+Binaries take long kebab-case flags with no short forms, as `uform_bench_encoder --checkpoint model.safetensors --cpu-class-ceiling intel-haswell` does, and spell classes, scalars and statuses as the C name tables do.
 A namespace-scope `_k` constant names an invariant or the default a zero field derives, as `idle_cores_denominator_k` and `default_progress_steps_k` in `src/lib.hpp` do, while a size a caller may want otherwise is a field of an argument structure.
 
 ## Data Scripts
@@ -293,6 +424,49 @@ python -X faulthandler -m pytest -x scripts/data
 `UFORM_SEED` pins the seed, `42` by default or `random`, and pytest prints both in its header.
 
 ## Bindings
+
+Every binding is a thin layer over the C interface, and these rules hold in each of them.
+Typed bindings are those whose compiler checks callback signatures, and dynamic bindings are the rest; in UForm the typed ones are Rust, Swift and Mojo, and the dynamic ones are Python and JavaScript.
+
+The C library decides what is valid.
+A binding forwards its status, turns each status into its language's error in one place, re-checks nothing the library refuses, and keeps no copy of state the library already holds.
+Name tables come from the library's `uform_*_name` and `uform_*_from_name` pairs, never from a switch written in the binding.
+
+One mechanism reports every outcome: `uform_outcome_status` reads it without waiting, and `uform_outcome_wait` parks until it is final.
+Nothing in a binding takes a lock, sends a notification or adds synchronization of its own.
+The object that submitted a deferred call is the only one that polls its outcome, so no other thread ever waits on it, and whatever a second caller asks, the library answers.
+A blocking `wait` calls `uform_outcome_wait`.
+An asynchronous bridge never parks a thread: it reads `uform_outcome_status` and, while the call is deferred, yields to its runtime.
+A runtime with a timer pauses between reads with a backoff growing from about 1 µs to 1 ms, like Python's `asyncio.sleep`, Swift's `Task.sleep`, JavaScript's `setTimeout` and C#'s `Task.Delay`.
+A Rust future yields only: `poll` reads the status and, while it is deferred, calls `wake_by_ref` and returns `Poll::Pending`, with no sleep and no timer thread.
+
+A callback never raises into the library.
+Its fault never unwinds through C frames and never waits in a latch for the call to end: typed bindings give their callback types no way to throw, like a `noexcept` C++ callback type, while dynamic bindings report the fault through their language's unraisable path, like Python's `sys.unraisablehook` and JavaScript's uncaught-exception handler, and the callback answers cancel.
+A Rust callback that panics aborts the process, as Rust does for any unwind reaching an `extern "C"` frame; nothing catches the unwind.
+A binding that hands the library no callback of its own has nothing to report.
+
+A view the library hands back lives until the next call on its arena.
+The library describes where the memory sits, and the caller checks it; the binding neither copies the view to be safe nor checks its residency on the caller's behalf.
+
+Every array a verb reads shares the call's one count, so mismatched shapes cannot be expressed.
+Where a binding's own types carry two lengths, like a slice of keys beside a matrix of values, it checks once that they agree before the call crosses into the library, and nowhere else.
+
+Each verb has one body, which fills the C struct and calls the library with no layers in between.
+What it returns is read from the struct's output slot, a trampoline receives the handler itself as its state with no hub around it, and whether a call blocks or defers follows from the type of the receiver it is called on, never from a flag.
+Verbs are never shared through a base class; a trait whose default methods hold the one body per verb is fine, like Rust's and Mojo's, since each receiver supplies only its handle.
+
+A typed binding takes the scalar as a type parameter of each call, like USearch's `search::<f32>`, rather than letting a handle's type fix one.
+A deferred Rust call owns what it lends the library until the call is final, since the borrow checker cannot see the library holding it.
+A C++ wrapper over the C interface is a full typed binding: it has a deferred receiver, `noexcept` callback types and per-call scalar templates.
+
+A dynamic binding publishes every field of every report the library fills.
+A type the binding hands to C by cast, like a slice of parts lent as the C array, is a transparent wrapper over the C struct, like Rust's `#[repr(transparent)]` newtype, so the cast is sound by construction and nothing asserts its size or alignment.
+Tests never restate a struct's layout that the compiler already pins: no `offset_of!`, `size_of`, `MemoryLayout` or `Marshal.SizeOf` asserts against the C structs; `offsetof` tables that declare members are declarations, not tests.
+Tests of how names print and parse, and of an engine run again through the binding, stay.
+
+`.githooks/pre-commit` refuses locks in binding sources, throwing callback types, caught unwinds and kept exceptions.
+
+### Testing the Bindings
 
 Each binding links either the engine or the stand-in, and its suite loads the tiny checkpoint `UFORM_TEST_CHECKPOINT` names, or else stand-in bytes only the stub loads, reading every shape from the model's description.
 The CI runs them the same way:
@@ -336,7 +510,7 @@ Class values are shared by USearch, UStore, UCall and UForm, so one value names 
 
 | Value | CPU class         | What it adds                                                   |
 | ----: | :---------------- | :------------------------------------------------------------- |
-|     0 | `unknown`         | Picks the newest class this machine runs                       |
+|     0 | `unknown`         | No ceiling: the newest class this machine runs                 |
 |     1 | `serial`          | The portable floor, no SIMD                                    |
 |     2 | `monoversioned`   | The one class of a monoversioned build, as the libraries built |
 |     3 | `intel-haswell`   | AVX2 and FMA                                                   |
@@ -369,20 +543,20 @@ Class values are shared by USearch, UStore, UCall and UForm, so one value names 
 |     7 | `amd-cdna3`           | The CDNA3 kits                                  |
 |     8 | `amd-cdna4`           | The CDNA4 kits over CDNA3's                     |
 |     9 | `amd-cdna5`           | The CDNA5 kits over CDNA4's                     |
-|    10 | `apple-metal7`        | Declared, not yet built                         |
-|    11 | `apple-metal9`        | Declared, not yet built                         |
-|    12 | `apple-metal10`       | Declared, not yet built                         |
+|    10 | `apple-metal7`        | The generic Metal kits                          |
+|    11 | `apple-metal9`        | The Apple9 kits over the Metal ones             |
+|    12 | `apple-metal10`       | The Apple10 kits over the Metal ones            |
 
 A CPU class is picked by `pick_cpu_ceiling` in `src/lib.hpp`.
 It reads the masks NumKong and ForkUnion detect on this CPU, never NumKong's enabled mask, as UForm compiles its kits into its own units.
 It grants the AMX tiles the CPU offers and drops their bits where the kernel refuses them, once per process.
-A pin no class takes is an invalid argument, and a pin whose masks the CPU lacks is unsupported.
-The newest compiled class whose masks fit the ceiling then runs, and a ceiling no compiled class fits is unsupported.
+A ceiling no class takes is an invalid argument, and any other intersects with those masks, so a ceiling above the machine runs as the machine.
+The newest compiled class whose masks fit the intersection then runs, and only an intersection no compiled class fits, like a ceiling below a monoversioned build's class, is unsupported.
 
 A GPU class is picked per device by `pick_gpu_class` in `src/lib.hpp`, newest first down its vendor's ladder.
-A class serves a device when it is built, sits at or under the pin, and NumKong's loader runs all its kits there, as `nk_capabilities_compiled_cuda` and `nk_capabilities_compiled_rocm` answer.
+A class serves a device when it is built, sits at or under the ceiling, and NumKong's loader runs all its kits there, as `nk_capabilities_compiled_cuda`, `nk_capabilities_compiled_rocm` and `nk_capabilities_compiled_metal` answer.
 A device no class serves is still listed, as `unknown`, and refuses work as unsupported.
-A pin whose kits the device lacks is unsupported.
+A VRAM executor runs every named device as the best class all of them load at or under its ceiling, as USearch places an index, and devices sharing no such class are unsupported.
 
 ## Implementing a New Engine
 
@@ -391,14 +565,14 @@ An engine here is a CPU or GPU class: a rung of a ladder that runs the encoder t
 
 1. Kits: where NumKong compiles kernels no existing kit calls, add a `<capability>_products_kit_t`, `_attention_kit_t` or `_elementwise_kit_t` to `include/uform/encoder/ram_kits.hpp`, or to `vram_kits.hpp` for a GPU, under `#if NUMKONG_TARGET_<CAPABILITY>` beside a twin whose `compiled_k` is false, and list it in its family's ladder in priority order.
 2. The C enum: give the class the next free value of the registry USearch, UStore, UCall and UForm share, after the highest any of them uses, in `uform_cpu_class_t` or `uform_gpu_class_t` in `c/uform/types.h`, under its family's comment, spell it in the name tables of `src/types.cpp` and `src_stub/types.cpp`, and list it in `cpu_classes_k` or `gpu_classes_k` in `src/lib.hpp`.
-3. The class: in `src/lib.hpp`, add its `cpu_class_t` or `gpu_class_t` enumerator, its row of `numkong_capabilities_of` as its parent's mask plus a delta, its `parent_class_of`, and its place newest first in `cpu_ladder_t`, `nvidia_ladder_t` or `amd_ladder_t`.
+3. The class: in `src/lib.hpp`, add its `cpu_class_t` or `gpu_class_t` enumerator, its row of `numkong_capabilities_of` as its parent's mask plus a delta, its `parent_class_of`, and its place newest first in `cpu_ladder_t`, `nvidia_ladder_t`, `amd_ladder_t` or `apple_ladder_t`.
 4. Its primitives: a CPU class adds its cases to `forkunion_capabilities_of` and `cpu_class_compiled`, and specializes `waiter_for_cpu_class` and `atomic_ref_for_cpu_class` when it pairs a ForkUnion primitive its parent lacks; a GPU class adds its case to `gpu_vendor_of`.
 5. The build: a CPU class restates its delta in `src/CMakeLists.txt` as `uform_cpu_class(<class> <CLASS> OVER <parent> <capability> <MACRO>... FORKUNION <capability>...)`, which reaches `src/lib.hpp` as `UFORM_TARGET_<CLASS>`, and a GPU class is one `uform_gpu_class(<vendor> <class> <CLASS> <capability>)` line, oldest first.
 6. The class unit: `src/encoder/ram_variants_<class>.cpp` instantiates `encoder_class_tables` for `vendored_residency_t::ram_k` and `host_class_tables` for the class, while `src/encoder/vram_variants_<vendor>_<class>.cpp` instantiates `encoder_class_tables` for its vendor's residency.
 
 A class whose kits match its parent's answers no table, so the ladder falls through to the parent, and a CPU row whose delta NumKong did not compile builds no unit at all.
 A new GPU vendor also adds an `vendored_residency_t`, an entries kit declared in `vram_kits.hpp` and defined in `src/encoder/vram_entries_<vendor>.cpp` beside the device-only bundle of its `vram_kernels_<vendor>` unit, and its arms of `vendor_of`, `entries_kit_of` and `visit_vram_residency`, so the C verbs never name it.
-`uform_test_inference` encodes through every compiled CPU class against the serial floor in both precisions, and through the newest class each device `UFORM_DEVICES` selects admits, so a new class is checked as soon as its unit compiles.
+`uform_test_inference` encodes through every compiled CPU class, loaded through the C interface under a `cpu_class_ceiling` naming it, against the serial floor in both precisions, and through the newest class each device `UFORM_DEVICES` selects admits, so a new class is checked as soon as its unit compiles.
 
 ## Implementing a New Language Binding
 

@@ -1,7 +1,7 @@
 {
   "name": "@unum-cloud/uform",
   "version": "4.0.0-rc.1",
-  "description": "Distributed training and inference pipeline for multi-modal perception",
+  "description": "Distributed training and inference engine for multi-modal perception",
   "keywords": [
     "AI",
     "multimodal",
@@ -10,7 +10,7 @@
   ],
   "author": "Ash Vardanian, Unum Cloud",
   "license": "Apache-2.0",
-  "homepage": "https://github.com/unum-cloud/UForm",
+  "homepage": "https://www.unum.cloud/docs/uform",
   "repository": {
     "type": "git",
     "url": "https://github.com/unum-cloud/UForm.git"

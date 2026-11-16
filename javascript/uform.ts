@@ -2,7 +2,7 @@
  *  @file javascript/uform.ts
  *  @author Ash Vardanian
  *  @date October 18, 2026
- *  @brief Distributed training and inference pipeline for multi-modal perception, for Node.
+ *  @brief Distributed training and inference engine for multi-modal perception, for Node.
  *
  *      The package entry point: it binds the Node addon, and re-exports one module per C
  *      header underneath, so a caller imports `@unum-cloud/uform` and nothing deeper. Browsers

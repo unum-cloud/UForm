@@ -15,10 +15,11 @@ cargo add uform
 ```
 
 CMake builds the library from the crate's sources into Cargo's output directory and links it as a static archive, along with the system image, video and audio codecs.
-Three features swap what is linked, and `build.rs` refuses the stub beside either GPU feature:
+Four features swap what is linked, and `build.rs` refuses the stub beside any GPU feature, and `metal` beside `cuda` or `rocm`:
 
 - `cuda` adds the NVIDIA residency, the trainer and the mesh, and needs a CUDA toolkit at build time.
 - `rocm` adds the AMD residency, and needs ROCm at build time.
+- `metal` adds the Apple residency on macOS, linking Metal, Foundation, IOKit and CoreFoundation; its kernels compile on each device at first use.
 - `stub` links a stand-in that answers the same verbs over the C++ standard library alone, with deterministic rows, seconds to build and no codecs, for testing a caller and never for shipping.
 
 CMake builds the NumKong, StringZilla, ForkUnion and SmashTable trees of the crates Cargo resolved, rather than fetching their pinned revisions again.
@@ -32,18 +33,32 @@ CC=clang-22 CXX=clang++-22 cargo test --features stub
 
 ## Quickstart
 
+Encode two captions and a photo into one space, then pick the caption closest to the photo:
+
 ```rust
 use uform::*;
 
-let executor = Executor::for_ram(&[], None, 0)?;           // the threads every receiver names
-let mut arena = Arena::new_in(&executor)?;                    // the memory outputs land in
-let model = Model::load_ram("model.safetensors")?;            // BFloat16 blocks, as the checkpoint stores them
+fn main() -> core::result::Result<(), Box<dyn std::error::Error>> {
+    let executor = Executor::for_ram(&[], None, 0)?; // the threads every receiver names
+    let mut texts_arena = Arena::new_in(&executor)?; // a call rewinds its arena, so two outputs need two
+    let mut images_arena = Arena::new_in(&executor)?;
+    let model = Model::load_ram("model.safetensors")?; // BFloat16 blocks, as the checkpoint stores them
 
-let texts = ["a cat on a mat", "a dog in the fog"];
-let encoded = model.on(&executor).text_encode(&texts, Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
-if let Some(embeddings) = encoded.embeddings {
-    let values: &[f32] = embeddings.values()?;                // count × columns, zero-copy from the arena
-    assert_eq!(values.len(), texts.len() * model.describe()?.dimensions);
+    let captions = ["a cat on a mat", "a sunrise over the bay"];
+    let photo = std::fs::read("cat.png")?;
+    let texts = model.on(&executor).text_encode(&captions, Outputs::EMBEDDINGS, Scalar::F32, &mut texts_arena)?;
+    let images = model.on(&executor).image_encode(&[photo], Outputs::EMBEDDINGS, Scalar::F32, &mut images_arena)?;
+    let (texts, images) = (texts.embeddings.expect("asked for"), images.embeddings.expect("asked for"));
+
+    let image: &[f32] = images.values()?; // zero-copy from the arena; embeddings come unnormalized
+    let cosine = |text: &[f32]| {
+        let dot: f32 = text.iter().zip(image).map(|(t, i)| t * i).sum();
+        dot / (text.iter().map(|t| t * t).sum::<f32>() * image.iter().map(|i| i * i).sum::<f32>()).sqrt()
+    };
+    let rows: Vec<&[f32]> = texts.values::<f32>()?.chunks(texts.columns()).collect();
+    let best = usize::from(cosine(rows[1]) > cosine(rows[0]));
+    println!("'{}' describes the photo best", captions[best]);
+    Ok(())
 }
 ```
 
@@ -72,9 +87,9 @@ A `Deferred` owns the inputs the library reads until the call is final, and borr
 `status` answers `Ok(())` once the call succeeded, `Err(Status::Deferred)` while it is not final, and its failure otherwise.
 Inside an `async` block, `.await` polls the call's status until it is final, so other tasks run meanwhile, while `wait` blocks the thread without spinning.
 The crate starts no thread, so waiting off-thread goes through a scoped thread, as `std::thread::scope(|scope| scope.spawn(move || call.wait()).join())` does.
-Dropping an unfinished `Deferred` waits for the call, and a panic a progress handler raised resurfaces from `wait`, `.await`, or a drop outside unwinding.
+Dropping an unfinished `Deferred` waits for the call, and `wait_with_inputs` hands back the inputs it owned beside what it produced.
 
-The library reads a deferred call's inputs after the verb returns, so a deferred receiver takes owned inputs: items in a `Vec` or an array of owned or `'static` values, a tape as `(Vec<_>, Vec<usize>)`, a `PathBuf`, `String` or `'static` path, and `'static` configs and handlers.
+The library reads a deferred call's inputs after the verb returns, so a deferred receiver takes owned inputs: items in a `Vec` or an array of owned or `'static` values, a tape as `(Vec<_>, Vec<usize>)`, a `PathBuf`, `String` or `'static` path, and a config owning its progress handler, boxed or not, and its stats by value, with `'static` lists.
 Lending `&Vec<String>` fails to compile with "a deferred receiver needs owned inputs", and a config borrowing a local fails as "does not live long enough".
 A deferred call allocates one box holding its outcome, argument struct and inputs until it is final.
 An executor without threads of its own may hold a deferred call until its `wait`, its next `drain` or blocking call, or the drop of what it names, so `drain` it before an `.await` there.
@@ -96,7 +111,7 @@ let local = Executor::default();                                        // owns 
 threads.drain(Mood::Spinning)?;                                         // waits until no call holds it, then keeps spinning
 ```
 
-The second argument pins a `CPUClass` or a `GPUClass` to dispatch as, and `None` derives the hardware's own.
+The second argument is a `CPUClass` or `GPUClass` ceiling: calls dispatch as the best class under it the hardware runs, and `None` sets no ceiling.
 `gpu_devices(&mut devices)` fills a slice of `GPUDevice` and answers how many GPUs the process can drive, and a device's position there is the ordinal `for_vram` and `load_vram` name it by.
 `for_vram` and `on_pool` are `unsafe`, since the streams or the pool they borrow must outlive the executor; `on_pool` mirrors the C verb and answers `Status::Unsupported` until borrowing is designed, as `for_vram` does for borrowed streams.
 An executor runs one call at a time, so two threads that genuinely overlap take one apiece; an executor is `Send` but not `Sync`, while models stay freely shared.
@@ -149,14 +164,16 @@ Every bare `Scalar` converts into the verb's config, the scalar every output lan
 
 ```rust
 let mut stats = TextEncodeStats::default();
-let mut handler = |completed, total| if completed * 2 < total { ControlFlow::Continue(()) } else { ControlFlow::Break(()) };
-let config = TextEncodeConfig { stats: Some(&mut stats), progress: Some(&mut handler), ..TextEncodeConfig::from(Scalar::F32) };
+let mut handler = |completed: usize, total: usize| if completed * 2 < total { ControlFlow::Continue(()) } else { ControlFlow::Break(()) };
+let config = TextEncodeConfig { stats: Some(&mut stats), progress: Some(&mut handler as _), ..TextEncodeConfig::from(Scalar::F32) };
 let encoded = model.text_encode(&texts, Outputs::EMBEDDINGS, config, &mut arena);
 ```
 
 `Rows` reports its `count`, `columns`, `stride` and `scalar`, and reads as bytes through `as_bytes` or as values through `values::<f32>()`, refused when the rows hold another scalar type.
 `RowsTape` adds the `offsets` and an `item` per input.
 A handler answering `ControlFlow::Break` stops the call, which fails with `Status::Cancelled` and publishes nothing.
+
+## Choices
 
 `text_choose(texts, choices, ..)` scores each item's legal choices, one byte each, through one forward, and answers a `Tape` of one `f32` probability per choice that sums to one per item:
 
@@ -171,7 +188,7 @@ Each group is a question type below the model's `choice_temperature_groups`, and
 ## Models
 
 `Model::load_ram(path)` and `Model::load_vram(path)` copy a safetensors checkpoint into host memory or onto GPUs, and `load_ram_buffer` and `load_vram_buffer` take the checkpoint's bytes instead.
-A bare path or buffer loads on the calling thread with `Scalar::BF16` blocks, and its config reaches the executor, the placement and its class pin, `Scalar::E4M3` quantization and a progress handler:
+A bare path or buffer loads on the calling thread with `Scalar::BF16` blocks, and its config reaches the executor, the placement and its class ceiling, `Scalar::E4M3` quantization and a progress handler:
 
 ```rust
 let model = Model::load_vram(ModelLoadVramConfig {
@@ -242,8 +259,8 @@ match model.on(&executor).text_encode(&texts, Outputs::EMBEDDINGS, Scalar::F32, 
 ```
 
 `Status` carries the C enumerators' values and leaves success to `Result`, so an `Error` never carries `Status::Deferred`, which only `Deferred::status` reports.
-`Status`, `Scalar`, `Mood`, `CPUClass`, `GPUClass`, `Modality`, `Objective` and `Negatives` print through `Display` and parse through `FromStr` the names the C tables own, such as `"shape-mismatch"` or `"intel-haswell"`, and `MultimemTier` prints its own, which C never reads back.
-A panic inside a progress handler is caught at the C frame, since unwinding out of one is an abort, and resurfaces once the call is final.
+`Status`, `Scalar`, `Mood`, `CPUClass`, `GPUClass`, `GPUVendor`, `Modality`, `Objective`, `Negatives`, `MultimemTier`, `PairLossForm` and `LateInteractionSide` print through `Display` and parse through `FromStr` the names the C tables own, such as `"shape-mismatch"` or `"intel-haswell"`.
+A panic inside a progress handler aborts the process, since it cannot unwind through the library.
 
 ## Design
 

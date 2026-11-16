@@ -1,4 +1,4 @@
-//! UForm - Distributed training and inference pipeline for multi-modal perception.
+//! UForm - Distributed training and inference engine for multi-modal perception.
 //!
 //! The crate links the precompiled library, so building it compiles no tower.
 //!

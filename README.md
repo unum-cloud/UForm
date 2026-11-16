@@ -1,43 +1,38 @@
 <h1 align="center">UForm</h1>
 <h3 align="center">
-Distributed Training &amp; Inference Pipeline<br/>
-for Multi-Modal Perception<br/>
+Distributed Training &amp; Inference Engine<br/>
+for Multi-Modal Perception
 </h3>
 <br/>
 
 <p align="center">
 <a href="https://discord.gg/4mxGrenbNt"><img height="25" src="https://github.com/unum-cloud/.github/raw/main/assets/discord.svg" alt="Discord"></a>
-&nbsp; &nbsp; &nbsp;
+&nbsp;&nbsp;&nbsp;
 <a href="https://www.linkedin.com/company/unum-cloud/"><img height="25" src="https://github.com/unum-cloud/.github/raw/main/assets/linkedin.svg" alt="LinkedIn"></a>
-&nbsp; &nbsp; &nbsp;
+&nbsp;&nbsp;&nbsp;
 <a href="https://twitter.com/unum_cloud"><img height="25" src="https://github.com/unum-cloud/.github/raw/main/assets/twitter.svg" alt="Twitter"></a>
-&nbsp; &nbsp; &nbsp;
+&nbsp;&nbsp;&nbsp;
 <a href="https://unum.cloud/post"><img height="25" src="https://github.com/unum-cloud/.github/raw/main/assets/blog.svg" alt="Blog"></a>
-&nbsp; &nbsp; &nbsp;
+&nbsp;&nbsp;&nbsp;
 <a href="https://github.com/unum-cloud/UForm"><img height="25" src="https://github.com/unum-cloud/.github/raw/main/assets/github.svg" alt="GitHub"></a>
 </p>
 
 <p align="center">
-Multimodal Perception from 64 to 1024 Dimensions
-<br/>
 Text • Images • Videos • Audio • Code • Graphs
 <br/>
-CUDA Training • CPU, NVIDIA and AMD Inference • WebAssembly
+<a href="https://github.com/unum-cloud/UForm/blob/main/c/README.md">C</a> •
+<a href="https://github.com/unum-cloud/UForm/blob/main/python/README.md">Python</a> •
+<a href="https://github.com/unum-cloud/UForm/blob/main/rust/README.md">Rust</a> •
+<a href="https://github.com/unum-cloud/UForm/blob/main/javascript/README.md">JavaScript</a> •
+<a href="https://github.com/unum-cloud/UForm/blob/main/swift/README.md">Swift</a> •
+<a href="https://github.com/unum-cloud/UForm/blob/main/mojo/README.md">Mojo</a>
 <br/>
-<a href="https://github.com/unum-cloud/UForm/tree/main/c/uform">C</a>
- •
-<a href="https://github.com/unum-cloud/UForm/blob/main/python/README.md">Python</a>
- •
-<a href="https://github.com/unum-cloud/UForm/blob/main/rust/README.md">Rust</a>
- •
-<a href="https://github.com/unum-cloud/UForm/blob/main/javascript/README.md">JavaScript</a>
- •
-<a href="https://github.com/unum-cloud/UForm/blob/main/swift/README.md">Swift</a>
+Linux • macOS • Windows
+<br/>
+x86 • Arm • POWER • WebAssembly • CUDA • ROCm
 </p>
 
 ---
-
-![UForm banner](https://github.com/ashvardanian/ashvardanian/blob/master/repositories/UForm-v4.png?raw=true)
 
 UForm 4 is a family of neural networks trained from scratch to learn __shared multi-modal representations__ across text, images, audio, video, and code on a GPU, a single DGX node, or an entire cluster, designed bottom-up from scratch, to fully leverage modern hardware.
 A few convictions shape the whole stack:
@@ -53,7 +48,31 @@ This repository is the full training and inference stack, tuned for NVIDIA Hoppe
 Neither training nor inference carries a __PyTorch or JAX dependency__.
 There is not even NCCL or NVSHMEM, no dynamic memory allocations on the hot paths, locks, mutexes, or even need for multiple threads.
 
-## Architecture & Goals
+## Quickstart
+
+Every binding wraps one C library; the Python wheels install with `pip install uform`.
+Encode two captions and a photo into one space, then pick the caption closest to the photo:
+
+```python
+import numpy as np
+import uform
+
+executor = uform.Executor.for_ram()  # the threads every receiver names
+arena = uform.Arena(executor)  # where outputs land; each call rewinds it
+model = uform.Model.load_ram("model.safetensors")
+
+captions = ["a cat on a mat", "a sunrise over the bay"]
+texts = np.array(model.on(executor).text_encode(captions, arena).embeddings)  # a copy outlives the next call
+with open("cat.png", "rb") as photo:
+    image = np.array(model.on(executor).image_encode([photo.read()], arena).embeddings)[0]
+
+cosines = texts @ image / (np.linalg.norm(texts, axis=1) * np.linalg.norm(image))
+print(f"{captions[cosines.argmax()]!r} describes the photo best")
+```
+
+The same story opens every binding's page: [C](https://github.com/unum-cloud/UForm/blob/main/c/README.md#quickstart), [Python](https://github.com/unum-cloud/UForm/blob/main/python/README.md#quickstart), [Rust](https://github.com/unum-cloud/UForm/blob/main/rust/README.md#quickstart), [JavaScript](https://github.com/unum-cloud/UForm/blob/main/javascript/README.md#quickstart), [Swift](https://github.com/unum-cloud/UForm/blob/main/swift/README.md#quickstart) and [Mojo](https://github.com/unum-cloud/UForm/blob/main/mojo/README.md#quickstart).
+
+## Architecture
 
 Every UForm 4 model is a __uniform byte encoder__: bytes in, same-width transformer blocks, pooled embedding out.
 The encoder stage consists of N transformer blocks, all at one fixed width — there is no sequence narrowing between them.
@@ -355,7 +374,58 @@ A run with `--choices-weight` also trains calibrated choices through the byte de
 `uform_eval <checkpoint> --calibrate <choices.jsonl> --output <calibrated.safetensors>` fits one inverse temperature per question type on held-out choices.
 It prints each group's negative log-likelihood and the top-choice calibration error before and after, and writes the checkpoint again with them as `choices.inverse_temperatures`, which `uform_text_choose` reads.
 
-## Multiversioned and Monoversioned Builds
+## FAQ
+
+### Why TCR and Lipschitz, but not VICReg or DimNorm?
+
+Both VICReg and DimNorm attack the _symptom_ — rank collapse — rather than the pooled embedding's information density, and both were superseded.
+DimNorm normalized per-dimension statistics every forward pass to hold the pooled code off the rank-1 attractor; TCR's rank-maximization plus a fresh-encoder warm-start cover that role at the loss, so there is no separate normalization pass.
+An earlier [VICReg](https://arxiv.org/abs/2105.04906) loss was dropped for a sharper reason: its variance and covariance terms act on mean-centered statistics, so they are structurally blind to the shared-mean anisotropy the multi-prefix contrastive objective induces — in ablation, adding VICReg left raw cosine at 0.9999 and retrieval at chance.
+TCR and the Lipschitz bound instead shape the _raw_ second moment $Z^\top Z$ directly, and the contrastive escape term covers anti-collapse more cheaply than a dedicated variance loss.
+Only VICReg's covariance kernels survive — repurposed as the effective-rank metric.
+
+### Why attention pooling instead of mean pooling?
+
+Mean pooling is the uniform-attention special case of an attention pool, so attention pooling is strictly more expressive at no extra asymptotic cost.
+The pool query is a single learned encoder-width vector, broadcast across the batch as $Q$ with sequence length one; the per-byte encoder outputs serve as $K$ and $V$.
+NumKong's ragged attention makes the expressive route as cheap as the mean, so there is one pool path and no toggle.
+
+### Why no cuDNN, FlashAttention, xformers, or FA3?
+
+[NumKong](https://github.com/ashvardanian/NumKong) already runs a [FlashAttention](https://arxiv.org/abs/2205.14135)-style ragged attention, forward and backward, on every GPU generation and on the CPU, with each segment and head summed in a fixed order.
+One kernel library behind the products and the attention keeps the external surface small across driver and architecture bumps.
+ThunderKittens, FA3, CUTLASS and TransformerEngine stay out of the stack for the same reason.
+
+### Why hand-roll PTX instead of NCCL and NVSHMEM?
+
+The whole step — forward, backward, all-reduce, optimizer — is one CUDA Graph captured once and replayed from a single host thread, so collectives must run _inside_ the capture.
+NCCL is only partially capture-safe: a captured `ncclAllReduce` instantiates fine but silently no-ops on replay —
+
+```cpp
+cudaStreamBeginCapture(stream);
+forward_backward(...);
+ncclAllReduce(grad, grad, n, ncclBfloat16, ncclSum, comm, stream);
+cudaGraphLaunch(exec, stream);   // replays — but grad is never reduced
+```
+
+— and the standard workaround, splitting the step so the reduce runs on the host between sub-graphs, puts a host sync back into every step, which gave intermittent NaNs and stalled the multi-collective sharded-loss path.
+NVSHMEM replays correctly but bootstraps one PE per process (`nvshmem_n_pes()` returns 1 from our single-process trainer), so adopting it means re-architecting under MPI or `torchrun`.
+`multimem.*` is the NVLink-fabric primitive both libraries dispatch internally anyway — capture-safe and single-process — so UForm calls it directly; the design is in [NVLink-Based Cross-GPU Collaboration](#nvlink-based-cross-gpu-collaboration).
+
+## Compatibility
+
+| Feature                   |  C  | Python | Rust | JavaScript | Swift | Mojo |
+| :------------------------ | :-: | :----: | :--: | :--------: | :---: | :--: |
+| Text, image, video, audio |  ✓  |   ✓    |  ✓   |     ✓      |   ✓   |  ✓   |
+| States and token vectors  |  ✓  |   ✓    |  ✓   |     ✓      |   ✓   |  ✓   |
+| Calibrated choices        |  ✓  |   ✓    |  ✓   |     ✓      |   ✓   |  ✓   |
+| RAM and VRAM models       |  ✓  |   ✓    |  ✓   |     ✓      |   ✓   |  ✓   |
+| Training and meshes       |  ✓  |   ✓    |  ✓   |     ✓      |   ✓   |  ✓   |
+| Deferred calls            |  ✓  |   ✓    |  ✓   |     ✓      |   ✓   |  ✓   |
+
+The browser build of the JavaScript package encodes text and decoded pixels and samples on the calling thread, and answers `unsupported` for encoded media, VRAM, the mesh and the trainer.
+
+### Multiversioned and Monoversioned Builds
 
 UForm compiles in one of two shapes, picked by `UFORM_MULTIVERSIONED`.
 
@@ -401,50 +471,13 @@ uform/
 ├── rust/             the Rust crate over the C ABI
 ├── javascript/       the Node-API addon and the WebAssembly module over the C ABI
 ├── swift/            the Swift package over the C ABI
+├── mojo/             the Mojo package over the C ABI
 └── docs/             the documentation site
 ```
 
 Every binding is a thin layer over the C ABI in `c/uform/`: one module per header, one method per verb, and the same receivers, executors and arenas in each language.
 Each links either the engine or the stand-in of `src_stub/`, which answers every verb with deterministic rows in seconds of build time, so the binding suites run without a checkpoint.
 Conventions, hooks and the commit format are described in [`CONTRIBUTING.md`](https://github.com/unum-cloud/UForm/blob/main/CONTRIBUTING.md).
-
-## FAQ
-
-### Why TCR and Lipschitz, but not VICReg or DimNorm?
-
-Both VICReg and DimNorm attack the _symptom_ — rank collapse — rather than the pooled embedding's information density, and both were superseded.
-DimNorm normalized per-dimension statistics every forward pass to hold the pooled code off the rank-1 attractor; TCR's rank-maximization plus a fresh-encoder warm-start cover that role at the loss, so there is no separate normalization pass.
-An earlier [VICReg](https://arxiv.org/abs/2105.04906) loss was dropped for a sharper reason: its variance and covariance terms act on mean-centered statistics, so they are structurally blind to the shared-mean anisotropy the multi-prefix contrastive objective induces — in ablation, adding VICReg left raw cosine at 0.9999 and retrieval at chance.
-TCR and the Lipschitz bound instead shape the _raw_ second moment $Z^\top Z$ directly, and the contrastive escape term covers anti-collapse more cheaply than a dedicated variance loss.
-Only VICReg's covariance kernels survive — repurposed as the effective-rank metric.
-
-### Why attention pooling instead of mean pooling?
-
-Mean pooling is the uniform-attention special case of an attention pool, so attention pooling is strictly more expressive at no extra asymptotic cost.
-The pool query is a single learned encoder-width vector, broadcast across the batch as $Q$ with sequence length one; the per-byte encoder outputs serve as $K$ and $V$.
-NumKong's ragged attention makes the expressive route as cheap as the mean, so there is one pool path and no toggle.
-
-### Why no cuDNN, FlashAttention, xformers, or FA3?
-
-[NumKong](https://github.com/ashvardanian/NumKong) already runs a [FlashAttention](https://arxiv.org/abs/2205.14135)-style ragged attention, forward and backward, on every GPU generation and on the CPU, with each segment and head summed in a fixed order.
-One kernel library behind the products and the attention keeps the external surface small across driver and architecture bumps.
-ThunderKittens, FA3, CUTLASS and TransformerEngine stay out of the stack for the same reason.
-
-### Why hand-roll PTX instead of NCCL and NVSHMEM?
-
-The whole step — forward, backward, all-reduce, optimizer — is one CUDA Graph captured once and replayed from a single host thread, so collectives must run _inside_ the capture.
-NCCL is only partially capture-safe: a captured `ncclAllReduce` instantiates fine but silently no-ops on replay —
-
-```cpp
-cudaStreamBeginCapture(stream);
-forward_backward(...);
-ncclAllReduce(grad, grad, n, ncclBfloat16, ncclSum, comm, stream);
-cudaGraphLaunch(exec, stream);   // replays — but grad is never reduced
-```
-
-— and the standard workaround, splitting the step so the reduce runs on the host between sub-graphs, puts a host sync back into every step, which gave intermittent NaNs and stalled the multi-collective sharded-loss path.
-NVSHMEM replays correctly but bootstraps one PE per process (`nvshmem_n_pes()` returns 1 from our single-process trainer), so adopting it means re-architecting under MPI or `torchrun`.
-`multimem.*` is the NVLink-fabric primitive both libraries dispatch internally anyway — capture-safe and single-process — so UForm calls it directly; the design is in [NVLink-Based Cross-GPU Collaboration](#nvlink-based-cross-gpu-collaboration).
 
 ## Citation
 
@@ -453,7 +486,7 @@ If UForm helps your research or product, please cite it:
 ```bibtex
 @software{Kim_UForm,
   author = {Kim, Mikhail and Orshulevich, Vladimir and Vardanian, Ash},
-  title = {{UForm: Hardware-Accelerated Distributed Training of Multi-Modal Perception Models across NVLink Domains}},
+  title = {{UForm: Distributed Training \& Inference Engine for Multi-Modal Perception}},
   doi = {10.5281/zenodo.8204323},
   url = {https://github.com/unum-cloud/UForm},
   license = {Apache-2.0}

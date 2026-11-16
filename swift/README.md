@@ -32,14 +32,28 @@ UFORM_SWIFT_ARTIFACT=build_swift/UFormC.xcframework swift test # UFormC.artifact
 
 ## Quickstart
 
+Encode two captions and a photo into one space, then pick the caption closest to the photo:
+
 ```swift
+import Foundation
 import UForm
 
-let executor = try Executor.forRam()
-let arena = try Arena(on: executor)                                  // where the outputs land
+let executor = try Executor.forRam()                 // the threads every receiver names
+let textsArena = try Arena(on: executor)             // a call rewinds its arena, so two outputs need two
+let imagesArena = try Arena(on: executor)
 let model = try Model.loadRam(path: "model.safetensors")
-let encoded = try model.on(executor).textEncode(["A blue house"], outputs: .embeddings, arena: arena)
-let embedding = Array(encoded.embeddings![0])                        // [Float], the model's dimensions wide
+
+let captions = ["a cat on a mat", "a sunrise over the bay"]
+let photo = [UInt8](try Data(contentsOf: URL(fileURLWithPath: "cat.png")))
+let texts = try model.on(executor).textEncode(captions, arena: textsArena).embeddings!
+let image = Array(try model.on(executor).imageEncode([photo], arena: imagesArena).embeddings![0])
+
+func cosine(_ text: Rows.Row) -> Float {             // embeddings come unnormalized
+    let dot = zip(text, image).reduce(Float(0)) { $0 + $1.0 * $1.1 }
+    return dot / (text.reduce(Float(0)) { $0 + $1 * $1 } * image.reduce(Float(0)) { $0 + $1 * $1 }).squareRoot()
+}
+let best = cosine(texts[1]) > cosine(texts[0]) ? 1 : 0
+print("'\(captions[best])' describes the photo best")
 ```
 
 ## Receivers & Deferred Calls
@@ -57,7 +71,7 @@ let images = try await call.value  // or: try call.wait()
 A `Deferred` owns its outcome, its outputs and copies of its inputs until the call is final, so the caller's arrays may go at once.
 It borrows the model, the executor and the arena as a blocking call does, since releasing any of them waits for the calls naming it.
 `status` reads `deferred` until then, through `uform_outcome_status`, and `wait()` blocks through `uform_outcome_wait` and answers the result or throws the failure, the same every time it is asked.
-`value` waits on a Dispatch thread and then reads the result in the caller's isolation, so an `async` caller suspends rather than blocks.
+`value` polls `status` from the awaiting task, sleeping between reads, and then reads the result in the caller's isolation, so an `async` caller suspends rather than blocks.
 Releasing an unfinished one waits for it first.
 
 ```swift
@@ -84,7 +98,7 @@ try hostThreads.drain(mood: .parked)
 
 Each factory takes every argument its C constructor has, and only those.
 A thread count of zero takes 7/8 of the cores the memory domains carry, and `forVram` takes no thread count at all, since the submitting thread drives one stream per device.
-`Executor.onPool(memoryDomains:cpuClass:pool:)` mirrors the C verb that borrows a ForkUnion pool, and reports `unsupported` until the library wires borrowed pools.
+`Executor.onPool(memoryDomains:cpuClassCeiling:pool:)` mirrors the C verb that borrows a ForkUnion pool, and reports `unsupported` until the library wires borrowed pools.
 `drain(mood:)` waits until no call holds the executor and its devices are idle, then picks whether its threads park or spin.
 
 ## Arenas
@@ -178,18 +192,18 @@ print(description.cpuClass, description.tokenWidth, description.choiceTemperatur
 ```
 
 `quantization` is the scalar the transformer blocks run in: `bf16` as the checkpoint stores it, or `e4m3` quantized at load.
-Every RAM load and executor takes a `cpuClass` pin, and every VRAM one a `gpuClass`, dispatching as if the hardware were of that class; nil derives its own.
+Every RAM load and executor takes a `cpuClassCeiling`, and every VRAM one a `gpuClassCeiling`, dispatching as the best class under it the hardware runs; nil sets no ceiling.
 `describe()` reports the class the model runs as, nil on the other residency, the `tokenWidth` of its token head, and its `choiceTemperatureGroups`, each zero when the checkpoint carries no such head.
 `gpuDevices()` lists every GPU the process can drive, and a device's position in it is the ordinal `devices` names it by.
 
 ```swift
-let pinned = try Model.loadRam(path: "model.safetensors", cpuClass: CPUClass(name: "intel-haswell"))
+let capped = try Model.loadRam(path: "model.safetensors", cpuClassCeiling: CPUClass(name: "intel-haswell"))
 for (ordinal, device) in try gpuDevices().enumerated() { print(ordinal, device.name, device.gpuClass!) }
 ```
 
 ## Training
 
-Training is GPU-only, so every constructor takes a VRAM executor, and the trainer's verbs block on it.
+Training is GPU-only, so every constructor takes a VRAM executor, and the trainer's verbs block on it; `trainer.on(executor)` names that executor, and `trainer.deferred(executor)` submits the same `step` and `save` there, each answered at once as a `Deferred`.
 
 ```swift
 let mesh = try Mesh.bootstrap(executor: deviceStreams, options: MeshOptions(
@@ -206,12 +220,12 @@ print(step.stats.step, step.stats.loss, step.stats.contrastiveLoss)
 try trainer.save(path: "checkpoint.safetensors")
 ```
 
-`Modality`, `Objective`, `Negatives` and `MultimemTier` spell themselves through the library's own name tables.
+`Modality`, `Objective`, `Negatives`, `MultimemTier`, `PairLossForm` and `LateInteractionSide` spell themselves through the library's own name tables.
 `Contrastive` and `LateInteraction` each take a `PairLossForm`, and a positive `LateInteraction.weight` trains the token head over the items whose `sides` name them a query, a document or both.
 A positive `Choices.weight` trains calibrated choices, which needs `BatchShape.maxChoicesPerItem`, over the legal bytes each step's `choices` names, as `textChoose` takes them, and their `choiceTargets`.
 The step reports both terms as `lateInteractionLoss` and `choicesLoss`.
 A step over arrays of items gathers each into one tape, its one copy, while a step over `(data, offsets)` tapes lends their storage to the library in place.
-`Modality`, `Objective`, `Negatives` and `MultimemTier` read a spelling back with `init?(name:)`, answering nil for a name the library's table would quietly read as its default.
+The same types read a spelling back with `init?(name:)`, answering nil for a name the library's table would quietly read as its default.
 
 ## Errors
 
@@ -235,13 +249,13 @@ do {
 - __The receiver chooses, the verb stays.__
   The model runs a verb on the calling thread, `on(executor)` blocks on an executor, and `deferred(executor)` submits it, all with the same arguments.
 - __Deferred calls use the language's own idioms.__
-  `status` polls through `uform_outcome_status`, `wait()` blocks through `uform_outcome_wait`, and `try await call.value` runs that wait on a Dispatch thread, so an `async` caller suspends.
+  `status` polls through `uform_outcome_status`, `wait()` blocks through `uform_outcome_wait`, and `try await call.value` polls with sleeps between reads, so an `async` caller suspends.
 - __No life of its own.__
   The binding starts no threads, keeps no queues and caches nothing; releasing a `Deferred` rides its `deinit`, which waits for the call first.
 - __Arenas are lent and reused, never shared.__
   Every output verb takes an arena and answers views borrowing it; a view remembers which call wrote it and traps once a later one did.
 - __Statuses and modes are enums.__
-  `Status`, `Scalar`, `Mood`, `CPUClass`, `GPUClass`, `Modality`, `Objective`, `Negatives` and `MultimemTier` carry their C enumerators and spell themselves through the C name functions, never strings.
+  `Status`, `Scalar`, `Mood`, `CPUClass`, `GPUClass`, `GPUVendor`, `Modality`, `Objective`, `Negatives`, `MultimemTier`, `PairLossForm` and `LateInteractionSide` carry their C enumerators and spell themselves through the C name functions, never strings.
 - __Nothing costs anything until it is used.__
   Blocking calls take no deferred-table entry, a surface `outputs` leaves out is never computed, and an arena allocates only when a call writes into it.
 - __What this binding does not expose.__

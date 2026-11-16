@@ -46,19 +46,19 @@ A CPU class is its parent plus a delta.
 - Arm: `nvidia_vera` → `apple_m4` → `apple_m2` → `aws_g2`, with `aws_g5` over `apple_m2` beside them.
 - RISC-V: `alibaba_c930`, Power: `ibm_power10`, and WebAssembly: `wasm64_extended` → `wasm32_v128`.
 
-`nvidia_ladder_t` reads `nvidia_rubin` → `nvidia_blackwellrtx` → `nvidia_blackwell` → `nvidia_hopper` → `nvidia_ada` → `nvidia_ampere`, and `amd_ladder_t` reads `amd_cdna5` → `amd_cdna4` → `amd_cdna3`.
+`nvidia_ladder_t` reads `nvidia_rubin` → `nvidia_blackwellrtx` → `nvidia_blackwell` → `nvidia_hopper` → `nvidia_ada` → `nvidia_ampere`, `amd_ladder_t` reads `amd_cdna5` → `amd_cdna4` → `amd_cdna3`, and `apple_ladder_t` reads `apple_metal10` → `apple_metal9` → `apple_metal7`.
 Each vendor's oldest class is its floor, and a device no class serves is listed as `unknown` and refuses work.
 Rubin compiles no unit of its own, so its devices pick `nvidia_blackwell`.
 A monoversioned build keeps one class per vendor, and `compiled_rungs` asserts each ladder compiles at most one rung.
 
-- `pick_cpu_ceiling` is the one caller of NumKong's and ForkUnion's CPU detection: it reads the detected masks, grants the AMX tiles there and drops them where the kernel refuses, then unpinned answers those masks and pinned answers the class's, refusing a value no class takes as an invalid argument, and a class the machine does not run or a ceiling no compiled class fits as unsupported.
+- `pick_cpu_ceiling` is the one caller of NumKong's and ForkUnion's CPU detection: it reads the detected masks, grants the AMX tiles there and drops them where the kernel refuses, then intersects them with the masks of the ceiling class, refusing a value no class takes as an invalid argument and an intersection no compiled class fits as unsupported, so a ceiling above the machine runs as the machine.
 - `uform_executor_for_ram` and `uform_executor_for_vram` keep their ceiling and the `host_verbs_t` of the newest class under it, which the C layer waits through.
 - `uform_model_load_ram` walks `pick_cpu_variant` to the newest rung with `cpu_class_compiled` and `cpu_rung_fits` under the load's ceiling, which `pick_cpu_ceiling` made sure exists.
-- A monoversioned build compiles no `serial` unit and no named class, so a pin below its masks is refused rather than run on them.
-- A rung fits when its two masks are subsets of the ceiling's, so pinning behaves as running on a machine of that class.
-- A device's GPU class is picked by what its loader runs: `pick_gpu_class` walks its vendor's ladder for the newest class at or under the pin that `gpu_class_serves`, whose NumKong kits `nk_capabilities_compiled_cuda` or `nk_capabilities_compiled_rocm` all report running on the device.
-- `uform_model_load_vram` lets `visit_vram_residency` pick the vendor's residency and ladder from the devices' capabilities, and `pick_gpu_variant` walks it under the pinned `gpu_class`.
-- `cpu_class_compiled`, `gpu_class_compiled` and `gpu_vendor_compiled` read the `UFORM_TARGET_<CLASS>`, `UFORM_ARCH_CUDA_` and `UFORM_ARCH_ROCM_` definitions `src/CMakeLists.txt` passes as 1 for every unit it compiled and 0 otherwise, so a ladder never asks for a table the build lacks.
+- A monoversioned build compiles no `serial` unit and no named class, so a ceiling below its masks is refused rather than run on them.
+- A rung fits when its two masks are subsets of the ceiling's, so a ceiling the machine runs behaves as running on a machine of that class.
+- A device's GPU class is picked by what its loader runs: `pick_gpu_class` walks its vendor's ladder for the newest class at or under the ceiling that `gpu_class_serves`, whose NumKong kits `nk_capabilities_compiled_cuda`, `nk_capabilities_compiled_rocm` or `nk_capabilities_compiled_metal` all report running on the device.
+- `uform_model_load_vram` lets `visit_vram_residency` pick the vendor's residency and ladder from the devices' capabilities, and `pick_gpu_variant` walks it under the load's `gpu_class_ceiling`.
+- `cpu_class_compiled`, `gpu_class_compiled` and `gpu_vendor_compiled` read the `UFORM_TARGET_<CLASS>`, `UFORM_ARCH_CUDA_`, `UFORM_ARCH_ROCM_` and `UFORM_ARCH_METAL_` definitions `src/CMakeLists.txt` passes as 1 for every unit it compiled and 0 otherwise, so a ladder never asks for a table the build lacks.
 
 ## Waiters and Atomics
 
@@ -84,6 +84,7 @@ The variant libraries link after `uform_host`, so the baseline's copy of any sha
 
 - `uform_host`: the verbs, `geometry.cpp`, the checkpoint reader, and the media planning and resize, joined by the host codecs outside WebAssembly, all compiled at the baseline.
 - `uform_encoder_ram_variants`: the CPU class units, each compiled with the flags its `uform_cpu_class` row computes, its parent's plus those of every delta capability NumKong compiled, and present only when its parent is and some delta compiled.
-- `uform_encoder_vram_nvidia_variants` and `uform_encoder_vram_amd_variants`: the GPU class units and the entries, which compile no device code of their own, since NumKong's libraries carry every generation's kernels.
+- `uform_encoder_vram_nvidia_variants`, `uform_encoder_vram_amd_variants` and `uform_encoder_vram_apple_variants`: the GPU class units and the entries, which compile no device code of their own, since NumKong's libraries carry every generation's kernels.
 - `uform_encoder_nvidia` and `uform_encoder_amd`: the device-only bundles of UForm's own kernels, linked into a read-only section through an assembler stub and loaded by name, so nothing registers them with a GPU runtime.
+- `vram_entries_apple.cpp` embeds the source of `vram_kernels_apple.metal` behind NumKong's `types.metal` instead, which each Apple GPU compiles at its first launch, so no Metal toolchain builds it.
 - `uform::train`, `uform::loaders` and `uform::datasets`: the training engine, the mesh and the loaders, built with CUDA alone, with `uform_nvidia_train` serving the verbs of `train.h`.

@@ -23,14 +23,14 @@ cmake --build build_cuda --target uform_bench_encoder uform_bench_core
 
 ```sh
 build_cuda/uform_bench_encoder --checkpoint model.safetensors
-build_cuda/uform_bench_encoder --checkpoint model.safetensors --cpu-class intel-haswell --precision e4m3
-build_cuda/uform_bench_encoder --checkpoint model.safetensors --residency vram --gpu-class nvidia-hopper
+build_cuda/uform_bench_encoder --checkpoint model.safetensors --cpu-class-ceiling intel-haswell --precision e4m3
+build_cuda/uform_bench_encoder --checkpoint model.safetensors --residency vram --gpu-class-ceiling nvidia-hopper
 ```
 
 - `--checkpoint`: the `.safetensors` file to load, required.
 - `--residency`: `ram` encodes on host threads and `vram` on the first GPU, `ram` by default.
-- `--cpu-class`: the CPU class to dispatch as, like `serial` or `intel-sapphire`, the machine's own by default.
-- `--gpu-class`: the GPU class to dispatch as, like `nvidia-ampere`, the device's own by default.
+- `--cpu-class-ceiling`: the newest CPU class to dispatch as, like `serial` or `intel-sapphire`, capped by what the machine runs, no ceiling by default.
+- `--gpu-class-ceiling`: the newest GPU class to dispatch as, like `nvidia-ampere`, capped by what the device loads, no ceiling by default.
 - `--precision`: the weights' quantization, `bf16` or `e4m3`, `bf16` by default.
 
 ## Training Kernels

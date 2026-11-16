@@ -1,6 +1,6 @@
 [package]
 authors = ["Ash Vardanian <info@unum.cloud>"]
-description = "Distributed training and inference pipeline for multi-modal perception"
+description = "Distributed training and inference engine for multi-modal perception"
 edition = "2021"
 rust-version = "1.100"
 include = [
@@ -18,8 +18,9 @@ license = "Apache-2.0"
 name = "uform"
 links = "uform"
 publish = false
+homepage = "https://www.unum.cloud/docs/uform"
 repository = "https://github.com/unum-cloud/UForm"
-documentation = "https://docs.rs/uform"
+documentation = "https://www.unum.cloud/docs/uform/rust"
 version = "4.0.0-rc.1"
 
 [lib]
