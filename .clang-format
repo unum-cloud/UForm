@@ -6,17 +6,14 @@ NamespaceIndentation: None
 # A docblock takes an empty line above it everywhere, an access specifier included, so the blank
 # one writes there must survive formatting - LLVM's default strips it.
 EmptyLineAfterAccessModifier: Leave
+# Code wraps at 120. Prose wraps at 100 by hand - `@brief` text, `@param` descriptions, and the
+# paragraphs after a tag block - so a docblock reads as a narrower column than the code below it.
+# `ReflowComments` only reflows past the limit, so it never widens prose already inside 100.
 ColumnLimit: 120
-# Docstrings are hand-formatted to a fixed 6-space continuation indent; do not let clang-format reflow
-# comment bodies (ReflowComments:true would collapse that to a 1-space hanging indent).
-ReflowComments: false
+ReflowComments: true
+# A URL cannot wrap, so reflow would split it from its `@see` and drop the hanging indent.
+CommentPragmas: '^ IWYU pragma:|https?://'
 UseTab: Never
-IndentPPDirectives: None
-InsertNewlineAtEOF: true
-PointerAlignment: Right
-DerivePointerAlignment: false
-BreakBeforeBinaryOperators: None
-PenaltyBreakAssignment: 50
 
 AlignConsecutiveAssignments: false
 AlignConsecutiveDeclarations: false
@@ -38,6 +35,7 @@ AlwaysBreakAfterReturnType: None
 PenaltyReturnTypeOnItsOwnLine: 200
 
 BreakBeforeBraces: Custom
+BreakAdjacentStringLiterals: true
 BraceWrapping:
   AfterCaseLabel: false
   AfterClass: false
@@ -56,7 +54,7 @@ BraceWrapping:
   IndentBraces: false
 
 SortIncludes: false
-SortUsingDeclarations: false
+SortUsingDeclarations: true
 
 SpaceAfterCStyleCast: false
 SpaceAfterLogicalNot: false
@@ -77,10 +75,31 @@ SpacesInSquareBrackets: false
 
 BinPackArguments: true
 BinPackParameters: true
-PenaltyBreakBeforeFirstCallParameter: 1
-
-# Pack long braced lists (big LUT / constant tables) densely instead of one element per line.
-# Requires clang-format 22+ (we use clang-format-23).
-BreakAdjacentStringLiterals: false
+# Requires clang-format 22+; older versions will error on unknown keys below.
 BinPackLongBracedList: true
 BreakBeforeCloseBracketBracedList: false
+PenaltyBreakBeforeFirstCallParameter: 1
+
+# The export macro the C interface puts before every declaration, read as an attribute.
+AttributeMacros:
+  - UFORM_EXPORT
+
+# Align consecutive macro definitions, as the `*_TARGET_*` capability flags run in blocks
+AlignConsecutiveMacros:
+  Enabled: true
+  AcrossEmptyLines: false
+  AcrossComments: false
+
+# Preprocessor directive indentation: None (flat), AfterHash (#  if), BeforeHash (  #if)
+IndentPPDirectives: None
+
+# The C++ convention `int* x`, binding the pointer to the type.
+PointerAlignment: Left
+DerivePointerAlignment: false
+
+# Preserve user line breaks in intrinsic-heavy code
+BreakBeforeBinaryOperators: None
+PenaltyBreakAssignment: 50
+
+# Ensure files end with a newline
+InsertNewlineAtEOF: true
