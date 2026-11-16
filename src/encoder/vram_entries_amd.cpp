@@ -15,7 +15,7 @@
 #include <forkunion/types.hpp>   // `fu::standard_yield_t`, `fu::wait_capped_k`
 
 #include "uform/encoder/vram_kits.hpp"      // `vram_amd_entries_kit_t`, `segment_layout_t`, `entries_block_threads_k`
-#include "uform/utilities/vram_drivers.hpp" // `hip_api_t`
+#include "uform/utilities/vram_amd_device.hpp" // `hip_api_t`
 
 namespace fu = ashvardanian::forkunion;
 namespace ue = unum::uform::encoder;

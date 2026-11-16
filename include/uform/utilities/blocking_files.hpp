@@ -2,8 +2,8 @@
  *  @file include/uform/utilities/blocking_files.hpp
  *  @author Ash Vardanian
  *  @date November 9, 2026
- *  @brief Native files read and written at absolute offsets, whole-file mappings, and files
- *      replaced durably, all blocking the calling thread.
+ *  @brief Native files read and written at absolute offsets, whole-file mappings, files replaced
+ *      durably, all blocking the calling thread, and the shared libraries GPU drivers load from.
  *
  *  Every verb takes its path as a view and terminates it on the stack in the encoding the platform
  *  calls take, UTF-16 on Windows, so no verb allocates on the heap. After a crash
@@ -35,6 +35,7 @@
 #include <unistd.h>   // `close`, `pread`, `pwrite`, `fsync`, `fdatasync`
 #endif                // UFORM_OS_WINDOWS_
 #if !UFORM_OS_WINDOWS_ && !UFORM_OS_WASI_
+#include <dlfcn.h>    // `dlopen`, `dlsym` - each GPU driver opened at first use
 #include <sys/mman.h> // `mmap`, `munmap`
 #endif
 
@@ -606,5 +607,42 @@ template <typename writer_type_>
 }
 
 #pragma endregion Durable Files
+
+#pragma region Shared Libraries
+
+/** A shared library opened by name and kept open for the process's life, as the entry points
+ *  resolved from it are never unloaded; empty where the system has no such library or, as on
+ *  WASI, no loader. */
+struct shared_library_t {
+    void* handle = nullptr;
+
+    /** Opens the library named @p name , or answers the empty one. */
+    static shared_library_t open([[maybe_unused]] char const* name) noexcept { // vendor-boundary: a C string
+#if UFORM_OS_WINDOWS_
+        return {reinterpret_cast<void*>(LoadLibraryA(name))}; // vendor-boundary: the loader answers an `HMODULE`
+#elif UFORM_OS_WASI_
+        return {};
+#else
+        return {dlopen(name, RTLD_NOW | RTLD_LOCAL)};
+#endif
+    }
+
+    /** Points @p entry at the symbol exported as @p name , answering whether there is one. */
+    template <typename function_type_>
+    bool resolve([[maybe_unused]] char const* name, function_type_& entry) const noexcept { // vendor-boundary
+        if (!handle) return false;
+#if UFORM_OS_WINDOWS_
+        entry = reinterpret_cast<function_type_>( // vendor-boundary: the loader answers a `FARPROC`
+            GetProcAddress(static_cast<HMODULE>(handle), name));
+#elif !UFORM_OS_WASI_
+        entry = reinterpret_cast<function_type_>(dlsym(handle, name)); // vendor-boundary: `dlsym` answers a `void*`
+#endif
+        return entry != nullptr;
+    }
+
+    explicit operator bool() const noexcept { return handle != nullptr; }
+};
+
+#pragma endregion Shared Libraries
 
 } // namespace unum::uform::utilities
