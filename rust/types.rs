@@ -830,7 +830,7 @@ impl FromStr for CPUClass {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[non_exhaustive]
 pub enum GPUClass {
-    /// Ampere-class NVIDIA and every GPU without a class of its own - A100, A10 & RTX 30.
+    /// Ampere-class NVIDIA - A100, A10 & RTX 30, and newer GPUs whose driver compiles its PTX.
     NVIDIAAmpere = 1,
     /// Ada-class NVIDIA - L4, L40S & RTX 40: the fp8 conversions.
     NVIDIAAda = 2,

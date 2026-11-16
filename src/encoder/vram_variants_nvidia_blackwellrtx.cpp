@@ -8,4 +8,5 @@
 
 #include "encoder_specializations.hpp"
 
-template struct uf::encoder_class_tables<uf::encoder_home_t::vram_nvidia_k, uf::gpu_class_t::nvidia_blackwellrtx_k>;
+template struct uf::encoder_class_tables<uf::vendored_residency_t::vram_nvidia_k,
+                                         uf::gpu_class_t::nvidia_blackwellrtx_k>;

@@ -277,14 +277,13 @@ char const *uform_cpu_class_name(uform_cpu_class_t cpu_class) {
 
 uform_status_t uform_cpu_class_from_name(uform_bytes_view_t name, uform_cpu_class_t *cpu_class) {
     return read_name<uform_cpu_class_t>(
-        name,
-        {uform_cpu_class_serial_k, uform_cpu_class_monoversioned_k, uform_cpu_class_intel_haswell_k,
-         uform_cpu_class_intel_sierra_k, uform_cpu_class_intel_skylake_k, uform_cpu_class_intel_icelake_k,
-         uform_cpu_class_amd_genoa_k, uform_cpu_class_intel_sapphire_k, uform_cpu_class_intel_granite_k,
-         uform_cpu_class_intel_diamond_k, uform_cpu_class_aws_g2_k, uform_cpu_class_apple_m2_k,
-         uform_cpu_class_apple_m4_k, uform_cpu_class_aws_g5_k, uform_cpu_class_nvidia_vera_k,
-         uform_cpu_class_alibaba_c930_k, uform_cpu_class_ibm_power10_k, uform_cpu_class_wasm32_v128_k,
-         uform_cpu_class_wasm64_extended_k},
+        name, {uform_cpu_class_unknown_k,       uform_cpu_class_serial_k,         uform_cpu_class_monoversioned_k,
+               uform_cpu_class_intel_haswell_k, uform_cpu_class_intel_sierra_k,   uform_cpu_class_intel_skylake_k,
+               uform_cpu_class_intel_icelake_k, uform_cpu_class_amd_genoa_k,      uform_cpu_class_intel_sapphire_k,
+               uform_cpu_class_intel_granite_k, uform_cpu_class_intel_diamond_k,  uform_cpu_class_aws_g2_k,
+               uform_cpu_class_apple_m2_k,      uform_cpu_class_apple_m4_k,       uform_cpu_class_aws_g5_k,
+               uform_cpu_class_nvidia_vera_k,   uform_cpu_class_alibaba_c930_k,   uform_cpu_class_ibm_power10_k,
+               uform_cpu_class_wasm32_v128_k,   uform_cpu_class_wasm64_extended_k},
         uform_cpu_class_name, cpu_class);
 }
 

@@ -6,9 +6,9 @@
  *      with, the static bodies each variant's verb table points at, and the class tables a class
  *      unit instantiates once.
  *
- *  Only class units include it. A host class picks its kits from NumKong's mask for the class, a
- *  device class from its generation's mask, and a vendor floor from the vendor's generic kits. A
- *  class whose kits match its parent's answers no table, so the ladder falls to the parent.
+ *  Only class units include it. A host class picks its kits from NumKong's mask for the class, and
+ *  a device class from its generation's mask. A class whose kits match its parent's answers no
+ *  table, so the ladder falls to the parent.
  */
 #pragma once
 
@@ -35,39 +35,28 @@ using ram_tower_of =
                        typename encoder::elementwise_ladder<numkong_capabilities_of(kits_class_)>::kit_t,
                        atomic_ref_for_cpu_class<atomics_class_>::template type>;
 
-/** The mask a device class picks its kits under: its generation's, or its
- *  vendor's generic floor. */
-template <encoder_home_t home_, gpu_class_t gpu_class_>
-inline constexpr nk_capability_t device_capabilities_of = gpu_class_ == gpu_class_t::unknown_k
-                                                              ? vendor_of(home_)
-                                                              : numkong_capabilities_of(gpu_class_);
-
-/** The device tower one GPU class runs. Its unit compiles for the serial CPU class, so its load
- *  stages through that class's element-wise kit. */
-template <encoder_home_t home_, gpu_class_t gpu_class_>
+/** The device tower one GPU class runs. Its load stages through the element-wise kit of the
+ *  build's CPU floor, so a monoversioned build links no other host kit. */
+template <vendored_residency_t residency_, gpu_class_t gpu_class_>
 using vram_tower_of =
-    encoder::vram_tower<typename encoder::vram_products_ladder<device_capabilities_of<home_, gpu_class_>>::kit_t,
-                        typename encoder::vram_attention_ladder<device_capabilities_of<home_, gpu_class_>>::kit_t,
-                        typename encoder::vram_elementwise_ladder<device_capabilities_of<home_, gpu_class_>>::kit_t,
-                        entries_kit_of<home_>,
-                        typename encoder::elementwise_ladder<numkong_capabilities_of(cpu_class_t::serial_k)>::kit_t>;
+    encoder::vram_tower<typename encoder::vram_products_ladder<numkong_capabilities_of(gpu_class_)>::kit_t,
+                        typename encoder::vram_attention_ladder<numkong_capabilities_of(gpu_class_)>::kit_t,
+                        typename encoder::vram_elementwise_ladder<numkong_capabilities_of(gpu_class_)>::kit_t,
+                        entries_kit_of<residency_>,
+                        typename encoder::elementwise_ladder<numkong_capabilities_of(cpu_ladder_floor_k)>::kit_t>;
 
-/** Whether a host class picks kits its parent does not; the serial floor always does, and so
- *  does a class whose parent the build left out, as a monoversioned build leaves serial. Both
- *  sides take the class's own atomic reference, as each class names it through an alias template
- *  of its own. */
-template <cpu_class_t cpu_class_>
-constexpr bool ram_variant_advances() noexcept {
-    if constexpr (cpu_class_ == cpu_class_t::serial_k || !cpu_class_compiled(parent_class_of(cpu_class_))) return true;
-    else return !std::is_same_v<ram_tower_of<cpu_class_>, ram_tower_of<parent_class_of(cpu_class_), cpu_class_>>;
-}
-
-/** Whether a device class picks a tower its parent does not; the vendor floor always does, and so
- *  does a class whose parent the build left out. */
-template <encoder_home_t home_, gpu_class_t gpu_class_>
-constexpr bool vram_variant_advances() noexcept {
-    if constexpr (gpu_class_ == gpu_class_t::unknown_k || !gpu_class_compiled(parent_class_of(gpu_class_))) return true;
-    else return !std::is_same_v<vram_tower_of<home_, gpu_class_>, vram_tower_of<home_, parent_class_of(gpu_class_)>>;
+/** Whether a class picks kits its parent does not; the serial floor always does, and so does a
+ *  class whose parent the build left out, like the oldest GPU class or a monoversioned build's one
+ *  class. A host class takes its own atomic reference on both sides, as each names it through an
+ *  alias template of its own. */
+template <vendored_residency_t residency_, auto class_>
+consteval bool class_advances() noexcept {
+    if constexpr (residency_ == vendored_residency_t::ram_k) {
+        if constexpr (class_ == cpu_class_t::serial_k || !cpu_class_compiled(parent_class_of(class_))) return true;
+        else return !std::is_same_v<ram_tower_of<class_>, ram_tower_of<parent_class_of(class_), class_>>;
+    }
+    else if constexpr (!gpu_class_compiled(parent_class_of(class_))) return true;
+    else return !std::is_same_v<vram_tower_of<residency_, class_>, vram_tower_of<residency_, parent_class_of(class_)>>;
 }
 
 #pragma endregion Residencies
@@ -133,28 +122,28 @@ struct vram_bodies {
     }
 };
 
-template <encoder_home_t home_, auto class_>
-encoder_verbs<home_> const *encoder_class_tables<home_, class_>::find() noexcept {
-    if constexpr (home_ == encoder_home_t::ram_k) {
-        if constexpr (!ram_variant_advances<class_>()) return nullptr;
+template <vendored_residency_t residency_, auto class_>
+encoder_verbs<residency_> const *encoder_class_tables<residency_, class_>::find() noexcept {
+    if constexpr (residency_ == vendored_residency_t::ram_k) {
+        if constexpr (!class_advances<residency_, class_>()) return nullptr;
         else {
             using bodies_t = ram_bodies<ram_tower_of<class_>>;
-            static constexpr encoder_verbs<home_> verbs_k {class_,
-                                                           gpu_class_t::unknown_k,
-                                                           &bodies_t::create,
-                                                           &bodies_t::destroy,
-                                                           &bodies_t::scratch_bytes,
-                                                           &bodies_t::encode};
+            static constexpr encoder_verbs<residency_> verbs_k {class_,
+                                                                gpu_class_t::unknown_k,
+                                                                &bodies_t::create,
+                                                                &bodies_t::destroy,
+                                                                &bodies_t::scratch_bytes,
+                                                                &bodies_t::encode};
             return &verbs_k;
         }
     }
     else {
-        if constexpr (!vram_variant_advances<home_, class_>()) return nullptr;
+        if constexpr (!class_advances<residency_, class_>()) return nullptr;
         else {
-            using bodies_t = vram_bodies<vram_tower_of<home_, class_>, device_capabilities_of<home_, class_>>;
-            static constexpr encoder_verbs<home_> verbs_k {cpu_class_t::unknown_k,   class_,
-                                                           &bodies_t::create,        &bodies_t::destroy,
-                                                           &bodies_t::scratch_bytes, &bodies_t::encode};
+            using bodies_t = vram_bodies<vram_tower_of<residency_, class_>, numkong_capabilities_of(class_)>;
+            static constexpr encoder_verbs<residency_> verbs_k {cpu_class_t::unknown_k,   class_,
+                                                                &bodies_t::create,        &bodies_t::destroy,
+                                                                &bodies_t::scratch_bytes, &bodies_t::encode};
             return &verbs_k;
         }
     }
@@ -170,6 +159,12 @@ void host_class_tables<cpu_class_>::wait(u64_t &word, u64_t seen) noexcept {
 
 template <cpu_class_t cpu_class_>
 host_verbs_t const *host_class_tables<cpu_class_>::find() noexcept {
+    constexpr cpu_class_t parent_k = parent_class_of(cpu_class_);
+    static_assert(class_advances<vendored_residency_t::ram_k, cpu_class_>() ||
+                      !std::is_same_v<waiter_of<cpu_class_>, waiter_of<parent_k>> ||
+                      !std::is_same_v<typename atomic_ref_for_cpu_class<cpu_class_>::template type<u64_t>,
+                                      typename atomic_ref_for_cpu_class<parent_k>::template type<u64_t>>,
+                  "A compiled class no longer advances past the one below");
     static constexpr host_verbs_t verbs_k {&host_class_tables::wait};
     return &verbs_k;
 }

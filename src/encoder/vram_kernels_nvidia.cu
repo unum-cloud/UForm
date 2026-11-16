@@ -13,7 +13,7 @@
 
 #include <type_traits> // `std::is_same_v`
 
-#include <numkong/types.h>       // `NUMKONG_ARCH_CUDA_`, which the SIMT casts test before including it
+#include <numkong/types.h>       // NumKong's vendor flag, which the SIMT casts test before including it
 #include <numkong/cast/simt.cuh> // `nk_bf16_to_f32_simt_`, `nk_f32_to_bf16_simt_`, `nk_f32_to_e4m3_simt_`
 
 #include "uform/encoder/tower_kernels.cuh" // the bodies every vendor's kernels share with training

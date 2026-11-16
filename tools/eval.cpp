@@ -48,7 +48,7 @@
 #include <yyjson.h>     // `yyjson_read_file`
 
 #include <forkunion/atomics.hpp>           // `fu::standard_atomic_ref` - the scoring threads
-#include <numkong/capabilities.h>          // `nk_cpu_capabilities_enabled`
+#include <numkong/capabilities.h>          // `nk_capabilities_enabled_cpu`
 #include <numkong/dots.h>                  // `nk_dots_pack_f32_best`, `nk_dots_packed_f32_best`
 #include <smashtable/basic_hash_table.hpp> // `hash_map` — COCO image IDs to their files
 #include <smashtable/basic_vector.hpp>     // `basic_vector` — every growable table here
@@ -444,7 +444,7 @@ static constexpr std::size_t score_block_rows_k = 64;
     // A caption's one target is its own medium.
     for (std::size_t query = 0; query <= queries; ++query) owner_offsets[query] = query;
     nk_capability_t capabilities = 0;
-    if (nk_cpu_capabilities_enabled(&capabilities) != nk_success_k) return false;
+    if (nk_capabilities_enabled_cpu(&capabilities) != nk_success_k) return false;
     expected<topology_t> topology = topology_t::make();
     if (!topology) return false;
     expected<executor_t> pool = executor_t::make(*topology,

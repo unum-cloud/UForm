@@ -119,9 +119,9 @@ static std::unique_ptr<uform_model_handle_t> start_model(expected<checkpoint_to_
 
 /** Packs one tower of @p model from @p checkpoint through @p verbs on @p stream , null on the host;
  *  null once @p outcome records why not. */
-template <encoder_home_t home_>
+template <vendored_residency_t residency_>
 static void *pack_tower(uform_model_handle_t &model, checkpoint_to_load_t const &checkpoint,
-                        encoder_verbs<home_> const &verbs, nk_stream_t stream, uform_outcome_t *outcome) noexcept {
+                        encoder_verbs<residency_> const &verbs, nk_stream_t stream, uform_outcome_t *outcome) noexcept {
     expected<void *> packed = verbs.create(checkpoint, model.geometry, model.precision, stream);
     if (!packed) return propagate_load_failure(packed.status_, load_stage_t::packing_k, outcome), nullptr;
     model.memory_usage += tower_bytes(model.geometry, model.precision);
@@ -137,7 +137,7 @@ static bool host_ceiling(uform_executor_t executor, uform_cpu_class_t pinned, cp
         return propagate_error(uform_status_device_k, outcome, "A RAM load needs a RAM executor or none");
     if (ram && pinned == uform_cpu_class_unknown_k) return ceiling = ram->ceiling, true;
     expected<cpu_ceiling_t> picked = pick_cpu_ceiling(pinned);
-    if (!picked) return propagate_error(uform_status_unsupported_k, outcome, "The CPU does not admit the pinned class");
+    if (!picked) return propagate_error(status_of(picked.status_), outcome, "The CPU does not admit the pinned class");
     ceiling = *picked;
     if (ram && ((ceiling.compute & ~ram->ceiling.compute) || (ceiling.sync & ~ram->ceiling.sync)))
         return propagate_error(uform_status_unsupported_k, outcome, "The executor does not admit the pinned class");
@@ -151,7 +151,7 @@ static void load_ram(uform_model_t *output, uform_executor_t executor, uform_ram
                      uform_outcome_t *outcome) noexcept {
     cpu_ceiling_t ceiling;
     if (!host_ceiling(executor, ram_options.cpu_class, ceiling, outcome)) return;
-    encoder_verbs<encoder_home_t::ram_k> const *const verbs = pick_cpu_variant(cpu_ladder_t {}, ceiling);
+    encoder_verbs<vendored_residency_t::ram_k> const *const verbs = pick_cpu_variant(cpu_ladder_t {}, ceiling);
     std::unique_ptr<uform_model_handle_t> model = start_model(loaded, precision, outcome);
     if (!model) return;
     model->tables = verbs;
@@ -165,20 +165,20 @@ static void load_ram(uform_model_t *output, uform_executor_t executor, uform_ram
 
 /** Packs one replica per device of @p devices that @p vram names through the newest class of
  *  @p ladder_type_ every one of them runs; false once @p outcome records why not. */
-template <encoder_home_t home_, typename ladder_type_>
+template <vendored_residency_t residency_, typename ladder_type_>
 static bool load_replicas(uform_model_handle_t &model, checkpoint_to_load_t const &checkpoint, vram_executor_t &devices,
                           uform_vram_options_t const &vram, progress_ticks_t &ticks,
                           uform_outcome_t *outcome) noexcept {
     per_gpu_array<vram_replica_t> &replicas = std::get<per_gpu_array<vram_replica_t>>(model.towers);
-    encoder_verbs<home_> const *verbs = nullptr;
+    encoder_verbs<residency_> const *verbs = nullptr;
     std::size_t placed = 0;
     for (vram_device_t &device : devices.devices) {
         std::size_t named = !vram.devices_count;
         for (std::size_t listed = 0; listed != vram.devices_count; ++listed)
             named += device.ordinal == vram.devices[listed];
         if (!named) continue;
-        encoder_verbs<home_> const *const picked = pick_gpu_variant<home_>(ladder_type_ {}, vram.gpu_class,
-                                                                           device.capabilities);
+        encoder_verbs<residency_> const *const picked = pick_gpu_variant<residency_>(ladder_type_ {}, vram.gpu_class,
+                                                                                     device.capabilities);
         if (!picked)
             return propagate_error(uform_status_unsupported_k, outcome,
                                    "A device runs no compiled class under the pin");
@@ -217,9 +217,9 @@ static void load_vram(uform_model_t *output, uform_executor_t executor, uform_vr
     if (!model) return;
     model->towers.emplace<per_gpu_array<vram_replica_t>>();
     progress_ticks_t ticks {progress, devices->devices.size()};
-    bool const packed = visit_vram_home(
-        devices->devices[0].capabilities, [&]<encoder_home_t home_, typename ladder_type_>() noexcept {
-            return load_replicas<home_, ladder_type_>(*model, *loaded, *devices, vram, ticks, outcome);
+    bool const packed = visit_vram_residency(
+        devices->devices[0].capabilities, [&]<vendored_residency_t residency_, typename ladder_type_>() noexcept {
+            return load_replicas<residency_, ladder_type_>(*model, *loaded, *devices, vram, ticks, outcome);
         });
     if (!packed) return;
     *output = model.release();

@@ -225,12 +225,12 @@ PyObject *uform_py_enum_to_object(uform_py_enum_t const *mirrored, int value);
 
 /**
  *  @brief Reads an optional @c CPUClass or @c GPUClass pin, as @p classes names; NULL or None
- *      leaves @p value at zero, the unknown class that derives the hardware's own.
+ *      leaves @p value at zero, the unknown class of either kind, which derives the hardware's own.
  *  @return 0 on success, -1 with an exception set otherwise.
  */
 int uform_py_class_from_object(PyObject *object, char const *field, uform_py_enum_t const *classes, int *value);
 
-/** The member of @p classes valued @p value, or None for the unknown class; NULL on failure. */
+/** The member of @p classes valued @p value, or None for zero; NULL on failure. */
 PyObject *uform_py_class_to_object(uform_py_enum_t const *classes, int value);
 
 /** What one field of a keyword-built structure holds, and how it reaches the C structure. */

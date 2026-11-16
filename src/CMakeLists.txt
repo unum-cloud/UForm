@@ -44,13 +44,15 @@ function (uform_gpu_bundle target_ vendor_ name_ source_)
         foreach (code_ IN LISTS arg_CODES)
             list(APPEND offload_ --offload-arch=${code_})
         endforeach ()
+        set(includes_ "-I$<JOIN:$<TARGET_PROPERTY:${target_},INCLUDE_DIRECTORIES>,$<SEMICOLON>-I>")
+        set(definitions_ "-D$<JOIN:$<TARGET_PROPERTY:${target_},COMPILE_DEFINITIONS>,$<SEMICOLON>-D>")
+        # Clang writes no dependencies from a device-only pass, so a preprocessing pass of both sides writes them first
         add_custom_command(
             OUTPUT ${bundle_}
-            COMMAND
-                ${CMAKE_HIP_COMPILER} -x hip --cuda-device-only -c -std=c++23 -O3 ${offload_}
-                "-I$<JOIN:$<TARGET_PROPERTY:${target_},INCLUDE_DIRECTORIES>,;-I>"
-                "-D$<JOIN:$<TARGET_PROPERTY:${target_},COMPILE_DEFINITIONS>,;-D>" -MD -MF ${bundle_}.d
-                ${CMAKE_CURRENT_SOURCE_DIR}/${source_} -o ${bundle_}
+            COMMAND ${CMAKE_HIP_COMPILER} -x hip -std=c++23 ${offload_} ${includes_} ${definitions_} -M -MT ${bundle_}
+                    -MF ${bundle_}.d ${CMAKE_CURRENT_SOURCE_DIR}/${source_}
+            COMMAND ${CMAKE_HIP_COMPILER} -x hip --cuda-device-only -c -std=c++23 -O3 ${offload_} ${includes_}
+                    ${definitions_} ${CMAKE_CURRENT_SOURCE_DIR}/${source_} -o ${bundle_}
             DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${source_}
             DEPFILE ${bundle_}.d
             COMMENT "Compiling the ${name_} kernels"
@@ -111,7 +113,7 @@ function (uform_cpu_class class_ target_macro_)
             math(EXPR macro_index_ "${index_} + 1")
             list(GET arg_UNPARSED_ARGUMENTS ${index_} capability_)
             list(GET arg_UNPARSED_ARGUMENTS ${macro_index_} capability_macro_)
-            if (numkong_target_${capability_}_enabled OR uform_target_${capability_}_compiles_)
+            if (numkong_target_${capability_}_compiled OR uform_target_${capability_}_compiles_)
                 list(APPEND definitions_ NUMKONG_TARGET_${capability_macro_}=1)
             else ()
                 set(exists_ FALSE)
@@ -120,7 +122,7 @@ function (uform_cpu_class class_ target_macro_)
     endif ()
     # ForkUnion's verdicts reach every class unit through `forkunion::cpu_capabilities_compiled`, so they add no flags.
     foreach (capability_ IN LISTS arg_FORKUNION)
-        if (NOT forkunion_target_${capability_}_enabled)
+        if (NOT forkunion_target_${capability_}_compiled)
             set(exists_ FALSE)
         endif ()
     endforeach ()
@@ -160,6 +162,9 @@ uform_cpu_class(
     ALDER
     sierra
     SIERRA
+    FORKUNION
+    x86_tpause
+    x86_cmpccxadd
 )
 uform_cpu_class(intel_skylake INTEL_SKYLAKE OVER intel_haswell skylake SKYLAKE)
 uform_cpu_class(intel_icelake INTEL_ICELAKE OVER intel_skylake icelake ICELAKE)
@@ -174,12 +179,14 @@ uform_cpu_class(
     sapphireamx
     SAPPHIREAMX
 )
-uform_cpu_class(intel_granite INTEL_GRANITE OVER intel_sapphire graniteamx GRANITEAMX)
+# no intel_granite row: it adds no kit over Sapphire until UForm multiplies f16 or e5m2
 uform_cpu_class(
     intel_diamond
     INTEL_DIAMOND
     OVER
-    intel_granite
+    intel_sapphire
+    graniteamx
+    GRANITEAMX
     alder
     ALDER
     sierra
@@ -210,14 +217,8 @@ uform_cpu_class(
     smebi32
     SMEBI32
 )
-uform_cpu_class(
-    nvidia_vera
-    NVIDIA_VERA
-    OVER
-    apple_m2
-    neonfp8
-    NEONFP8
-)
+uform_cpu_class(aws_g5 AWS_G5 OVER apple_m2)
+uform_cpu_class(nvidia_vera NVIDIA_VERA OVER apple_m2 neonfp8 NEONFP8)
 uform_cpu_class(
     alibaba_c930
     ALIBABA_C930
@@ -237,6 +238,9 @@ uform_cpu_class(
     POWERVSX
     powermma
     POWERMMA
+    FORKUNION
+    ppc64_pause
+    ppc64_amo
 )
 uform_cpu_class(wasm32_v128 WASM32_V128 OVER serial v128 V128)
 uform_cpu_class(wasm64_extended WASM64_EXTENDED OVER wasm32_v128 v128relaxed V128RELAXED)
@@ -246,9 +250,9 @@ uform_cpu_class(wasm64_extended WASM64_EXTENDED OVER wasm32_v128 v128relaxed V12
 set(uform_class_monoversioned_macro_ MONOVERSIONED)
 list(APPEND uform_cpu_rows_ monoversioned)
 if (NOT UFORM_MULTIVERSIONED)
-    get_property(uform_capabilities_enabled_ GLOBAL PROPERTY numkong_capabilities_enabled)
-    get_property(forkunion_capabilities_enabled_ GLOBAL PROPERTY forkunion_capabilities_enabled)
-    list(APPEND uform_capabilities_enabled_ ${forkunion_capabilities_enabled_})
+    get_property(uform_capabilities_compiled_ GLOBAL PROPERTY numkong_capabilities_compiled)
+    get_property(forkunion_capabilities_compiled_ GLOBAL PROPERTY forkunion_capabilities_compiled)
+    list(APPEND uform_capabilities_compiled_ ${forkunion_capabilities_compiled_})
     set(uform_class_monoversioned_kept_ TRUE)
     set(uform_class_monoversioned_definitions_
         "$<TARGET_PROPERTY:numkong::cpu_capabilities_compiled,INTERFACE_COMPILE_DEFINITIONS>"
@@ -266,26 +270,30 @@ endforeach ()
 
 # The GPU classes compile no device code of their own: NumKong's libraries carry every generation's kernels, and one
 # bundle per vendor carries UForm's entries. So a class is a host unit picking its generation's kits, and exists where
-# NumKong enabled the capability after its name for some code UForm names; the vendor-wide class `nvidia` or `amd`, on
-# NumKong's generic kits, runs every device of the vendor without a class of its own. A monoversioned build keeps the
-# newest class of each lineage, and the vendor-wide one. Their units see `NUMKONG_ARCH_<VENDOR>_` and NumKong's
-# `numkong_<vendor>_capabilities_compiled_`, which declare the generations its library compiled, and `uform_host` reads
-# each vendor as `UFORM_ARCH_CUDA_` or `UFORM_ARCH_ROCM_` and each class as `UFORM_TARGET_<CLASS>`, 1 when built and 0
-# otherwise. Rubin runs the Blackwell class through `parent_class_of`, so it compiles nothing of its own.
+# NumKong enabled the capability after its name for some code UForm names; each vendor's oldest class is its floor, and
+# configure stops on a code no class claims. A monoversioned build keeps one class per vendor, the newest that exists.
+# Their units link NumKong's published `numkong::<vendor>_capabilities_compiled`, which declares the generations its
+# library compiled, and `uform_host` reads each vendor as `UFORM_ARCH_CUDA_` or `UFORM_ARCH_ROCM_` and each class as
+# `UFORM_TARGET_<CLASS>`, 1 when built and 0 otherwise. A device runs a class where NumKong's loader runs all its kits.
+# Rubin runs the Blackwell class through `parent_class_of`, so it compiles nothing of its own.
 set(uform_gpu_gates_ "UFORM_ARCH_CUDA_=$<BOOL:${UFORM_CUDA_ARCH}>" "UFORM_ARCH_ROCM_=$<BOOL:${UFORM_ROCM_ARCH}>")
-# Declares the GPU class @p class_ of @p vendor_, gated as `UFORM_TARGET_<target_macro>`, over NumKong's @p capability_
-# and the class named after `OVER`.
+# Declares the GPU class @p class_ of @p vendor_, gated as `UFORM_TARGET_<target_macro>`, over NumKong's @p capability_;
+# classes are declared oldest first, so in a monoversioned build each one that exists drops the ones before it.
 function (uform_gpu_class vendor_ class_ target_macro_ capability_)
-    cmake_parse_arguments(PARSE_ARGV 4 arg "" "OVER" "")
-    set(kept_ ${numkong_target_${capability_}_enabled})
-    if (kept_
-        AND arg_OVER
-        AND NOT UFORM_MULTIVERSIONED
-    )
-        set(uform_class_${arg_OVER}_kept_
-            FALSE
+    set(kept_ ${numkong_target_${capability_}_compiled})
+    if (kept_)
+        set(uform_${vendor_}_claimed_
+            ${uform_${vendor_}_claimed_} ${numkong_target_${capability_}_architectures}
             PARENT_SCOPE
         )
+    endif ()
+    if (kept_ AND NOT UFORM_MULTIVERSIONED)
+        foreach (older_ IN LISTS uform_${vendor_}_classes_)
+            set(uform_class_${older_}_kept_
+                FALSE
+                PARENT_SCOPE
+            )
+        endforeach ()
     endif ()
     set(uform_class_${class_}_kept_
         ${kept_}
@@ -300,24 +308,36 @@ function (uform_gpu_class vendor_ class_ target_macro_ capability_)
         PARENT_SCOPE
     )
 endfunction ()
+# Stops configure on a code of @p vendor_ after it, without CMake's "-real" or "-virtual" or a ROCm target ID's
+# ":xnack-", that no class of the vendor claims, as no device could pick a class for it.
+function (uform_gpu_codes_claimed vendor_)
+    foreach (code_ IN LISTS ARGN)
+        if (code_ MATCHES "^([^-:]+)")
+            set(architecture_ ${CMAKE_MATCH_1})
+        endif ()
+        if (NOT architecture_ IN_LIST uform_${vendor_}_claimed_)
+            message(FATAL_ERROR "UForm: no GPU class runs ${code_}; name an architecture a class claims")
+        endif ()
+    endforeach ()
+endfunction ()
 if (UFORM_CUDA_ARCH)
     set(uform_nvidia_classes_)
-    set(uform_nvidia_definitions_ "NUMKONG_ARCH_CUDA_=1")
-    set(uform_class_nvidia_kept_ TRUE)
+    set(uform_nvidia_claimed_)
     uform_gpu_class(nvidia nvidia_ampere NVIDIA_AMPERE ampere)
-    uform_gpu_class(nvidia nvidia_ada NVIDIA_ADA ada OVER nvidia_ampere)
-    uform_gpu_class(nvidia nvidia_hopper NVIDIA_HOPPER hopper OVER nvidia_ada)
-    uform_gpu_class(nvidia nvidia_blackwell NVIDIA_BLACKWELL blackwell OVER nvidia_ada)
-    uform_gpu_class(nvidia nvidia_blackwellrtx NVIDIA_BLACKWELLRTX blackwellrtx OVER nvidia_ada)
+    uform_gpu_class(nvidia nvidia_ada NVIDIA_ADA ada)
+    uform_gpu_class(nvidia nvidia_hopper NVIDIA_HOPPER hopper)
+    uform_gpu_class(nvidia nvidia_blackwell NVIDIA_BLACKWELL blackwell)
+    uform_gpu_class(nvidia nvidia_blackwellrtx NVIDIA_BLACKWELLRTX blackwellrtx)
+    uform_gpu_codes_claimed(nvidia ${CMAKE_CUDA_ARCHITECTURES})
 endif ()
 if (UFORM_ROCM_ARCH)
     enable_language(ASM)
     set(uform_amd_classes_)
-    set(uform_amd_definitions_ "NUMKONG_ARCH_ROCM_=1")
-    set(uform_class_amd_kept_ TRUE)
+    set(uform_amd_claimed_)
     uform_gpu_class(amd amd_cdna3 AMD_CDNA3 cdna3)
-    uform_gpu_class(amd amd_cdna4 AMD_CDNA4 cdna4 OVER amd_cdna3)
-    uform_gpu_class(amd amd_cdna5 AMD_CDNA5 cdna5 OVER amd_cdna4)
+    uform_gpu_class(amd amd_cdna4 AMD_CDNA4 cdna4)
+    uform_gpu_class(amd amd_cdna5 AMD_CDNA5 cdna5)
+    uform_gpu_codes_claimed(amd ${CMAKE_HIP_ARCHITECTURES})
 endif ()
 foreach (class_ IN LISTS uform_nvidia_classes_ uform_amd_classes_)
     list(APPEND uform_gpu_gates_ "UFORM_TARGET_${uform_class_${class_}_macro_}=$<BOOL:${uform_class_${class_}_kept_}>")
@@ -330,7 +350,7 @@ endif ()
 if (UFORM_MULTIVERSIONED)
     message(STATUS "UForm: multiversioned above ${uform_floor_}")
 else ()
-    message(STATUS "UForm: monoversioned for ${uform_floor_}: ${uform_capabilities_enabled_}")
+    message(STATUS "UForm: monoversioned for ${uform_floor_}: ${uform_capabilities_compiled_}")
 endif ()
 
 # Declares the @p modality_ variants resident in @p residency_ on @p backend_, over the kept classes after it, as
@@ -354,9 +374,7 @@ function (uform_variants modality_ residency_ backend_)
     target_include_directories(
         ${library_} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/c"
     )
-    target_compile_definitions(
-        ${library_} PRIVATE ${uform_${backend_}_definitions_} ${uform_cpu_gates_} ${uform_gpu_gates_}
-    )
+    target_compile_definitions(${library_} PRIVATE ${uform_cpu_gates_} ${uform_gpu_gates_})
     target_link_libraries(
         ${library_} PRIVATE numkong::static forkunion::header stringzilla::static smashtable::header yyjson
                             $<BUILD_INTERFACE:forkunion::cpu_capabilities_compiled>
@@ -381,11 +399,11 @@ else ()
 endif ()
 uform_variants(encoder ram cpu ${uform_cpu_classes_})
 if (UFORM_CUDA_ARCH)
-    uform_variants(encoder vram nvidia nvidia ${uform_nvidia_classes_})
+    uform_variants(encoder vram nvidia ${uform_nvidia_classes_})
     target_sources(uform_encoder_vram_nvidia_variants PRIVATE encoder/vram_entries_nvidia.cpp)
     target_link_libraries(
         uform_encoder_vram_nvidia_variants
-        PRIVATE $<BUILD_INTERFACE:numkong_cuda_capabilities_compiled_>
+        PRIVATE $<BUILD_INTERFACE:numkong::cuda_capabilities_compiled>
         PUBLIC ${CMAKE_DL_LIBS}
     )
     uform_gpu_bundle(
@@ -398,11 +416,11 @@ if (UFORM_CUDA_ARCH)
     target_compile_options(uform_encoder_nvidia_device PRIVATE --expt-relaxed-constexpr)
 endif ()
 if (UFORM_ROCM_ARCH)
-    uform_variants(encoder vram amd amd ${uform_amd_classes_})
+    uform_variants(encoder vram amd ${uform_amd_classes_})
     target_sources(uform_encoder_vram_amd_variants PRIVATE encoder/vram_entries_amd.cpp)
     target_link_libraries(
         uform_encoder_vram_amd_variants
-        PRIVATE $<BUILD_INTERFACE:numkong_rocm_capabilities_compiled_>
+        PRIVATE $<BUILD_INTERFACE:numkong::rocm_capabilities_compiled>
         PUBLIC ${CMAKE_DL_LIBS}
     )
     uform_gpu_bundle(
@@ -544,7 +562,7 @@ if (UFORM_BUILD_TRAIN)
     # The envelope probe reads this process's device bytes from NVML, which ships with the driver like libcuda.
     target_link_libraries(uform_train PRIVATE CUDA::nvml)
     # `gpu_numerics_of` fills each GPU class's table from the rungs NumKong compiled.
-    target_link_libraries(uform_train PRIVATE $<BUILD_INTERFACE:numkong_cuda_capabilities_compiled_>)
+    target_link_libraries(uform_train PRIVATE $<BUILD_INTERFACE:numkong::cuda_capabilities_compiled>)
     # The items source plans and decodes caller media through the host decoders `uform_host` compiled, and those
     # objects name the encoder's variants, so the archive carries them too.
     target_link_libraries(uform_train PRIVATE uform_host ${uform_encoder_variants_})

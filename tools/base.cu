@@ -110,7 +110,7 @@ using namespace unum::uform::train;
     for (int device = 0; device != device_count; ++device)
         if (st::failed(devices.push_back(static_cast<i32_t>(device))))
             return fail_out_("device table allocation failed");
-    if (nk_cuda_capabilities_enabled(0, &options.capabilities) != nk_success_k)
+    if (nk_capabilities_enabled_cuda(0, &options.capabilities) != nk_success_k)
         return fail_out_("NumKong cannot query device 0");
 
     mesh_t mesh;

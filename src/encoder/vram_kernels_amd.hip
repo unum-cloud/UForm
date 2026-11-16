@@ -17,7 +17,7 @@
 
 #include <hip/hip_runtime.h> // `__global__`, `blockIdx`, `__syncthreads`
 
-#include <numkong/types.h>       // `NUMKONG_ARCH_ROCM_`, which the SIMT casts test before including it
+#include <numkong/types.h>       // NumKong's vendor flag, which the SIMT casts test before including it
 #include <numkong/cast/simt.cuh> // `nk_bf16_to_f32_simt_`, `nk_f32_to_bf16_simt_`, `nk_f32_to_e4m3_simt_`
 
 #include "uform/encoder/tower_kernels.cuh" // the bodies every vendor's kernels share with training

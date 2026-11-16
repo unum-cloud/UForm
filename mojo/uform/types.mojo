@@ -330,7 +330,7 @@ struct CPUClass(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     var code: c_int
     """The raw `uform_cpu_class_t` value the ABI exchanges."""
     comptime UNKNOWN = Self(0)
-    """Derives the CPU's own class."""
+    """Picks the newest class this machine runs."""
     comptime SERIAL = Self(1)
     """The portable floor: no SIMD assumptions."""
     comptime MONOVERSIONED = Self(2)
@@ -380,7 +380,7 @@ struct GPUClass(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     comptime UNKNOWN = Self(0)
     """Derives the devices' own class."""
     comptime NVIDIA_AMPERE = Self(1)
-    """Ampere-class NVIDIA and every GPU without a class of its own."""
+    """Ampere-class NVIDIA, and newer GPUs whose driver compiles its PTX."""
     comptime NVIDIA_ADA = Self(2)
     """Ada-class NVIDIA: the fp8 conversions."""
     comptime NVIDIA_HOPPER = Self(3)

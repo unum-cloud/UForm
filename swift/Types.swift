@@ -240,7 +240,7 @@ public struct GPUClass: Hashable, Sendable, CustomStringConvertible {
     /// The C enumerator.
     let raw: uform_gpu_class_t
 
-    /// Ampere-class NVIDIA, and every NVIDIA GPU without a class of its own.
+    /// Ampere-class NVIDIA, and newer GPUs whose driver compiles its PTX.
     public static let nvidiaAmpere = GPUClass(raw: uform_gpu_class_nvidia_ampere_k)
     /// Ada-class NVIDIA: the fp8 conversions.
     public static let nvidiaAda = GPUClass(raw: uform_gpu_class_nvidia_ada_k)

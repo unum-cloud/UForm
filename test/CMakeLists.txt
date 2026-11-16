@@ -11,6 +11,22 @@ add_executable(uform_test_inference inference.cpp)
 target_link_libraries(uform_test_inference PRIVATE uform_host ${uform_encoder_variants_} fmt::fmt)
 add_test(NAME uform_test_inference COMMAND uform_test_inference "${PROJECT_BINARY_DIR}/tiny.safetensors")
 set_tests_properties(uform_test_inference PROPERTIES FIXTURES_REQUIRED uform_tiny_checkpoint LABELS host)
+# The entries bundles hold UForm's kernels alone: no NumKong or StringZilla kernel or device table rides along.
+if (UFORM_CUDA_ARCH OR UFORM_ROCM_ARCH)
+    if (UFORM_CUDA_ARCH)
+        find_program(uform_test_cuobjdump_ cuobjdump HINTS ${CUDAToolkit_BIN_DIR} REQUIRED)
+    endif ()
+    if (UFORM_ROCM_ARCH)
+        find_program(uform_test_offload_bundler_ clang-offload-bundler HINTS /opt/rocm/llvm/bin REQUIRED)
+        find_program(uform_test_readelf_ llvm-readelf HINTS /opt/rocm/llvm/bin REQUIRED)
+    endif ()
+    add_test(
+        NAME uform_test_gpu_bundles
+        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/bundles.sh ${PROJECT_BINARY_DIR}/src/bundles "${uform_test_cuobjdump_}"
+                "${uform_test_offload_bundler_}" "${uform_test_readelf_}" ${CMAKE_HIP_ARCHITECTURES}
+    )
+    set_tests_properties(uform_test_gpu_bundles PROPERTIES LABELS host)
+endif ()
 # Under Emscripten the suites run in Node, reading and writing the build tree's real files.
 if (EMSCRIPTEN)
     target_link_options(uform_tiny_checkpoint PRIVATE "-sNODERAWFS")

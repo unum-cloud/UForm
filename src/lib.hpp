@@ -34,15 +34,15 @@
 #include <forkunion/capabilities.hpp> // `fu::x86_pause_t`, `fu::arm64_wfet_t` & waiter kin
 #include <forkunion/types.hpp>        // `fu::spin_mutex_t`, `fu::wait_capped_k`
 #include <numkong/capabilities.h>     // `nk_capability_t`, `nk_stream_t`
-#include <numkong/memory.h>       // `nk_allocator_t`, `nk_allocator_init_heap`
-#include <numkong/memory.hpp>     // `nk::stream_t` - the stream an executor owns
+#include <numkong/memory.h>           // `nk_allocator_t`, `nk_allocator_init_heap`
+#include <numkong/memory.hpp>         // `nk::stream_t` - the stream an executor owns
 
 #include "uform/uform.h" // every argument structure
 
 #include "uform/utilities/array.hpp"      // `per_gpu_array`
 #include "uform/utilities/ram_device.hpp" // `executor_t`, `lent_pool_t`, `pool_view_t`, `topology_t`
 #include "uform/utilities/types.hpp"      // `status_t`, the integer aliases, `sz::string_view_t`, `st::basic_vector`
-#include "uform/encoder/tower.hpp"   // `geometry_t`, `precision_t`, `outputs_t` - what a model's towers take
+#include "uform/encoder/tower.hpp"        // `geometry_t`, `precision_t`, `outputs_t` - what a model's towers take
 
 namespace unum::uform {
 
@@ -207,7 +207,7 @@ constexpr nk_capability_t numkong_capabilities_of(cpu_class_t cpu_class) noexcep
     case cpu_class_t::wasm32_v128_k: return nk_cap_serial_k | nk_cap_v128_k;
     case cpu_class_t::wasm64_extended_k:
         return numkong_capabilities_of(cpu_class_t::wasm32_v128_k) | nk_cap_v128relaxed_k;
-    case cpu_class_t::monoversioned_k: return nk_cpu_capabilities_compiled_();
+    case cpu_class_t::monoversioned_k: return nk_capabilities_compiled_cpu_mask();
     default: return nk_cap_serial_k;
     }
 }
@@ -256,25 +256,6 @@ constexpr cpu_class_t parent_class_of(cpu_class_t cpu_class) noexcept {
     case cpu_class_t::wasm64_extended_k: return cpu_class_t::wasm32_v128_k;
     default: return cpu_class_t::serial_k;
     }
-}
-
-/** The class of a device as its vendor's driver reports its architecture: NVIDIA's compute
- *  capability, AMD's gfx major and minor digits; unknown for a device no class covers. */
-constexpr gpu_class_t gpu_class_of(uform_gpu_vendor_t vendor, u32_t architecture_major,
-                                   u32_t architecture_minor) noexcept {
-    if (vendor == uform_gpu_vendor_nvidia_k) {
-        if (architecture_major == 12) return gpu_class_t::nvidia_blackwellrtx_k;
-        if (architecture_major == 10) return gpu_class_t::nvidia_blackwell_k;
-        if (architecture_major == 9) return gpu_class_t::nvidia_hopper_k;
-        if (architecture_major * 10 + architecture_minor >= 89) return gpu_class_t::nvidia_ada_k;
-        if (architecture_major == 8) return gpu_class_t::nvidia_ampere_k;
-    }
-    if (vendor == uform_gpu_vendor_amd_k) {
-        if (architecture_major == 9 && architecture_minor == 4) return gpu_class_t::amd_cdna3_k;
-        if (architecture_major == 9 && architecture_minor == 5) return gpu_class_t::amd_cdna4_k;
-        if (architecture_major == 12 && architecture_minor == 5) return gpu_class_t::amd_cdna5_k;
-    }
-    return gpu_class_t::unknown_k;
 }
 
 /** The wait instruction one CPU class pairs: x86 spins PAUSE, the WAITPKG Xeons and the monitored
@@ -516,8 +497,8 @@ constexpr fu::capabilities_t forkunion_capabilities_of(cpu_class_t cpu_class) no
     }
 }
 
-/** The C enum's class as the engine names it; @c uform_cpu_class_unknown_k derives nothing, so it
- *  names the serial floor. */
+/** The C enum's class as the engine names it; @c uform_cpu_class_unknown_k derives nothing, so
+ *  it names the serial floor. */
 constexpr cpu_class_t cpu_class_of(uform_cpu_class_t cpu_class) noexcept {
     if (!listed_in(cpu_classes_k, cpu_class)) return cpu_class_t::serial_k;
     return static_cast<cpu_class_t>(cpu_class);
@@ -536,16 +517,6 @@ constexpr bool cpu_rung_fits(cpu_class_t rung, cpu_ceiling_t ceiling) noexcept {
            (forkunion_capabilities_of(rung) & ~ceiling.sync) == 0;
 }
 
-/** The capabilities a device of @p device_class runs under @p pinned: its own class's when
- *  nothing is pinned, the pinned class's when the device holds it, and zero when it does not. */
-constexpr nk_capability_t gpu_pin_capabilities(gpu_class_t device_class, uform_gpu_class_t pinned) noexcept {
-    nk_capability_t const device = numkong_capabilities_of(device_class);
-    if (pinned == uform_gpu_class_unknown_k) return device;
-    if (!listed_in(gpu_classes_k, pinned)) return 0;
-    nk_capability_t const wanted = numkong_capabilities_of(static_cast<gpu_class_t>(pinned));
-    return (device & wanted) == wanted ? wanted : 0;
-}
-
 /** CPU classes newest first, the order a ladder tries them in. */
 template <cpu_class_t... classes_>
 struct cpu_ladder {};
@@ -554,38 +525,32 @@ struct cpu_ladder {};
 template <gpu_class_t... classes_>
 struct gpu_ladder {};
 
-/** This architecture's ladder, the serial floor last, or a monoversioned build's one class. */
+/** Every class carrying variants, each lineage newest first and the serial floor last, or the one
+ *  class of a monoversioned build; the walk skips a rung the build left out, the list keeps it. */
 #if UFORM_TARGET_MONOVERSIONED
 using cpu_ladder_t = cpu_ladder<cpu_class_t::monoversioned_k>;
-#elif NUMKONG_ARCH_X8664_
+inline constexpr cpu_class_t cpu_ladder_floor_k = cpu_class_t::monoversioned_k;
+#else
 using cpu_ladder_t =
     cpu_ladder<cpu_class_t::intel_diamond_k, cpu_class_t::intel_granite_k, cpu_class_t::intel_sapphire_k,
                cpu_class_t::amd_genoa_k, cpu_class_t::intel_icelake_k, cpu_class_t::intel_skylake_k,
-               cpu_class_t::intel_sierra_k, cpu_class_t::intel_haswell_k, cpu_class_t::serial_k>;
-#elif NUMKONG_ARCH_ARM64_
-using cpu_ladder_t = cpu_ladder<cpu_class_t::nvidia_vera_k, cpu_class_t::apple_m4_k, cpu_class_t::aws_g5_k,
-                                cpu_class_t::apple_m2_k, cpu_class_t::aws_g2_k, cpu_class_t::serial_k>;
-#elif NUMKONG_ARCH_RISCV64_
-using cpu_ladder_t = cpu_ladder<cpu_class_t::alibaba_c930_k, cpu_class_t::serial_k>;
-#elif NUMKONG_ARCH_PPC64_
-using cpu_ladder_t = cpu_ladder<cpu_class_t::ibm_power10_k, cpu_class_t::serial_k>;
-#elif NUMKONG_ARCH_WASM_
-using cpu_ladder_t = cpu_ladder<cpu_class_t::wasm64_extended_k, cpu_class_t::wasm32_v128_k, cpu_class_t::serial_k>;
-#else
-using cpu_ladder_t = cpu_ladder<cpu_class_t::serial_k>;
+               cpu_class_t::intel_sierra_k, cpu_class_t::intel_haswell_k, cpu_class_t::nvidia_vera_k,
+               cpu_class_t::apple_m4_k, cpu_class_t::aws_g5_k, cpu_class_t::apple_m2_k, cpu_class_t::aws_g2_k,
+               cpu_class_t::alibaba_c930_k, cpu_class_t::ibm_power10_k, cpu_class_t::wasm64_extended_k,
+               cpu_class_t::wasm32_v128_k, cpu_class_t::serial_k>;
+inline constexpr cpu_class_t cpu_ladder_floor_k = cpu_class_t::serial_k;
 #endif
 
-/** The NVIDIA classes newest first, the vendor floor last, which runs every NVIDIA device without a
- *  class of its own on NumKong's generic CUDA kits. */
+/** The NVIDIA classes newest first, Ampere the floor; Rubin compiles no unit, so its devices
+ *  pick Blackwell. */
 using nvidia_ladder_t =
-    gpu_ladder<gpu_class_t::nvidia_blackwellrtx_k, gpu_class_t::nvidia_blackwell_k, gpu_class_t::nvidia_hopper_k,
-               gpu_class_t::nvidia_ada_k, gpu_class_t::nvidia_ampere_k, gpu_class_t::unknown_k>;
+    gpu_ladder<gpu_class_t::nvidia_rubin_k, gpu_class_t::nvidia_blackwellrtx_k, gpu_class_t::nvidia_blackwell_k,
+               gpu_class_t::nvidia_hopper_k, gpu_class_t::nvidia_ada_k, gpu_class_t::nvidia_ampere_k>;
 
-/** The AMD classes newest first, the vendor floor last, on NumKong's generic ROCm kits. */
-using amd_ladder_t =
-    gpu_ladder<gpu_class_t::amd_cdna5_k, gpu_class_t::amd_cdna4_k, gpu_class_t::amd_cdna3_k, gpu_class_t::unknown_k>;
+/** The AMD classes newest first, CDNA3 the floor. */
+using amd_ladder_t = gpu_ladder<gpu_class_t::amd_cdna5_k, gpu_class_t::amd_cdna4_k, gpu_class_t::amd_cdna3_k>;
 
-/** The rung a GPU class degrades to within its vendor, the vendor floor last. */
+/** The rung a GPU class degrades to within its vendor, @c unknown_k past the oldest. */
 constexpr gpu_class_t parent_class_of(gpu_class_t gpu_class) noexcept {
     switch (gpu_class) {
     case gpu_class_t::nvidia_rubin_k: return gpu_class_t::nvidia_blackwell_k;
@@ -666,16 +631,19 @@ constexpr bool cpu_class_compiled(cpu_class_t cpu_class) noexcept {
     }
 }
 
-/** The ceiling @p pinned sets, the one caller of NumKong's and ForkUnion's CPU detection; a class
- *  this machine does not run, a value no class takes, and a ceiling no compiled class fits, like
- *  one below a monoversioned build's masks, are refused as unsupported. */
+/** The ceiling @p pinned sets, the one caller of NumKong's and ForkUnion's CPU detection, which
+ *  grants the AMX tiles the CPU offers and drops them where the kernel refuses; a value no class
+ *  takes is an invalid argument, while a class this machine does not run and a ceiling no compiled
+ *  class fits, like one below a monoversioned build's masks, are unsupported. */
 inline expected<cpu_ceiling_t> pick_cpu_ceiling(uform_cpu_class_t pinned) noexcept {
+    if (pinned != uform_cpu_class_unknown_k && !listed_in(cpu_classes_k, pinned))
+        return expected<cpu_ceiling_t>::fail(status_t::invalid_argument_k, "no CPU class has that value");
     cpu_ceiling_t picked;
-    if (nk_cpu_capabilities_enabled(&picked.compute) != nk_success_k) picked.compute = nk_cap_serial_k;
+    if (nk_capabilities_detected_cpu(&picked.compute) != nk_success_k) picked.compute = nk_cap_serial_k;
     picked.sync = fu::cpu_capabilities();
+    nk_capability_t const tiles = picked.compute & (nk_cap_sapphireamx_k | nk_cap_graniteamx_k | nk_cap_diamondamx_k);
+    if (tiles && nk_configure_thread_cpu(tiles) != nk_success_k) picked.compute &= ~tiles;
     if (pinned != uform_cpu_class_unknown_k) {
-        if (!listed_in(cpu_classes_k, pinned))
-            return expected<cpu_ceiling_t>::fail(status_t::unsupported_k, "no CPU class has that value");
         cpu_class_t const pinned_class = cpu_class_of(pinned);
         cpu_ceiling_t const wanted {numkong_capabilities_of(pinned_class), forkunion_capabilities_of(pinned_class)};
         if ((picked.compute & wanted.compute) != wanted.compute || (picked.sync & wanted.sync) != wanted.sync)
@@ -688,10 +656,9 @@ inline expected<cpu_ceiling_t> pick_cpu_ceiling(uform_cpu_class_t pinned) noexce
 }
 
 /** Whether the build compiled the unit of @p gpu_class, as CMake told the dispatch unit through
- *  @c UFORM_TARGET_<CLASS>; the vendor floor's unit comes with its vendor. */
+ *  @c UFORM_TARGET_<CLASS>. */
 constexpr bool gpu_class_compiled(gpu_class_t gpu_class) noexcept {
     switch (gpu_class) {
-    case gpu_class_t::unknown_k: return true;
 #if UFORM_TARGET_NVIDIA_AMPERE
     case gpu_class_t::nvidia_ampere_k: return true;
 #endif
@@ -720,9 +687,25 @@ constexpr bool gpu_class_compiled(gpu_class_t gpu_class) noexcept {
     }
 }
 
-/** Whether the build compiled the units of @p home 's vendor, as CMake told the dispatch unit
- *  through @c UFORM_ARCH_CUDA_ and @c UFORM_ARCH_ROCM_ ; every class of a compiled vendor has a
- *  unit, the ones advancing nothing past their parent answering no table. */
+/** Rungs of a ladder this build compiled; a monoversioned build compiles at most one. */
+template <cpu_class_t... classes_>
+consteval std::size_t compiled_rungs(cpu_ladder<classes_...>) noexcept {
+    return (std::size_t {cpu_class_compiled(classes_)} + ... + 0);
+}
+template <gpu_class_t... classes_>
+consteval std::size_t compiled_rungs(gpu_ladder<classes_...>) noexcept {
+    return (std::size_t {gpu_class_compiled(classes_)} + ... + 0);
+}
+
+#if UFORM_TARGET_MONOVERSIONED
+static_assert(compiled_rungs(cpu_ladder_t {}) <= 1);
+static_assert(compiled_rungs(nvidia_ladder_t {}) <= 1);
+static_assert(compiled_rungs(amd_ladder_t {}) <= 1);
+#endif
+
+/** Whether the build compiled the units of @p vendor , as CMake told the dispatch unit through
+ *  @c UFORM_ARCH_CUDA_ and @c UFORM_ARCH_ROCM_ ; every class CMake kept has a unit, the ones
+ *  advancing nothing past their parent answering no table. */
 constexpr bool gpu_vendor_compiled([[maybe_unused]] nk_capability_t vendor) noexcept {
 #if UFORM_ARCH_CUDA_
     if (vendor == nk_cap_cuda_k) return true;
@@ -731,6 +714,69 @@ constexpr bool gpu_vendor_compiled([[maybe_unused]] nk_capability_t vendor) noex
     if (vendor == nk_cap_rocm_k) return true;
 #endif
     return false;
+}
+
+/** One GPU as NumKong reports it, what @ref gpu_class_serves reads. */
+struct gpu_device_t {
+    uform_gpu_vendor_t vendor = uform_gpu_vendor_unknown_k;
+
+    /** What NumKong detected on the device, its vendor's group bit included. */
+    nk_capability_t detected = 0;
+
+    /** What this build holds NumKong code for that the device's loader runs, its vendor's group
+     *  bit included. */
+    nk_capability_t compiled = 0;
+};
+
+/** The vendor whose devices @p gpu_class names; unknown for the zero class. */
+constexpr uform_gpu_vendor_t gpu_vendor_of(gpu_class_t gpu_class) noexcept {
+    switch (gpu_class) {
+    case gpu_class_t::nvidia_ampere_k:
+    case gpu_class_t::nvidia_ada_k:
+    case gpu_class_t::nvidia_hopper_k:
+    case gpu_class_t::nvidia_blackwell_k:
+    case gpu_class_t::nvidia_blackwellrtx_k:
+    case gpu_class_t::nvidia_rubin_k: return uform_gpu_vendor_nvidia_k;
+    case gpu_class_t::amd_cdna3_k:
+    case gpu_class_t::amd_cdna4_k:
+    case gpu_class_t::amd_cdna5_k: return uform_gpu_vendor_amd_k;
+    case gpu_class_t::apple_metal7_k:
+    case gpu_class_t::apple_metal9_k:
+    case gpu_class_t::apple_metal10_k: return uform_gpu_vendor_apple_k;
+    case gpu_class_t::unknown_k: return uform_gpu_vendor_unknown_k;
+    }
+    return uform_gpu_vendor_unknown_k;
+}
+
+/** Whether @p gpu_class runs on @p device: built, of the device's vendor, and its kits all among
+ *  those NumKong's loader runs there. */
+inline bool gpu_class_serves(gpu_class_t gpu_class, gpu_device_t const &device) noexcept {
+    nk_capability_t const kits = numkong_capabilities_of(gpu_class);
+    return gpu_class_compiled(gpu_class) && gpu_vendor_of(gpu_class) == device.vendor &&
+           (device.compiled & kits) == kits;
+}
+
+/** Whether @p gpu_class sits at or under @p pinned on its lineage, as every class does when nothing
+ *  is pinned. */
+constexpr bool gpu_class_under_pin(gpu_class_t gpu_class, uform_gpu_class_t pinned) noexcept {
+    if (pinned == uform_gpu_class_unknown_k) return true;
+    for (gpu_class_t rung = static_cast<gpu_class_t>(pinned);; rung = parent_class_of(rung)) {
+        if (rung == gpu_class) return true;
+        if (rung == gpu_class_t::unknown_k) return false;
+    }
+}
+
+/** The newest class of @p ladder serving @p device at or under @p pinned, or @c unknown_k where
+ *  none serves. */
+template <gpu_class_t... classes_>
+gpu_class_t pick_gpu_class(gpu_ladder<classes_...>, gpu_device_t const &device, uform_gpu_class_t pinned) noexcept {
+    gpu_class_t picked = gpu_class_t::unknown_k;
+    auto rung = [&]<gpu_class_t class_>() noexcept {
+        if (picked == gpu_class_t::unknown_k && gpu_class_under_pin(class_, pinned) && gpu_class_serves(class_, device))
+            picked = class_;
+    };
+    (rung.template operator()<classes_>(), ...);
+    return picked;
 }
 
 /** The verbs one CPU class compiles in its class unit for the C layer, which is compiled once at
@@ -1070,32 +1116,33 @@ struct vram_executor_t {
 
 #pragma region Models
 
-/** Where an encoder's tower lives; there is no NVMe home for models. */
-enum class encoder_home_t : u32_t {
+/** Where an encoder's tower lives; there is no NVMe residency for models. */
+enum class vendored_residency_t : u32_t {
     ram_k,
     vram_nvidia_k,
     vram_amd_k,
 };
 
-/** The executor each home's verbs take: a host tower's thread pool, a device tower's stream. */
-template <encoder_home_t home_>
-struct encoder_home_executor {
+/** The executor each residency's verbs take: a host tower's thread pool, a device tower's
+ *  stream. */
+template <vendored_residency_t residency_>
+struct vendored_residency_executor {
     using type = nk_stream_t;
 };
 template <>
-struct encoder_home_executor<encoder_home_t::ram_k> {
+struct vendored_residency_executor<vendored_residency_t::ram_k> {
     using type = pool_view_t;
 };
 
 /** The verbs one encoder variant compiles in its class unit, defined in @c encoder_punned.hpp . */
-template <encoder_home_t home_>
+template <vendored_residency_t residency_>
 struct encoder_verbs;
 
-/** The variant a load picked, as its home's verb table, which alone casts each tower back
+/** The variant a load picked, as its residency's verb table, which alone casts each tower back
  *  to its type. */
-using encoder_home_tables_t =
-    std::variant<encoder_verbs<encoder_home_t::ram_k> const *, encoder_verbs<encoder_home_t::vram_nvidia_k> const *,
-                 encoder_verbs<encoder_home_t::vram_amd_k> const *>;
+using encoder_residency_tables_t = std::variant<encoder_verbs<vendored_residency_t::ram_k> const *,
+                                                encoder_verbs<vendored_residency_t::vram_nvidia_k> const *,
+                                                encoder_verbs<vendored_residency_t::vram_amd_k> const *>;
 
 /** One copy of a model's tower on one GPU, matched to an executor's device by its UForm ordinal. */
 struct vram_replica_t {
@@ -1341,9 +1388,9 @@ struct uform_model_handle_t {
      *  runs; empty without the byte decoder. */
     uf::st::basic_vector<uf::f32_t> choice_inverse_temperatures;
 
-    /** The variant picked once at load: its home's verb table, which alone casts
+    /** The variant picked once at load: its residency's verb table, which alone casts
      *  each tower back. */
-    uf::encoder_home_tables_t tables;
+    uf::encoder_residency_tables_t tables;
 
     /** The one host tower, serving any RAM executor, or one replica per GPU the load named, every
      *  one of the picked class. */

@@ -151,7 +151,7 @@ struct ram_site_t {
     chunked_arena_t &transfers;
 
     /** The variant the model's load picked, and its one host tower. */
-    encoder_verbs<encoder_home_t::ram_k> const &verbs;
+    encoder_verbs<vendored_residency_t::ram_k> const &verbs;
     void const *tower = nullptr;
     bytes_span_t scratch {};
 
@@ -202,11 +202,11 @@ struct vram_shard_t {
 
 /** A VRAM call: plans on the decoder pool into host pages, packs into pinned pages, and
  *  splits each slice across the devices holding a replica, by token count, through the verbs
- *  of the variant @p home_ 's load picked, moving each shard's run in and its outputs out
+ *  of the variant @p residency_ 's load picked, moving each shard's run in and its outputs out
  *  through the vendor's copies. */
-template <encoder_home_t home_>
+template <vendored_residency_t residency_>
 struct vram_site {
-    using entries_kit_t = entries_kit_of<home_>;
+    using entries_kit_t = entries_kit_of<residency_>;
 
     pool_view_t pool;
     chunked_arena_t &staging;
@@ -215,7 +215,7 @@ struct vram_site {
     /** The stream of the device the call's arena lives on, whose shard writes
      *  the arena directly. */
     nk_stream_t arena_stream = nullptr;
-    encoder_verbs<home_> const &verbs;
+    encoder_verbs<residency_> const &verbs;
     per_gpu_array<vram_shard_t> shards {};
     std::size_t cell_bytes = 0;
 
@@ -651,18 +651,19 @@ void encode_items(arguments_type_ &arguments, packer_type_ &packer, site_type_ &
 
 /** A VRAM call through @p verbs : one shard per device of @p devices holding one of
  *  @p replicas . */
-template <encoder_home_t home_, typename arguments_type_, typename packer_type_>
-void encode_on_devices(arguments_type_ &arguments, packer_type_ &packer, encoder_verbs<home_> const &verbs,
+template <vendored_residency_t residency_, typename arguments_type_, typename packer_type_>
+void encode_on_devices(arguments_type_ &arguments, packer_type_ &packer, encoder_verbs<residency_> const &verbs,
                        per_gpu_array<vram_replica_t> const &replicas, vram_executor_t &devices, chunked_arena_t &memory,
                        call_outcome_t &outcome) noexcept {
     auto const fail = [&](failure_t failure) noexcept { propagate_error(failure.status, outcome, failure.message); };
     vram_device_t &lead = devices.devices[0];
     devices.staging.chunks.rewind();
     lead.transfers.rewind();
-    vram_site<home_> site {devices.decoders.view(), devices.staging.chunks, lead.transfers, memory.stream(), verbs};
+    vram_site<residency_> site {devices.decoders.view(), devices.staging.chunks, lead.transfers, memory.stream(),
+                                verbs};
     for (vram_device_t &device : devices.devices)
         for (vram_replica_t const &replica : replicas)
-            if (replica.ordinal == device.ordinal && (device.capabilities & vendor_of(home_)))
+            if (replica.ordinal == device.ordinal && (device.capabilities & vendor_of(residency_)))
                 if (site.shards.push_back({&device, &replica}) != status_t::success_k)
                     return fail({uform_status_internal_k, "More devices than one process drives"});
     if (!site.shards.size()) return fail({uform_status_device_k, "The model holds no replica on the executor"});
@@ -686,8 +687,8 @@ void encode_call(arguments_type_ &arguments, packer_type_ &packer, uform_tape_vi
     uform_model_handle_t const &model = *arguments.model;
 
     std::visit(
-        [&]<encoder_home_t home_>(encoder_verbs<home_> const *verbs) noexcept {
-            if constexpr (home_ == encoder_home_t::ram_k) {
+        [&]<vendored_residency_t residency_>(encoder_verbs<residency_> const *verbs) noexcept {
+            if constexpr (residency_ == vendored_residency_t::ram_k) {
                 void *const tower = std::get<void *>(model.towers);
                 if (executor && !std::holds_alternative<ram_executor_t>(executor->executor))
                     return fail({uform_status_device_k, "A RAM model computes on a RAM executor or none"});
@@ -701,7 +702,7 @@ void encode_call(arguments_type_ &arguments, packer_type_ &packer, uform_tape_vi
                 ram_site_t site {caller->view(), memory, memory, *verbs, tower};
                 return encode_items(arguments, packer, site, memory, outcome);
             }
-            else if constexpr (!gpu_vendor_compiled(vendor_of(home_)))
+            else if constexpr (!gpu_vendor_compiled(vendor_of(residency_)))
                 return fail({uform_status_unsupported_k, "This build drives no GPU of the model's vendor"});
             else {
                 vram_executor_t *const devices = executor ? std::get_if<vram_executor_t>(&executor->executor) : nullptr;

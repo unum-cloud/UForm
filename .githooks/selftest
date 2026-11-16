@@ -1672,6 +1672,23 @@ git -C "$fixture_directory" add -- include/probe.hpp
 run_precommit
 expect_rejection "changed template header with unchanged class name" "suffixes a class template"
 
+stage_fixture_with_header include/probe.hpp <<'FIXTURE'
+template <typename type_>
+struct hip_warp {
+    inline static constexpr u32_t width_k = hip_wave_lanes(type_::value);
+};
+FIXTURE
+git -C "$fixture_directory" commit --quiet -m "Chore: Seed the fixture"
+sed -e 's/typename type_/typename value_type_/' -e 's/type_::value/value_type_::value/' -e 's/width_k = /width_k = 1 + /' "$fixture_directory/include/probe.hpp" > "$fixture_directory/edited"
+mv "$fixture_directory/edited" "$fixture_directory/include/probe.hpp"
+git -C "$fixture_directory" add -- include/probe.hpp
+run_precommit
+expect_acceptance "static member edited below an unchanged class template brace"
+
+assert_rejects "new one-line suffixed variable template" "suffixes a variable template" include/probe.hpp <<'FIXTURE'
+template <typename type_> constexpr bool bounded_k = true;
+FIXTURE
+
 assert_rejects "raw platform predefine" "reads a raw platform predefine" include/$project_directory/probe.h <<'FIXTURE'
 #if defined(__linux__)
 static int probe(void) { return 1; }
@@ -3241,14 +3258,6 @@ assert_accepts "ForkUnion atomic reference" tools/probe.hpp <<'FIXTURE'
 inline int probe(int *word) { return atomic_ref_t {*word}.load(std::memory_order_acquire); }
 FIXTURE
 
-assert_rejects "CMake string surgery" "derives a name or flag by editing a string" CMakeLists.txt <<'FIXTURE'
-string(REPLACE "a" "b" probe_name_ "${probe_source_}")
-FIXTURE
-
-assert_accepts "CMake names spelled at the call" CMakeLists.txt <<'FIXTURE'
-uform_dense_dtype_sources(probe BF16 probe_bf16.cpp F16 probe_f16.cpp)
-FIXTURE
-
 assert_rejects "CPython format shortcut" "calls a format-string shortcut of the C API" python/probe.c <<'FIXTURE'
 static int probe(PyObject *arguments, int *value) { return PyArg_ParseTuple(arguments, "i", value); }
 FIXTURE
@@ -3312,25 +3321,6 @@ FIXTURE
 
 assert_accepts "wait through the class waiter" include/uform/probe.hpp <<'FIXTURE'
 inline void probe(int const &word) noexcept { waiter_t::wait(&word, 0); }
-FIXTURE
-
-assert_rejects "capability mask in an engine" "holds or takes a NumKong capability mask" include/uform/probe.hpp <<'FIXTURE'
-inline void probe(nk_capability_t mask) noexcept {}
-FIXTURE
-
-assert_accepts "kit's own capability constant" include/uform/probe.hpp <<'FIXTURE'
-struct probe_kit_t {
-    static constexpr nk_capability_t capability_k = nk_cap_serial_k;
-};
-FIXTURE
-
-assert_rejects "CPU class named in an engine" "names a CPU or GPU class under include/" include/uform/probe.hpp <<'FIXTURE'
-inline void probe(cpu_class_t kind) noexcept {}
-FIXTURE
-
-assert_accepts "engine taking its kits" include/uform/probe.hpp <<'FIXTURE'
-template <typename kit_>
-inline void probe(kit_ kit) noexcept {}
 FIXTURE
 
 assert_rejects "hand-widened accumulation in a test" "accumulates hand-widened BFloat16" test/probe.cu <<'FIXTURE'
@@ -3652,6 +3642,66 @@ FIXTURE
 assert_accepts "prose naming thread_local" tools/probe.hpp <<'FIXTURE'
 /** Keeps no thread_local counter; the executor owns per-thread state. */
 inline int probe() { return 0; }
+FIXTURE
+
+assert_rejects "library ARCH flag" "names a NumKong or StringZilla _ARCH_ flag" include/$project_directory/probe.hpp <<'FIXTURE'
+inline static constexpr bool compiled_k = NUMKONG_ARCH_CUDA_AMPERE_;
+FIXTURE
+
+assert_accepts "library public TARGET switch" include/$project_directory/probe.hpp <<'FIXTURE'
+#if NUMKONG_TARGET_HASWELL
+inline static constexpr bool compiled_k = true;
+#endif
+FIXTURE
+
+assert_rejects "library GPU generation target raised" "sets a library GPU generation target" CMakeLists.txt <<'FIXTURE'
+target_compile_definitions(probe PRIVATE NUMKONG_TARGET_CDNA3=1)
+FIXTURE
+
+assert_accepts "library GPU floor target lowered" CMakeLists.txt <<'FIXTURE'
+target_compile_definitions(probe PRIVATE NUMKONG_TARGET_ROCM=0 STRINGZILLA_TARGET_ROCM=0)
+FIXTURE
+
+assert_rejects "warp calling a generation's step" "StringZilla step inside a warp type" include/$project_directory/vram_probe_device.cuh <<'FIXTURE'
+struct probe_warp_t {
+    static __device__ unsigned sum(unsigned value) noexcept { return sz_u32_lanes_sum_ampere_(value); }
+};
+FIXTURE
+
+assert_accepts "scan kit beside a generation-free warp" include/$project_directory/vram_probe_device.cuh <<'FIXTURE'
+struct probe_warp_t {
+    static __device__ unsigned shuffle(unsigned value, unsigned lane) noexcept { return __shfl_sync(~0u, value, lane); }
+};
+struct ampere_probe_scan_t {
+    static __device__ unsigned warp_sum(unsigned value) noexcept { return sz_u32_lanes_sum_ampere_(value); }
+};
+FIXTURE
+
+assert_rejects "CMake string surgery" "derives a name or flag by editing a string" CMakeLists.txt <<'FIXTURE'
+string(REPLACE "a" "b" probe_name_ "${probe_source_}")
+FIXTURE
+
+assert_accepts "CMake names spelled at the call" CMakeLists.txt <<'FIXTURE'
+uform_find_library(UFORM_PROBE_LIBRARY probe)
+FIXTURE
+
+assert_rejects "capability mask in an engine" "holds or takes a NumKong capability mask" include/$project_directory/probe.hpp <<'FIXTURE'
+inline void probe(nk_capability_t mask) noexcept {}
+FIXTURE
+
+assert_accepts "kit's own capability constant" include/$project_directory/probe.hpp <<'FIXTURE'
+struct probe_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+};
+FIXTURE
+
+assert_rejects "CPU class named in an engine" "names a CPU or GPU class under include/" include/$project_directory/probe.hpp <<'FIXTURE'
+inline void probe(cpu_class_t kind) noexcept {}
+FIXTURE
+
+assert_accepts "engine taking its kits" include/$project_directory/probe.hpp <<'FIXTURE'
+template <typename kit_>
+inline void probe(kit_ kit) noexcept {}
 FIXTURE
 
 # endregion UForm Fixtures

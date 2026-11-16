@@ -60,9 +60,7 @@ namespace ut = unum::uform::train;
  *  element-wise kit's own. */
 template <uf::gpu_class_t gpu_class_>
 static gpu_numerics_t gpu_numerics_of() noexcept {
-    constexpr nk_capability_t capabilities_k = gpu_class_ == uf::gpu_class_t::unknown_k
-                                                   ? nk_cap_cuda_k
-                                                   : uf::numkong_capabilities_of(gpu_class_);
+    constexpr nk_capability_t capabilities_k = uf::numkong_capabilities_of(gpu_class_);
     using products_kit_t = typename uf::encoder::vram_products_ladder<capabilities_k>::kit_t;
     using attention_kit_t = typename uf::encoder::vram_attention_ladder<capabilities_k>::kit_t;
     using elementwise_kit_t = typename uf::encoder::vram_elementwise_ladder<capabilities_k>::kit_t;
@@ -104,15 +102,23 @@ static uf::gpu_class_t nvidia_class_held_(nk_capability_t capabilities) noexcept
     return uf::gpu_class_t::unknown_k;
 }
 
+/** The kernels of the newest compiled class on @p ladder whose kits @p capabilities hold, or an
+ *  empty table where none does. */
+template <uf::gpu_class_t... classes_>
+static gpu_numerics_t gpu_numerics_of(uf::gpu_ladder<classes_...>, nk_capability_t capabilities) noexcept {
+    gpu_numerics_t numerics;
+    auto rung = [&]<uf::gpu_class_t class_>() noexcept {
+        if constexpr (uf::gpu_class_compiled(class_)) {
+            nk_capability_t const wanted = uf::numkong_capabilities_of(class_);
+            if (!numerics.multiply_bf16 && (capabilities & wanted) == wanted) numerics = ::gpu_numerics_of<class_>();
+        }
+    };
+    (rung.template operator()<classes_>(), ...);
+    return numerics;
+}
+
 gpu_numerics_t ut::gpu_numerics_of(nk_capability_t capabilities) noexcept {
-    switch (nvidia_class_held_(capabilities)) {
-    case uf::gpu_class_t::nvidia_blackwellrtx_k: return ::gpu_numerics_of<uf::gpu_class_t::nvidia_blackwellrtx_k>();
-    case uf::gpu_class_t::nvidia_blackwell_k: return ::gpu_numerics_of<uf::gpu_class_t::nvidia_blackwell_k>();
-    case uf::gpu_class_t::nvidia_hopper_k: return ::gpu_numerics_of<uf::gpu_class_t::nvidia_hopper_k>();
-    case uf::gpu_class_t::nvidia_ada_k: return ::gpu_numerics_of<uf::gpu_class_t::nvidia_ada_k>();
-    case uf::gpu_class_t::nvidia_ampere_k: return ::gpu_numerics_of<uf::gpu_class_t::nvidia_ampere_k>();
-    default: return ::gpu_numerics_of<uf::gpu_class_t::unknown_k>();
-    }
+    return ::gpu_numerics_of(uf::nvidia_ladder_t {}, capabilities);
 }
 
 #pragma endregion Numerics
@@ -277,6 +283,8 @@ struct device_budget_t {
     if (gpus == 0 || gpus != topology.shape.gpus_per_host_domain)
         return expected_t::fail(status_t::invalid_argument_k, "the trainer drives the mesh's {} devices, not {}",
                                 topology.shape.gpus_per_host_domain, gpus);
+    if (!numerics.multiply_bf16)
+        return expected_t::fail(status_t::unsupported_k, "the build compiled no GPU class these devices run");
     if (config.regularizes() && !config.contrasts())
         return expected_t::fail(status_t::invalid_argument_k,
                                 "the coding rate and the Lipschitz penalty shape the pooled rows, which only a " //

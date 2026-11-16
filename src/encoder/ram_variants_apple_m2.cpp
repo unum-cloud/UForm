@@ -8,5 +8,5 @@
 
 #include "encoder_specializations.hpp"
 
-template struct uf::encoder_class_tables<uf::encoder_home_t::ram_k, uf::cpu_class_t::apple_m2_k>;
+template struct uf::encoder_class_tables<uf::vendored_residency_t::ram_k, uf::cpu_class_t::apple_m2_k>;
 template struct uf::host_class_tables<uf::cpu_class_t::apple_m2_k>;

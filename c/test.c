@@ -221,11 +221,12 @@ static void test_library_probes(void) {
                tier == uform_multimem_tier_peer_read_k,
            "An unrecognized multimem tier fails rather than reading as switch-reduced");
 
-    // Classes fit a byte, so walking every byte meets each class and every gap between blocks.
-    for (int value = 1; value != 256; ++value) {
+    // Classes fit a byte, so walking every byte meets each class and every gap between blocks;
+    // the CPU walk starts at "unknown", which a pin spells too.
+    for (int value = 0; value != 256; ++value) {
         uform_cpu_class_t const code = (uform_cpu_class_t)value;
         char const *const spelled = uform_cpu_class_name(code);
-        uform_cpu_class_t read = uform_cpu_class_unknown_k;
+        uform_cpu_class_t read = uform_cpu_class_serial_k;
         uform_status_t const status = uform_cpu_class_from_name(view_of(spelled), &read);
         expect(strcmp(spelled, "unrecognized") == 0 ? status == uform_status_invalid_argument_k
                                                     : status == uform_status_success_k && read == code,
@@ -244,6 +245,11 @@ static void test_library_probes(void) {
            "The Power class spells its name as USearch does");
     expect(strcmp(uform_cpu_class_name(uform_cpu_class_intel_haswell_k), "intel-haswell") == 0,
            "A CPU class spells its name as USearch does");
+    uform_cpu_class_t untouched_cpu_class = uform_cpu_class_intel_haswell_k;
+    expect(
+        uform_cpu_class_from_name(view_of("intel-haswel"), &untouched_cpu_class) == uform_status_invalid_argument_k &&
+            untouched_cpu_class == uform_cpu_class_intel_haswell_k,
+        "A misspelled CPU class fails and writes nothing");
     uform_gpu_class_t untouched_gpu_class = uform_gpu_class_nvidia_ada_k;
     expect(
         uform_gpu_class_from_name(view_of("nvidia-volta"), &untouched_gpu_class) == uform_status_invalid_argument_k &&

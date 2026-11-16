@@ -2220,13 +2220,13 @@ check_type_suffixes() {
         }' "$staged_code_path" || true)
     [ -z "$templates" ] || reject_with_reason "$templates" \
         "$staged_path suffixes a class template with '_t' - the template stays bare and the alias that materializes it carries the suffix:"
-    variables=$(printf '%s\n' "$staged_added_text" | "$fastest_awk" '
+    variables=$(scan_staged_file_marking_added_lines '
         function suffixed(line) { return line ~ /constexpr[[:space:]][^=(]*[[:space:]][A-Za-z0-9_]*_[kt][[:space:]]*=/ }
-        /^\+[[:space:]]*template[[:space:]]*</ { if (suffixed($0)) print; else pending = 1; next }
-        pending && suffixed($0) { print; pending = 0; next }
+        /^[[:space:]]*template[[:space:]]*</ { opened = FNR in added; if (suffixed($0)) { if (opened) printf "line %d: %s\n", FNR, $0 } else pending = 1; next }
+        pending && suffixed($0) { if (opened || FNR in added) printf "line %d: %s\n", FNR, $0; pending = 0; next }
         pending && /\{[[:space:]]*$/ { pending = 0; next }
-        pending && /^\+[[:space:]]*(typename|class |std::|requires|[A-Za-z_]+ [A-Za-z_]+_|>)/ { next }
-        { pending = 0 }')
+        pending && /^[[:space:]]*(typename|class |std::|requires|[A-Za-z_]+ [A-Za-z_]+_|>)/ { next }
+        { pending = 0 }' "$staged_code_path")
     [ -z "$variables" ] || reject_with_reason "$variables" \
         "$staged_path suffixes a variable template with '_k' or '_t' - the template stays bare, like \`template <typename type_> constexpr bool bounded\`:"
 }
@@ -3922,17 +3922,6 @@ check_numkong_dispatch() {
         "$staged_path calls a serial or dispatching NumKong kernel - name the class kit's kernel instead:"
 }
 
-# An engine takes kits, never the mask they were picked under: no `nk_capability_t` member, local or function
-# parameter appears under include/, except a kit's own `capability_k`.
-check_capability_masks_in_engines() {
-    local masks
-    masks=$(printf '%s\n' "$staged_added_text" | blank_c_comments_preserving_columns |
-        grep -E '^\+[[:space:]]*((static|inline|constexpr)[[:space:]]+)*nk_capability_t([[:space:]]+const)?[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(;|=|\{)|[(,][[:space:]]*nk_capability_t([[:space:]]+const)?[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*([,)=]|$)' |
-        grep -vE '[[:space:]]capability_k[[:space:]]*=' || true)
-    [ -z "$masks" ] || reject_with_reason "$masks" \
-        "$staged_path holds or takes a NumKong capability mask under include/ - take the kits src/ picks under it:"
-}
-
 # A raw pointer member beside a count describes one range: a span, a NumKong view or a tape says so. A C++ record
 # holds no `T *name` or `T const *name` member, and a function takes no `(T const *, std::size_t)` pair. The C ABI's
 # `uform_*_handle_t` records, the type-erased `void *` towers and states the verb tables pass, C-string members,
@@ -4038,7 +4027,7 @@ check_vendor_neutral() {
 # vendor the model holds; checking that the executor matches the model is no such branch.
 check_residency_branches() {
     local branching
-    branching=$(printf '%s\n' "$staged_added_text" | grep -E '(holds_alternative|get_if)<(ram|vram)_model|encoder_home_t::vram_|uform_gpu_vendor_[a-z]+_k|device_kind_t::|gpu_vendor_t::|(^|[^A-Za-z0-9_])vendor_k' || true)
+    branching=$(printf '%s\n' "$staged_added_text" | grep -E '(holds_alternative|get_if)<(ram|vram)_model|vendored_residency_t::vram_|uform_gpu_vendor_[a-z]+_k|device_kind_t::|gpu_vendor_t::|(^|[^A-Za-z0-9_])vendor_k' || true)
     [ -z "$branching" ] || reject_with_reason "$branching" \
         "$staged_path branches a C verb on residency or vendor - the face serves the verb or answers unsupported_k:"
 }
@@ -4057,15 +4046,6 @@ check_tower_isolation() {
     [ -z "$crossing" ] || reject_with_reason "$crossing" \
         "$staged_path reaches into another tower - towers include only their own vendor, shared headers none, and the" \
         "            host tower no device one:"
-}
-
-# Engines take kits, and `src/` alone picks them per class: nothing under `include/uform/` names a class enum or a
-# class unit.
-check_classes_out_of_engines() {
-    local named
-    named=$(printf '%s\n' "$staged_added_text" | grep -E '(cpu|gpu)_class_t|_variants_' || true)
-    [ -z "$named" ] || reject_with_reason "$named" \
-        "$staged_path names a CPU or GPU class under include/ - an engine takes the kits src/ picks per class:"
 }
 
 # The mesh lifts out of UForm whole: `uform/utilities/mesh.hpp` and the multimem and InfiniBand collectives include
@@ -4180,20 +4160,6 @@ check_test_oracle_never_compiled_out() {
     [ -z "$asserts" ] || reject_with_reason "$asserts" \
         "$staged_path asserts in a test - write \`suite.check_equal(count, 3u, \"rows\");\` from test/harness.hpp," \
         "            which counts the failure and never compiles out:"
-}
-
-# CMake spells every target, source and flag it means at the call that means it. Deriving one by replacing, slicing or
-# matching out part of another string, or by editing a list in place, hides what the build compiles: pass each name as
-# an argument instead, under a keyword where several kinds travel together. Building a list with `list(APPEND)` and
-# testing a value with `if (... MATCHES ...)` stay free.
-check_cmake_string_surgery() {
-    local surgery
-    surgery=$(printf '%s\n' "$staged_added_text" | grep -vE '^\+?[[:space:]]*#' |
-        grep -iE '(^|[^A-Za-z0-9_])(string[[:space:]]*\([[:space:]]*(REPLACE|REGEX|SUBSTRING|STRIP|TOLOWER|TOUPPER)[[:space:]]|list[[:space:]]*\([[:space:]]*(TRANSFORM|FILTER|REMOVE_ITEM|REMOVE_AT|REMOVE_DUPLICATES|SUBLIST|POP_BACK|POP_FRONT|INSERT|JOIN|SORT|REVERSE)[[:space:]]|(get_filename_component|cmake_path)[[:space:]]*\()' ||
-        true)
-    [ -z "$surgery" ] || reject_with_reason "$surgery" \
-        "$staged_path derives a name or flag by editing a string or a list - spell each one out at its call and pass it as" \
-        "            an argument, as \`uform_find_library(UFORM_AVCODEC_LIBRARY avcodec)\` takes both its names:"
 }
 
 # The CPython bindings parse arguments and build results by hand: `PyArg_Parse*` and `Py_BuildValue` interpret a
@@ -4347,6 +4313,76 @@ check_sibling_pins_agree() {
         }')
 }
 
+# CMake spells every target, source and flag it means at the call that means it. Deriving one by
+# replacing, slicing or matching out part of another string, or by editing a list in place, hides
+# what the build compiles: pass each name as an argument instead, under a keyword where several
+# kinds travel together. Building a list with `list(APPEND)` and testing a value with
+# `if (... MATCHES ...)` stay free.
+check_cmake_string_surgery() {
+    local surgery
+    surgery=$(printf '%s\n' "$staged_added_text" | grep -vE '^\+[[:space:]]*#' |
+        grep -iE '(^|[^A-Za-z0-9_])(string[[:space:]]*\([[:space:]]*(REPLACE|REGEX|SUBSTRING|STRIP|TOLOWER|TOUPPER)[[:space:]]|list[[:space:]]*\([[:space:]]*(TRANSFORM|FILTER|REMOVE_ITEM|REMOVE_AT|REMOVE_DUPLICATES|SUBLIST|POP_BACK|POP_FRONT|INSERT|JOIN|SORT|REVERSE)[[:space:]]|(get_filename_component|cmake_path)[[:space:]]*\()' ||
+        true)
+    [ -z "$surgery" ] || reject_with_reason "$surgery" \
+        "$staged_path derives a name or flag by editing a string or a list; spell each one out at its call and pass it as" \
+        "            an argument, under a keyword where several kinds travel together:"
+}
+
+# An engine takes kits, never the mask they were picked under: no `nk_capability_t` member, local or
+# function parameter appears under include/, except a kit's own `capability_k`.
+check_capability_masks_in_engines() {
+    local masks
+    masks=$(printf '%s\n' "$staged_added_text" | blank_c_comments_preserving_columns |
+        grep -E '^\+[[:space:]]*((static|inline|constexpr)[[:space:]]+)*nk_capability_t([[:space:]]+const)?[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(;|=|\{)|[(,][[:space:]]*nk_capability_t([[:space:]]+const)?[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*([,)=]|$)' |
+        grep -vE '[[:space:]]capability_k[[:space:]]*=' || true)
+    [ -z "$masks" ] || reject_with_reason "$masks" \
+        "$staged_path holds or takes a NumKong capability mask under include/; take the kits src/ picks under it:"
+}
+
+# Engines take kits, and `src/` alone picks them per class: nothing under `include/` names a class
+# enum or a class unit, anywhere in the file, since the enums live under `src/`.
+check_classes_out_of_engines() {
+    local named
+    named=$(grep -nE '(^|[^A-Za-z0-9_])(cpu|gpu)_class_t|_variants_' "$staged_code_path" || true)
+    [ -z "$named" ] || reject_with_reason "$named" \
+        "$staged_path names a CPU or GPU class under include/; an engine takes the kits src/ picks per class:"
+}
+
+# Rejects a NumKong or StringZilla `_ARCH_` flag, which says what compiles inside that library's own build; the
+# product reads the libraries' public `_TARGET_` switches and names its GPU class through
+# `${macro_prefix}_TARGET_<VENDOR>_<CLASS>`.
+check_library_arch_flags_unnamed() {
+    local named
+    named=$(printf '%s\n' "$staged_added_text" | grep -E "^\+.*(NUMKONG|STRINGZILLA)_ARCH_[A-Z0-9_]+" || true)
+    [ -z "$named" ] || reject_with_reason "$named" \
+        "$staged_path names a NumKong or StringZilla _ARCH_ flag, which only that library's own build may read;" \
+        "            test its public _TARGET_ switch, or ${macro_prefix}_TARGET_<VENDOR>_<CLASS> for a GPU class:"
+}
+
+# Rejects a CMake line raising a NumKong or StringZilla GPU generation target, because a class unit lowers the
+# library's floor target and names its own class through its product's `_TARGET_<VENDOR>_<CLASS>` switch instead.
+check_library_gpu_targets_unset() {
+    local raised
+    raised=$(printf '%s\n' "$staged_added_text" | grep -vE '^\+?[[:space:]]*#' |
+        grep -E '(NUMKONG|STRINGZILLA)_TARGET_(AMPERE|ADA|HOPPER|BLACKWELL[A-Z]*|CDNA[0-9])=1' || true)
+    [ -z "$raised" ] || reject_with_reason "$raised" \
+        "$staged_path sets a library GPU generation target; class units write the floor target to 0 and name" \
+        "            their class with ${macro_prefix}_TARGET_<VENDOR>_<CLASS>:"
+}
+
+# Rejects a warp type calling a GPU generation's StringZilla step, because a warp carries its vendor and width
+# alone, and each generation's scans live in the scan kit its class unit names beside the warp.
+check_warps_carry_no_generation() {
+    local stepped
+    stepped=$("$fastest_awk" '
+        /struct [a-z_]*warp[a-z_]* [{]|struct hip_warp/ { in_warp = 1 }
+        in_warp && /sz_[a-z0-9_]+_(ampere|hopper|blackwell[a-z]*|cdna[0-9])_\(/ { print FNR ": " $0 }
+        /^};/ { in_warp = 0 }' "$staged_code_path")
+    [ -z "$stepped" ] || reject_with_reason "$stepped" \
+        "$staged_path calls a GPU generation's StringZilla step inside a warp type; a warp carries vendor and" \
+        "            width only, and the generation's scan kit beside it calls the step:"
+}
+
 # Routes one staged file through the checks only UForm has.
 run_project_checks() {
     case "$staged_path" in
@@ -4458,7 +4494,13 @@ run_project_checks() {
     include/uform/encoder/* | src/encoder/*) check_tower_isolation ;;
     esac
     case "$staged_path" in
-    include/uform/*) check_classes_out_of_engines ;;
+    include/*.h | include/*.hpp | include/*.cuh | include/*.hip | include/*.metal) check_classes_out_of_engines ;;
+    esac
+    case "$staged_path" in
+    */vram_*_device.cuh | */vram_*_device.hip) check_warps_carry_no_generation ;;
+    esac
+    case "$staged_path" in
+    *.c | *.h | *.hpp | *.cpp | *.cc | *.cu | *.cuh | *.hip | *.metal) check_library_arch_flags_unnamed ;;
     esac
     case "$staged_path" in
     include/uform/utilities/mesh.hpp | include/uform/utilities/multimem_* | include/uform/utilities/infiniband_* | \
@@ -4491,7 +4533,10 @@ run_project_checks() {
         check_substring_assertions
         ;;
     *.swift | *.ts | *.js) check_ids_capitalized ;;
-    CMakeLists.txt | */CMakeLists.txt | *.cmake) check_cmake_string_surgery ;;
+    CMakeLists.txt | */CMakeLists.txt | *.cmake)
+        check_cmake_string_surgery
+        check_library_gpu_targets_unset
+        ;;
     python/*.c | python/*.h) check_cpython_format_shortcuts ;;
     esac
 }

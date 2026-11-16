@@ -1558,7 +1558,7 @@ int main(int, char **argv) {
     }
     switch_to_gpu_t scope {*stream};
     nk_capability_t capabilities = 0;
-    if (nk_cuda_capabilities_enabled(0, &capabilities) != nk_success_k) {
+    if (nk_capabilities_enabled_cuda(0, &capabilities) != nk_success_k) {
         suite.check(false, "NumKong cannot query device 0");
         return suite.finish();
     }

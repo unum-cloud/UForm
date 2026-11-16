@@ -507,7 +507,7 @@ typedef enum uform_completion_t {
  *  and callers may pin one. The enumerators and their values are USearch's, fixed per family. */
 typedef enum uform_cpu_class_t {
 
-    /** No class: dispatch picks one, and a value no class takes reads as this. */
+    /** Picks the newest class this machine runs. */
     uform_cpu_class_unknown_k = 0,
 
     // Portable
@@ -590,12 +590,13 @@ typedef enum uform_cpu_class_t {
  *  one class per generation of kernel kits. The enumerators and their values are USearch's. */
 typedef enum uform_gpu_class_t {
 
-    /** No class: dispatch picks one, and a value no class takes reads as this. */
+    /** No class: in options, dispatch picks one; in a listing, the device runs no class of this
+     *  build, only its vendor's generic kernels where this build's code runs on it. */
     uform_gpu_class_unknown_k = 0,
 
     // NVIDIA
 
-    /** Ampere-class NVIDIA and every GPU without a class of its own - A100, A10 & RTX 30. */
+    /** Ampere-class NVIDIA - A100, A10 & RTX 30, and newer GPUs whose driver compiles its PTX. */
     uform_gpu_class_nvidia_ampere_k = 1,
 
     /** Ada-class NVIDIA - L4, L40S & RTX 40: the fp8 conversions. */
@@ -660,7 +661,7 @@ typedef struct uform_gpu_device_t {
     /** The device's ordinal in its vendor's runtime, as @c nvidia-smi or @c rocm-smi list it. */
     uint32_t vendor_ordinal;
 
-    /** The class whose kernels run on it. */
+    /** The newest class whose code runs on it, or @c uform_gpu_class_unknown_k where none does. */
     uform_gpu_class_t gpu_class;
 
     /** Streaming multiprocessors or compute units. */
@@ -710,8 +711,9 @@ typedef struct uform_ram_options_t {
     size_t memory_domains_count;
 
     /** The class to dispatch as if the CPU were of it, admitting every rung whose features it
-     *  holds; @c uform_cpu_class_unknown_k derives the CPU's own. A class this CPU cannot run
-     *  reports @c uform_status_unsupported_k. */
+     *  holds; @c uform_cpu_class_unknown_k derives the CPU's own. A value no class takes reports
+     *  @c uform_status_invalid_argument_k, and a class this CPU cannot run
+     *  @c uform_status_unsupported_k. */
     uform_cpu_class_t cpu_class;
 } uform_ram_options_t;
 
@@ -998,8 +1000,8 @@ UFORM_EXPORT char const* uform_mood_name(uform_mood_t mood);
  *  @c uform_status_invalid_argument_k. */
 UFORM_EXPORT uform_status_t uform_mood_from_name(uform_bytes_view_t name, uform_mood_t *mood);
 
-/** The canonical spelling of a CPU class, as
- *  @c uform_cpu_class_intel_haswell_k spells "intel-haswell". */
+/** The canonical spelling of a CPU class, as @c uform_cpu_class_intel_haswell_k spells
+ *  "intel-haswell" and @c uform_cpu_class_unknown_k spells "unknown". */
 UFORM_EXPORT char const* uform_cpu_class_name(uform_cpu_class_t cpu_class);
 
 /** Reads a CPU class back from its spelling into @p cpu_class, or fails with

@@ -41,7 +41,7 @@
 #include <cuda.h>       // `cuMemcpyDtoH`
 #include <fmt/format.h> // `fmt::println`, `fmt::format_to_n`
 
-#include <numkong/capabilities.h>      // `nk_cpu_capabilities_enabled`
+#include <numkong/capabilities.h>      // `nk_capabilities_enabled_cpu`
 #include <numkong/each.h>              // `nk_each_scale_bf16_best` — the halved columns
 #include <smashtable/basic_vector.hpp> // `basic_vector` — every growable table here
 
@@ -132,7 +132,7 @@ static constexpr char const *kept_metadata_k[] = {
         return expected_t::fail(status_t::bad_alloc_k, "{} staging failed", name);
     nk::tensor_span<nk_bf16_t, 2> const target {staging.data(), grown_rows, grown_cols};
     nk_capability_t capabilities = 0;
-    if (columns == columns_t::halved_k && nk_cpu_capabilities_enabled(&capabilities) != nk_success_k)
+    if (columns == columns_t::halved_k && nk_capabilities_enabled_cpu(&capabilities) != nk_success_k)
         return expected_t::fail(status_t::unsupported_k, "{} found no CPU capabilities", name);
     nk_f32_t const half = 0.5f, zero = 0.0f;
     for (std::size_t row = 0; row != grown_rows; ++row) {

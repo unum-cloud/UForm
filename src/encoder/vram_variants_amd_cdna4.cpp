@@ -8,4 +8,4 @@
 
 #include "encoder_specializations.hpp"
 
-template struct uf::encoder_class_tables<uf::encoder_home_t::vram_amd_k, uf::gpu_class_t::amd_cdna4_k>;
+template struct uf::encoder_class_tables<uf::vendored_residency_t::vram_amd_k, uf::gpu_class_t::amd_cdna4_k>;

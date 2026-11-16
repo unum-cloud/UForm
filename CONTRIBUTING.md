@@ -102,8 +102,8 @@ The pre-commit hook refuses a namespace no directory backs and a nameless one.
 ### Naming
 
 - `_t` marks concrete types and the aliases that materialize a template, and `_k` marks constants and enumerators.
-- Class and variable templates carry neither suffix: `ram_tower`, `encoder_class_tables`, `device_capabilities_of`.
-- Template parameters end in one underscore, as `typename tower_type_` and `encoder_home_t home_` do, and so do private and protected data members, so neither shadows the public names around it.
+- Class, alias and variable templates carry neither suffix: `ram_tower`, `encoder_class_tables`, `vram_tower_of`.
+- Template parameters end in one underscore, as `typename tower_type_` and `vendored_residency_t residency_` do, and so do private and protected data members, so neither shadows the public names around it.
 - Identifiers are whole words, like `index`, `count`, `threads` and `segments`.
 - One word names one concept: memory is allocated or reserved, a contiguous region is a buffer, a chunk or a plane, and the hook refuses `carve`, `slab`, `seam` and `slot`.
 - A `bool` parameter of the C ABI or the library becomes a two-value `enum class`, as `caller_exclusivity_t` names `caller_inclusive_k` and `caller_exclusive_k`.
@@ -265,7 +265,7 @@ Every CMake option carries the `UFORM_` prefix, and every `UFORM_BUILD_*` switch
 - `UFORM_WITH_INFINIBAND`: `AUTO` probes for InfiniBand and enables it when present, `ON` requires it and `OFF` leaves it out.
 - `UFORM_WITH_CODECS`: the host image, video and audio codecs the verbs over files decode with, on by default and off on WebAssembly, Android and Windows presets; CUDA needs it.
 - `UFORM_MARCH`: the `-march` floor of UForm's units and its libraries', an ISA level, `native` or a CPU name like `graniterapids`, and on WebAssembly the module's `serial`, `v128` or `v128relaxed`; empty by default, seeded from the environment.
-- `UFORM_MULTIVERSIONED`: on by default, every CPU class that exists, `serial` included, picked at run time; off, one `monoversioned` CPU class over every capability the libraries enabled, which is what the floor implies and what a preset vouches for with `-D <LIBRARY>_TARGET_<CAPABILITY>=1`, and only the newest GPU class of each lineage beside the vendor-wide one, so a pin below them is refused.
+- `UFORM_MULTIVERSIONED`: on by default, every CPU class that exists, `serial` included, picked at run time; off, one `monoversioned` CPU class over every capability the libraries enabled, which is what the floor implies and what a preset vouches for with `-D <LIBRARY>_TARGET_<CAPABILITY>=1`, and only the newest GPU class of each vendor, so a pin below it is refused; configure stops when no class runs the one GPU code.
 - The `xeon4_hopper`, `xeon6_blackwell`, `grace_hopper` and `vera_rubin` presets build the C library for one machine, naming its CPU and its one GPU code.
 
 GPU code follows one policy per build kind.
@@ -330,6 +330,60 @@ It builds the Swift binaries for that version, stamps every version site and the
 Then it publishes the GitHub release with the binaries attached, marking `X.Y.Z-rc.N` candidates as prereleases.
 Publishing starts every `release-<binding>.yml` at once, and each runs `check-release.sh` before it builds anything, so each registry trusts only its own binding's file.
 
+## Classes and Picks
+
+Class values are shared by USearch, UStore, UCall and UForm, so one value names the same hardware in all four.
+
+| Value | CPU class         | What it adds                                                   |
+| ----: | :---------------- | :------------------------------------------------------------- |
+|     0 | `unknown`         | Picks the newest class this machine runs                       |
+|     1 | `serial`          | The portable floor, no SIMD                                    |
+|     2 | `monoversioned`   | The one class of a monoversioned build, as the libraries built |
+|     3 | `intel-haswell`   | AVX2 and FMA                                                   |
+|     4 | `intel-sierra`    | AVX-VNNI over Haswell, without AVX-512                         |
+|     5 | `intel-skylake`   | AVX-512 over Haswell                                           |
+|     6 | `intel-icelake`   | AVX-512 VNNI and VPOPCNT                                       |
+|     7 | `amd-genoa`       | AVX-512 bf16 dot products                                      |
+|     8 | `intel-sapphire`  | AVX-512 FP16 and the AMX-BF16 and AMX-INT8 tiles               |
+|     9 | `intel-granite`   | The AMX-FP16 tiles                                             |
+|    10 | `intel-diamond`   | AVX10.2 FP8 conversions                                        |
+|    12 | `aws-g2`          | The NEON floor                                                 |
+|    13 | `apple-m2`        | Armv8.6 dot products and bf16 and f16 multiplies               |
+|    14 | `apple-m4`        | The SME outer-product tiles                                    |
+|    15 | `aws-g5`          | `WFE` waits over `apple-m2`                                    |
+|    16 | `nvidia-vera`     | FP8 dot products over `apple-m2`                               |
+|    17 | `alibaba-c930`    | RVA23 vectors                                                  |
+|    18 | `ibm-power10`     | VSX vectors and the MMA accumulators                           |
+|    19 | `wasm32-v128`     | The fixed-width `simd128` tier                                 |
+|    20 | `wasm64-extended` | Relaxed SIMD, shared memory and 64-bit addressing              |
+
+| Value | GPU class             | What it adds                                    |
+| ----: | :-------------------- | :---------------------------------------------- |
+|     0 | `unknown`             | No class: the vendor's generic kernels, or none |
+|     1 | `nvidia-ampere`       | The NVIDIA floor kits                           |
+|     2 | `nvidia-ada`          | fp8 conversions                                 |
+|     3 | `nvidia-hopper`       | Hopper's kits over Ada's                        |
+|     4 | `nvidia-blackwell`    | Blackwell's kits over Ada's                     |
+|     5 | `nvidia-blackwellrtx` | Consumer Blackwell's kits over Ada's            |
+|     6 | `nvidia-rubin`        | Rides `nvidia-blackwell`, compiling nothing     |
+|     7 | `amd-cdna3`           | The CDNA3 kits                                  |
+|     8 | `amd-cdna4`           | The CDNA4 kits over CDNA3's                     |
+|     9 | `amd-cdna5`           | The CDNA5 kits over CDNA4's                     |
+|    10 | `apple-metal7`        | Declared, not yet built                         |
+|    11 | `apple-metal9`        | Declared, not yet built                         |
+|    12 | `apple-metal10`       | Declared, not yet built                         |
+
+A CPU class is picked by `pick_cpu_ceiling` in `src/lib.hpp`.
+It reads the masks NumKong and ForkUnion detect on this CPU, never NumKong's enabled mask, as UForm compiles its kits into its own units.
+It grants the AMX tiles the CPU offers and drops their bits where the kernel refuses them, once per process.
+A pin no class takes is an invalid argument, and a pin whose masks the CPU lacks is unsupported.
+The newest compiled class whose masks fit the ceiling then runs, and a ceiling no compiled class fits is unsupported.
+
+A GPU class is picked per device by `pick_gpu_class` in `src/lib.hpp`, newest first down its vendor's ladder.
+A class serves a device when it is built, sits at or under the pin, and NumKong's loader runs all its kits there, as `nk_capabilities_compiled_cuda` and `nk_capabilities_compiled_rocm` answer.
+A device no class serves is still listed, as `unknown`, and refuses work as unsupported.
+A pin whose kits the device lacks is unsupported.
+
 ## Implementing a New Engine
 
 An engine here is a CPU or GPU class: a rung of a ladder that runs the encoder tower on kits picked for its instructions.
@@ -338,12 +392,12 @@ An engine here is a CPU or GPU class: a rung of a ladder that runs the encoder t
 1. Kits: where NumKong compiles kernels no existing kit calls, add a `<capability>_products_kit_t`, `_attention_kit_t` or `_elementwise_kit_t` to `include/uform/encoder/ram_kits.hpp`, or to `vram_kits.hpp` for a GPU, under `#if NUMKONG_TARGET_<CAPABILITY>` beside a twin whose `compiled_k` is false, and list it in its family's ladder in priority order.
 2. The C enum: give the class the next free value of the registry USearch, UStore, UCall and UForm share, after the highest any of them uses, in `uform_cpu_class_t` or `uform_gpu_class_t` in `c/uform/types.h`, under its family's comment, spell it in the name tables of `src/types.cpp` and `src_stub/types.cpp`, and list it in `cpu_classes_k` or `gpu_classes_k` in `src/lib.hpp`.
 3. The class: in `src/lib.hpp`, add its `cpu_class_t` or `gpu_class_t` enumerator, its row of `numkong_capabilities_of` as its parent's mask plus a delta, its `parent_class_of`, and its place newest first in `cpu_ladder_t`, `nvidia_ladder_t` or `amd_ladder_t`.
-4. Its primitives: a CPU class adds its cases to `forkunion_capabilities_of` and `cpu_class_compiled`, and specializes `waiter_for_cpu_class` and `atomic_ref_for_cpu_class` when it pairs a ForkUnion primitive its parent lacks; a GPU class adds the architecture numbers its driver reports to `gpu_class_of`.
-5. The build: a CPU class restates its delta in `src/CMakeLists.txt` as `uform_cpu_class(<class> <CLASS> OVER <parent> <capability> <MACRO>... FORKUNION <capability>...)`, which reaches `src/lib.hpp` as `UFORM_TARGET_<CLASS>`, and a GPU class is one `uform_nvidia_class(<class>)` or `uform_amd_class(<class>)` line.
-6. The class unit: `src/encoder/ram_variants_<class>.cpp` instantiates `encoder_class_tables` for `encoder_home_t::ram_k` and `host_class_tables` for the class, while `src/encoder/vram_variants_<vendor>_<class>.cpp` instantiates `encoder_class_tables` for its vendor's home.
+4. Its primitives: a CPU class adds its cases to `forkunion_capabilities_of` and `cpu_class_compiled`, and specializes `waiter_for_cpu_class` and `atomic_ref_for_cpu_class` when it pairs a ForkUnion primitive its parent lacks; a GPU class adds its case to `gpu_vendor_of`.
+5. The build: a CPU class restates its delta in `src/CMakeLists.txt` as `uform_cpu_class(<class> <CLASS> OVER <parent> <capability> <MACRO>... FORKUNION <capability>...)`, which reaches `src/lib.hpp` as `UFORM_TARGET_<CLASS>`, and a GPU class is one `uform_gpu_class(<vendor> <class> <CLASS> <capability>)` line, oldest first.
+6. The class unit: `src/encoder/ram_variants_<class>.cpp` instantiates `encoder_class_tables` for `vendored_residency_t::ram_k` and `host_class_tables` for the class, while `src/encoder/vram_variants_<vendor>_<class>.cpp` instantiates `encoder_class_tables` for its vendor's residency.
 
 A class whose kits match its parent's answers no table, so the ladder falls through to the parent, and a CPU row whose delta NumKong did not compile builds no unit at all.
-A new GPU vendor also adds an `encoder_home_t`, an entries kit declared in `vram_kits.hpp` and defined in `src/encoder/vram_entries_<vendor>.cpp` beside the device-only bundle of its `vram_kernels_<vendor>` unit, and its arms of `vendor_of`, `entries_kit_of` and `visit_vram_home`, so the C verbs never name it.
+A new GPU vendor also adds an `vendored_residency_t`, an entries kit declared in `vram_kits.hpp` and defined in `src/encoder/vram_entries_<vendor>.cpp` beside the device-only bundle of its `vram_kernels_<vendor>` unit, and its arms of `vendor_of`, `entries_kit_of` and `visit_vram_residency`, so the C verbs never name it.
 `uform_test_inference` encodes through every compiled CPU class against the serial floor in both precisions, and through the newest class each device `UFORM_DEVICES` selects admits, so a new class is checked as soon as its unit compiles.
 
 ## Implementing a New Language Binding

@@ -92,10 +92,11 @@ static std::vector<float> read_floats(char const *path) {
 /** Encodes the texts through @p verbs in @p precision into @p encoded : on @p executor , a pool
  *  for a host variant or a stream for a device one, with the batch and the outputs in memory both
  *  sides address, placed under @p capabilities . */
-template <encoder_home_t home_>
-static bool encode(test_suite_t &suite, encoder_verbs<home_> const &verbs, checkpoint_to_load_t const &checkpoint,
+template <vendored_residency_t residency_>
+static bool encode(test_suite_t &suite, encoder_verbs<residency_> const &verbs, checkpoint_to_load_t const &checkpoint,
                    geometry_t const &geometry, precision_t precision, nk_capability_t capabilities,
-                   typename encoder_home_executor<home_>::type executor, nk_stream_t stream, encoded_t &encoded) {
+                   typename vendored_residency_executor<residency_>::type executor, nk_stream_t stream,
+                   encoded_t &encoded) {
     expected<void *> made = verbs.create(checkpoint, geometry, precision, stream);
     if (!made && made.status_ == status_t::unsupported_k && precision == precision_t::e4m3_k)
         return suite.skip("the class has no E4M3 products"), false;
@@ -188,8 +189,8 @@ static void class_parity(test_suite_t &suite, checkpoint_to_load_t const &checkp
                          double tolerance) {
     if (!cpu_rung_fits(class_, {available, fu::cpu_capabilities()}))
         return suite.skip("this machine does not run the class");
-    encoder_verbs<encoder_home_t::ram_k> const *const verbs =
-        encoder_class_tables<encoder_home_t::ram_k, class_>::find();
+    encoder_verbs<vendored_residency_t::ram_k> const *const verbs =
+        encoder_class_tables<vendored_residency_t::ram_k, class_>::find();
     if (!verbs) return suite.skip("the class picks the kits its parent does");
     encoded_t encoded;
     if (!encode(suite, *verbs, checkpoint, geometry, precision, numkong_capabilities_of(class_), pool, nullptr,
@@ -201,8 +202,8 @@ static void class_parity(test_suite_t &suite, checkpoint_to_load_t const &checkp
 
 /** Encodes in @p precision on @p stream through @p verbs , the variant a device's vendor ladder
  *  picked, and compares with the serial floor's @p reference . */
-template <encoder_home_t home_>
-static void check_device_variant(test_suite_t &suite, encoder_verbs<home_> const *verbs,
+template <vendored_residency_t residency_>
+static void check_device_variant(test_suite_t &suite, encoder_verbs<residency_> const *verbs,
                                  checkpoint_to_load_t const &checkpoint, geometry_t const &geometry,
                                  precision_t precision, nk_capability_t capabilities, nk_stream_t stream,
                                  encoded_t const &reference, double tolerance) {
@@ -228,13 +229,13 @@ static void device_parity(test_suite_t &suite, checkpoint_to_load_t const &check
     if (!stream) return suite.check(false, "device stream: {}", nk::status_name(stream.status));
     if (amd)
         check_device_variant(suite,
-                             pick_gpu_variant<encoder_home_t::vram_amd_k>(amd_ladder_t {}, uform_gpu_class_unknown_k,
-                                                                          capabilities.value),
+                             pick_gpu_variant<vendored_residency_t::vram_amd_k>(
+                                 amd_ladder_t {}, uform_gpu_class_unknown_k, capabilities.value),
                              checkpoint, geometry, precision, capabilities.value, stream.value.get(), reference,
                              tolerance);
     else
         check_device_variant(suite,
-                             pick_gpu_variant<encoder_home_t::vram_nvidia_k>(
+                             pick_gpu_variant<vendored_residency_t::vram_nvidia_k>(
                                  nvidia_ladder_t {}, uform_gpu_class_unknown_k, capabilities.value),
                              checkpoint, geometry, precision, capabilities.value, stream.value.get(), reference,
                              tolerance);
@@ -308,17 +309,13 @@ static void checkpoint_round_trip(test_suite_t &suite, checkpoint_to_load_t cons
     std::filesystem::remove(path, ignored);
 }
 
-/** The class parity compares against: serial, or the one class of a monoversioned build. */
-constexpr cpu_class_t reference_class_k = cpu_class_compiled(cpu_class_t::serial_k) ? cpu_class_t::serial_k
-                                                                                    : cpu_class_t::monoversioned_k;
-
 /** Runs @ref class_parity for every class of the ladder this build compiled, in both precisions. */
 template <cpu_class_t... classes_>
 static void run_class_parity(test_suite_t &suite, cpu_ladder<classes_...>, checkpoint_to_load_t const &checkpoint,
                              geometry_t const &geometry, pool_view_t pool, nk_capability_t available,
                              encoded_t const &bf16_reference, encoded_t const &e4m3_reference) {
     auto rung = [&]<cpu_class_t class_>() {
-        if constexpr (cpu_class_compiled(class_) && class_ != reference_class_k) {
+        if constexpr (cpu_class_compiled(class_) && class_ != cpu_ladder_floor_k) {
             char const *const name = uform_cpu_class_name(static_cast<uform_cpu_class_t>(class_));
             suite.run(fmt::format("class_parity/{}/bf16", name), class_parity<class_>, checkpoint, geometry, pool,
                       available, precision_t::bf16_k, bf16_reference, 5e-2);
@@ -340,14 +337,14 @@ int main(int argc, char **argv) {
     if (!geometry) return suite.check(false, "geometry: {}", geometry.description_), suite.finish();
 
     nk_capability_t available = 0;
-    if (nk_cpu_capabilities_enabled(&available) != nk_success_k)
+    if (nk_capabilities_enabled_cpu(&available) != nk_success_k)
         return suite.check(false, "no CPU capabilities"), suite.finish();
     expected<executor_t> pool = executor_t::make(4, caller_exclusivity_t::caller_inclusive_k);
     if (!pool) return suite.check(false, "pool: {}", pool.description_), suite.finish();
 
-    encoder_verbs<encoder_home_t::ram_k> const &reference =
-        *encoder_class_tables<encoder_home_t::ram_k, reference_class_k>::find();
-    nk_capability_t const reference_capabilities = numkong_capabilities_of(reference_class_k);
+    encoder_verbs<vendored_residency_t::ram_k> const &reference =
+        *encoder_class_tables<vendored_residency_t::ram_k, cpu_ladder_floor_k>::find();
+    nk_capability_t const reference_capabilities = numkong_capabilities_of(cpu_ladder_floor_k);
     encoded_t bf16_reference, e4m3_reference;
     if (!encode(suite, reference, *checkpoint, *geometry, precision_t::bf16_k, reference_capabilities, pool->view(),
                 nullptr, bf16_reference) ||

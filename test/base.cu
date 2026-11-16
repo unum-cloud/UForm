@@ -954,7 +954,7 @@ int main(int, char **argv) {
         options.directory = sz::string_view_t {directory, std::strlen(directory)};
     if (char const *job = std::getenv("UFORM_JOB_ID"); job != nullptr)
         options.job = sz::string_view_t {job, std::strlen(job)};
-    if (nk_cuda_capabilities_enabled(0, &options.capabilities) != nk_success_k) {
+    if (nk_capabilities_enabled_cuda(0, &options.capabilities) != nk_success_k) {
         suite.check(false, "NumKong cannot query device 0");
         return suite.finish();
     }

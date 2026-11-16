@@ -355,6 +355,24 @@ A run with `--choices-weight` also trains calibrated choices through the byte de
 `uform_eval <checkpoint> --calibrate <choices.jsonl> --output <calibrated.safetensors>` fits one inverse temperature per question type on held-out choices.
 It prints each group's negative log-likelihood and the top-choice calibration error before and after, and writes the checkpoint again with them as `choices.inverse_temperatures`, which `uform_text_choose` reads.
 
+## Multiversioned and Monoversioned Builds
+
+UForm compiles in one of two shapes, picked by `UFORM_MULTIVERSIONED`.
+
+- __Multiversioned builds are for distribution.__
+  One binary runs well across diverse machines, because each CPU and each GPU picks its own class at runtime.
+  This is the default, and the shape of the Python wheels, the Rust crate and the JavaScript and Swift packages.
+- __Monoversioned builds are for throughput.__
+  For common hardware and data-center deployments, the binary carries only the best code for one machine.
+  These are the leanest binaries: they start fast and take little memory and disk.
+  Outside that machine they refuse cleanly with `uform_status_unsupported_k`, never crashing and never falling back to slower code in silence.
+- __The switches.__
+  `UFORM_MULTIVERSIONED=OFF` picks the second shape and `UFORM_MARCH` names its CPU floor.
+  The `xeon4_hopper`, `xeon6_blackwell`, `grace_hopper`, `vera_rubin` and `venice_mi450` presets spell whole machines.
+
+A monoversioned build compiles the single `monoversioned` CPU class in place of the ladder of named ones.
+It needs no monoversioned GPU class, as a preset's one GPU architecture already matches a named class, and CMake builds only the class units carrying code for it.
+
 ## Repository Layout
 
 ```bash
