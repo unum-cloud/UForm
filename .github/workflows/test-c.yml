@@ -116,16 +116,13 @@ jobs:
   verify_models:
     name: Check Promela Models
     runs-on: ubuntu-26.04
+    container: ghcr.io/ashvardanian/fatwheels:verify@sha256:c29899edae67fe85f0fa80ec3dfaa577a24e297cd4796c0fcdddda60a9010415
     timeout-minutes: 30
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7
       - name: Pull the ForkUnion Submodule
         run: git submodule update --init forkunion
-      - name: Install Spin
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y spin
       - name: Verify Every Model
         run: verification/check.sh
 
@@ -254,17 +251,17 @@ jobs:
     timeout-minutes: 60
     container: rocm/dev-ubuntu-26.04:10.0.0-full
     steps:
-      - name: Install Clang 22 and the Codecs
+      - name: Install Clang 23 and the Codecs
         run: |
           apt-get update && apt-get install -y curl gnupg git cmake ninja-build
           curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor -o /usr/share/keyrings/llvm.gpg
-          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-22 main" \
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-23 main" \
             > /etc/apt/sources.list.d/llvm.list
-          apt-get update && apt-get install -y clang-22 $UBUNTU_CODECS
+          apt-get update && apt-get install -y clang-23 $UBUNTU_CODECS
       - name: Checkout Repository
         uses: actions/checkout@v7
       - name: Build
         run: |
-          cmake --preset venice_mi450 -D CMAKE_C_COMPILER=clang-22 -D CMAKE_CXX_COMPILER=clang++-22 \
+          cmake --preset venice_mi450 -D CMAKE_C_COMPILER=clang-23 -D CMAKE_CXX_COMPILER=clang++-23 \
             -D CMAKE_PREFIX_PATH=/opt/rocm
           cmake --build --preset venice_mi450
