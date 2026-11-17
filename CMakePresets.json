@@ -14,13 +14,20 @@
       "binaryDir": "${sourceDir}/build_${presetName}",
       "cacheVariables": {
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "CMAKE_C_COMPILER": "clang",
-        "CMAKE_CXX_COMPILER": "clang++",
-        "CMAKE_CUDA_HOST_COMPILER": "clang++",
         "CMAKE_C_COMPILER_LAUNCHER": "$env{CMAKE_C_COMPILER_LAUNCHER}",
         "CMAKE_CXX_COMPILER_LAUNCHER": "$env{CMAKE_CXX_COMPILER_LAUNCHER}",
         "CMAKE_CUDA_COMPILER_LAUNCHER": "$env{CMAKE_CUDA_COMPILER_LAUNCHER}",
         "UFORM_WITH_CODECS": "ON"
+      }
+    },
+    {
+      "name": "clang",
+      "hidden": true,
+      "description": "Clang for the host code, NVCC included, wherever the toolchain file names no compiler of its own.",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_CUDA_HOST_COMPILER": "clang++"
       }
     },
     {
@@ -52,7 +59,10 @@
     },
     {
       "name": "debug",
-      "inherits": "base",
+      "inherits": [
+        "base",
+        "clang"
+      ],
       "displayName": "Debug - unoptimized host code",
       "description": "Unoptimized host code with full DWARF, every host library, tool and suite.",
       "cacheVariables": {
@@ -64,7 +74,10 @@
     },
     {
       "name": "check",
-      "inherits": "base",
+      "inherits": [
+        "base",
+        "clang"
+      ],
       "displayName": "Check - fastest compile cycle",
       "description": "Does it still compile, nothing more: -O0 without debug information on the host and in ptxas where CUDA is added, cicc at -O1 because nvcc 13.4 rejects __dp4a at -O0, with warnings as errors.",
       "cacheVariables": {
@@ -80,7 +93,10 @@
     },
     {
       "name": "relwithdebinfo",
-      "inherits": "base",
+      "inherits": [
+        "base",
+        "clang"
+      ],
       "displayName": "RelWithDebInfo - optimized with symbols and device line tables",
       "description": "Optimized, with host DWARF and -lineinfo device line tables for cuda-gdb and Nsight. The tree `.clangd` reads.",
       "cacheVariables": {
@@ -93,7 +109,10 @@
     },
     {
       "name": "release",
-      "inherits": "base",
+      "inherits": [
+        "base",
+        "clang"
+      ],
       "displayName": "Release - every host target",
       "description": "The host libraries and the conformance suites, fully optimized, with build paths remapped so the binaries name none.",
       "cacheVariables": {
@@ -108,7 +127,10 @@
     },
     {
       "name": "profile",
-      "inherits": "base",
+      "inherits": [
+        "base",
+        "clang"
+      ],
       "displayName": "Profile - benchmarks under perf",
       "description": "The profiling tree behind bench/README.md: full optimization, plus the symbols `perf` needs to attribute samples.",
       "cacheVariables": {
@@ -121,7 +143,10 @@
     },
     {
       "name": "tsan",
-      "inherits": "base",
+      "inherits": [
+        "base",
+        "clang"
+      ],
       "displayName": "TSan - host suites under ThreadSanitizer",
       "description": "ThreadSanitizer over UForm's own host units in RelWithDebInfo, in a tree of its own because AddressSanitizer cannot share a process with it. Its libraries keep their own flags.",
       "cacheVariables": {
@@ -161,9 +186,9 @@
       }
     },
     {
-      "name": "library",
+      "name": "library_options",
+      "hidden": true,
       "inherits": "base",
-      "displayName": "Library - the C library for the host alone",
       "description": "The C library alone, fully optimized, without the trainer or the conformance suites, with build paths remapped.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
@@ -172,6 +197,15 @@
         "CMAKE_CUDA_FLAGS": "-Xcompiler=-ffile-prefix-map=${sourceDir}=.",
         "UFORM_BUILD_SHARED": "ON"
       }
+    },
+    {
+      "name": "library",
+      "inherits": [
+        "library_options",
+        "clang"
+      ],
+      "displayName": "Library - the C library for the host alone",
+      "description": "The C library alone, fully optimized, without the trainer or the conformance suites, with build paths remapped."
     },
     {
       "name": "stub_library",
@@ -184,7 +218,10 @@
     },
     {
       "name": "swift",
-      "inherits": "base",
+      "inherits": [
+        "base",
+        "clang"
+      ],
       "displayName": "Swift - the XCFramework or artifact bundle SwiftPM links",
       "description": "The CPU library packed for SwiftPM, or with UFORM_BUILD_STUB the stand-in the Swift suite runs against. An Apple slice names its SDK and architecture, here or with -D, and any other target its Swift triples in UFORM_SWIFT_TRIPLES.",
       "cacheVariables": {
@@ -236,13 +273,10 @@
     },
     {
       "name": "wasm32_emscripten",
-      "inherits": "library",
+      "inherits": "library_options",
       "displayName": "WebAssembly Emscripten - the C library for browsers and Node",
       "toolchainFile": "${sourceDir}/cmake/toolchain-wasm32-emscripten.cmake",
       "cacheVariables": {
-        "CMAKE_C_COMPILER": null,
-        "CMAKE_CXX_COMPILER": null,
-        "CMAKE_CUDA_HOST_COMPILER": null,
         "UFORM_MARCH": "v128",
         "UFORM_WITH_CODECS": "OFF",
         "CMAKE_CROSSCOMPILING_EMULATOR": "node"
@@ -250,13 +284,10 @@
     },
     {
       "name": "wasm64_emscripten",
-      "inherits": "library",
+      "inherits": "library_options",
       "displayName": "WebAssembly Emscripten 64 - the extended C library for isolated pages and Node",
       "toolchainFile": "${sourceDir}/cmake/toolchain-wasm64-emscripten.cmake",
       "cacheVariables": {
-        "CMAKE_C_COMPILER": null,
-        "CMAKE_CXX_COMPILER": null,
-        "CMAKE_CUDA_HOST_COMPILER": null,
         "UFORM_MARCH": "v128relaxed",
         "UFORM_WITH_CODECS": "OFF",
         "CMAKE_CROSSCOMPILING_EMULATOR": "node"
@@ -264,26 +295,20 @@
     },
     {
       "name": "wasm32_wasi",
-      "inherits": "library",
+      "inherits": "library_options",
       "displayName": "WebAssembly WASI - the C library for standalone runtimes",
       "toolchainFile": "${sourceDir}/cmake/toolchain-wasm32-wasi.cmake",
       "cacheVariables": {
-        "CMAKE_C_COMPILER": null,
-        "CMAKE_CXX_COMPILER": null,
-        "CMAKE_CUDA_HOST_COMPILER": null,
         "UFORM_MARCH": "v128",
         "UFORM_WITH_CODECS": "OFF"
       }
     },
     {
       "name": "android_arm64",
-      "inherits": "library",
+      "inherits": "library_options",
       "displayName": "Android ARM64 - the C library through the NDK's toolchain",
       "toolchainFile": "$env{ANDROID_NDK_ROOT}/build/cmake/android.toolchain.cmake",
       "cacheVariables": {
-        "CMAKE_C_COMPILER": null,
-        "CMAKE_CXX_COMPILER": null,
-        "CMAKE_CUDA_HOST_COMPILER": null,
         "ANDROID_ABI": "arm64-v8a",
         "ANDROID_PLATFORM": "android-28",
         "UFORM_WITH_CODECS": "OFF"
@@ -292,16 +317,13 @@
     {
       "name": "msvc2026_x64",
       "inherits": [
-        "library",
+        "library_options",
         "windows"
       ],
       "displayName": "Windows x64 - the C library with Visual Studio 2026",
       "generator": "Visual Studio 18 2026",
       "architecture": "x64",
       "cacheVariables": {
-        "CMAKE_C_COMPILER": null,
-        "CMAKE_CXX_COMPILER": null,
-        "CMAKE_CUDA_HOST_COMPILER": null,
         "CMAKE_C_FLAGS": "/DWIN32 /D_WINDOWS /pathmap:${sourceDir}=.",
         "CMAKE_CXX_FLAGS": "/DWIN32 /D_WINDOWS /EHsc /pathmap:${sourceDir}=.",
         "CMAKE_CUDA_FLAGS": null,
@@ -311,16 +333,13 @@
     {
       "name": "msvc2026_arm64",
       "inherits": [
-        "library",
+        "library_options",
         "windows"
       ],
       "displayName": "Windows ARM64 - the C library with Visual Studio 2026",
       "generator": "Visual Studio 18 2026",
       "architecture": "ARM64",
       "cacheVariables": {
-        "CMAKE_C_COMPILER": null,
-        "CMAKE_CXX_COMPILER": null,
-        "CMAKE_CUDA_HOST_COMPILER": null,
         "CMAKE_C_FLAGS": "/DWIN32 /D_WINDOWS /pathmap:${sourceDir}=.",
         "CMAKE_CXX_FLAGS": "/DWIN32 /D_WINDOWS /EHsc /pathmap:${sourceDir}=.",
         "CMAKE_CUDA_FLAGS": null,
@@ -330,45 +349,36 @@
     {
       "name": "linux_arm64",
       "inherits": [
-        "library",
+        "library_options",
         "linux"
       ],
       "displayName": "Linux ARM64 - the C library through Clang and LLD",
       "toolchainFile": "${sourceDir}/cmake/toolchain-aarch64-llvm.cmake",
       "cacheVariables": {
-        "CMAKE_C_COMPILER": null,
-        "CMAKE_CXX_COMPILER": null,
-        "CMAKE_CUDA_HOST_COMPILER": null,
         "UFORM_WITH_CODECS": "OFF"
       }
     },
     {
       "name": "linux_riscv64",
       "inherits": [
-        "library",
+        "library_options",
         "linux"
       ],
       "displayName": "Linux RISC-V 64 - the C library through GCC 16",
       "toolchainFile": "${sourceDir}/cmake/toolchain-riscv64-gnu.cmake",
       "cacheVariables": {
-        "CMAKE_C_COMPILER": null,
-        "CMAKE_CXX_COMPILER": null,
-        "CMAKE_CUDA_HOST_COMPILER": null,
         "UFORM_WITH_CODECS": "OFF"
       }
     },
     {
       "name": "linux_ppc64le",
       "inherits": [
-        "library",
+        "library_options",
         "linux"
       ],
       "displayName": "Linux POWER - the C library through GCC 15",
       "toolchainFile": "${sourceDir}/cmake/toolchain-ppc64le-gnu.cmake",
       "cacheVariables": {
-        "CMAKE_C_COMPILER": null,
-        "CMAKE_CXX_COMPILER": null,
-        "CMAKE_CUDA_HOST_COMPILER": null,
         "UFORM_WITH_CODECS": "OFF"
       }
     },

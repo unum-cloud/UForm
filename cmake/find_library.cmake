@@ -38,7 +38,9 @@ if (uform_wheel_site_packages_)
     message(STATUS "uform: wheel libraries from ${uform_wheel_site_packages_}")
 endif ()
 
-set(uform_library_hints_ ${CUDAToolkit_LIBRARY_DIR} /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/lib64)
+set(uform_library_hints_ ${CUDAToolkit_LIBRARY_DIR} /usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}
+                         /lib/${CMAKE_LIBRARY_ARCHITECTURE} /usr/lib64
+)
 if (uform_wheel_site_packages_)
     list(
         PREPEND

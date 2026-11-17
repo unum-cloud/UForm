@@ -154,93 +154,37 @@ endfunction ()
 
 uform_cpu_class(intel_haswell INTEL_HASWELL OVER serial haswell HASWELL)
 uform_cpu_class(
-    intel_sierra
-    INTEL_SIERRA
-    OVER
-    intel_haswell
-    alder
-    ALDER
-    sierra
-    SIERRA
-    FORKUNION
-    x86_tpause
-    x86_cmpccxadd
+    intel_sierra INTEL_SIERRA
+    OVER intel_haswell alder ALDER sierra SIERRA
+    FORKUNION x86_tpause x86_cmpccxadd
 )
 uform_cpu_class(intel_skylake INTEL_SKYLAKE OVER intel_haswell skylake SKYLAKE)
 uform_cpu_class(intel_icelake INTEL_ICELAKE OVER intel_skylake icelake ICELAKE)
 uform_cpu_class(amd_genoa AMD_GENOA OVER intel_icelake genoa GENOA)
-uform_cpu_class(
-    intel_sapphire
-    INTEL_SAPPHIRE
-    OVER
-    amd_genoa
-    sapphire
-    SAPPHIRE
-    sapphireamx
-    SAPPHIREAMX
-)
+uform_cpu_class(intel_sapphire INTEL_SAPPHIRE OVER amd_genoa sapphire SAPPHIRE sapphireamx SAPPHIREAMX)
 # no intel_granite row: it adds no kit over Sapphire until UForm multiplies f16 or e5m2
 uform_cpu_class(
-    intel_diamond
-    INTEL_DIAMOND
-    OVER
-    intel_sapphire
-    graniteamx
-    GRANITEAMX
-    alder
-    ALDER
-    sierra
-    SIERRA
-    diamond
-    DIAMOND
+    intel_diamond INTEL_DIAMOND
+    OVER intel_sapphire
+         graniteamx
+         GRANITEAMX
+         alder
+         ALDER
+         sierra
+         SIERRA
+         diamond
+         DIAMOND
 )
 uform_cpu_class(aws_g2 AWS_G2 OVER serial neon NEON)
-uform_cpu_class(
-    apple_m2
-    APPLE_M2
-    OVER
-    aws_g2
-    neonsdot
-    NEONSDOT
-    neonbfdot
-    NEONBFDOT
-    neonfhm
-    NEONFHM
-)
-uform_cpu_class(
-    apple_m4
-    APPLE_M4
-    OVER
-    apple_m2
-    sme
-    SME
-    smebi32
-    SMEBI32
-)
+uform_cpu_class(apple_m2 APPLE_M2 OVER aws_g2 neonsdot NEONSDOT neonbfdot NEONBFDOT neonfhm NEONFHM)
+uform_cpu_class(apple_m4 APPLE_M4 OVER apple_m2 sme SME smebi32 SMEBI32)
 uform_cpu_class(aws_g5 AWS_G5 OVER apple_m2)
 uform_cpu_class(nvidia_vera NVIDIA_VERA OVER apple_m2 neonfp8 NEONFP8)
+uform_cpu_class(alibaba_c930 ALIBABA_C930 OVER serial rvv RVV rvvbb RVVBB)
 uform_cpu_class(
-    alibaba_c930
-    ALIBABA_C930
-    OVER
-    serial
-    rvv
-    RVV
-    rvvbb
-    RVVBB
-)
-uform_cpu_class(
-    ibm_power10
-    IBM_POWER10
-    OVER
-    serial
-    powervsx
-    POWERVSX
-    powermma
-    POWERMMA
-    FORKUNION
-    ppc64_pause
-    ppc64_amo
+    ibm_power10 IBM_POWER10
+    OVER serial powervsx POWERVSX powermma POWERMMA
+    FORKUNION ppc64_pause ppc64_amo
 )
 uform_cpu_class(wasm32_v128 WASM32_V128 OVER serial v128 V128)
 uform_cpu_class(wasm64_extended WASM64_EXTENDED OVER wasm32_v128 v128relaxed V128RELAXED)
@@ -422,8 +366,8 @@ if (UFORM_CUDA_ARCH)
         PUBLIC ${CMAKE_DL_LIBS}
     )
     uform_gpu_bundle(
-        uform_encoder_vram_nvidia_variants nvidia uform_encoder_nvidia encoder/vram_kernels_nvidia.cu CODES
-        ${uform_encoder_nvidia_codes_}
+        uform_encoder_vram_nvidia_variants nvidia uform_encoder_nvidia encoder/vram_kernels_nvidia.cu
+        CODES ${uform_encoder_nvidia_codes_}
     )
     target_link_libraries(
         uform_encoder_nvidia_device PRIVATE numkong::static forkunion::header stringzilla::static smashtable::header
@@ -439,8 +383,8 @@ if (UFORM_ROCM_ARCH)
         PUBLIC ${CMAKE_DL_LIBS}
     )
     uform_gpu_bundle(
-        uform_encoder_vram_amd_variants amd uform_encoder_amd encoder/vram_kernels_amd.hip CODES
-        ${CMAKE_HIP_ARCHITECTURES}
+        uform_encoder_vram_amd_variants amd uform_encoder_amd encoder/vram_kernels_amd.hip
+        CODES ${CMAKE_HIP_ARCHITECTURES}
     )
 endif ()
 # Apple's kernels travel as source, NumKong's MSL and UForm's embedded alike, and every device compiles them at first
@@ -488,7 +432,10 @@ if (UFORM_WITH_CODECS)
                             "sudo apt install libturbojpeg0-dev."
         )
     endif ()
+    # A TurboJPEG under CMAKE_PREFIX_PATH compiles against its own header, not the system's.
+    find_path(UFORM_TURBOJPEG_INCLUDE_DIR turbojpeg.h)
     target_sources(uform_host PRIVATE encode_media.cpp media/image.cpp media/video.cpp media/audio.cpp)
+    target_include_directories(uform_host SYSTEM BEFORE PRIVATE "${UFORM_TURBOJPEG_INCLUDE_DIR}")
     target_link_libraries(
         uform_host
         PUBLIC "${UFORM_TURBOJPEG_LIBRARY}"

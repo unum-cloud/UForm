@@ -140,9 +140,9 @@ set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 include(cmake/uform_flags.cmake)
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-if (NOT CMAKE_BUILD_TYPE)
+get_property(uform_multi_config_ GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if (NOT uform_multi_config_ AND NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif ()
 
@@ -167,30 +167,19 @@ include(cmake/uform_platform.cmake)
 # maps each visible GPU to the code its capability rows need, family suffix included, where CMake's own resolution would
 # drop it; eight cards of one kind still compile one code. A native or named code compiles as SASS alone.
 if (UFORM_CUDA_ARCH)
-    set(uform_cuda_native_codes_
-        75-real=75-real
-        80-real=80-real
-        86-real=86-real
-        89-real=89-real
-        90-real=90a-real
-        100-real=100f-real
-        103-real=103f-real
-        110-real=110f-real
-        120-real=120f-real
-        121-real=121f-real
-    )
     if (UFORM_CUDA_ARCH STREQUAL "all")
         set(uform_cuda_architectures_ 80-real 89-real 90a-real 100f-real 120f-real 80-virtual)
     elseif (UFORM_CUDA_ARCH STREQUAL "native")
         set(uform_cuda_architectures_)
         foreach (visible_ IN LISTS CMAKE_CUDA_ARCHITECTURES_NATIVE)
             set(native_code_)
-            foreach (pair_ IN LISTS uform_cuda_native_codes_)
-                if (pair_ MATCHES "^${visible_}=(.+)$")
-                    set(native_code_ ${CMAKE_MATCH_1})
-                endif ()
-            endforeach ()
-            if (NOT native_code_)
+            if (visible_ MATCHES "^(75|80|86|89)-real$")
+                set(native_code_ ${visible_})
+            elseif (visible_ STREQUAL "90-real")
+                set(native_code_ 90a-real)
+            elseif (visible_ MATCHES "^(100|103|110|120|121)-real$")
+                set(native_code_ ${CMAKE_MATCH_1}f-real)
+            else ()
                 message(FATAL_ERROR "UFORM_CUDA_ARCH=native has no code for the visible ${visible_} GPU; "
                                     "name its code instead"
                 )
