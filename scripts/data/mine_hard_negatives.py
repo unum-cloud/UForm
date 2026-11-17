@@ -313,7 +313,7 @@ def mine_one_shard(
 
 def main() -> int:
     """Mine hard negatives for every shard of the selected corpus."""
-    parser =argparse.ArgumentParser(description="Mine K hard negatives per row via CLIP within-shard kNN.")
+    parser = argparse.ArgumentParser(description="Mine K hard negatives per row via CLIP within-shard kNN.")
     parser.add_argument(
         "--corpus", required=True, choices=("coco_captions", "msrvtt_captions"), help="Registered corpus name to mine."
     )

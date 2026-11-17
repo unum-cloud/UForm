@@ -13,8 +13,9 @@
  */
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the module's load stage
 #include <forkunion/types.hpp>   // `fu::standard_yield_t`, `fu::wait_capped_k`
+#include <numkong/types.hpp>     // `nk::device_t`
 
-#include "uform/encoder/vram_kits.hpp"      // `vram_amd_entries_kit_t`, `segment_layout_t`, `entries_block_threads_k`
+#include "uform/encoder/vram_kits.hpp" // `vram_amd_entries_kit_t`, `segment_layout_t`, `entries_block_threads_k`
 #include "uform/utilities/vram_amd_device.hpp" // `hip_api_t`
 
 namespace fu = ashvardanian::forkunion;
@@ -183,6 +184,20 @@ nk_status_t ue::vram_amd_entries_kit_t::describe(std::size_t vendor_ordinal,
     description.architecture_major = static_cast<u32_t>(architecture_major);
     description.architecture_minor = static_cast<u32_t>(architecture_minor);
     return nk_success_k;
+}
+
+nk_capability_t ue::vram_amd_entries_kit_t::capabilities_detected(std::size_t vendor_ordinal,
+                                                                  device_description_t const&) noexcept {
+    nk::expected<nk::device_t> const device = nk::device_t::make(nk::device_kind_t::rocm_k, vendor_ordinal);
+    if (!device) return 0;
+    nk::expected<nk_capability_t> const detected = device.value.capabilities_detected();
+    return detected ? detected.value : 0;
+}
+
+nk_capability_t ue::vram_amd_entries_kit_t::capabilities_compiled(std::size_t vendor_ordinal,
+                                                                  device_description_t const&) noexcept {
+    nk::expected<nk::device_t> const device = nk::device_t::make(nk::device_kind_t::rocm_k, vendor_ordinal);
+    return device ? device.value.capabilities_compiled() : 0;
 }
 
 nk_status_t ue::vram_amd_entries_kit_t::copy(bytes_span_t target, bytes_view_t source, nk_stream_t stream) noexcept {

@@ -3809,6 +3809,31 @@ inline int probe(value_type_) noexcept {
 using probe_category_t = std::random_access_iterator_tag;
 FIXTURE
 
+assert_rejects "a reference to a pointer to a pointer" "takes or binds a reference to a pointer" test/probe.cpp <<'FIXTURE'
+inline void probe(char **&arguments) noexcept { arguments = nullptr; }
+FIXTURE
+
+assert_rejects "a type alias above an include" "declares an alias above its last #include" test/probe.cpp <<'FIXTURE'
+using probe_t = int;
+#include <cstddef> // `std::size_t`
+inline std::size_t probe(probe_t value) noexcept { return static_cast<std::size_t>(value); }
+FIXTURE
+
+assert_accepts "a type alias below the includes" test/probe.cpp <<'FIXTURE'
+#include <cstddef> // `std::size_t`
+using probe_t = int;
+inline std::size_t probe(probe_t value) noexcept { return static_cast<std::size_t>(value); }
+FIXTURE
+
+assert_rejects "a reference to a pointer in a test helper" "takes or binds a reference to a pointer" test/probe.cpp <<'FIXTURE'
+inline void probe(char const*& cursor, std::size_t count) noexcept { cursor += count; }
+FIXTURE
+
+assert_accepts "a view the callee advances, and prose naming the reference it replaces" test/probe.cpp <<'FIXTURE'
+/** Advances @p remaining past @p count bytes, never a <tt>char const*& cursor</tt>. */
+inline void probe(std::span<char const>& remaining, std::size_t count) noexcept { remaining = remaining.subspan(count); }
+FIXTURE
+
 # endregion Shared Gate Fixtures
 
 # region UForm Fixtures
@@ -4169,6 +4194,10 @@ assert_accepts "prose naming const_cast" tools/probe.hpp <<'FIXTURE'
 inline int &probe(int &value) { return value; }
 FIXTURE
 
+stage_edited_fixture tools/probe.hpp 's/^ \*  The case under test follows\.$/ *  The case under test follows, and never needs a const_cast./'
+run_precommit
+expect_acceptance "a docblock line naming const_cast, edited without its opener"
+
 assert_rejects "host thread in a GPU unit" "spawns host threads in a GPU backend" tools/probe.cuh <<'FIXTURE'
 inline void probe() { std::thread worker; }
 FIXTURE
@@ -4181,8 +4210,22 @@ assert_rejects "GCC atomic builtin" "uses a GCC atomic builtin" tools/probe.hpp 
 inline int probe(int *word) { return __atomic_load_n(word, __ATOMIC_ACQUIRE); }
 FIXTURE
 
+assert_rejects "a trap builtin outside the harness" "uses a GCC atomic builtin" tools/probe.hpp <<'FIXTURE'
+inline void probe() noexcept { __builtin_trap(); }
+FIXTURE
+
 assert_accepts "ForkUnion atomic reference" tools/probe.hpp <<'FIXTURE'
 inline int probe(int *word) { return atomic_ref_t {*word}.load(std::memory_order_acquire); }
+FIXTURE
+
+assert_accepts "a trap builtin in the harness, which no atomic reference replaces" test/probe.cpp <<'FIXTURE'
+inline void probe() noexcept { __builtin_trap(); }
+FIXTURE
+
+assert_accepts "the harness's failed-check counter" test/probe.cpp <<'FIXTURE'
+struct probe_run_t {
+    std::atomic<std::size_t> failed_checks {0};
+};
 FIXTURE
 
 assert_rejects "CPython format shortcut" "calls a format-string shortcut of the C API" python/probe.c <<'FIXTURE'
@@ -4533,6 +4576,10 @@ FIXTURE
 assert_accepts "a foreign macro keeps its abbreviation" tools/probe.hpp <<'FIXTURE'
 #include <asm/hwprobe.h>
 inline bool zabha(unsigned long extensions) { return extensions & RISCV_HWPROBE_EXT_ZABHA; }
+FIXTURE
+
+assert_accepts "a standard name deep in a std:: chain keeps its abbreviation" test/probe.cpp <<'FIXTURE'
+inline std::filesystem::path probe() { return std::filesystem::temp_directory_path(); }
 FIXTURE
 
 assert_accepts "member named in a one-line body, and a concept" tools/probe.hpp <<'FIXTURE'

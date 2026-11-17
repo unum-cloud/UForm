@@ -95,6 +95,7 @@ def _script_is_shardable(script: str) -> bool:
             _SHARDABLE_CACHE[script] = False
     return _SHARDABLE_CACHE[script]
 
+
 #: Host data root every registry `data/<name>` glob is anchored under.
 DATA_ROOT: str = os.environ.get("UFORM_DATA_ROOT", str(Path(__file__).resolve().parents[2] / "data"))
 
@@ -150,7 +151,9 @@ class StagingRow:
         the synthetic present-corpus rollup and the eval/smoke datasets not carried by any mixture.
         """
         if self.glob_override is not None:
-            return self.glob_override if Path(self.glob_override).is_absolute() else str(PROJECT_ROOT / self.glob_override)
+            return (
+                self.glob_override if Path(self.glob_override).is_absolute() else str(PROJECT_ROOT / self.glob_override)
+            )
         return mixtures.dataset_glob(self.dataset)
 
     def resolved_download_command(self, target_gigabytes: float) -> list[str] | None:

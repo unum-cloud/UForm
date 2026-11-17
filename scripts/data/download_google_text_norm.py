@@ -187,7 +187,7 @@ def repack(csv_path: Path, overwrite: bool, max_records: int) -> int:
 
 def main() -> int:
     """Fetch the Google text-normalization table and repack its token pairs to Parquet."""
-    parser =argparse.ArgumentParser(description=__doc__.split("\n", maxsplit=1)[0])
+    parser = argparse.ArgumentParser(description=__doc__.split("\n", maxsplit=1)[0])
     parser.add_argument(
         "--data-root",
         default=DEFAULT_DATA_ROOT,

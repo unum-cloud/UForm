@@ -15,8 +15,8 @@
 
 #define _GNU_SOURCE // `sched_getaffinity` and `CPU_COUNT`
 
-#include <stdio.h>  // `printf`
-#include <stdlib.h> // `exit`, `malloc`, `free`
+#include <stdio.h>  // `printf`, `snprintf`
+#include <stdlib.h> // `exit`, `getenv`, `strtod`, `strtoull`, `malloc`, `free`
 #include <string.h> // `memset`, `strlen`
 #include <time.h>   // `time`, `clock` - the seed a random run draws
 
@@ -32,6 +32,11 @@
 #if UFORM_OS_LINUX_
 #include <sched.h> // `sched_getaffinity`, `CPU_COUNT`
 #endif
+#if UFORM_OS_WINDOWS_
+#include <io.h> // `_write`
+#else
+#include <unistd.h> // `write`, `STDERR_FILENO`
+#endif
 
 /*  region Shared C Checks  */
 static size_t failed_checks = 0;
@@ -41,7 +46,6 @@ static size_t failed_cases = 0;
 static size_t skipped_cases = 0;
 static char const* current_case = NULL;
 static char const* program_name = "";
-static char const* test_filter = NULL;
 static uint64_t test_seed = 42;
 static double test_scale = 1.0;
 static bool refuse_skips = false;
@@ -56,11 +60,22 @@ static inline uint64_t split_mix_bits(uint64_t value) {
     return value ^ (value >> 31);
 }
 
+/** Writes @p text to the standard error through a raw @c write, which a signal handler may call. */
+static void write_text(char const* text) {
+#if UFORM_OS_WINDOWS_
+    (void)!_write(2, text, (unsigned)strlen(text));
+#else
+    (void)!write(STDERR_FILENO, text, strlen(text));
+#endif
+}
+
 /** Counts a failed check at @p file : @p line without stopping, so one run lists every mismatch. */
 static inline bool expect_at(bool is_met, char const* file, int line, char const* what) {
     if (is_met) return true;
     fflush(stdout);
-    fprintf(stderr, "  check failed at %s:%d\n    %s\n", file, line, what);
+    char message[512];
+    snprintf(message, sizeof message, "  check failed at %s:%d\n    %s\n", file, line, what);
+    write_text(message);
     ++failed_checks;
     return false;
 }
@@ -80,7 +95,9 @@ static inline char const* setting_text(int argc, char** argv, char const* variab
 
 /** Exits with one line naming a setting that does not parse, so a bad value never runs anything. */
 static inline void exit_unparsed(char const* variable, char const* text, char const* expected) {
-    fprintf(stderr, "%s=\"%s\" does not parse, expected %s\n", variable, text, expected);
+    char message[512];
+    snprintf(message, sizeof message, "%s=\"%s\" does not parse, expected %s\n", variable, text, expected);
+    write_text(message);
     exit(1);
 }
 
@@ -116,15 +133,13 @@ static inline bool read_flag_setting(int argc, char** argv, char const* variable
 static inline void start_test_run(int argc, char** argv) {
     program_name = argc != 0 ? argv[0] : "";
     read_test_settings(argc, argv);
-    printf("- Seed: %" PRIu64 ", scale: %g, filter: %s\n", test_seed, test_scale, test_filter ? test_filter : "none");
+    printf("- Seed: %" PRIu64 ", scale: %g\n", test_seed, test_scale);
 }
 
-/** Starts the case @p label unless the filter leaves it out, matched by substring. */
-static inline bool start_test_case(char const* label) {
-    if (test_filter && !strstr(label, test_filter)) return false;
+/** Starts the case @p label, which every run runs. */
+static inline void start_test_case(char const* label) {
     current_case = label;
     failed_checks_before_case = failed_checks;
-    return true;
 }
 
 /** Ends the case @ref start_test_case began: @p skip_reason when it skipped, NULL when it ran. */
@@ -141,8 +156,11 @@ static inline void finish_test_case(char const* skip_reason) {
     else {
         ++failed_cases;
         fflush(stdout);
-        fprintf(stderr, "- %s ... FAILED: %zu failed check(s)\n", current_case, failed);
-        fprintf(stderr, "  rerun: %s --seed %" PRIu64 " --filter '%s'\n", program_name, test_seed, current_case);
+        char message[512];
+        snprintf(message, sizeof message, "- %s ... FAILED: %zu failed check(s)\n", current_case, failed);
+        write_text(message);
+        snprintf(message, sizeof message, "  rerun: %s --seed %" PRIu64 "\n", program_name, test_seed);
+        write_text(message);
     }
     current_case = NULL;
 }
@@ -160,7 +178,6 @@ static inline int finish_test_run(void) {
 
 static void read_test_settings(int argc, char** argv) {
     test_seed = read_seed_setting(argc, argv, "UFORM_SEED", "--seed");
-    test_filter = setting_text(argc, argv, "UFORM_FILTER", "--filter");
     test_scale = read_real_setting(argc, argv, "UFORM_SCALE", "--scale", 1.0);
     refuse_skips = read_flag_setting(argc, argv, "UFORM_NO_SKIPS", "--no-skips", false);
 }
@@ -407,6 +424,144 @@ static uform_continuation_t carry_on(size_t completed, size_t total, void* state
     return uform_continue_k;
 }
 
+/** A model with the executor and arena that run it. */
+typedef struct {
+    uform_model_t model;
+    uform_executor_t executor;
+    uform_arena_t arena;
+} loaded_model_t;
+
+static void test_executor_leaves_its_creator_cores(void) {
+    int32_t const device = 0;
+    uform_outcome_t outcome = {0};
+    uform_executor_t executor = NULL;
+    int const cores = caller_cores();
+    uform_executor_for_vram(
+        &(uform_executor_for_vram_t) {.executor = &executor, .outcome = &outcome, .vram = {&device, 1}});
+    expect_success_at(&outcome, __FILE__, __LINE__);
+    expect_(caller_cores() == cores);
+    uform_executor_free(executor);
+}
+
+/** A mesh spans every visible GPU, so it gets an executor of its own over all of them; a build
+ *  without the trainer has no mesh and refuses one as unsupported. */
+static char const* test_mesh_dispatches_as_a_known_class(void) {
+    uform_outcome_t outcome = {0};
+    int visible = 0;
+    int32_t members[64];
+    expect_(cuDeviceGetCount(&visible) == CUDA_SUCCESS && visible <= 64);
+    for (int member = 0; member != visible; ++member) members[member] = member;
+    uform_executor_t box = NULL;
+    uform_executor_for_vram(
+        &(uform_executor_for_vram_t) {.executor = &box, .outcome = &outcome, .vram = {members, (size_t)visible}});
+    expect_success_at(&outcome, __FILE__, __LINE__);
+    uform_mesh_t mesh = NULL;
+    uform_mesh_bootstrap(&(uform_mesh_bootstrap_t) {.mesh = &mesh, .executor = box, .outcome = &outcome});
+    bool const trains = outcome.status != uform_status_unsupported_k;
+    if (trains) {
+        expect_success_at(&outcome, __FILE__, __LINE__);
+        uform_mesh_description_t layout = {0};
+        uform_mesh_describe(&(uform_mesh_describe_t) {.mesh = mesh, .outcome = &outcome, .description = &layout});
+        expect_success_at(&outcome, __FILE__, __LINE__);
+        expect_(layout.gpu_class != uform_gpu_class_unknown_k);
+        printf("- Mesh: %zu GPUs dispatching as %s\n", layout.gpus_per_host_domain,
+               uform_gpu_class_name(layout.gpu_class));
+        uform_mesh_free(mesh);
+    }
+    uform_executor_free(box);
+    return trains ? NULL : "built without UFORM_BUILD_TRAIN";
+}
+
+/** A load names its device by the UForm ordinal, which counts AMD devices after NVIDIA's. */
+static void test_model_loads_on_every_listed_ordinal(uform_bytes_view_t path) {
+    uform_outcome_t outcome = {0};
+    uform_gpu_device_t listed[64];
+    size_t listed_count = 0;
+    uform_gpu_devices(&(uform_gpu_devices_t) {.outcome = &outcome,
+                                              .devices = listed,
+                                              .devices_capacity = 64,
+                                              .devices_count = &listed_count});
+    expect_success_at(&outcome, __FILE__, __LINE__);
+    for (size_t position = 0; position != listed_count && position != 64; ++position) {
+        int32_t const ordinal = (int32_t)position;
+        uform_executor_t single = NULL;
+        uform_model_t replica = NULL;
+        uform_executor_for_vram(
+            &(uform_executor_for_vram_t) {.executor = &single, .outcome = &outcome, .vram = {&ordinal, 1}});
+        expect_success_at(&outcome, __FILE__, __LINE__);
+        uform_model_load_vram(&(uform_model_load_vram_t) {.model = &replica,
+                                                          .executor = single,
+                                                          .outcome = &outcome,
+                                                          .path = path,
+                                                          .vram = {&ordinal, 1},
+                                                          .quantization = uform_scalar_bf16_k});
+        expect_success_at(&outcome, __FILE__, __LINE__);
+        uform_model_free(replica);
+        uform_executor_free(single);
+    }
+}
+
+static void test_vram_matches_ram_within_the_bfloat16_floor(loaded_model_t host, loaded_model_t gpu,
+                                                            uform_model_description_t const* description) {
+    static inputs_t inputs;
+    fill_inputs(&inputs);
+    size_t const dimensions = description->dimensions;
+    float worst = 0.0f;
+    for (verb_t verb = verb_text_k; verb <= verb_samples_k; ++verb) {
+        landed_t landed;
+        uform_progress_t const quiet = {0};
+        encode(verb, &inputs, host.model, host.executor, host.arena, uform_completion_blocking_k, quiet, &landed);
+        expect_success_at(&landed.outcome, __FILE__, __LINE__);
+        fetched_t const reference = fetch(&landed, dimensions, false);
+
+        char const* const runs[] = {"blocking", "deferred", "two slices"};
+        for (size_t run = 0; run != 3; ++run) {
+            size_t reports = 0;
+            uform_progress_t const progress = {run == 2 ? carry_on : NULL, &reports, 2};
+            uform_completion_t const completion = run == 1 ? uform_completion_deferred_k : uform_completion_blocking_k;
+            encode(verb, &inputs, gpu.model, gpu.executor, gpu.arena, completion, progress, &landed);
+            expect_success_at(&landed.outcome, __FILE__, __LINE__);
+            expect_(landed.tokens == reference.tokens);
+            fetched_t const fetched = fetch(&landed, dimensions, true);
+            expect_(memcmp(fetched.offsets, reference.offsets, sizeof(fetched.offsets)) == 0);
+            expect_(run != 2 || reports == 2);
+            float const embeddings = relative_error(fetched.embeddings, reference.embeddings, items_count, dimensions);
+            float const states = relative_error(fetched.states, reference.states, reference.tokens, dimensions);
+            printf("%-8s %-10s tokens %4zu: max relative error embeddings %.5f, states %.5f\n", verb_names[verb],
+                   runs[run], fetched.tokens, embeddings, states);
+            worst = embeddings > worst ? embeddings : worst;
+            worst = states > worst ? states : worst;
+            free(fetched.embeddings), free(fetched.states);
+        }
+        free(reference.embeddings), free(reference.states);
+    }
+
+    size_t const token_width = description->token_width;
+    heads_t const reference = read_heads(&inputs, host.model, host.executor, host.arena, token_width, false);
+    heads_t const fetched = read_heads(&inputs, gpu.model, gpu.executor, gpu.arena, token_width, true);
+    expect_(memcmp(fetched.token_offsets, reference.token_offsets, sizeof(fetched.token_offsets)) == 0);
+    expect_(memcmp(fetched.probability_offsets, choice_offsets, sizeof(choice_offsets)) == 0 &&
+            memcmp(reference.probability_offsets, choice_offsets, sizeof(choice_offsets)) == 0);
+    float const token_vectors = relative_error(fetched.token_vectors, reference.token_vectors,
+                                               reference.token_offsets[items_count], token_width);
+    float probabilities = 0.0f;
+    for (size_t item = 0; item != items_count; ++item) {
+        float fetched_sum = 0.0f, reference_sum = 0.0f;
+        for (size_t choice = choice_offsets[item]; choice != choice_offsets[item + 1]; ++choice) {
+            float const delta = fabsf(fetched.probabilities[choice] - reference.probabilities[choice]);
+            probabilities = delta > probabilities ? delta : probabilities;
+            fetched_sum += fetched.probabilities[choice], reference_sum += reference.probabilities[choice];
+        }
+        expect_(fabsf(fetched_sum - 1.0f) < 1e-3f && fabsf(reference_sum - 1.0f) < 1e-3f);
+    }
+    printf("heads    blocking   tokens %4zu: max relative error token vectors %.5f, probabilities %.5f\n",
+           reference.token_offsets[items_count], token_vectors, probabilities);
+    worst = token_vectors > worst ? token_vectors : worst;
+    worst = probabilities > worst ? probabilities : worst;
+    free(fetched.token_vectors), free(reference.token_vectors);
+    expect_(worst <= tolerance);
+}
+
 int main(int argc, char* argv[]) {
     printf("UForm %s\n- Compiled for: %s\n- This machine: %s\n", uform_version_name(), uform_capabilities_compiled(),
            uform_capabilities_available());
@@ -416,42 +571,38 @@ int main(int argc, char* argv[]) {
     int32_t const device = 0;
     uform_outcome_t outcome = {0};
 
-    uform_executor_t host = NULL, gpu = NULL;
-    uform_executor_for_ram(&(uform_executor_for_ram_t) {.executor = &host, .outcome = &outcome, .threads = 2});
+    loaded_model_t host = {0}, gpu = {0};
+    uform_executor_for_ram(&(uform_executor_for_ram_t) {.executor = &host.executor, .outcome = &outcome, .threads = 2});
     expect_success_at(&outcome, __FILE__, __LINE__);
-    int const cores = caller_cores();
-    uform_executor_for_vram(&(uform_executor_for_vram_t) {.executor = &gpu, .outcome = &outcome, .vram = {&device, 1}});
+    uform_executor_for_vram(
+        &(uform_executor_for_vram_t) {.executor = &gpu.executor, .outcome = &outcome, .vram = {&device, 1}});
     expect_success_at(&outcome, __FILE__, __LINE__);
-    bool const creator_keeps_its_cores = caller_cores() == cores;
 
-    uform_model_t host_model = NULL, gpu_model = NULL;
-    uform_model_load_ram(&(uform_model_load_ram_t) {.model = &host_model,
-                                                    .executor = host,
+    uform_model_load_ram(&(uform_model_load_ram_t) {.model = &host.model,
+                                                    .executor = host.executor,
                                                     .outcome = &outcome,
                                                     .path = path,
                                                     .quantization = uform_scalar_bf16_k});
     expect_success_at(&outcome, __FILE__, __LINE__);
-    uform_model_load_vram(&(uform_model_load_vram_t) {.model = &gpu_model,
-                                                      .executor = gpu,
+    uform_model_load_vram(&(uform_model_load_vram_t) {.model = &gpu.model,
+                                                      .executor = gpu.executor,
                                                       .outcome = &outcome,
                                                       .path = path,
                                                       .vram = {&device, 1},
                                                       .quantization = uform_scalar_bf16_k});
     expect_success_at(&outcome, __FILE__, __LINE__);
     uform_model_description_t description = {0};
-    uform_model_describe(&(uform_model_describe_t) {.model = gpu_model,
-                                                    .executor = gpu,
+    uform_model_describe(&(uform_model_describe_t) {.model = gpu.model,
+                                                    .executor = gpu.executor,
                                                     .outcome = &outcome,
                                                     .description = &description});
     expect_success_at(&outcome, __FILE__, __LINE__);
-    size_t const dimensions = description.dimensions;
-    printf("- VRAM model: %zu dimensions, %zu context, %s\n", dimensions, description.context,
+    printf("- VRAM model: %zu dimensions, %zu context, %s\n", description.dimensions, description.context,
            uform_gpu_class_name(description.gpu_class));
 
-    uform_arena_t host_arena = NULL, gpu_arena = NULL;
-    uform_arena_init(&(uform_arena_init_t) {.arena = &host_arena, .executor = host, .outcome = &outcome});
+    uform_arena_init(&(uform_arena_init_t) {.arena = &host.arena, .executor = host.executor, .outcome = &outcome});
     expect_success_at(&outcome, __FILE__, __LINE__);
-    uform_arena_init(&(uform_arena_init_t) {.arena = &gpu_arena, .executor = gpu, .outcome = &outcome});
+    uform_arena_init(&(uform_arena_init_t) {.arena = &gpu.arena, .executor = gpu.executor, .outcome = &outcome});
     expect_success_at(&outcome, __FILE__, __LINE__);
 
     CUcontext context = NULL;
@@ -462,134 +613,20 @@ int main(int argc, char* argv[]) {
     // Every case below needs the executors, models and context; a failed setup ends the run.
     if (failed_checks != 0) return finish_test_run();
 
-    if (start_test_case("test_executor_leaves_its_creator_cores"))
-        expect_(creator_keeps_its_cores), finish_test_case(NULL);
-
-    if (start_test_case("test_mesh_dispatches_as_a_known_class")) {
-        // A mesh spans every visible GPU, so it gets an executor of its own over all of them.
-        int visible = 0;
-        int32_t members[64];
-        expect_(cuDeviceGetCount(&visible) == CUDA_SUCCESS && visible <= 64);
-        for (int member = 0; member != visible; ++member) members[member] = member;
-        uform_executor_t box = NULL;
-        uform_executor_for_vram(
-            &(uform_executor_for_vram_t) {.executor = &box, .outcome = &outcome, .vram = {members, (size_t)visible}});
-        expect_success_at(&outcome, __FILE__, __LINE__);
-        uform_mesh_t mesh = NULL;
-        uform_mesh_bootstrap(&(uform_mesh_bootstrap_t) {.mesh = &mesh, .executor = box, .outcome = &outcome});
-        // A build without the trainer has no mesh and refuses one as unsupported.
-        bool const trains = outcome.status != uform_status_unsupported_k;
-        if (trains) {
-            expect_success_at(&outcome, __FILE__, __LINE__);
-            uform_mesh_description_t layout = {0};
-            uform_mesh_describe(&(uform_mesh_describe_t) {.mesh = mesh, .outcome = &outcome, .description = &layout});
-            expect_success_at(&outcome, __FILE__, __LINE__);
-            expect_(layout.gpu_class != uform_gpu_class_unknown_k);
-            printf("- Mesh: %zu GPUs dispatching as %s\n", layout.gpus_per_host_domain,
-                   uform_gpu_class_name(layout.gpu_class));
-            uform_mesh_free(mesh);
-        }
-        uform_executor_free(box);
-        finish_test_case(trains ? NULL : "built without UFORM_BUILD_TRAIN");
-    }
-
-    // A load names its device by the UForm ordinal, which counts AMD devices after NVIDIA's.
-    if (start_test_case("test_model_loads_on_every_listed_ordinal")) {
-        uform_gpu_device_t listed[64];
-        size_t listed_count = 0;
-        uform_gpu_devices(&(uform_gpu_devices_t) {.outcome = &outcome,
-                                                  .devices = listed,
-                                                  .devices_capacity = 64,
-                                                  .devices_count = &listed_count});
-        expect_success_at(&outcome, __FILE__, __LINE__);
-        for (size_t position = 0; position != listed_count && position != 64; ++position) {
-            int32_t const ordinal = (int32_t)position;
-            uform_executor_t single = NULL;
-            uform_model_t replica = NULL;
-            uform_executor_for_vram(
-                &(uform_executor_for_vram_t) {.executor = &single, .outcome = &outcome, .vram = {&ordinal, 1}});
-            expect_success_at(&outcome, __FILE__, __LINE__);
-            uform_model_load_vram(&(uform_model_load_vram_t) {.model = &replica,
-                                                              .executor = single,
-                                                              .outcome = &outcome,
-                                                              .path = path,
-                                                              .vram = {&ordinal, 1},
-                                                              .quantization = uform_scalar_bf16_k});
-            expect_success_at(&outcome, __FILE__, __LINE__);
-            uform_model_free(replica);
-            uform_executor_free(single);
-        }
+    start_test_case("test_executor_leaves_its_creator_cores"), test_executor_leaves_its_creator_cores(),
         finish_test_case(NULL);
-    }
-
-    if (start_test_case("test_vram_matches_ram_within_the_bfloat16_floor")) {
-        static inputs_t inputs;
-        fill_inputs(&inputs);
-        float worst = 0.0f;
-        for (verb_t verb = verb_text_k; verb <= verb_samples_k; ++verb) {
-            landed_t landed;
-            uform_progress_t const quiet = {0};
-            encode(verb, &inputs, host_model, host, host_arena, uform_completion_blocking_k, quiet, &landed);
-            expect_success_at(&landed.outcome, __FILE__, __LINE__);
-            fetched_t const reference = fetch(&landed, dimensions, false);
-
-            char const* const runs[] = {"blocking", "deferred", "two slices"};
-            for (size_t run = 0; run != 3; ++run) {
-                size_t reports = 0;
-                uform_progress_t const progress = {run == 2 ? carry_on : NULL, &reports, 2};
-                uform_completion_t const completion = run == 1 ? uform_completion_deferred_k
-                                                               : uform_completion_blocking_k;
-                encode(verb, &inputs, gpu_model, gpu, gpu_arena, completion, progress, &landed);
-                expect_success_at(&landed.outcome, __FILE__, __LINE__);
-                expect_(landed.tokens == reference.tokens);
-                fetched_t const fetched = fetch(&landed, dimensions, true);
-                expect_(memcmp(fetched.offsets, reference.offsets, sizeof(fetched.offsets)) == 0);
-                expect_(run != 2 || reports == 2);
-                float const embeddings = relative_error(fetched.embeddings, reference.embeddings, items_count,
-                                                        dimensions);
-                float const states = relative_error(fetched.states, reference.states, reference.tokens, dimensions);
-                printf("%-8s %-10s tokens %4zu: max relative error embeddings %.5f, states %.5f\n", verb_names[verb],
-                       runs[run], fetched.tokens, embeddings, states);
-                worst = embeddings > worst ? embeddings : worst;
-                worst = states > worst ? states : worst;
-                free(fetched.embeddings), free(fetched.states);
-            }
-            free(reference.embeddings), free(reference.states);
-        }
-
-        size_t const token_width = description.token_width;
-        heads_t const reference = read_heads(&inputs, host_model, host, host_arena, token_width, false);
-        heads_t const fetched = read_heads(&inputs, gpu_model, gpu, gpu_arena, token_width, true);
-        expect_(memcmp(fetched.token_offsets, reference.token_offsets, sizeof(fetched.token_offsets)) == 0);
-        expect_(memcmp(fetched.probability_offsets, choice_offsets, sizeof(choice_offsets)) == 0 &&
-                memcmp(reference.probability_offsets, choice_offsets, sizeof(choice_offsets)) == 0);
-        float const token_vectors = relative_error(fetched.token_vectors, reference.token_vectors,
-                                                   reference.token_offsets[items_count], token_width);
-        float probabilities = 0.0f;
-        for (size_t item = 0; item != items_count; ++item) {
-            float fetched_sum = 0.0f, reference_sum = 0.0f;
-            for (size_t choice = choice_offsets[item]; choice != choice_offsets[item + 1]; ++choice) {
-                float const delta = fabsf(fetched.probabilities[choice] - reference.probabilities[choice]);
-                probabilities = delta > probabilities ? delta : probabilities;
-                fetched_sum += fetched.probabilities[choice], reference_sum += reference.probabilities[choice];
-            }
-            expect_(fabsf(fetched_sum - 1.0f) < 1e-3f && fabsf(reference_sum - 1.0f) < 1e-3f);
-        }
-        printf("heads    blocking   tokens %4zu: max relative error token vectors %.5f, probabilities %.5f\n",
-               reference.token_offsets[items_count], token_vectors, probabilities);
-        worst = token_vectors > worst ? token_vectors : worst;
-        worst = probabilities > worst ? probabilities : worst;
-        free(fetched.token_vectors), free(reference.token_vectors);
-        expect_(worst <= tolerance);
+    start_test_case("test_mesh_dispatches_as_a_known_class"), finish_test_case(test_mesh_dispatches_as_a_known_class());
+    start_test_case("test_model_loads_on_every_listed_ordinal"), test_model_loads_on_every_listed_ordinal(path),
         finish_test_case(NULL);
-    }
+    start_test_case("test_vram_matches_ram_within_the_bfloat16_floor"),
+        test_vram_matches_ram_within_the_bfloat16_floor(host, gpu, &description), finish_test_case(NULL);
 
-    uform_arena_free(gpu_arena);
-    uform_arena_free(host_arena);
-    uform_model_free(gpu_model);
-    uform_model_free(host_model);
-    uform_executor_free(gpu);
-    uform_executor_free(host);
+    uform_arena_free(gpu.arena);
+    uform_arena_free(host.arena);
+    uform_model_free(gpu.model);
+    uform_model_free(host.model);
+    uform_executor_free(gpu.executor);
+    uform_executor_free(host.executor);
     cuDevicePrimaryCtxRelease(handle);
     return finish_test_run();
 }

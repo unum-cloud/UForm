@@ -143,9 +143,7 @@ def _resolve_texts(config_files: list[str], id_column: str, text_column: str, ne
     return resolved
 
 
-def _materialize(
-    rows: list[tuple[str, str, list[str]]], passages: dict[str, str], queries: dict[str, str]
-) -> pa.Table:
+def _materialize(rows: list[tuple[str, str, list[str]]], passages: dict[str, str], queries: dict[str, str]) -> pa.Table:
     """Resolve the id triplets to text and build the canonical `(query, positive, negative)` parquet table.
 
     Drops a row whose query or positive id failed to resolve, and drops any individual negative id missing from

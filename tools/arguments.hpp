@@ -7,15 +7,16 @@
  *
  *  Flags are long kebab-case words whose value follows as the next argument or after @c =. Byte
  *  counts carry a binary suffix, durations carry @c ms or @c s, counts are plain integers, and
- *  lists are comma-separated. A flag naming a library enumerator writes that enumerator, parsed by
- *  the C interface's own names. A text value views the tail of its @c argv entry, so it is
- *  null-terminated; list items are not. A value that does not parse prints @c --flag="value"
- *  @c does @c not @c parse, @c expected @c <grammar>.
+ *  lists are comma-separated. A flag naming one of a few spellings selects its index in a
+ *  @c choice_t, which the tool maps to the enumerator. A text value views the tail of its @c argv
+ *  entry, so it is null-terminated; list items are not. A value that does not parse prints
+ *  @c --flag="value" @c does @c not @c parse, @c expected @c <grammar>.
  *
  *  @code{.cpp}
  *  count_t batch {256};
  *  std::string_view output;
- *  uform_objective_t objective = uform_objective_masked_k;
+ *  std::array<std::string_view, 3> const objectives {"masked", "contrastive", "joint"};
+ *  choice_t objective {objectives};
  *  std::array<flag_t, 3> const flags {{
  *      {"--output", "path", "where the calibrated checkpoint is written", &output},
  *      {"--batch", "items", "items one encoding call takes", &batch},
@@ -153,38 +154,45 @@ enum class switch_t : bool {
     present_k,
 };
 
-/** Which named checks run: every one for an empty pattern, else those the pattern finds as an
- *  ECMAScript regex, or as a substring when it is no valid regex. */
-struct filter_t {
-    std::string_view pattern;
-    std::regex regex;
-    bool compiled = false;
+/** Which named checks run: those its ECMAScript regex matches somewhere, every one while unset. */
+struct regex_filter_t {
+    std::string_view text;
+    std::regex regex {""};
 
-    /** Whether @p name passes the filter. */
-    bool selects(std::string_view name) const noexcept {
-        if (pattern.empty()) return true;
-        if (compiled) return std::regex_search(name.begin(), name.end(), regex);
-        return name.find(pattern) != std::string_view::npos;
-    }
+    bool selects(std::string_view name) const noexcept { return std::regex_search(name.begin(), name.end(), regex); }
 };
 
-/** The filter @p pattern spells, compiled once. */
-inline filter_t filter_of(std::string_view pattern) {
-    filter_t filter {pattern, {}, false};
-    if (pattern.empty()) return filter;
+/** Compiles @p text into @p filter, refusing a pattern that is no ECMAScript regex. */
+[[nodiscard]] inline argument_status_t filter_of(std::string_view text, regex_filter_t& filter) noexcept {
+    filter.text = text;
 #if defined(__cpp_exceptions) && __cpp_exceptions
     try {
-        filter.regex.assign(pattern.begin(), pattern.end());
-        filter.compiled = true;
+        filter.regex.assign(text.begin(), text.end());
     }
     catch (std::regex_error const&) {
+        return argument_status_t::invalid_number_k;
     }
 #else
-    filter.regex.assign(pattern.begin(), pattern.end());
-    filter.compiled = true;
+    filter.regex.assign(text.begin(), text.end());
 #endif
-    return filter;
+    return argument_status_t::parsed_k;
 }
+
+/** Comma-separated items like @c /mnt/a,/mnt/b, viewing into @c argv without null terminators. */
+struct texts_t {
+    static constexpr std::size_t capacity_k = 16;
+    std::array<std::string_view, capacity_k> values {};
+    std::size_t size = 0;
+
+    [[nodiscard]] std::span<std::string_view const> view() const noexcept { return {values.data(), size}; }
+};
+
+/** One name out of @c names, for a selection the C interface spells nowhere, like a benchmark's
+ *  @c cpu|gpu; @c selected indexes the chosen one. */
+struct choice_t {
+    std::span<std::string_view const> names;
+    std::size_t selected = 0;
+};
 
 /** One flag: its name with both dashes, the usage placeholder, one help line, and the value it
  *  writes. */
@@ -193,8 +201,8 @@ struct flag_t {
     std::string_view placeholder;
     std::string_view help;
     std::variant<std::string_view*, count_t*, counts_t*, switch_t*, std::chrono::milliseconds*, std::uint32_t*, double*,
-                 filter_t*, uform_objective_t*, uform_pair_loss_form_t*, bytes_t*>
-        destination;
+                 regex_filter_t*, texts_t*, choice_t*, bytes_t*>
+        parsed_variant;
 };
 
 /** Result of @c parse_arguments: the status, the argument and flag it concerns, the value that
@@ -309,37 +317,47 @@ inline uform_bytes_view_t bytes_view(std::string_view text) noexcept {
     return {reinterpret_cast<std::uint8_t const*>(text.data()), text.size()};
 }
 
-/** Writes the enumerator a status-answering @p from_name reads @p value as into @p destination. */
-template <typename enumeration_type_>
-[[nodiscard]] argument_status_t assign_named_(std::string_view value, enumeration_type_& destination,
-                                              uform_status_t (*from_name)(uform_bytes_view_t,
-                                                                          enumeration_type_*)) noexcept {
-    enumeration_type_ parsed {};
-    if (from_name(bytes_view(value), &parsed) != uform_status_success_k) return argument_status_t::unknown_name_k;
-    destination = parsed;
-    return argument_status_t::parsed_k;
+/** Splits comma-separated text into @p texts, rejecting empty items. */
+[[nodiscard]] inline argument_status_t parse_texts(std::string_view text, texts_t& texts) noexcept {
+    texts.size = 0;
+    while (true) {
+        std::size_t const comma = text.find(',');
+        if (texts.size == texts_t::capacity_k) return argument_status_t::too_many_items_k;
+        std::string_view const item = text.substr(0, comma);
+        if (item.empty()) return argument_status_t::too_few_items_k;
+        texts.values[texts.size++] = item;
+        if (comma == std::string_view::npos) return argument_status_t::parsed_k;
+        text.remove_prefix(comma + 1);
+    }
+}
+
+/** Selects the name in @p choice equal to @p text. */
+[[nodiscard]] inline argument_status_t parse_choice(std::string_view text, choice_t& choice) noexcept {
+    for (std::size_t index = 0; index != choice.names.size(); ++index) {
+        if (choice.names[index] != text) continue;
+        choice.selected = index;
+        return argument_status_t::parsed_k;
+    }
+    return argument_status_t::unknown_name_k;
 }
 
 [[nodiscard]] inline argument_status_t assign_(flag_t const& flag, std::string_view value) noexcept {
-    if (std::string_view* const* text = std::get_if<std::string_view*>(&flag.destination)) {
+    if (std::string_view* const* text = std::get_if<std::string_view*>(&flag.parsed_variant)) {
         **text = value;
         return argument_status_t::parsed_k;
     }
-    if (count_t* const* count = std::get_if<count_t*>(&flag.destination)) return parse_count(value, **count);
-    if (counts_t* const* counts = std::get_if<counts_t*>(&flag.destination)) return parse_counts(value, **counts);
-    if (std::chrono::milliseconds* const* duration = std::get_if<std::chrono::milliseconds*>(&flag.destination))
+    if (count_t* const* count = std::get_if<count_t*>(&flag.parsed_variant)) return parse_count(value, **count);
+    if (counts_t* const* counts = std::get_if<counts_t*>(&flag.parsed_variant)) return parse_counts(value, **counts);
+    if (std::chrono::milliseconds* const* duration = std::get_if<std::chrono::milliseconds*>(&flag.parsed_variant))
         return parse_duration(value, **duration);
-    if (std::uint32_t* const* seed = std::get_if<std::uint32_t*>(&flag.destination)) return parse_seed(value, **seed);
-    if (double* const* real = std::get_if<double*>(&flag.destination)) return parse_real(value, **real);
-    if (filter_t* const* filter = std::get_if<filter_t*>(&flag.destination)) {
-        **filter = filter_of(value);
-        return argument_status_t::parsed_k;
-    }
-    if (uform_objective_t* const* objective = std::get_if<uform_objective_t*>(&flag.destination))
-        return assign_named_(value, **objective, uform_objective_from_name);
-    if (uform_pair_loss_form_t* const* form = std::get_if<uform_pair_loss_form_t*>(&flag.destination))
-        return assign_named_(value, **form, uform_pair_loss_form_from_name);
-    if (bytes_t* const* bytes = std::get_if<bytes_t*>(&flag.destination)) return parse_bytes(value, **bytes);
+    if (std::uint32_t* const* seed = std::get_if<std::uint32_t*>(&flag.parsed_variant))
+        return parse_seed(value, **seed);
+    if (double* const* real = std::get_if<double*>(&flag.parsed_variant)) return parse_real(value, **real);
+    if (regex_filter_t* const* filter = std::get_if<regex_filter_t*>(&flag.parsed_variant))
+        return filter_of(value, **filter);
+    if (texts_t* const* texts = std::get_if<texts_t*>(&flag.parsed_variant)) return parse_texts(value, **texts);
+    if (choice_t* const* choice = std::get_if<choice_t*>(&flag.parsed_variant)) return parse_choice(value, **choice);
+    if (bytes_t* const* bytes = std::get_if<bytes_t*>(&flag.parsed_variant)) return parse_bytes(value, **bytes);
     return argument_status_t::unexpected_value_k;
 }
 
@@ -384,7 +402,7 @@ template <typename enumeration_type_>
         }
         result.flag = flag;
 
-        switch_t* const* toggle = std::get_if<switch_t*>(&flag->destination);
+        switch_t* const* toggle = std::get_if<switch_t*>(&flag->parsed_variant);
         if (toggle && equals != std::string_view::npos) {
             result.value = argument.substr(equals + 1);
             result.status = argument_status_t::unexpected_value_k;
@@ -409,19 +427,18 @@ template <typename enumeration_type_>
 
 /** The grammar a value of @p flag parses in, as the error line names it. */
 [[nodiscard]] inline std::string_view grammar(flag_t const& flag) noexcept {
-    if (count_t* const* count = std::get_if<count_t*>(&flag.destination))
+    if (count_t* const* count = std::get_if<count_t*>(&flag.parsed_variant))
         return (*count)->minimum ? "a positive count" : "an unsigned integer";
-    if (counts_t* const* counts = std::get_if<counts_t*>(&flag.destination))
+    if (counts_t* const* counts = std::get_if<counts_t*>(&flag.parsed_variant))
         return (*counts)->minimum ? "positive counts like 64,128" : "unsigned integers like 0,1";
-    if (std::holds_alternative<std::chrono::milliseconds*>(flag.destination)) return "a duration like 200ms or 10s";
-    if (std::holds_alternative<std::uint32_t*>(flag.destination)) return "an unsigned integer or random";
-    if (std::holds_alternative<double*>(flag.destination)) return "a non-negative real";
-    if (std::holds_alternative<filter_t*>(flag.destination)) return "an ECMAScript regex or a substring";
-    if (std::holds_alternative<uform_objective_t*>(flag.destination)) return "masked, contrastive or joint";
-    if (std::holds_alternative<uform_pair_loss_form_t*>(flag.destination))
-        return "derived, balanced, ranked or sigmoid";
-    if (std::holds_alternative<switch_t*>(flag.destination)) return "no value";
-    if (std::holds_alternative<bytes_t*>(flag.destination)) return "bytes like 4096 or 24G";
+    if (std::holds_alternative<std::chrono::milliseconds*>(flag.parsed_variant)) return "a duration like 200ms or 10s";
+    if (std::holds_alternative<std::uint32_t*>(flag.parsed_variant)) return "an unsigned integer or random";
+    if (std::holds_alternative<double*>(flag.parsed_variant)) return "a non-negative real";
+    if (std::holds_alternative<regex_filter_t*>(flag.parsed_variant)) return "an ECMAScript regex";
+    if (std::holds_alternative<texts_t*>(flag.parsed_variant)) return "names separated by commas";
+    if (std::holds_alternative<choice_t*>(flag.parsed_variant)) return "one of the names --help lists";
+    if (std::holds_alternative<switch_t*>(flag.parsed_variant)) return "no value";
+    if (std::holds_alternative<bytes_t*>(flag.parsed_variant)) return "bytes like 4096 or 24G";
     return "a value";
 }
 
@@ -438,7 +455,7 @@ template <typename enumeration_type_>
 /** Writes @p value, a variable's text, into @p flag: a switch takes 1, 0, true or false, the rest
  *  parse as on the command line. */
 [[nodiscard]] inline argument_status_t assign_variable_(flag_t const& flag, std::string_view value) noexcept {
-    switch_t* const* toggle = std::get_if<switch_t*>(&flag.destination);
+    switch_t* const* toggle = std::get_if<switch_t*>(&flag.parsed_variant);
     if (!toggle) return assign_(flag, value);
     bool const present = value == "1" || value == "true";
     if (!present && value != "0" && value != "false") return argument_status_t::unexpected_value_k;
@@ -472,7 +489,7 @@ inline std::size_t parse_or_exit(int argc, char const* const* argv, std::string_
         sz::string_t const variable = uform_variable(flag);
         char const* const value = std::getenv(variable.c_str());
         if (!value || !*value || assign_variable_(flag, value) == argument_status_t::parsed_k) continue;
-        bool const toggle = std::holds_alternative<switch_t*>(flag.destination);
+        bool const toggle = std::holds_alternative<switch_t*>(flag.parsed_variant);
         fmt::println(stderr, "{}=\"{}\" does not parse, expected {}", variable, value,
                      toggle ? "1, 0, true or false" : grammar(flag));
         std::exit(1);

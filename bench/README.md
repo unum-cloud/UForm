@@ -45,7 +45,7 @@ build_cuda/uform_bench_encoder --checkpoint model.safetensors --residency vram -
 
 Both binaries read the same environment variables:
 
-- `UFORM_FILTER`: the benchmarks to run by name, as an ECMAScript regex or a substring.
+- `UFORM_FILTER`: the benchmarks to run by name, as an ECMAScript regex.
 - `UFORM_SEED`: the seed of the synthetic inputs, an unsigned integer or `random`, 42 by default.
 - `UFORM_WARMUP`: the untimed run per benchmark, like `200ms` or `1s`, `1s` by default.
 - `UFORM_TIME_LIMIT`: the timed run per benchmark, like `200ms` or `10s`, `10s` by default.

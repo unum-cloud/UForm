@@ -1169,6 +1169,17 @@ enum class vendored_residency_t : u32_t {
     vram_apple_k,
 };
 
+/** The vendor in the C interface whose devices @p residency names; unknown for RAM. */
+constexpr uform_gpu_vendor_t gpu_vendor_of(vendored_residency_t residency) noexcept {
+    switch (residency) {
+    case vendored_residency_t::vram_nvidia_k: return uform_gpu_vendor_nvidia_k;
+    case vendored_residency_t::vram_amd_k: return uform_gpu_vendor_amd_k;
+    case vendored_residency_t::vram_apple_k: return uform_gpu_vendor_apple_k;
+    case vendored_residency_t::ram_k: return uform_gpu_vendor_unknown_k;
+    }
+    return uform_gpu_vendor_unknown_k;
+}
+
 /** The executor each residency's verbs take: a host tower's thread pool, a device tower's
  *  stream. */
 template <vendored_residency_t residency_>

@@ -89,9 +89,7 @@ def _clip_records(out_dir: Path, index_cap: int | None) -> list[dict[str, object
                 return records
             watch_id, start, end = _parse_video_id(str(entry["videoID"]))
             captions = list(entry.get("enCap", [])) + list(entry.get("chCap", []))
-            record = MediaClip(
-                source_id=watch_id, kind=MediaKind.VIDEO, start_seconds=start, end_seconds=end
-            ).to_json()
+            record = MediaClip(source_id=watch_id, kind=MediaKind.VIDEO, start_seconds=start, end_seconds=end).to_json()
             record["caption"] = "\n".join(str(caption) for caption in captions)
             records.append(record)
     return records

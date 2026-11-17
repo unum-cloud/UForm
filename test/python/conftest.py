@@ -37,13 +37,13 @@ def pytest_report_header() -> list[str]:
         f"- Capabilities compiled: {uform.capabilities_compiled()}",
         f"- Capabilities available: {uform.capabilities_available()}",
         f"- Checkpoint: {os.environ.get('UFORM_TEST_CHECKPOINT', 'none, the stub loads any bytes')}",
-        f"- Seed: {SETTINGS.seed}, scale: {SETTINGS.scale:g}, filter: {SETTINGS.filter.pattern or 'none'}",
+        f"- Seed: {SETTINGS.seed}, scale: {SETTINGS.scale:g}",
     ]
 
 
 # region Shared Pytest
-def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Refuses a test whose cases outgrow MAX_CASES_PER_TEST, then deselects what the filter setting leaves out."""
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Refuses a test whose cases outgrow MAX_CASES_PER_TEST."""
     variants: dict[tuple[str, str], set[str]] = collections.defaultdict(set)
     for item in items:
         callspec = getattr(item, "callspec", None)
@@ -58,10 +58,6 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     ]
     if oversized:
         raise pytest.UsageError(f"over MAX_CASES_PER_TEST={MAX_CASES_PER_TEST}: " + "; ".join(oversized))
-    deselected = [item for item in items if not SETTINGS.filter.selects(item.nodeid)]
-    if deselected:
-        config.hook.pytest_deselected(items=deselected)
-        items[:] = [item for item in items if SETTINGS.filter.selects(item.nodeid)]
 
 
 def pytest_make_parametrize_id(config: pytest.Config, val: object, argname: str) -> str | None:

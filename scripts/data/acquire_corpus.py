@@ -55,6 +55,7 @@ from sharding import resolve_rank_world
 #: Repository root, two levels above `scripts/data/`; registry globs are anchored here.
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 
+
 def staged_shard_count(registry_glob: str) -> int:
     """Count shards already on disk for a registry glob (recursive, anchored to PROJECT_ROOT) — for display."""
     absolute = registry_glob if Path(registry_glob).is_absolute() else str(PROJECT_ROOT / registry_glob)
@@ -188,8 +189,15 @@ def main() -> int:
         default=None,
         help="Total on-disk budget in GB; default auto-detects free disk * SAFETY_MARGIN (or $UFORM_DATA_BUDGET_GB).",
     )
-    parser.add_argument("--rank", type=int, default=None, help="this worker's index; usually Slurm-derived, explicit for local N-way runs.")
-    parser.add_argument("--world", type=int, default=None, help="total workers; usually Slurm-derived, explicit for local N-way runs.")
+    parser.add_argument(
+        "--rank",
+        type=int,
+        default=None,
+        help="this worker's index; usually Slurm-derived, explicit for local N-way runs.",
+    )
+    parser.add_argument(
+        "--world", type=int, default=None, help="total workers; usually Slurm-derived, explicit for local N-way runs."
+    )
     args = parser.parse_args()
 
     rank, world = resolve_rank_world(args.rank, args.world)

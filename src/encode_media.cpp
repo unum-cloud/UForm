@@ -137,7 +137,7 @@ struct recordings_packer_t {
         return {};
     }
 
-    failure_t stage(std::size_t item, item_plan_t const& plan, bytes_span_t cells, ue::geometry_t const& geometry,
+    failure_t stage(std::size_t item, item_plan_t const&, bytes_span_t cells, ue::geometry_t const& geometry,
                     std::size_t) const noexcept {
         expected_t const decoded = um::decode_audio(tape[item], geometry.audio_sample_rate,
                                                     nk::as_writable_values<f32_t>(cells));

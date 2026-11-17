@@ -167,22 +167,38 @@ def _crawl_url_index(index_shard: Path, crawl_dir: Path, *, url_column: str, cap
     img2dataset = shutil.which("img2dataset") or str(Path(sys.executable).with_name("img2dataset"))
     command = [
         img2dataset,
-        "--url_list", str(index_shard),
-        "--input_format", "parquet",
-        "--url_col", url_column,
-        "--caption_col", caption_column,
-        "--output_folder", str(crawl_dir),
-        "--output_format", "parquet",
-        "--processes_count", "1",  # concurrency is img2dataset's threads, not ours; one worker per shard
-        "--thread_count", "64",
-        "--image_size", "256",
-        "--resize_mode", "keep_ratio",
-        "--encode_format", "jpg",
-        "--encode_quality", "90",
-        "--retries", "2",
-        "--timeout", "20",
-        "--number_sample_per_shard", "100000",
-        "--disallowed_header_directives", "[]",  # honor no robots opt-out header; crawl every reachable URL
+        "--url_list",
+        str(index_shard),
+        "--input_format",
+        "parquet",
+        "--url_col",
+        url_column,
+        "--caption_col",
+        caption_column,
+        "--output_folder",
+        str(crawl_dir),
+        "--output_format",
+        "parquet",
+        "--processes_count",
+        "1",  # concurrency is img2dataset's threads, not ours; one worker per shard
+        "--thread_count",
+        "64",
+        "--image_size",
+        "256",
+        "--resize_mode",
+        "keep_ratio",
+        "--encode_format",
+        "jpg",
+        "--encode_quality",
+        "90",
+        "--retries",
+        "2",
+        "--timeout",
+        "20",
+        "--number_sample_per_shard",
+        "100000",
+        "--disallowed_header_directives",
+        "[]",  # honor no robots opt-out header; crawl every reachable URL
     ]
     subprocess.run(command, check=True)  # non-zero only on bad args; partial download yield is a clean exit
 
@@ -321,7 +337,9 @@ def acquire(
     parser = argparse.ArgumentParser(description=f"Acquire and normalize {name} to canonical parquet.")
     parser.add_argument("--fraction", type=float, default=None, help="leading-slice volume cap in (0, 1]")
     parser.add_argument("--max-shards", type=int, default=None, help="hard cap on the number of shards")
-    parser.add_argument("--out-dir", type=Path, default=None, help="explicit output dir; overrides <data-root>/<out_name>")
+    parser.add_argument(
+        "--out-dir", type=Path, default=None, help="explicit output dir; overrides <data-root>/<out_name>"
+    )
     parser.add_argument("--data-root", type=Path, default=None, help="root the <out_name> output dir is created under")
     parser.add_argument(
         "--only",

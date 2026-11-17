@@ -113,7 +113,7 @@ static case_result_t encode(encoder_verbs<residency_> const& verbs, checkpoint_t
     // read the batch's segments in place and the host reads the outputs there
     nk_allocator_t shared {}, scratch_policy {};
     if constexpr (residency_ == vendored_residency_t::ram_k) shared = scratch_policy = host_pages_policy();
-    else {
+    else if constexpr (gpu_vendor_compiled(vendor_of(residency_))) {
         shared = entries_kit_of<residency_>::policy(stream, uform_residency_ram_k);
         scratch_policy = entries_kit_of<residency_>::policy(stream, uform_residency_vram_k);
     }
@@ -162,7 +162,8 @@ static case_result_t encode(encoder_verbs<residency_> const& verbs, checkpoint_t
                              {masked_logits.data(), items_k, geometry.masked_vocabulary}};
     expected_t ran = verbs.encode(tower, batch->view(), outputs, scratch, executor);
     nk_status_t finished = nk_success_k;
-    if constexpr (residency_ != vendored_residency_t::ram_k) finished = entries_kit_of<residency_>::synchronize(stream);
+    if constexpr (residency_ != vendored_residency_t::ram_k && gpu_vendor_compiled(vendor_of(residency_)))
+        finished = entries_kit_of<residency_>::synchronize(stream);
     verbs.destroy(tower);
     if (!expect_true(ran, "encode: {}", ran.description_)) return {};
     if (!expect_true(finished == nk_success_k, "encode: {}", nk_status_name(finished))) return {};

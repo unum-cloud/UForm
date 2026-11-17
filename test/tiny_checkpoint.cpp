@@ -19,11 +19,12 @@
 #include <cstdint> // `std::uint16_t`, `std::uint32_t`, `std::uint64_t`
 #include <cstdio>  // `std::fopen`, `std::fwrite`, `std::fclose`, `std::fputs`
 
-#include <bit>    // `std::bit_cast`
-#include <string> // `std::string`, `std::to_string`
-#include <vector> // `std::vector`
+#include <bit>      // `std::bit_cast`
+#include <iterator> // `std::back_inserter`
+#include <string>   // `std::string`
+#include <vector>   // `std::vector`
 
-#include <fmt/format.h> // `fmt::println`
+#include <fmt/format.h> // `fmt::format`, `fmt::format_to`, `fmt::println`
 
 /** The tower's geometry, every value spelled as the metadata spells it. */
 static constexpr std::size_t hidden_k = 256, depth_k = 2, ffn_expansion_k = 2, patch_side_k = 8, tube_frames_k = 2;
@@ -53,13 +54,12 @@ static std::vector<tensor_plan_t> plan_tensors() {
     std::vector<tensor_plan_t> plans;
     plans.push_back({"model.embedding", vocabulary_k, hidden_k, fill_t::random_k});
     for (std::size_t block = 0; block != depth_k; ++block) {
-        std::string const prefix = "model.blocks." + std::to_string(block) + ".";
-        plans.push_back({prefix + "qkv", 3 * hidden_k, hidden_k, fill_t::random_k});
-        plans.push_back({prefix + "out", hidden_k, hidden_k, fill_t::random_k});
-        plans.push_back({prefix + "gate_up", 2 * ffn, hidden_k, fill_t::random_k});
-        plans.push_back({prefix + "down", hidden_k, ffn, fill_t::random_k});
-        plans.push_back({prefix + "pre_norm", 1, hidden_k, fill_t::ones_k});
-        plans.push_back({prefix + "post_norm", 1, hidden_k, fill_t::ones_k});
+        plans.push_back({fmt::format("model.blocks.{}.qkv", block), 3 * hidden_k, hidden_k, fill_t::random_k});
+        plans.push_back({fmt::format("model.blocks.{}.out", block), hidden_k, hidden_k, fill_t::random_k});
+        plans.push_back({fmt::format("model.blocks.{}.gate_up", block), 2 * ffn, hidden_k, fill_t::random_k});
+        plans.push_back({fmt::format("model.blocks.{}.down", block), hidden_k, ffn, fill_t::random_k});
+        plans.push_back({fmt::format("model.blocks.{}.pre_norm", block), 1, hidden_k, fill_t::ones_k});
+        plans.push_back({fmt::format("model.blocks.{}.post_norm", block), 1, hidden_k, fill_t::ones_k});
     }
     plans.push_back({"model.final_norm", 1, hidden_k, fill_t::ones_k});
     plans.push_back({"model.pool_query", 1, hidden_k, fill_t::random_k});
@@ -79,37 +79,20 @@ static std::vector<tensor_plan_t> plan_tensors() {
 
 /** The geometry keys training writes at save, in the order the reader documents them. */
 static std::string metadata_json() {
-    std::string const entries[][2] = {
-        {"step", "0"},
-        {"depth", std::to_string(depth_k)},
-        {"hidden", std::to_string(hidden_k)},
-        {"ffn_expansion", std::to_string(ffn_expansion_k)},
-        {"head_width", "128"},
-        {"rms_epsilon", "1e-06"},
-        {"rope_temporal", "64"},
-        {"rope_height", "32"},
-        {"rope_width", "32"},
-        {"rope_base", "10000"},
-        {"context", "512"},
-        {"image_patch_side", std::to_string(patch_side_k)},
-        {"image_channels", std::to_string(image_channels_k)},
-        {"image_pixel_mean", "0.485,0.456,0.406,0"},
-        {"image_pixel_std", "0.229,0.224,0.225,1"},
-        {"video_patch_side", std::to_string(patch_side_k)},
-        {"video_tube_frames", std::to_string(tube_frames_k)},
-        {"video_frame_stride", "1"},
-        {"video_channels", std::to_string(video_channels_k)},
-        {"video_pixel_mean", "0.485,0.456,0.406"},
-        {"video_pixel_std", "0.229,0.224,0.225"},
-        {"audio_chunk_samples", std::to_string(chunk_samples_k)},
-        {"audio_sample_rate", "16000"},
-    };
-    std::string json = "\"__metadata__\":{";
-    for (auto const& entry : entries) {
-        if (json.back() != '{') json += ',';
-        json += "\"" + entry[0] + "\":\"" + entry[1] + "\"";
-    }
-    return json + '}';
+    return fmt::format(
+        "\"__metadata__\":{{\"step\":\"0\",\"depth\":\"{depth}\",\"hidden\":\"{hidden}\","                   //
+        "\"ffn_expansion\":\"{ffn_expansion}\",\"head_width\":\"128\",\"rms_epsilon\":\"1e-06\","            //
+        "\"rope_temporal\":\"64\",\"rope_height\":\"32\",\"rope_width\":\"32\",\"rope_base\":\"10000\","     //
+        "\"context\":\"512\",\"image_patch_side\":\"{patch_side}\",\"image_channels\":\"{image_channels}\"," //
+        "\"image_pixel_mean\":\"0.485,0.456,0.406,0\",\"image_pixel_std\":\"0.229,0.224,0.225,1\","          //
+        "\"video_patch_side\":\"{patch_side}\",\"video_tube_frames\":\"{tube_frames}\","                     //
+        "\"video_frame_stride\":\"1\",\"video_channels\":\"{video_channels}\","                              //
+        "\"video_pixel_mean\":\"0.485,0.456,0.406\",\"video_pixel_std\":\"0.229,0.224,0.225\","              //
+        "\"audio_chunk_samples\":\"{chunk_samples}\",\"audio_sample_rate\":\"16000\"}}",
+        fmt::arg("depth", depth_k), fmt::arg("hidden", hidden_k), fmt::arg("ffn_expansion", ffn_expansion_k),
+        fmt::arg("patch_side", patch_side_k), fmt::arg("image_channels", image_channels_k),
+        fmt::arg("tube_frames", tube_frames_k), fmt::arg("video_channels", video_channels_k),
+        fmt::arg("chunk_samples", chunk_samples_k));
 }
 
 int main(int argc, char** argv) {
@@ -119,13 +102,13 @@ int main(int argc, char** argv) {
     }
     std::vector<tensor_plan_t> const plans = plan_tensors();
 
-    std::string header = "{" + metadata_json();
+    std::string header = fmt::format("{{{}", metadata_json());
     std::uint64_t offset = 0;
     for (tensor_plan_t const& plan : plans) {
         std::uint64_t const end = offset + plan.rows * plan.columns * sizeof(std::uint16_t);
-        header += ",\"" + plan.name + "\":{\"dtype\":\"BF16\",\"shape\":[" + std::to_string(plan.rows) + "," +
-                  std::to_string(plan.columns) + "],\"data_offsets\":[" + std::to_string(offset) + "," +
-                  std::to_string(end) + "]}";
+        fmt::format_to(std::back_inserter(header),
+                       ",\"{}\":{{\"dtype\":\"BF16\",\"shape\":[{},{}],\"data_offsets\":[{},{}]}}", plan.name,
+                       plan.rows, plan.columns, offset, end);
         offset = end;
     }
     header += '}';

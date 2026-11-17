@@ -48,6 +48,21 @@ This repository is the full training and inference stack, tuned for NVIDIA Hoppe
 Neither training nor inference carries a __PyTorch or JAX dependency__.
 There is not even NCCL or NVSHMEM, no dynamic memory allocations on the hot paths, locks, mutexes, or even need for multiple threads.
 
+## Performance
+
+UForm grows its contrastive batch, and the negatives each pair learns from, with the number of GPUs rather than with their memory, through mechanisms like those of [ScalingContrasts](https://github.com/ashvardanian/ScalingContrasts) and more advanced ones.
+That project's own measurements show the scale such a loss reaches:
+
+| 16 GPUs in 2 boxes       |          Step | Memory per GPU |
+| :----------------------- | ------------: | -------------: |
+| ScalingContrasts         |       77.7 ms |        3.02 GB |
+| big_vision SigLIP        |   2.9× slower |       35× more |
+| open_clip SigLIP, gather |   3.9× slower |       31× more |
+| open_clip CLIP           | out of memory |                |
+
+Inside a box, its multimem all-reduce reaches 1.28× NCCL's best bus bandwidth behind a 25.5 µs barrier.
+Measured on two 8× B300 SXM6 boxes joined by 100 Gb/s RoCE v2 per GPU.
+
 ## Quickstart
 
 Every binding wraps one C library; the Python wheels install with `pip install uform`.

@@ -159,8 +159,9 @@ static void load_ram(uform_model_t* output, uform_executor_t executor, uform_ram
     std::unique_ptr<uform_model_handle_t> model = start_model(loaded, precision, outcome);
     if (!model) return;
     model->tables = verbs;
-    void*& tower = model->towers.emplace<void*>(pack_tower(*model, *loaded, *verbs, nullptr, outcome));
+    void* const tower = pack_tower(*model, *loaded, *verbs, nullptr, outcome);
     if (!tower) return;
+    model->towers.emplace<void*>(tower);
     if (progress_ticks_t {progress, 1}(1) == continuation_t::cancel_k)
         return propagate_error(uform_status_cancelled_k, outcome, "The caller's handler stopped the load"), void();
     *output = model.release();

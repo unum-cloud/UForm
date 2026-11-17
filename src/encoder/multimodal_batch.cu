@@ -150,12 +150,16 @@ static constexpr u32_t mixed_source_absent_k = ~u32_t {0};
 }
 
 /** Every member's addresses, passed by value as a kernel argument — @ref max_gpus_per_host_k
- *  bounds the table, so no device-resident copy and no staging exist. */
+ *  bounds the table, so no device-resident copy and no staging exist. Kernels take it as
+ *  @c __grid_constant__ and copy the entry they read, so no callee sees a param-space address. */
 struct batch_sources_t_ {
     batch_source_t_ entries[max_gpus_per_host_k] {};
     u32_t count = 0;
 
-    [[nodiscard]] __device__ batch_source_t_ const& operator[](u32_t gpu) const noexcept { return entries[gpu]; }
+    // Inlined, since cicc -O1 hands a callee this parameter's address without cvta.param
+    [[nodiscard]] __device__ __forceinline__ batch_source_t_ const& operator[](u32_t gpu) const noexcept {
+        return entries[gpu];
+    }
 };
 
 /** The first segment of @p peer in @c [from,end) whose membership in the live run of @p bag equals
@@ -195,11 +199,12 @@ struct batch_sources_t_ {
  *  nowhere and reports no drop.
  */
 template <typename sources_type_>
-static __device__ u32_t route_destination_(sources_type_ const& sources, u32r1_span_t mixed_offsets,
-                                           u32r1_span_t mixed_lengths, u32r1_span_t mixed_sources,
-                                           u32r1_span_t mixed_bags, u32_t member_index, data_epoch_t data_epoch,
-                                           u64_t seed, u32_t segments_per_gpu, u32_t rows_per_gpu,
-                                           u32_t columns_per_row, u32_t max_bags_per_gpu) noexcept {
+static __device__ __forceinline__ u32_t route_destination_(sources_type_ const& sources, u32r1_span_t mixed_offsets,
+                                                           u32r1_span_t mixed_lengths, u32r1_span_t mixed_sources,
+                                                           u32r1_span_t mixed_bags, u32_t member_index,
+                                                           data_epoch_t data_epoch, u64_t seed, u32_t segments_per_gpu,
+                                                           u32_t rows_per_gpu, u32_t columns_per_row,
+                                                           u32_t max_bags_per_gpu) noexcept {
     bool const lands = !mixed_offsets.empty();
     bool const leader = threadIdx.x % warp_size_k == 0u; // every lane walks the same cursor, one stores it
     u32_t const capacity = rows_per_gpu * columns_per_row;
@@ -212,7 +217,7 @@ static __device__ u32_t route_destination_(sources_type_ const& sources, u32r1_s
         for (u32_t segment = 0; segment != segments_per_gpu; ++segment) {
             std::size_t const destination = static_cast<std::size_t>(member_index) * segments_per_gpu + segment;
             std::size_t const source = epoch_permutation(seed, data_epoch, destination, world_segments);
-            batch_source_t_ const& peer = sources[static_cast<u32_t>(source / segments_per_gpu)];
+            batch_source_t_ const peer = sources[static_cast<u32_t>(source / segments_per_gpu)];
             u32_t columns = peer.segment_lengths[source % segments_per_gpu];
             cursor = row_aligned_cursor_(cursor, columns, peer.segment_modality[source % segments_per_gpu],
                                          columns_per_row);
@@ -246,7 +251,7 @@ static __device__ u32_t route_destination_(sources_type_ const& sources, u32r1_s
         for (u32_t bag = 0; bag != max_bags_per_gpu; ++bag) {
             std::size_t const destination_bag = static_cast<std::size_t>(member_index) * max_bags_per_gpu + bag;
             std::size_t const source_bag_world = epoch_permutation(seed, data_epoch, destination_bag, world_bags);
-            batch_source_t_ const& peer = sources[static_cast<u32_t>(source_bag_world / max_bags_per_gpu)];
+            batch_source_t_ const peer = sources[static_cast<u32_t>(source_bag_world / max_bags_per_gpu)];
             u32_t const source_bag = static_cast<u32_t>(source_bag_world % max_bags_per_gpu);
             u32_t const source_gpu_base = static_cast<u32_t>(source_bag_world / max_bags_per_gpu) * segments_per_gpu;
 
@@ -310,7 +315,7 @@ static __device__ u32_t route_destination_(sources_type_ const& sources, u32r1_s
  *  __grid_size__ @c [1,1,1] of one warp; no dynamic shared memory.
  */
 template <typename sources_type_>
-static __global__ void batch_geometry_kernel_(sources_type_ sources, u32r1_span_t mixed_offsets,
+static __global__ void batch_geometry_kernel_(__grid_constant__ sources_type_ const sources, u32r1_span_t mixed_offsets,
                                               u32r1_span_t mixed_lengths, u32r1_span_t mixed_sources,
                                               u32r1_span_t mixed_bags, u32r1_view_t loaded_dropped,
                                               u32r1_span_t mixed_dropped, u32_t member_index, data_epoch_t data_epoch,
@@ -332,10 +337,10 @@ static __global__ void batch_geometry_kernel_(sources_type_ sources, u32r1_span_
  *  dynamic shared memory.
  */
 template <typename sources_type_>
-static __global__ void batch_world_geometry_kernel_(sources_type_ sources, u32r2_span_t world_lengths,
-                                                    u32r2_span_t world_sources, data_epoch_t data_epoch, u64_t seed,
-                                                    u32_t segments_per_gpu, u32_t rows_per_gpu, u32_t columns_per_row,
-                                                    u32_t max_bags_per_gpu) {
+static __global__ void batch_world_geometry_kernel_(__grid_constant__ sources_type_ const sources,
+                                                    u32r2_span_t world_lengths, u32r2_span_t world_sources,
+                                                    data_epoch_t data_epoch, u64_t seed, u32_t segments_per_gpu,
+                                                    u32_t rows_per_gpu, u32_t columns_per_row, u32_t max_bags_per_gpu) {
     u32_t const gpu = blockIdx.x;
     if (gpu >= sources.count) return;
     route_destination_(sources, u32r1_span_t {}, world_lengths[gpu, nk::slice], world_sources[gpu, nk::slice],
@@ -361,9 +366,9 @@ static __global__ void batch_world_geometry_kernel_(sources_type_ sources, u32r2
  *  dynamic shared memory.
  */
 template <typename sources_type_>
-static __global__ void batch_gather_kernel_(sources_type_ sources, batch_dest_t_ dest, u32r1_view_t mixed_offsets,
-                                            u32r1_view_t mixed_lengths, u32r1_view_t mixed_sources,
-                                            u32_t segments_per_gpu) {
+static __global__ void batch_gather_kernel_(__grid_constant__ sources_type_ const sources, batch_dest_t_ dest,
+                                            u32r1_view_t mixed_offsets, u32r1_view_t mixed_lengths,
+                                            u32r1_view_t mixed_sources, u32_t segments_per_gpu) {
     u32_t const segment = blockIdx.x;
     u32_t const source = mixed_sources[segment];
     if (source == mixed_source_absent_k) {
@@ -379,7 +384,7 @@ static __global__ void batch_gather_kernel_(sources_type_ sources, batch_dest_t_
         }
         return;
     }
-    batch_source_t_ const& peer = sources[source / segments_per_gpu];
+    batch_source_t_ const peer = sources[source / segments_per_gpu];
     u32_t const source_segment = source % segments_per_gpu;
 
     // Descriptors travel for every routed segment, PAD included, so the mixed batch
@@ -436,16 +441,16 @@ static __global__ void batch_gather_kernel_(sources_type_ sources, batch_dest_t_
  *  __grid_size__ @c [world_gpus,1,1] , threads stripe the segments; no dynamic shared memory.
  */
 template <typename sources_type_>
-static __global__ void batch_world_keys_kernel_(sources_type_ sources, u32r2_view_t world_lengths,
-                                                u32r2_view_t world_sources, u64r2_span_t world_keys,
-                                                u32_t segments_per_gpu) {
+static __global__ void batch_world_keys_kernel_(__grid_constant__ sources_type_ const sources,
+                                                u32r2_view_t world_lengths, u32r2_view_t world_sources,
+                                                u64r2_span_t world_keys, u32_t segments_per_gpu) {
     u32_t const gpu = blockIdx.x;
     if (gpu >= sources.count) return;
     for (u32_t segment = threadIdx.x; segment < segments_per_gpu; segment += blockDim.x) {
         u32_t const source = world_sources[gpu, segment];
         u64_t key = 0u;
         if (source != mixed_source_absent_k && world_lengths[gpu, segment] != 0u) {
-            batch_source_t_ const& peer = sources[source / segments_per_gpu];
+            batch_source_t_ const peer = sources[source / segments_per_gpu];
             if (!peer.segment_key.empty()) key = peer.segment_key[source % segments_per_gpu];
         }
         world_keys[gpu, segment] = key;

@@ -1364,6 +1364,18 @@ nk_status_t ue::vram_apple_entries_kit_t::describe(std::size_t vendor_ordinal,
     return nk_success_k;
 }
 
+nk_capability_t ue::vram_apple_entries_kit_t::capabilities_detected(std::size_t,
+                                                                    device_description_t const& description) noexcept {
+    u32_t const family = description.architecture_major;
+    return (family >= 7 ? nk_cap_metal_k : 0) | (family >= 9 ? nk_cap_apple9_k : 0) |
+           (family >= 10 ? nk_cap_apple10_k : 0);
+}
+
+nk_capability_t ue::vram_apple_entries_kit_t::capabilities_compiled(std::size_t vendor_ordinal,
+                                                                    device_description_t const& description) noexcept {
+    return capabilities_detected(vendor_ordinal, description);
+}
+
 nk_status_t ue::vram_apple_entries_kit_t::copy(bytes_span_t target, bytes_view_t source, nk_stream_t stream) noexcept {
     if (source.empty()) return nk_success_k;
     metal_context_t* const context = context_of_(stream);

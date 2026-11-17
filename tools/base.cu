@@ -213,10 +213,25 @@ static f32_t weight_or_exit_(std::string_view flag, double value, bool positive 
     return static_cast<f32_t>(value);
 }
 
+/** The names @c --objective accepts, in the order of @c objectives_k. */
+static constexpr std::array<std::string_view, 3> objective_names_k {"masked", "contrastive", "joint"};
+
+/** The objective each name of @c objective_names_k selects. */
+static constexpr std::array<uform_objective_t, 3> objectives_k {uform_objective_masked_k, uform_objective_contrastive_k,
+                                                                uform_objective_joint_k};
+
+/** The names @c --pair-loss accepts, in the order of @c pair_loss_forms_k. */
+static constexpr std::array<std::string_view, 4> pair_loss_names_k {"derived", "balanced", "ranked", "sigmoid"};
+
+/** The pair loss each name of @c pair_loss_names_k selects. */
+static constexpr std::array<uform_pair_loss_form_t, 4> pair_loss_forms_k {
+    uform_pair_loss_form_derived_k, uform_pair_loss_form_balanced_k, uform_pair_loss_form_ranked_k,
+    uform_pair_loss_form_sigmoid_k};
+
 /** Parse @p argv and its @c UFORM_ variables into a run description, or exit: with status 0 after
  *  the usage on @c --help , with status 1 after one line on a value that does not parse. */
 [[nodiscard]] static trainer_config_t parse_config_(int argc, char const* const* argv) noexcept {
-    using tools::count_t, tools::flag_t, tools::switch_t;
+    using tools::choice_t, tools::count_t, tools::flag_t, tools::switch_t;
     trainer_config_t config;
     std::size_t constexpr u32_max_k = (std::numeric_limits<u32_t>::max)();
     std::string_view tier_name, mixture, eval_mixture, checkpoint, resume, telemetry;
@@ -230,13 +245,13 @@ static f32_t weight_or_exit_(std::string_view flag, double value, bool positive 
            tcr_lambda = config.tcr_lambda, tcr_epsilon_squared = config.tcr_epsilon_squared,
            lipschitz_lambda = config.lipschitz_lambda, grad_spike_threshold = config.grad_spike_threshold;
     std::uint32_t seed = static_cast<std::uint32_t>(config.seed);
-    uform_objective_t objective = uform_objective_masked_k;
-    uform_pair_loss_form_t pair_loss = uform_pair_loss_form_derived_k;
+    choice_t objective_choice {objective_names_k};
+    choice_t pair_loss_choice {pair_loss_names_k};
     switch_t eager = switch_t::absent_k;
     std::array<flag_t, 26> const flags {{
         {"--tier", "name", "tiny, small, medium, large or xl: the width, depth, rows and learning rate", &tier_name},
         {"--mixture", "path", "a mixture JSON, or the synthetic tokens or omni draw", &mixture},
-        {"--objective", "name", "masked, contrastive or joint: which losses a step relaxes", &objective},
+        {"--objective", "name", "masked, contrastive or joint: which losses a step relaxes", &objective_choice},
         {"--steps", "count", "the run's length in optimizer steps, counted across resumes", &steps},
         {"--rows", "count", "rows per GPU, zero to measure them from free memory", &rows},
         {"--learning-rate", "real", "the peak learning rate, the tier's unless given", &learning_rate},
@@ -244,7 +259,7 @@ static f32_t weight_or_exit_(std::string_view flag, double value, bool positive 
         {"--seed", "seed", "the run's base seed, which every draw derives from", &seed},
         {"--nvdec-engines", "count", "the NVDEC engines a GPU carries, which a video mixture needs", &nvdec_engines},
         {"--batches-per-fill", "count", "steps' batches one data fill packs per GPU", &batches_per_fill},
-        {"--pair-loss", "name", "the contrastive pair loss, each starting at its own logit scale", &pair_loss},
+        {"--pair-loss", "name", "the contrastive pair loss, each starting at its own logit scale", &pair_loss_choice},
         {"--late-interaction-weight", "real", "the late-interaction loss's weight, zero for none",
          &late_interaction_weight},
         {"--choices-weight", "real", "the calibrated choices' weight, zero for none", &choices_weight},
@@ -304,6 +319,8 @@ static f32_t weight_or_exit_(std::string_view flag, double value, bool positive 
         names = comma == std::string_view::npos ? std::string_view {} : names.substr(comma + 1);
     }
 
+    uform_objective_t const objective = objectives_k[objective_choice.selected];
+    uform_pair_loss_form_t const pair_loss = pair_loss_forms_k[pair_loss_choice.selected];
     switch (objective) {
     case uform_objective_masked_k: config.objective = objective_t::masked_k; break;
     case uform_objective_contrastive_k: config.objective = objective_t::contrastive_k; break;

@@ -410,7 +410,7 @@ The suites and benchmarks read these variables, and a C++ test or bench binary a
 | Variable                | Flag                | Default            | Meaning                                                                                  |
 | :---------------------- | :------------------ | :----------------- | :--------------------------------------------------------------------------------------- |
 | `UFORM_SEED`            | `--seed`            | `42`               | Seed every draw derives from, an unsigned 64-bit integer or `random`, which a run prints |
-| `UFORM_FILTER`          | `--filter`          | unset              | C++ case labels or pytest node IDs to run, as an ECMAScript regex or else a substring    |
+| `UFORM_FILTER`          | `--filter`          | unset              | C++ case labels or benchmark rows to run, as an ECMAScript regex                         |
 | `UFORM_SCALE`           | `--scale`           | `1`                | Multiplier of every baseline iteration count and sweep, like `0.1` or `10`               |
 | `UFORM_TRAP_ON_FAILURE` | `--trap-on-failure` | unset              | C++ only: raises `SIGTRAP` at the first failed check, to stop there under a debugger     |
 | `UFORM_NO_SKIPS`        | `--no-skips`        | unset              | C++ only: a run in which a case skipped exits with 3                                     |
@@ -419,8 +419,8 @@ The suites and benchmarks read these variables, and a C++ test or bench binary a
 | `UFORM_WARMUP`          | `--warmup`          | `1s`               | Benchmarks only: the untimed run per benchmark, like `200ms` or `1s`                     |
 | `UFORM_TIME_LIMIT`      | `--time-limit`      | `10s`              | Benchmarks only: the timed run per benchmark, like `200ms` or `10s`                      |
 
-The C suites read `UFORM_SEED` and `UFORM_FILTER`, matching the filter as a substring, as C has no portable regex.
-The Python suites read `UFORM_SEED`, `UFORM_FILTER` and `UFORM_SCALE`, alongside `pytest -k`, and the Rust suite reads `UFORM_SEED`.
+The C suites read `UFORM_SEED` and run every case, as C has no portable regex.
+The Python suites read `UFORM_SEED` and `UFORM_SCALE` and select through `pytest -k`, and the Rust suite reads `UFORM_SEED`.
 
 `UFORM_SEED` keys every case's own stream by the case's name, as `stream_key(seed, name, index)`, identical in C++, C, Python, Rust and Mojo.
 A case's inputs therefore never depend on which cases ran before it, so `UFORM_SEED` together with `UFORM_FILTER` is a faithful reproduction recipe.

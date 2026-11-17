@@ -78,6 +78,16 @@ struct vram_nvidia_entries_kit_t {
      *  @p vendor_ordinal . */
     static nk_status_t describe(std::size_t vendor_ordinal, device_description_t& description) noexcept;
 
+    /** What NumKong detects on the device @p vendor_ordinal that @p description read, its vendor's
+     *  group bit included; zero when the runtime refuses. */
+    static nk_capability_t capabilities_detected(std::size_t vendor_ordinal,
+                                                 device_description_t const& description) noexcept;
+
+    /** What this build holds NumKong code for that the device's loader runs, its vendor's group
+     *  bit included; zero when the runtime refuses. */
+    static nk_capability_t capabilities_compiled(std::size_t vendor_ordinal,
+                                                 device_description_t const& description) noexcept;
+
     /** @p source into @p target , as long, either side in host or device memory. */
     static nk_status_t copy(uu::bytes_span_t target, uu::bytes_view_t source, nk_stream_t stream) noexcept;
 
@@ -116,6 +126,10 @@ struct vram_amd_entries_kit_t {
     static nk_allocator_t policy(nk_stream_t stream, uform_residency_t residency) noexcept;
     static nk_status_t synchronize(nk_stream_t stream) noexcept;
     static nk_status_t describe(std::size_t vendor_ordinal, device_description_t& description) noexcept;
+    static nk_capability_t capabilities_detected(std::size_t vendor_ordinal,
+                                                 device_description_t const& description) noexcept;
+    static nk_capability_t capabilities_compiled(std::size_t vendor_ordinal,
+                                                 device_description_t const& description) noexcept;
     static nk_status_t copy(uu::bytes_span_t target, uu::bytes_view_t source, nk_stream_t stream) noexcept;
     static nk_status_t zero(uu::bytes_span_t target, nk_stream_t stream) noexcept;
     static nk_status_t fill_layout(u32r1_view_t lengths, u32r1_span_t packed_offsets, u32r1_span_t pool_offsets,
@@ -153,6 +167,15 @@ struct vram_apple_entries_kit_t {
     static nk_status_t synchronize(nk_stream_t stream) noexcept;
 
     static nk_status_t describe(std::size_t vendor_ordinal, device_description_t& description) noexcept;
+
+    /** The Metal families of @p description 's newest family: Metal 3 from family 7, Apple 9 and
+     *  Apple 10 from their own. */
+    static nk_capability_t capabilities_detected(std::size_t vendor_ordinal,
+                                                 device_description_t const& description) noexcept;
+
+    /** As @ref capabilities_detected , since Apple's kernels compile on the device at first use. */
+    static nk_capability_t capabilities_compiled(std::size_t vendor_ordinal,
+                                                 device_description_t const& description) noexcept;
     static nk_status_t copy(uu::bytes_span_t target, uu::bytes_view_t source, nk_stream_t stream) noexcept;
     static nk_status_t zero(uu::bytes_span_t target, nk_stream_t stream) noexcept;
     static nk_status_t fill_layout(u32r1_view_t lengths, u32r1_span_t packed_offsets, u32r1_span_t pool_offsets,

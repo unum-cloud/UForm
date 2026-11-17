@@ -27,6 +27,7 @@ set(uform_bundled_files_
 if (UFORM_BUILD_TEST)
     add_executable(uform_test_tools ${PROJECT_SOURCE_DIR}/test/tools.cpp)
     target_link_libraries(uform_test_tools PRIVATE fmt::fmt)
+    target_compile_features(uform_test_tools PRIVATE cxx_std_23)
     foreach (tool_ IN ITEMS base eval grow)
         add_test(NAME uform_test_tools_${tool_} COMMAND uform_test_tools -- ${CMAKE_CROSSCOMPILING_EMULATOR}
                                                          $<TARGET_FILE:uform_${tool_}>

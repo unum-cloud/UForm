@@ -13,7 +13,7 @@
  *
  *  @verbatim
  *  Variable          Flag          Default  Meaning
- *  UFORM_FILTER      --filter      none     Benchmarks to run, by label, as an ECMAScript regex or a substring
+ *  UFORM_FILTER      --filter      none     Benchmarks to run, by label, as an ECMAScript regex
  *  UFORM_SEED        --seed        42       Seed the synthetic inputs derive from, an unsigned integer or random
  *  UFORM_WARMUP      --warmup      1s       Untimed run per benchmark, like 200ms or 1s
  *  UFORM_TIME_LIMIT  --time-limit  10s      Timed run per benchmark, like 200ms or 10s
@@ -24,7 +24,7 @@
 #include <cctype>  // `std::tolower`
 #include <cmath>   // `std::isfinite`
 #include <cstdint> // `std::uint64_t`, `std::uint8_t`
-#include <cstdio>  // `std::fprintf`, `std::snprintf`
+#include <cstdio>  // `std::FILE`
 #include <cstdlib> // `std::getenv`, `std::exit`, `std::strtod`
 #include <cstring> // `std::strcmp`, `std::strncmp`
 
@@ -32,10 +32,8 @@
 #include <array>        // `std::array` — the windows the median reads
 #include <charconv>     // `std::from_chars`
 #include <chrono>       // `std::chrono::steady_clock`, `std::chrono::milliseconds`
-#include <optional>     // `std::optional` — the filter's regex
 #include <random>       // `std::random_device`
 #include <regex>        // `std::regex`, `std::regex_search`
-#include <string>       // `std::string` — the filter's pattern
 #include <string_view>  // `std::string_view`
 #include <system_error> // `std::errc`
 #include <type_traits>  // `std::type_identity_t`
@@ -46,11 +44,17 @@
 
 namespace unum::uform::bench {
 
+/** Writes one line to @p stream, formatted from @p format and @p args, then its newline. */
+template <typename... args_types_>
+void print_line(std::FILE* stream, fmt::format_string<args_types_...> format, args_types_&&... args) {
+    fmt::println(stream, format, std::forward<args_types_>(args)...);
+}
+
 #pragma region Shared Settings
 
 /** Exits with one line naming a setting that does not parse, so a bad value never runs anything. */
 [[noreturn]] inline void exit_unparsed(char const* variable, char const* text, char const* expected) noexcept {
-    std::fprintf(stderr, "%s=\"%s\" does not parse, expected %s\n", variable, text, expected);
+    print_line(stderr, "{}=\"{}\" does not parse, expected {}", variable, text, expected);
     std::exit(1);
 }
 
@@ -84,8 +88,8 @@ inline std::size_t read_count_setting(int argc, char** argv, char const* variabl
     if (!text) return fallback;
     std::string_view const spelled {text};
     std::size_t count = 0;
-    auto const [end, error] = std::from_chars(spelled.data(), spelled.data() + spelled.size(), count);
-    if (error != std::errc {} || end != spelled.data() + spelled.size())
+    auto const [end, parse_status] = std::from_chars(spelled.data(), spelled.data() + spelled.size(), count);
+    if (parse_status != std::errc {} || end != spelled.data() + spelled.size())
         exit_unparsed(variable, text, "a whole number");
     return count;
 }
@@ -110,9 +114,9 @@ inline std::chrono::milliseconds read_duration_setting(int argc, char** argv, ch
     if (!text) return fallback;
     std::string_view const spelled {text};
     std::uint32_t count = 0;
-    auto const [end, error] = std::from_chars(spelled.data(), spelled.data() + spelled.size(), count);
+    auto const [end, parse_status] = std::from_chars(spelled.data(), spelled.data() + spelled.size(), count);
     std::string_view const unit = spelled.substr(static_cast<std::size_t>(end - spelled.data()));
-    if (error == std::errc {} && count != 0) {
+    if (parse_status == std::errc {} && count != 0) {
         if (unit == "ms") return std::chrono::milliseconds(count);
         if (unit == "s") return std::chrono::seconds(count);
         if (unit == "m") return std::chrono::minutes(count);
@@ -130,38 +134,36 @@ inline std::uint64_t read_seed_setting(int argc, char** argv, char const* variab
         return (static_cast<std::uint64_t>(device()) << 32) ^ device();
     }
     std::uint64_t seed = 0;
-    auto const [end, error] = std::from_chars(spelled.data(), spelled.data() + spelled.size(), seed);
-    if (error != std::errc {} || end != spelled.data() + spelled.size())
+    auto const [end, parse_status] = std::from_chars(spelled.data(), spelled.data() + spelled.size(), seed);
+    if (parse_status != std::errc {} || end != spelled.data() + spelled.size())
         exit_unparsed(variable, text, "an unsigned integer or random");
     return seed;
 }
 
-/** Which labels a run selects: a regex search when the pattern compiles, else a substring. */
-struct filter_t {
-    std::string pattern;
-    std::optional<std::regex> regex;
+/** Which labels a run selects: those its regex matches somewhere, every label while unset. */
+struct regex_filter_t {
+    std::string_view text;
+    std::regex regex {""};
 
-    bool selects(std::string_view label) const noexcept {
-        if (pattern.empty()) return true;
-        if (regex) return std::regex_search(label.begin(), label.end(), *regex);
-        return label.find(pattern) != std::string_view::npos;
-    }
+    bool selects(std::string_view label) const noexcept { return std::regex_search(label.begin(), label.end(), regex); }
 };
 
-/** The filter a setting spells, compiled once; empty, selecting everything, when unset. */
-inline filter_t read_filter_setting(int argc, char** argv, char const* variable, std::string_view flag) noexcept {
-    filter_t filter;
+/** The filter a setting spells, compiled once; one that does not compile exits as a bad setting. */
+inline regex_filter_t read_regex_filter_setting(int argc, char** argv, char const* variable,
+                                                std::string_view flag) noexcept {
+    regex_filter_t filter;
     char const* text = setting_text(argc, argv, variable, flag);
     if (!text) return filter;
-    filter.pattern = text;
+    filter.text = text;
 #if defined(__cpp_exceptions) && __cpp_exceptions
     try {
-        filter.regex.emplace(filter.pattern);
+        filter.regex.assign(filter.text.begin(), filter.text.end());
     }
     catch (std::regex_error const&) {
+        exit_unparsed(variable, text, "a regular expression");
     }
 #else
-    filter.regex.emplace(filter.pattern);
+    filter.regex.assign(filter.text.begin(), filter.text.end());
 #endif
     return filter;
 }
@@ -169,7 +171,7 @@ inline filter_t read_filter_setting(int argc, char** argv, char const* variable,
 /** What every suite and bench reads before its own settings; @c program starts the rerun lines. */
 struct common_settings_t {
     std::uint64_t seed = 42;
-    filter_t filter;
+    regex_filter_t regex_filter;
     char const* program = "";
 };
 
@@ -188,7 +190,7 @@ constexpr std::uint64_t stream_key(std::uint64_t seed, std::string_view name, st
 }
 
 /**
- *  @brief SplitMix64 over one 64-bit state, seeded by a @ref stream_key , bit-identical to the
+ *  @brief SplitMix64 over one 64-bit counter, seeded by a @ref stream_key , bit-identical to the
  *      JavaScript generator NumKong ships.
  *
  *  Distributions are not specified to draw the same sequence on every standard library, so a
@@ -197,12 +199,12 @@ constexpr std::uint64_t stream_key(std::uint64_t seed, std::string_view name, st
  */
 struct split_mix_generator_t {
     using result_type = std::uint64_t;
-    std::uint64_t state = 0;
+    std::uint64_t counter = 0;
 
-    explicit split_mix_generator_t(std::uint64_t key) noexcept : state(key) {}
+    explicit split_mix_generator_t(std::uint64_t key) noexcept : counter(key) {}
     static constexpr result_type(min)() noexcept { return 0; }
     static constexpr result_type(max)() noexcept { return ~result_type {0}; }
-    result_type operator()() noexcept { return split_mix_bits(state += 0x9E3779B97F4A7C15ull); }
+    result_type operator()() noexcept { return split_mix_bits(counter += 0x9E3779B97F4A7C15ull); }
 
     /** A uniform draw below @p bound , zero for an empty bound, without the bias of a modulo. */
     std::uint64_t below(std::uint64_t bound) noexcept {
@@ -226,7 +228,7 @@ struct bench_settings_t : common_settings_t {
 [[nodiscard]] inline bench_settings_t read_bench_settings(int argc, char** argv) noexcept {
     bench_settings_t settings;
     settings.seed = read_seed_setting(argc, argv, "UFORM_SEED", "--seed");
-    settings.filter = read_filter_setting(argc, argv, "UFORM_FILTER", "--filter");
+    settings.regex_filter = read_regex_filter_setting(argc, argv, "UFORM_FILTER", "--filter");
     settings.warmup = read_duration_setting(argc, argv, "UFORM_WARMUP", "--warmup", settings.warmup);
     settings.time_limit = read_duration_setting(argc, argv, "UFORM_TIME_LIMIT", "--time-limit", settings.time_limit);
     settings.program = argc != 0 ? argv[0] : "";
@@ -255,8 +257,8 @@ inline void print(machine_t const& machine) noexcept {
 /** Prints the settings, one <tt>- Name: value</tt> line each. */
 inline void print(bench_settings_t const& settings) noexcept {
     fmt::println("- Seed: {}", settings.seed);
-    std::string_view const filter = settings.filter.pattern;
-    fmt::println("- Filter: {}", filter.empty() ? std::string_view {"none"} : filter);
+    fmt::println("- Filter: {}",
+                 settings.regex_filter.text.empty() ? std::string_view("none") : settings.regex_filter.text);
     fmt::println("- Warmup: {}ms, time limit: {}ms", settings.warmup.count(), settings.time_limit.count());
 }
 
@@ -387,7 +389,7 @@ template <typename... parameters_types_>
 [[nodiscard]] bool run(bench_settings_t const& settings, std::string_view name,
                        void (*bench_function)(loop_t&, parameters_types_...),
                        std::type_identity_t<parameters_types_>... arguments) noexcept {
-    if (!settings.filter.selects(name)) return false;
+    if (!settings.regex_filter.selects(name)) return false;
     loop_t loop {settings.warmup, settings.time_limit};
     bench_function(loop, arguments...);
     loop.report(name);

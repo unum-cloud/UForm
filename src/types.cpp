@@ -9,7 +9,7 @@
  *  rest of the pool from inside its slice and ends the call there; every other call runs on its
  *  caller. Nothing waits in a table, so a wait, a drain or a free only waits.
  */
-#include <cstring> // `std::memcpy` - a listed device's name
+#include <cstring> // `std::memcpy`, `std::memset` - a listed device's name, a finished call's named handles
 
 #include <iterator> // `std::size` - the GPU kinds
 #include <memory>   // `std::unique_ptr` - a handle under construction
@@ -92,8 +92,9 @@ void uf::end_call(uform_executor_handle_t& executor) noexcept {
     holding_call_t& call = executor.holding_call;
     uform_outcome_t* const outcome = call.outcome;
     uform_outcome_t const recorded = call.recorded;
-    for (u64_t*& named : call.named_calls)
-        if (named) fu::standard_atomic_ref<u64_t> {*named}.fetch_sub(1, std::memory_order_release), named = nullptr;
+    for (u64_t* const named : call.named_calls)
+        if (named) fu::standard_atomic_ref<u64_t> {*named}.fetch_sub(1, std::memory_order_release);
+    std::memset(call.named_calls, 0, sizeof(call.named_calls));
     call.arguments = nullptr;
     call.delegated_body = nullptr;
     call.delegated_arguments.emplace<std::monostate>();
@@ -206,17 +207,19 @@ static caller_exclusivity_t spawned_exclusivity() noexcept {
                                                                      : caller_exclusivity_t::caller_inclusive_k;
 }
 
-/** Reads the name, compute units and memory of @p residency_ 's device @p vendor_ordinal through
- *  its vendor's entries kit; false for a vendor this build lacks or a runtime that refuses. */
-template <vendored_residency_t residency_>
-static bool describe_device(std::size_t vendor_ordinal, ue::device_description_t& description) noexcept {
-    if constexpr (!gpu_vendor_compiled(vendor_of(residency_))) return false;
-    else return entries_kit_of<residency_>::describe(vendor_ordinal, description) == nk_success_k;
-}
-
 /** The GPU kinds in the order the process-wide ordinals list them: NVIDIA, then AMD, then Apple. */
 static constexpr nk::device_kind_t gpu_kinds_k[] {nk::device_kind_t::cuda_k, nk::device_kind_t::rocm_k,
                                                   nk::device_kind_t::metal_k};
+
+/** The vendor's capability group a GPU kind runs on, which @ref visit_vram_residency keys on. */
+static constexpr nk_capability_t vendor_of(nk::device_kind_t kind) noexcept {
+    switch (kind) {
+    case nk::device_kind_t::cuda_k: return nk_cap_cuda_k;
+    case nk::device_kind_t::rocm_k: return nk_cap_rocm_k;
+    case nk::device_kind_t::metal_k: return nk_cap_metal_k;
+    default: return 0;
+    }
+}
 
 /** How many devices each kind of @ref gpu_kinds_k lists, in its order. */
 struct gpu_counts_t {
@@ -244,63 +247,34 @@ struct gpu_counts_t {
     }
 };
 
-/** The vendor's name in the C interface for a NumKong device kind. */
-static uform_gpu_vendor_t gpu_vendor_of(nk::device_kind_t kind) noexcept {
-    switch (kind) {
-    case nk::device_kind_t::cuda_k: return uform_gpu_vendor_nvidia_k;
-    case nk::device_kind_t::rocm_k: return uform_gpu_vendor_amd_k;
-    case nk::device_kind_t::metal_k: return uform_gpu_vendor_apple_k;
-    default: return uform_gpu_vendor_unknown_k;
-    }
-}
-
-/** Reads device @p vendor_ordinal of @p kind through the entries kit of its vendor's residency. */
-static bool describe_device(nk::device_kind_t kind, std::size_t vendor_ordinal,
-                            ue::device_description_t& description) noexcept {
-    switch (kind) {
-    case nk::device_kind_t::cuda_k:
-        return describe_device<vendored_residency_t::vram_nvidia_k>(vendor_ordinal, description);
-    case nk::device_kind_t::rocm_k:
-        return describe_device<vendored_residency_t::vram_amd_k>(vendor_ordinal, description);
-    case nk::device_kind_t::metal_k:
-        return describe_device<vendored_residency_t::vram_apple_k>(vendor_ordinal, description);
-    default: return false;
-    }
-}
-
 /** The device @p vendor_ordinal of @p kind as its driver describes it into @p description, and as
- *  NumKong detects it and its loader runs this build's code there; one of a vendor this build
- *  lacks, or whose runtime refuses, detects and runs nothing. An Apple GPU runs every Metal family
- *  its context reads, as its kernels compile on it at first use. */
+ *  its vendor's entries kit reads what it detects and what this build runs there; one of a vendor
+ *  this build lacks, or whose runtime refuses, detects and runs nothing. */
 static gpu_device_t describe_gpu(nk::device_kind_t kind, std::size_t vendor_ordinal,
                                  ue::device_description_t& description) noexcept {
     gpu_device_t device;
-    device.vendor = gpu_vendor_of(kind);
-    if (!describe_device(kind, vendor_ordinal, description)) return device;
-    if (kind == nk::device_kind_t::metal_k) {
-        u32_t const family = description.architecture_major;
-        device.detected = (family >= 7 ? nk_cap_metal_k : 0) | (family >= 9 ? nk_cap_apple9_k : 0) |
-                          (family >= 10 ? nk_cap_apple10_k : 0);
-        device.compiled = device.detected;
-        return device;
-    }
-    nk::expected<nk::device_t> const opened = nk::device_t::make(kind, vendor_ordinal);
-    if (!opened) return device;
-    nk::expected<nk_capability_t> const detected = opened.value.capabilities_detected();
-    device.detected = detected ? detected.value : 0;
-    device.compiled = opened.value.capabilities_compiled();
+    visit_vram_residency(vendor_of(kind), [&]<vendored_residency_t residency_, typename>() noexcept {
+        device.vendor = gpu_vendor_of(residency_);
+        if constexpr (gpu_vendor_compiled(vendor_of(residency_))) {
+            using kit_t = entries_kit_of<residency_>;
+            if (kit_t::describe(vendor_ordinal, description) != nk_success_k) return true;
+            device.detected = kit_t::capabilities_detected(vendor_ordinal, description);
+            device.compiled = kit_t::capabilities_compiled(vendor_ordinal, description);
+        }
+        return true;
+    });
     return device;
 }
 
 /** The newest class of @p kind 's ladder serving @p device at or under @p ceiling. */
 static gpu_class_t pick_gpu_class(nk::device_kind_t kind, gpu_device_t const& device,
                                   uform_gpu_class_t ceiling) noexcept {
-    switch (kind) {
-    case nk::device_kind_t::cuda_k: return pick_gpu_class(nvidia_ladder_t {}, device, ceiling);
-    case nk::device_kind_t::rocm_k: return pick_gpu_class(amd_ladder_t {}, device, ceiling);
-    case nk::device_kind_t::metal_k: return pick_gpu_class(apple_ladder_t {}, device, ceiling);
-    default: return gpu_class_t::unknown_k;
-    }
+    gpu_class_t picked = gpu_class_t::unknown_k;
+    visit_vram_residency(vendor_of(kind), [&]<vendored_residency_t, typename ladder_type_>() noexcept {
+        picked = pick_gpu_class(ladder_type_ {}, device, ceiling);
+        return true;
+    });
+    return picked;
 }
 
 /** The device kind and vendor ordinal of the GPU the process-wide @p listed ordinal names, which
@@ -421,10 +395,10 @@ UFORM_EXPORT void uform_gpu_devices(uform_gpu_devices_t* arguments) {
             if (listed >= arguments->devices_capacity) continue;
             uform_gpu_device_t& entry = arguments->devices[listed];
             entry = {};
-            entry.vendor = gpu_vendor_of(kind);
             entry.vendor_ordinal = static_cast<u32_t>(ordinal);
             ue::device_description_t description;
             gpu_device_t const described = describe_gpu(kind, ordinal, description);
+            entry.vendor = described.vendor;
             entry.gpu_class = static_cast<uform_gpu_class_t>(
                 pick_gpu_class(kind, described, uform_gpu_class_unknown_k));
             std::memcpy(entry.name, description.name, sizeof(entry.name));

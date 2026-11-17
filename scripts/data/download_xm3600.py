@@ -30,7 +30,10 @@ def _transform(table: pa.Table) -> pa.Table:
     image_structs = table.column("image").to_pylist()
     caption_lists = table.column("captions").to_pylist()
     images = pa.array(
-        [{"bytes": struct["bytes"], "path": image_id} for struct, image_id in zip(image_structs, image_ids, strict=True)],
+        [
+            {"bytes": struct["bytes"], "path": image_id}
+            for struct, image_id in zip(image_structs, image_ids, strict=True)
+        ],
         type=_IMAGE_STRUCT,
     )
     captions = pa.array(
