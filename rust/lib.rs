@@ -28,6 +28,9 @@ mod model;
 mod train;
 mod types;
 
+#[cfg(test)]
+mod testing;
+
 // The C mirror items are public within their modules, so only these names leave the crate.
 pub use encode::{
     AudioEncode, AudioEncodeConfig, AudioEncodeSamples, AudioEncodeSamplesConfig, AudioEncodeStats, EncodeVerbs,

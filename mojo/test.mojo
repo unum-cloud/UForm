@@ -1,9 +1,8 @@
 """The Mojo binding's tests, registered in `main` since Mojo has no test discovery.
 
-The pure-logic group needs no engine. The rest call the engine and are skipped when nothing is on
+The pure-logic group needs no library. The rest call the library and are skipped when it is not on
 the loader path, and the model checks also need the tiny checkpoint `UFORM_TEST_CHECKPOINT` names,
-which `uform_tiny_checkpoint` writes; without one they are skipped, as the Python and Rust suites
-skip theirs against the engine.
+which `uform_tiny_checkpoint` writes; without one they are skipped.
 
 File: mojo/test.mojo
 Author: Ash Vardanian
@@ -49,6 +48,32 @@ from uform import (
 )
 from uform.types import NULL_ADDRESS
 
+
+# region Shared Testing
+def _skipped(reason: String):
+    """Announces a skipped test, so a run shows what it left out rather than passing in silence."""
+    print("skipped:", reason)
+
+
+def _split_mix_bits(value: UInt64) -> UInt64:
+    """SplitMix64's finalizer, a bijection that spreads every input bit over all 64 output bits."""
+    var mixed = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9
+    mixed = (mixed ^ (mixed >> 27)) * 0x94D049BB133111EB
+    return mixed ^ (mixed >> 31)
+
+
+def _stream_key(seed: UInt64, name: String, index: UInt64 = 0) -> UInt64:
+    """The `index`-th stream of the family `name` under `seed`, identical in C, C++, Rust and Python."""
+    var hashed: UInt64 = 0xCBF29CE484222325
+    for byte in name.as_bytes():
+        hashed = (hashed ^ UInt64(byte)) * 0x100000001B3
+    return _split_mix_bits(_split_mix_bits(seed ^ hashed) + index)
+# endregion Shared Testing
+
+
+comptime library_missing_k = "the shared library is not on the loader path"
+comptime checkpoint_missing_k = "needs UFORM_TEST_CHECKPOINT"
+
 # region Pure Logic
 
 
@@ -86,8 +111,8 @@ def test_tapes_refuse_offsets_past_their_elements() raises:
 # region Engine
 
 
-def _engine_is_present() raises -> Bool:
-    """Whether anything answers on the loader path; a library missing a symbol fails rather than skips."""
+def _library_is_present() raises -> Bool:
+    """Whether the shared library is on the loader path; any other failure to load it raises rather than skips."""
     try:
         _ = Library()
         return True
@@ -99,8 +124,8 @@ def _engine_is_present() raises -> Bool:
 
 def test_library_reports_its_version_and_capabilities() raises:
     """The loaded engine is of the binding's major, and both capability lists are non-empty."""
-    if not _engine_is_present():
-        print("skipped: libuform_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     assert_equal(library.version()[0], 4)
@@ -109,10 +134,10 @@ def test_library_reports_its_version_and_capabilities() raises:
     assert_true(library.capabilities_available().byte_length() > 0)
 
 
-def test_names_round_trip_through_the_engine_tables() raises:
-    """Every enumerator's spelling reads back as the same enumerator."""
-    if not _engine_is_present():
-        print("skipped: libuform_shared is not on the loader path")
+def test_names_round_trip_through_the_library_and_refuse_strangers() raises:
+    """Every enumerator's spelling reads back as the same enumerator, and a spelling no table holds is refused."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     assert_equal(library.status_name(Status.SHAPE_MISMATCH), "shape-mismatch")
@@ -154,8 +179,8 @@ def test_names_round_trip_through_the_engine_tables() raises:
 
 def test_gpu_devices_count_what_the_process_drives() raises:
     """The listing fills no more entries than it is given, and a host-only build counts none."""
-    if not _engine_is_present():
-        print("skipped: libuform_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var devices = List[GPUDevice]()
@@ -169,8 +194,8 @@ def test_gpu_devices_count_what_the_process_drives() raises:
 
 def test_executors_and_arenas_open_and_drain() raises:
     """A RAM executor drains, and arenas open in host pages on the calling thread and on the executor."""
-    if not _engine_is_present():
-        print("skipped: libuform_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, RamOptions(), threads=2)
@@ -183,8 +208,8 @@ def test_executors_and_arenas_open_and_drain() raises:
 
 def test_a_missing_checkpoint_is_refused_with_its_status() raises:
     """Loading a path that does not exist raises `IO`, and the error names the engine and the verb."""
-    if not _engine_is_present():
-        print("skipped: libuform_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var refused = Status.SUCCESS
@@ -200,8 +225,8 @@ def test_a_missing_checkpoint_is_refused_with_its_status() raises:
 
 def test_undecodable_bytes_are_refused() raises:
     """A buffer holding no safetensors checkpoint is refused rather than loaded."""
-    if not _engine_is_present():
-        print("skipped: libuform_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var bytes = "stand-in checkpoint bytes".as_bytes()
@@ -215,13 +240,13 @@ def test_undecodable_bytes_are_refused() raises:
 
 def test_a_device_executor_needs_a_device() raises:
     """Without a drivable GPU, a device executor is refused rather than made."""
-    if not _engine_is_present():
-        print("skipped: libuform_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var none = List[GPUDevice]()
     if library.gpu_devices(none) > 0:
-        print("skipped: this machine drives a GPU")
+        _skipped("needs a machine without a GPU")
         return
     var refused = Status.SUCCESS
     try:
@@ -234,8 +259,8 @@ def test_a_device_executor_needs_a_device() raises:
 def test_training_verbs_refuse_a_host_executor() raises:
     """Every training constructor needs a device executor, and a RAM one is refused with `DEVICE`; a
     verb on a null trainer or mesh is refused with `UNINITIALIZED` before anything else."""
-    if not _engine_is_present():
-        print("skipped: libuform_shared is not on the loader path")
+    if not _library_is_present():
+        _skipped(library_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=1)
@@ -294,11 +319,14 @@ def _checkpoint() -> String:
     return getenv("UFORM_TEST_CHECKPOINT")
 
 
-def test_model_describes_a_loaded_checkpoint() raises:
+def test_a_loaded_model_describes_itself_on_every_receiver() raises:
     """A loaded model reports a geometry, the same from its path as from its bytes."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
+        return
     var path = _checkpoint()
-    if not _engine_is_present() or path.byte_length() == 0:
-        print("skipped: UFORM_TEST_CHECKPOINT names no checkpoint")
+    if path.byte_length() == 0:
+        _skipped(checkpoint_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
@@ -313,9 +341,12 @@ def test_model_describes_a_loaded_checkpoint() raises:
 
 def test_a_ceiling_loads_the_best_class_under_it() raises:
     """A serial ceiling loads serial, and a ceiling of a family this CPU does not run falls to serial."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
+        return
     var path = _checkpoint()
-    if not _engine_is_present() or path.byte_length() == 0:
-        print("skipped: UFORM_TEST_CHECKPOINT names no checkpoint")
+    if path.byte_length() == 0:
+        _skipped(checkpoint_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
@@ -324,11 +355,14 @@ def test_a_ceiling_loads_the_best_class_under_it() raises:
         assert_true(model.describe().cpu_class == CPUClass.SERIAL)
 
 
-def test_text_encode_lands_rows_in_the_arena() raises:
+def test_texts_land_one_embedding_per_item_and_one_state_per_byte() raises:
     """Embeddings land one row per text at the model's width, and states one row per byte."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
+        return
     var path = _checkpoint()
-    if not _engine_is_present() or path.byte_length() == 0:
-        print("skipped: UFORM_TEST_CHECKPOINT names no checkpoint")
+    if path.byte_length() == 0:
+        _skipped(checkpoint_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
@@ -356,9 +390,12 @@ def test_text_encode_lands_rows_in_the_arena() raises:
 
 def test_a_later_call_retires_earlier_rows() raises:
     """A second call on the same arena rewinds it, so reading the first call's rows is refused."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
+        return
     var path = _checkpoint()
-    if not _engine_is_present() or path.byte_length() == 0:
-        print("skipped: UFORM_TEST_CHECKPOINT names no checkpoint")
+    if path.byte_length() == 0:
+        _skipped(checkpoint_missing_k)
         return
     var library = Library()
     var model = Model.load_ram(Executor(library), path)
@@ -377,9 +414,12 @@ def test_a_later_call_retires_earlier_rows() raises:
 
 def test_deferred_encoding_matches_the_blocking_one() raises:
     """A deferred call reads `DEFERRED` or final, and its waited rows equal a blocking call's."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
+        return
     var path = _checkpoint()
-    if not _engine_is_present() or path.byte_length() == 0:
-        print("skipped: UFORM_TEST_CHECKPOINT names no checkpoint")
+    if path.byte_length() == 0:
+        _skipped(checkpoint_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
@@ -424,9 +464,12 @@ def _call_again(completed: Int, total: Int, reentry: Pointer[_Reentry, MutAnyOri
 
 def test_a_held_executor_refuses_other_calls() raises:
     """A call made from the handler of a call holding the executor raises `CONTENDED` without running."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
+        return
     var path = _checkpoint()
-    if not _engine_is_present() or path.byte_length() == 0:
-        print("skipped: UFORM_TEST_CHECKPOINT names no checkpoint")
+    if path.byte_length() == 0:
+        _skipped(checkpoint_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
@@ -456,11 +499,14 @@ def _stop_at_first_report(completed: Int, total: Int, reports: Pointer[Int, MutA
     return Continuation.CANCEL
 
 
-def test_progress_cancels_an_encoding() raises:
+def test_a_stopping_handler_cancels_the_call() raises:
     """A handler answering `CANCEL` stops the call, which finishes `CANCELLED` after one report."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
+        return
     var path = _checkpoint()
-    if not _engine_is_present() or path.byte_length() == 0:
-        print("skipped: UFORM_TEST_CHECKPOINT names no checkpoint")
+    if path.byte_length() == 0:
+        _skipped(checkpoint_missing_k)
         return
     var library = Library()
     var model = Model.load_ram(Executor(library), path)
@@ -478,23 +524,31 @@ def test_progress_cancels_an_encoding() raises:
     assert_equal(reports, 1)
 
 
-def test_text_choose_answers_a_probability_per_choice() raises:
-    """Each item's probabilities sum to one over its legal choices."""
+def test_choices_sum_to_one_or_are_refused() raises:
+    """Each item's probabilities sum to one over its legal choices, or a model without the byte decoder refuses them."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
+        return
     var path = _checkpoint()
-    if not _engine_is_present() or path.byte_length() == 0:
-        print("skipped: UFORM_TEST_CHECKPOINT names no checkpoint")
+    if path.byte_length() == 0:
+        _skipped(checkpoint_missing_k)
         return
     var library = Library()
     var model = Model.load_ram(Executor(library), path)
-    if model.describe().choice_temperature_groups == 0:
-        print("skipped: the checkpoint carries no byte decoder")
-        return
     var states = "yes or no? ".as_bytes()
     var state_offsets: List[UInt] = [0, UInt(len(states))]
     var choices = "yn".as_bytes()
     var choice_offsets: List[UInt] = [0, 2]
     var groups: List[UInt32] = [0]
     var arena = Arena(library)
+    if model.describe().choice_temperature_groups == 0:
+        var refused = Status.SUCCESS
+        try:
+            _ = model.text_choose(TapeView.of(states, state_offsets), TapeView.of(choices, choice_offsets), arena)
+        except error:
+            refused = error.status
+        assert_true(refused == Status.UNSUPPORTED, "a model without the byte decoder must refuse choices")
+        return
     var probabilities = model.text_choose(
         TapeView.of(states, state_offsets),
         TapeView.of(choices, choice_offsets),
@@ -508,9 +562,12 @@ def test_text_choose_answers_a_probability_per_choice() raises:
 
 def test_pixels_and_samples_encode_without_codecs() raises:
     """Decoded pixels and samples encode into one embedding each."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
+        return
     var path = _checkpoint()
-    if not _engine_is_present() or path.byte_length() == 0:
-        print("skipped: UFORM_TEST_CHECKPOINT names no checkpoint")
+    if path.byte_length() == 0:
+        _skipped(checkpoint_missing_k)
         return
     var library = Library()
     var model = Model.load_ram(Executor(library), path)
@@ -529,9 +586,12 @@ def test_pixels_and_samples_encode_without_codecs() raises:
 
 def test_mismatched_pixel_shapes_are_refused_before_the_call() raises:
     """Heights and widths must name every item, which the binding checks before crossing."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
+        return
     var path = _checkpoint()
-    if not _engine_is_present() or path.byte_length() == 0:
-        print("skipped: UFORM_TEST_CHECKPOINT names no checkpoint")
+    if path.byte_length() == 0:
+        _skipped(checkpoint_missing_k)
         return
     var library = Library()
     var model = Model.load_ram(Executor(library), path)
@@ -565,13 +625,16 @@ def _cosine(text: Span[Float32, _], image: Span[Float32, _]) -> Float32:
     return dot / sqrt(text_norm * image_norm)
 
 
-def test_the_quickstart_names_the_caption_closest_to_the_photo() raises:
+def test_readme_quickstart() raises:
     """The Quickstart of `mojo/README.md`, line for line, but loading the suite's checkpoint in place
     of `model.safetensors` and an 8 x 8 PNG in place of reading `cat.png`; a build without host
     decoders refuses the photo, which the README's build decodes."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
+        return
     var path = _checkpoint()
-    if not _engine_is_present() or path.byte_length() == 0:
-        print("skipped: UFORM_TEST_CHECKPOINT names no checkpoint")
+    if path.byte_length() == 0:
+        _skipped(checkpoint_missing_k)
         return
     var library = Library()
     var executor = Executor.for_ram(library)
@@ -608,22 +671,22 @@ def main() raises:
     suite.test[test_scalar_kinds_follow_their_element_types]()
     suite.test[test_tapes_refuse_offsets_past_their_elements]()
     suite.test[test_library_reports_its_version_and_capabilities]()
-    suite.test[test_names_round_trip_through_the_engine_tables]()
+    suite.test[test_names_round_trip_through_the_library_and_refuse_strangers]()
     suite.test[test_gpu_devices_count_what_the_process_drives]()
     suite.test[test_executors_and_arenas_open_and_drain]()
     suite.test[test_a_missing_checkpoint_is_refused_with_its_status]()
     suite.test[test_undecodable_bytes_are_refused]()
     suite.test[test_a_device_executor_needs_a_device]()
     suite.test[test_training_verbs_refuse_a_host_executor]()
-    suite.test[test_model_describes_a_loaded_checkpoint]()
+    suite.test[test_a_loaded_model_describes_itself_on_every_receiver]()
     suite.test[test_a_ceiling_loads_the_best_class_under_it]()
-    suite.test[test_text_encode_lands_rows_in_the_arena]()
+    suite.test[test_texts_land_one_embedding_per_item_and_one_state_per_byte]()
     suite.test[test_a_later_call_retires_earlier_rows]()
     suite.test[test_deferred_encoding_matches_the_blocking_one]()
-    suite.test[test_progress_cancels_an_encoding]()
+    suite.test[test_a_stopping_handler_cancels_the_call]()
     suite.test[test_a_held_executor_refuses_other_calls]()
-    suite.test[test_text_choose_answers_a_probability_per_choice]()
+    suite.test[test_choices_sum_to_one_or_are_refused]()
     suite.test[test_pixels_and_samples_encode_without_codecs]()
     suite.test[test_mismatched_pixel_shapes_are_refused_before_the_call]()
-    suite.test[test_the_quickstart_names_the_caption_closest_to_the_photo]()
+    suite.test[test_readme_quickstart]()
     suite^.run()

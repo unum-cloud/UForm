@@ -7,10 +7,10 @@
  *  Loads one checkpoint onto the host or the first GPU, under a pinned class or the machine's own,
  *  and times blocking calls over synthetic lowercase texts that fill the model's context:
  *
- *  - "encode/batch_1" and "encode/batch_64": @c uform_text_encode to pooled embeddings, rated in
- *    tokens per second.
- *  - "choose/batch_1" and "choose/batch_64": @c uform_text_choose over four choices per item,
- *    rated in items per second; a checkpoint without the byte decoder skips them.
+ *  - "encoder.encode.batch_1" and "encoder.encode.batch_64": @c uform_text_encode to pooled
+ *    embeddings, rated in tokens per second.
+ *  - "encoder.choose.batch_1" and "encoder.choose.batch_64": @c uform_text_choose over four choices
+ *    per item, rated in items per second; a checkpoint without the byte decoder skips them.
  *
  *  Every row reports its median call in milliseconds beside the rate.
  *
@@ -18,7 +18,7 @@
  *  [--cpu-class-ceiling <name>] [--gpu-class-ceiling <name>] [--precision bf16|e4m3]</tt>.
  */
 #include <cstdint> // `std::uint8_t`, `std::int32_t`
-#include <cstring> // `std::strcmp`, `std::memcpy`
+#include <cstring> // `std::memcpy`
 
 #include <chrono>      // `std::chrono::steady_clock` — each call's latency
 #include <random>      // `std::mt19937_64`, `std::uniform_int_distribution` — the synthetic texts
@@ -31,7 +31,7 @@
 #include "uform/model.h"  // `uform_model_load_ram`, `uform_model_load_vram`, `uform_model_describe`
 #include "uform/types.h"  // `uform_executor_for_ram`, `uform_arena_init`, the class and scalar names
 
-#include "harness.hpp" // `loop_t`, `run`, `read_settings`
+#include "harness.hpp" // `loop_t`, `run`, `read_bench_settings`, `setting_text`
 
 using namespace unum::uform::bench;
 
@@ -152,18 +152,16 @@ static void choose_items(loop_t& loop, session_t const& session, std::size_t bat
 }
 
 int main(int argc, char** argv) {
-    char const *checkpoint = nullptr, *residency = "ram", *cpu_ceiling_text = "", *gpu_ceiling_text = "",
-               *precision_text = "bf16";
-    for (int index = 1; index + 1 < argc; index += 2) {
-        char const *flag = argv[index], *value = argv[index + 1];
-        if (!std::strcmp(flag, "--checkpoint")) checkpoint = value;
-        else if (!std::strcmp(flag, "--residency")) residency = value;
-        else if (!std::strcmp(flag, "--cpu-class-ceiling")) cpu_ceiling_text = value;
-        else if (!std::strcmp(flag, "--gpu-class-ceiling")) gpu_ceiling_text = value;
-        else if (!std::strcmp(flag, "--precision")) precision_text = value;
-        else return fmt::println(stderr, "uform_bench_encoder: unknown flag {}", flag), 1;
-    }
-    if (argc % 2 == 0 || !checkpoint)
+    auto const setting_or = [&](char const* variable, std::string_view flag, char const* fallback) noexcept {
+        char const* const text = setting_text(argc, argv, variable, flag);
+        return text ? text : fallback;
+    };
+    char const* const checkpoint = setting_text(argc, argv, "UFORM_CHECKPOINT", "--checkpoint");
+    char const* const residency = setting_or("UFORM_RESIDENCY", "--residency", "ram");
+    char const* const cpu_ceiling_text = setting_or("UFORM_CPU_CLASS_CEILING", "--cpu-class-ceiling", "");
+    char const* const gpu_ceiling_text = setting_or("UFORM_GPU_CLASS_CEILING", "--gpu-class-ceiling", "");
+    char const* const precision_text = setting_or("UFORM_PRECISION", "--precision", "bf16");
+    if (!checkpoint)
         return fmt::println(stderr, "Usage: uform_bench_encoder --checkpoint <path> [--residency ram|vram] " //
                                     "[--cpu-class-ceiling <name>] [--gpu-class-ceiling <name>] "             //
                                     "[--precision bf16|e4m3]"),
@@ -188,7 +186,8 @@ int main(int argc, char** argv) {
         (precision != uform_scalar_bf16_k && precision != uform_scalar_e4m3_k))
         return fmt::println(stderr, "uform_bench_encoder: --precision takes bf16 or e4m3, not {}", precision_text), 1;
 
-    settings_t const settings = read_settings();
+    bench_settings_t const settings = read_bench_settings(argc, argv);
+    print(probe_machine());
     print(settings);
     session_t session;
     session.seed = settings.seed;
@@ -246,13 +245,13 @@ int main(int argc, char** argv) {
                  session.description.context);
 
     bool failed = false;
-    failed |= run(settings, "encode/batch_1", encode_texts, session, 1);
-    failed |= run(settings, "encode/batch_64", encode_texts, session, 64);
+    failed |= run(settings, "encoder.encode.batch_1", encode_texts, session, 1);
+    failed |= run(settings, "encoder.encode.batch_64", encode_texts, session, 64);
     if (session.description.choice_temperature_groups) {
-        failed |= run(settings, "choose/batch_1", choose_items, session, 1);
-        failed |= run(settings, "choose/batch_64", choose_items, session, 64);
+        failed |= run(settings, "encoder.choose.batch_1", choose_items, session, 1);
+        failed |= run(settings, "encoder.choose.batch_64", choose_items, session, 64);
     }
-    else fmt::println("choose: skipped, the checkpoint carries no byte decoder");
+    else fmt::println("{:<32} skipped: needs a checkpoint with a byte decoder", "encoder.choose");
     uform_model_free(session.model);
     uform_arena_free(session.arena);
     uform_executor_free(session.executor);

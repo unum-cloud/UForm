@@ -14,6 +14,8 @@
  *
  *  Usage: `tiny_checkpoint <output.safetensors>`.
  */
+#undef NDEBUG // ! A test's oracle must stay live in every build
+
 #include <cstdint> // `std::uint16_t`, `std::uint32_t`, `std::uint64_t`
 #include <cstdio>  // `std::fopen`, `std::fwrite`, `std::fclose`, `std::fputs`
 

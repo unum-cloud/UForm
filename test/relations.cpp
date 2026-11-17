@@ -11,6 +11,8 @@
  *  that holds it, inside the world axis the loss reads, and the attract graph stays symmetric.
  *  Two more cases pin the role rules of one bag and the edge capacity those rules derive.
  */
+#undef NDEBUG // ! A test's oracle must stay live in every build
+
 #include "uform/train/contrastive_relations.cuh" // `relate_roles`, `contrastive_edges`
 #include "uform/utilities/mesh.hpp"              // `mesh_shape_t`, `mesh_topology_t`, `make_mesh_shape`
 
@@ -96,21 +98,21 @@ static void fill_world_(world_columns_t& world, u32_t world_gpus, u64_t seed) no
 }
 
 /** Every process of the @p host , @p multimem , @p colocated mesh against the whole world. */
-static void slices_match_world(test_suite_t& suite, u32_t host, u32_t multimem, u32_t colocated) {
+static void test_slices_match_world(u32_t host, u32_t multimem, u32_t colocated) {
     expected<mesh_shape_t> shape = make_mesh_shape(host, multimem, colocated);
-    if (!shape) return suite.check(false, "mesh shape: {}", shape.description_);
+    if (!expect_true(shape, "mesh shape: {}", shape.description_)) return;
     world_columns_t world;
-    fill_world_(world, colocated, suite.settings.seed);
+    fill_world_(world, colocated, test_run.settings.seed);
 
     mesh_topology_t whole;
     whole.shape = mesh_shape_t {colocated, colocated, colocated};
     gpu_relations_t global[max_world_gpus_k], sliced[max_world_gpus_k];
-    suite.check(relate_process_(whole, world, global), "the single-process world should relate");
+    expect_true(relate_process_(whole, world, global), "the single-process world should relate");
     for (u32_t process = 0; process != shape->host_domain_count(); ++process) {
         mesh_topology_t topology;
         topology.shape = *shape;
         topology.host_domain_index = process;
-        suite.check(relate_process_(topology, world, sliced), "process {} should relate", process);
+        expect_true(relate_process_(topology, world, sliced), "process {} should relate", process);
     }
 
     u32_t const world_vertices = colocated * segments_k;
@@ -120,11 +122,11 @@ static void slices_match_world(test_suite_t& suite, u32_t host, u32_t multimem, 
         for (u32_t row = 0; row != segments_k + 1 && same; ++row)
             same = rows.offsets[row] == expected_rows.offsets[row];
         for (u32_t edge = 0; edge != rows.edges && same; ++edge) same = rows.ids[edge] == expected_rows.ids[edge];
-        suite.check(same, "GPU {}'s slice should equal the world construction", gpu);
+        expect_true(same, "GPU {}'s slice should equal the world construction", gpu);
         for (u32_t row = 0; row != segments_k; ++row)
             for (u32_t edge = rows.offsets[row]; edge != rows.offsets[row + 1]; ++edge) {
                 u32_t const partner = rows.ids[edge];
-                suite.check(partner < world_vertices && partner / segments_k == gpu,
+                expect_true(partner < world_vertices && partner / segments_k == gpu,
                             "GPU {} row {} names vertex {}, off its own GPU's run of the {}-vertex world", gpu, row,
                             partner, world_vertices);
                 bool mirrored = false;
@@ -133,8 +135,8 @@ static void slices_match_world(test_suite_t& suite, u32_t host, u32_t multimem, 
                 for (u32_t back_edge = back.offsets[partner_row]; back_edge != back.offsets[partner_row + 1];
                      ++back_edge)
                     mirrored = mirrored || back.ids[back_edge] == gpu * segments_k + row;
-                suite.check(mirrored, "vertex {} attracts {} but not back", gpu * segments_k + row, partner);
-                suite.check(world.lengths[gpu][row] != 0u && world.lengths[partner / segments_k][partner_row] != 0u,
+                expect_true(mirrored, "vertex {} attracts {} but not back", gpu * segments_k + row, partner);
+                expect_true(world.lengths[gpu][row] != 0u && world.lengths[partner / segments_k][partner_row] != 0u,
                             "PAD vertex {} or {} carries an edge", gpu * segments_k + row, partner);
             }
     }
@@ -158,7 +160,7 @@ static void slices_match_world(test_suite_t& suite, u32_t host, u32_t multimem, 
  *  from vertex 100: the anchor and positives attract each other, the anchor and each negative
  *  repel each other at the negative's weight, every other pair inside the bag is ignored, and no
  *  vertex ever names itself. */
-static void bag_roles(test_suite_t& suite) {
+static void test_bag_roles() {
     constexpr u32_t segments = 7, base = 100;
     using role_t = segment_role_t;
     u32_t const bags[segments] = {0, 0, 0, 0, 0, 1, 2};
@@ -167,30 +169,30 @@ static void bag_roles(test_suite_t& suite) {
                                     role_t::negative_k, role_t::anchor_k,   role_t::anchor_k};
     f32_t const weights[segments] = {1.0f, 1.0f, 1.0f, 2.0f, 0.5f, 1.0f, 1.0f};
     expected<host_edges_t> made = host_edges_t::make(segments, 16);
-    if (!made) return suite.check(false, "edges: {}", made.description_);
+    if (!expect_true(made, "edges: {}", made.description_)) return;
     host_edges_t& edges = made.value_;
     expected_t related = relate_roles(u32r1_view_t {bags, segments}, {roles, segments},
                                       u32r1_view_t {lengths, segments}, f32r1_view_t {weights, segments}, base, edges);
-    if (!related) return suite.check(false, "relate: {}", related.description_);
+    if (!expect_true(related, "relate: {}", related.description_)) return;
     contrastive_edges_view_t const attract = edges.attract(), repel = edges.repel(), ignore = edges.ignore();
-    suite.check(row_is_(attract, 0, {101, 102}, {1, 1}) && row_is_(repel, 0, {103, 104}, {2.0f, 0.5f}) &&
+    expect_true(row_is_(attract, 0, {101, 102}, {1, 1}) && row_is_(repel, 0, {103, 104}, {2.0f, 0.5f}) &&
                     row_is_(ignore, 0, {}, {}),
                 "the anchor attracts its positives and repels its negatives at their weights");
-    suite.check(
+    expect_true(
         row_is_(attract, 1, {100, 102}, {1, 1}) && row_is_(repel, 1, {}, {}) && row_is_(ignore, 1, {103, 104}, {}),
         "a positive attracts the anchor and the other positive and ignores the negatives");
-    suite.check(
+    expect_true(
         row_is_(attract, 3, {}, {}) && row_is_(repel, 3, {100}, {2.0f}) && row_is_(ignore, 3, {101, 102, 104}, {}),
         "a negative repels the anchor at its own weight and ignores the rest of its bag");
     bool const inert = row_is_(attract, 5, {}, {}) && row_is_(repel, 5, {}, {}) && row_is_(ignore, 5, {}, {}) &&
                        row_is_(attract, 6, {}, {}) && row_is_(repel, 6, {}, {}) && row_is_(ignore, 6, {}, {});
-    suite.check(inert, "a PAD vertex and a singleton bag name no edge");
+    expect_true(inert, "a PAD vertex and a singleton bag name no edge");
 }
 
 /** The mixer's two bands: two pairs' media lead, their captions trail, then PAD, from vertex 100.
  *  Each caption still attracts its own pair's media across the bands, in ascending vertex order,
  *  and bags that descend twice are refused. */
-static void bag_bands(test_suite_t& suite) {
+static void test_bag_bands() {
     constexpr u32_t segments = 5, base = 100;
     using role_t = segment_role_t;
     u32_t const bags[segments] = {0, 1, 0, 1, 2};
@@ -198,24 +200,24 @@ static void bag_bands(test_suite_t& suite) {
     role_t const roles[segments] = {role_t::positive_k, role_t::positive_k, role_t::anchor_k, role_t::anchor_k,
                                     role_t::anchor_k};
     expected<host_edges_t> made = host_edges_t::make(segments, 8);
-    if (!made) return suite.check(false, "edges: {}", made.description_);
+    if (!expect_true(made, "edges: {}", made.description_)) return;
     host_edges_t& edges = made.value_;
     expected_t related = relate_roles(u32r1_view_t {bags, segments}, {roles, segments},
                                       u32r1_view_t {lengths, segments}, {}, base, edges);
-    if (!related) return suite.check(false, "relate: {}", related.description_);
+    if (!expect_true(related, "relate: {}", related.description_)) return;
     contrastive_edges_view_t const attract = edges.attract();
-    suite.check(row_is_(attract, 0, {102}, {1}) && row_is_(attract, 1, {103}, {1}) && row_is_(attract, 2, {100}, {1}) &&
+    expect_true(row_is_(attract, 0, {102}, {1}) && row_is_(attract, 1, {103}, {1}) && row_is_(attract, 2, {100}, {1}) &&
                     row_is_(attract, 3, {101}, {1}) && row_is_(attract, 4, {}, {}),
                 "a bag split across the bands relates whole, and PAD names nothing");
     u32_t const twice[segments] = {0, 1, 0, 1, 0};
-    suite.check(!relate_roles(u32r1_view_t {twice, segments}, {roles, segments}, u32r1_view_t {lengths, segments}, {},
+    expect_true(!relate_roles(u32r1_view_t {twice, segments}, {roles, segments}, u32r1_view_t {lengths, segments}, {},
                               base, edges),
                 "bags descending twice are refused");
 }
 
 /** The derived capacity is exact: four bags of an anchor and two positives fill the attract set of
  *  @ref relation_edges_capacity to the last edge, and one edge less is refused loudly. */
-static void bag_capacity(test_suite_t& suite) {
+static void test_bag_capacity() {
     constexpr u32_t segments = 12, bag_segments = 3;
     using role_t = segment_role_t;
     u32_t bags[segments], lengths[segments];
@@ -227,23 +229,23 @@ static void bag_capacity(test_suite_t& suite) {
     u32_t const capacity = relation_edges_capacity(segments, bag_segments);
     expected<host_edges_t> exact = host_edges_t::make(segments, capacity);
     expected<host_edges_t> short_by_one = host_edges_t::make(segments, capacity - 1u);
-    if (!exact || !short_by_one) return suite.check(false, "edges: {}", exact.description_);
+    if (!expect_true(exact && short_by_one, "edges: {}", exact.description_)) return;
     expected_t related = relate_roles(u32r1_view_t {bags, segments}, {roles, segments},
                                       u32r1_view_t {lengths, segments}, {}, 0, exact.value_);
-    suite.check(related && exact.value_.attract().ids.extent(0) == capacity,
+    expect_true(related && exact.value_.attract().ids.extent(0) == capacity,
                 "bags of three fill the derived {} attract edges exactly", capacity);
-    suite.check(!relate_roles(u32r1_view_t {bags, segments}, {roles, segments}, u32r1_view_t {lengths, segments}, {}, 0,
+    expect_true(!relate_roles(u32r1_view_t {bags, segments}, {roles, segments}, u32r1_view_t {lengths, segments}, {}, 0,
                               short_by_one.value_),
                 "one edge short of the derived capacity is refused");
 }
 
-int main(int, char** argv) {
-    test_suite_t suite = test_suite_t::make(argv[0]);
-    suite.run("world/1-1-1", slices_match_world, 1u, 1u, 1u);
-    suite.run("world/2-8-16", slices_match_world, 2u, 8u, 16u);
-    suite.run("world/4-8-16", slices_match_world, 4u, 8u, 16u);
-    suite.run("roles/bag", bag_roles);
-    suite.run("roles/bands", bag_bands);
-    suite.run("roles/capacity", bag_capacity);
-    return suite.finish();
+int main(int argc, char** argv) {
+    start_test_run(argc, argv);
+    run_test_case("test_slices_match_world(1, 1, 1)", test_slices_match_world, 1u, 1u, 1u);
+    run_test_case("test_slices_match_world(2, 8, 16)", test_slices_match_world, 2u, 8u, 16u);
+    run_test_case("test_slices_match_world(4, 8, 16)", test_slices_match_world, 4u, 8u, 16u);
+    run_test_case("test_bag_roles", test_bag_roles);
+    run_test_case("test_bag_bands", test_bag_bands);
+    run_test_case("test_bag_capacity", test_bag_capacity);
+    return finish_test_run();
 }

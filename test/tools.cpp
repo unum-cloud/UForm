@@ -11,6 +11,8 @@
  *  choices, takes a SIGINT once it prints progress, and must print @c stopped @c in, exit with 130
  *  and write no output.
  */
+#undef NDEBUG // ! A test's oracle must stay live in every build
+
 #include <cstdio>  // `std::fopen`, `std::remove`
 #include <cstdlib> // `std::getenv`, `::setenv`, `::unsetenv`
 #include <cstring> // `std::strrchr`, `std::strncpy`

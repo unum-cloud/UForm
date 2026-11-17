@@ -599,48 +599,38 @@ impl Calling for ModelDescribe {
 // region: Tests
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use core::ops::ControlFlow;
 
     use super::*;
-
-    /// The tiny checkpoint `UFORM_TEST_CHECKPOINT` names, or stand-in bytes only the stub loads
-    /// as a model.
-    pub(crate) fn checkpoint() -> Vec<u8> {
-        match std::env::var_os("UFORM_TEST_CHECKPOINT") {
-            Some(path) => std::fs::read(path).expect("UFORM_TEST_CHECKPOINT names a readable checkpoint"),
-            None => vec![7u8; 256],
-        }
-    }
+    use crate::testing;
 
     #[test]
-    fn a_loaded_model_describes_itself_on_every_receiver() -> Result<()> {
-        let checkpoint = checkpoint();
-        let model = Model::load_ram_buffer(&checkpoint)?;
-        let local = model.describe()?;
+    fn a_loaded_model_describes_itself_on_every_receiver() {
+        let checkpoint = testing::checkpoint();
+        let model = Model::load_ram_buffer(&checkpoint).unwrap();
+        let local = model.describe().unwrap();
         assert_eq!(local.quantization, Scalar::BF16);
         assert!(local.dimensions != 0 && local.context != 0);
 
-        let executor = Executor::for_ram(&[], None, 1)?;
-        assert_eq!(model.on(&executor).describe()?, local);
-        assert_eq!(model.deferred(&executor).describe()?.wait()?, local);
-        Ok(())
+        let executor = testing::executor();
+        assert_eq!(model.on(&executor).describe().unwrap(), local);
+        assert_eq!(model.deferred(&executor).describe().unwrap().wait().unwrap(), local);
     }
 
     /// Every machine runs the serial class, so a serial ceiling loads it, and a ceiling of a family
     /// this CPU does not run falls to serial; the description reports the class picked.
     #[test]
-    fn a_ceiling_loads_the_best_class_under_it() -> Result<()> {
-        let checkpoint = checkpoint();
+    fn a_ceiling_loads_the_best_class_under_it() {
+        let checkpoint = testing::checkpoint();
         for ceiling in [CPUClass::Serial, CPUClass::Wasm64Extended] {
             let config = ModelLoadRamBufferConfig {
                 cpu_class_ceiling: Some(ceiling),
                 ..ModelLoadRamBufferConfig::from(&checkpoint)
             };
-            let description = Model::load_ram_buffer(config)?.describe()?;
+            let description = Model::load_ram_buffer(config).unwrap().describe().unwrap();
             assert_eq!((description.cpu_class, description.gpu_class), (Some(CPUClass::Serial), None));
         }
-        Ok(())
     }
 
     #[test]
@@ -656,7 +646,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_stopped_load_creates_no_model() {
-        let checkpoint = checkpoint();
+        let checkpoint = testing::checkpoint();
         let mut stop = |_, _| ControlFlow::Break(());
         let config = ModelLoadRamBufferConfig {
             progress: Some(&mut stop),

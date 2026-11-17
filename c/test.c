@@ -16,6 +16,7 @@
  *  or @c UFORM_TEST_CHECKPOINT, as written by @c test/tiny_checkpoint.cpp; without either, a small
  *  file is written to the temporary directory, which only the stand-in loads.
  */
+#undef NDEBUG // ! A test's oracle must stay live in every build
 #ifndef UFORM_TEST_STUB
 #define UFORM_TEST_STUB 0
 #endif
@@ -23,34 +24,153 @@
 #if !UFORM_TEST_STUB   // the stand-in runs every call on its caller, built as C99 without threads to race
 #include <stdatomic.h> // `atomic_int` - the gate a deferred call waits at
 #endif
-#include <time.h> // `time` - the deadline a spin gives up at
+#include <stdio.h>  // `printf`, `fopen`, `fwrite`, `remove`
+#include <stdlib.h> // `exit`, `getenv`
+#include <string.h> // `memcmp`, `memset`, `strcmp`, `strlen`, `strstr`
+#include <time.h>   // `time` - the deadline a spin gives up at
 
-#include <math.h>    // `sqrtf`
-#include <stdbool.h> // `bool`
-#include <stdint.h>  // `uint8_t`, `uint32_t`
-#include <stdio.h>   // `printf`, `fopen`, `fwrite`, `remove`
-#include <stdlib.h>  // `exit`, `getenv`
-#include <string.h>  // `memcmp`, `memset`, `strcmp`, `strlen`, `strstr`
+#include <inttypes.h> // `PRIu64`
+#include <math.h>     // `sqrtf`
+#include <stdbool.h>  // `bool`
+#include <stdint.h>   // `uint8_t`, `uint32_t`
 
 #include <forkunion/forkunion.h> // `fu_pool_new`, `fu_topology_new` - the pool a lender spawns
 
 #include "uform/uform.h"
 
-/** How long a check waits for what it expects to happen. A passing test never waits it out, so it
- *  bounds hangs rather than speed, and leaves room for sanitizers and emulated CPUs. */
-#define UFORM_TEST_WAIT_LIMIT_SECONDS 120
+/*  region Shared C Checks  */
+static size_t failed_checks = 0;
+static size_t failed_checks_before_case = 0;
+static size_t passed_cases = 0;
+static size_t failed_cases = 0;
+static size_t skipped_cases = 0;
+static char const* current_case = NULL;
+static char const* program_name = "";
+static char const* test_filter = NULL;
+static uint64_t test_seed = 42;
+static double test_scale = 1.0;
+static bool refuse_skips = false;
 
-static void expect(bool must_be_true, char const* message) {
-    if (must_be_true) return;
-    printf("Assert: %s\n", message ? message : "C unit test failed");
-    exit(-1);
+/** Fills the settings above from the file's own spelled-out variables and flags. */
+static void read_test_settings(int argc, char** argv);
+
+/** SplitMix64's finalizer, a bijection that spreads every input bit over all 64 output bits. */
+static inline uint64_t split_mix_bits(uint64_t value) {
+    value = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9ull;
+    value = (value ^ (value >> 27)) * 0x94D049BB133111EBull;
+    return value ^ (value >> 31);
 }
 
-/** A substring of the tests to run, from @c UFORM_FILTER; @c NULL runs every test. */
-static char const* test_filter = NULL;
+/** Counts a failed check at @p file : @p line without stopping, so one run lists every mismatch. */
+static inline bool expect_at(bool is_met, char const* file, int line, char const* what) {
+    if (is_met) return true;
+    fflush(stdout);
+    fprintf(stderr, "  check failed at %s:%d\n    %s\n", file, line, what);
+    ++failed_checks;
+    return false;
+}
 
-/** Whether the test @p name passes @c UFORM_FILTER. */
-static bool selected(char const* name) { return !test_filter || strstr(name, test_filter) != NULL; }
+/** The text of a setting: its @p flag when given, else its environment @p variable , else NULL. */
+static inline char const* setting_text(int argc, char** argv, char const* variable, char const* flag) {
+    size_t const flag_length = strlen(flag);
+    for (int index = 1; index < argc; ++index) {
+        if (strcmp(argv[index], flag) == 0)
+            return index + 1 < argc && strncmp(argv[index + 1], "--", 2) != 0 ? argv[index + 1] : "1";
+        if (strncmp(argv[index], flag, flag_length) == 0 && argv[index][flag_length] == '=')
+            return argv[index] + flag_length + 1;
+    }
+    char const* text = getenv(variable);
+    return text && *text ? text : NULL;
+}
+
+/** Exits with one line naming a setting that does not parse, so a bad value never runs anything. */
+static inline void exit_unparsed(char const* variable, char const* text, char const* expected) {
+    fprintf(stderr, "%s=\"%s\" does not parse, expected %s\n", variable, text, expected);
+    exit(1);
+}
+
+/** The run's seed: 42 when unset, drawn afresh for @c random , else any unsigned 64-bit value. */
+static inline uint64_t read_seed_setting(int argc, char** argv, char const* variable, char const* flag) {
+    char const* text = setting_text(argc, argv, variable, flag);
+    char* end = NULL;
+    if (!text) return 42;
+    if (strcmp(text, "random") == 0) return split_mix_bits((uint64_t)time(NULL) ^ (uint64_t)clock());
+    uint64_t const seed = (uint64_t)strtoull(text, &end, 10);
+    if (*end != '\0' || *text == '-') exit_unparsed(variable, text, "an unsigned integer or random");
+    return seed;
+}
+
+/** A positive real, @p fallback when unset. */
+static inline double read_real_setting(int argc, char** argv, char const* variable, char const* flag, double fallback) {
+    char const* text = setting_text(argc, argv, variable, flag);
+    char* end = NULL;
+    if (!text) return fallback;
+    double const value = strtod(text, &end);
+    if (*end != '\0' || !(value > 0)) exit_unparsed(variable, text, "a positive number like 0.1 or 10");
+    return value;
+}
+
+/** A switch, @p fallback when unset: 0, false, off and no turn it off, anything else on. */
+static inline bool read_flag_setting(int argc, char** argv, char const* variable, char const* flag, bool fallback) {
+    char const* text = setting_text(argc, argv, variable, flag);
+    if (!text) return fallback;
+    return strcmp(text, "0") != 0 && strcmp(text, "false") != 0 && strcmp(text, "off") != 0 && strcmp(text, "no") != 0;
+}
+
+/** Reads the settings and prints the settings line, before the first case. */
+static inline void start_test_run(int argc, char** argv) {
+    program_name = argc != 0 ? argv[0] : "";
+    read_test_settings(argc, argv);
+    printf("- Seed: %" PRIu64 ", scale: %g, filter: %s\n", test_seed, test_scale, test_filter ? test_filter : "none");
+}
+
+/** Starts the case @p label unless the filter leaves it out, matched by substring. */
+static inline bool start_test_case(char const* label) {
+    if (test_filter && !strstr(label, test_filter)) return false;
+    current_case = label;
+    failed_checks_before_case = failed_checks;
+    return true;
+}
+
+/** Ends the case @ref start_test_case began: @p skip_reason when it skipped, NULL when it ran. */
+static inline void finish_test_case(char const* skip_reason) {
+    size_t const failed = failed_checks - failed_checks_before_case;
+    if (skip_reason) {
+        ++skipped_cases;
+        printf("- %s ... skipped: %s\n", current_case, skip_reason);
+    }
+    else if (failed == 0) {
+        ++passed_cases;
+        printf("- %s ... ok\n", current_case);
+    }
+    else {
+        ++failed_cases;
+        fflush(stdout);
+        fprintf(stderr, "- %s ... FAILED: %zu failed check(s)\n", current_case, failed);
+        fprintf(stderr, "  rerun: %s --seed %" PRIu64 " --filter '%s'\n", program_name, test_seed, current_case);
+    }
+    current_case = NULL;
+}
+
+/** The exit code: 1 when a case or a check outside any case failed, or nothing ran; 3 when
+ *  skips are refused and one happened; else 0. */
+static inline int finish_test_run(void) {
+    printf("%zu passed, %zu failed, %zu skipped, seed %" PRIu64 "\n", passed_cases, failed_cases, skipped_cases,
+           test_seed);
+    if (failed_cases != 0 || failed_checks != 0 || passed_cases + skipped_cases == 0) return 1;
+    if (skipped_cases != 0 && refuse_skips) return 3;
+    return 0;
+}
+/*  endregion Shared C Checks  */
+
+static void read_test_settings(int argc, char** argv) {
+    test_seed = read_seed_setting(argc, argv, "UFORM_SEED", "--seed");
+    test_filter = setting_text(argc, argv, "UFORM_FILTER", "--filter");
+    test_scale = read_real_setting(argc, argv, "UFORM_SCALE", "--scale", 1.0);
+    refuse_skips = read_flag_setting(argc, argv, "UFORM_NO_SKIPS", "--no-skips", false);
+}
+
+#define expect_(condition) expect_at((condition), __FILE__, __LINE__, #condition)
 
 /** The checkpoint every test loads. */
 static char const* checkpoint_path = NULL;
@@ -66,8 +186,8 @@ static uform_executor_t create_executor(void) {
     uform_outcome_t outcome = {0};
     uform_executor_t executor = NULL;
     uform_executor_for_ram(&(uform_executor_for_ram_t) {.executor = &executor, .outcome = &outcome, .threads = 2});
-    expect(!outcome.message, outcome.message);
-    expect(executor != NULL, "A RAM executor must be created");
+    expect_at(!outcome.message, __FILE__, __LINE__, outcome.message);
+    expect_(executor != NULL);
     return executor;
 }
 
@@ -75,8 +195,8 @@ static uform_arena_t create_arena(uform_executor_t executor) {
     uform_outcome_t outcome = {0};
     uform_arena_t arena = NULL;
     uform_arena_init(&(uform_arena_init_t) {.arena = &arena, .executor = executor, .outcome = &outcome});
-    expect(!outcome.message, outcome.message);
-    expect(arena != NULL, "An arena must be created");
+    expect_at(!outcome.message, __FILE__, __LINE__, outcome.message);
+    expect_(arena != NULL);
     return arena;
 }
 
@@ -90,14 +210,14 @@ static uform_model_t load_model(uform_executor_t executor, uform_model_descripti
                                                     .outcome = &outcome,
                                                     .path = view_of(checkpoint_path),
                                                     .quantization = uform_scalar_bf16_k});
-    expect(!outcome.message, outcome.message);
-    expect(model != NULL, "A model must be loaded");
+    expect_at(!outcome.message, __FILE__, __LINE__, outcome.message);
+    expect_(model != NULL);
     uform_model_describe(&(uform_model_describe_t) {.model = model,
                                                     .executor = executor,
                                                     .outcome = &outcome,
                                                     .description = description});
-    expect(!outcome.message, outcome.message);
-    expect(description->dimensions > 0 && description->context > 0, "A model reports its geometry");
+    expect_at(!outcome.message, __FILE__, __LINE__, outcome.message);
+    expect_(description->dimensions > 0 && description->context > 0);
     return model;
 }
 
@@ -112,12 +232,12 @@ typedef struct texts_t {
 
 /** Fills @p texts with @p count items of the given @p lengths. */
 static void fill_texts(texts_t* texts, size_t count, size_t const* lengths) {
-    expect(count <= texts_capacity, "Too many texts");
+    expect_(count <= texts_capacity);
     texts->count = count;
     texts->offsets[0] = 0;
     for (size_t item = 0; item != count; ++item) {
         size_t const begin = texts->offsets[item];
-        expect(begin + lengths[item] <= text_bytes_capacity, "Too many text bytes");
+        expect_(begin + lengths[item] <= text_bytes_capacity);
         memset(texts->bytes + begin, 'a' + (int)(item % 26), lengths[item]);
         texts->offsets[item + 1] = begin + lengths[item];
     }
@@ -129,10 +249,10 @@ static uform_tape_view_t tape_of(texts_t const* texts) {
 
 /** Checks a run of output rows: present, of the model's width, written packed as @p scalar. */
 static void check_rows(uform_rows_view_t const* rows, size_t dimensions, uform_scalar_t scalar) {
-    expect(rows->data != NULL, "Rows must land in the arena");
-    expect(rows->columns == dimensions, "Rows span the model's dimensions");
-    expect(rows->scalar == scalar, "Rows land as the scalar asked for");
-    expect(rows->stride == dimensions * scalar_bytes(scalar), "Rows are written packed");
+    expect_(rows->data != NULL);
+    expect_(rows->columns == dimensions);
+    expect_(rows->scalar == scalar);
+    expect_(rows->stride == dimensions * scalar_bytes(scalar));
 }
 
 /** Checks per-token states against the call's stats: offsets from zero, never decreasing, no item
@@ -140,30 +260,27 @@ static void check_rows(uform_rows_view_t const* rows, size_t dimensions, uform_s
 static void check_states(uform_rows_tape_view_t const* states, size_t count, uform_model_description_t const* model,
                          uform_scalar_t scalar, size_t tokens) {
     check_rows(&states->rows, model->dimensions, scalar);
-    expect(states->offsets != NULL, "States carry their offsets");
-    expect(states->offsets[0] == 0, "The offsets start at zero");
+    expect_(states->offsets != NULL);
+    expect_(states->offsets[0] == 0);
     for (size_t item = 0; item != count; ++item) {
-        expect(states->offsets[item + 1] >= states->offsets[item], "The offsets never decrease");
-        expect(states->offsets[item + 1] - states->offsets[item] <= model->context, "No item passes the context");
+        expect_(states->offsets[item + 1] >= states->offsets[item]);
+        expect_(states->offsets[item + 1] - states->offsets[item] <= model->context);
     }
-    expect(states->offsets[count] == tokens, "The last offset is the tokens counted");
+    expect_(states->offsets[count] == tokens);
 }
 
 /** The library-wide probes, which take no handle and cannot fail, and every name
  *  table read back. */
 static void test_library_probes(void) {
-    printf("Test: Library Probes\n");
-    expect(uform_capabilities_compiled() != NULL, "The compiled capabilities must be reported");
-    expect(uform_capabilities_available() != NULL, "The available capabilities must be reported");
+    expect_(uform_capabilities_compiled() != NULL);
+    expect_(uform_capabilities_available() != NULL);
     int major = -1, minor = -1, patch = -1;
     uform_version(&major, &minor, &patch);
-    expect(major == UFORM_VERSION_MAJOR && minor == UFORM_VERSION_MINOR && patch == UFORM_VERSION_PATCH,
-           "The linked library reports the version its header carries");
+    expect_(major == UFORM_VERSION_MAJOR && minor == UFORM_VERSION_MINOR && patch == UFORM_VERSION_PATCH);
     char core[64];
     snprintf(core, sizeof(core), "%d.%d.%d", major, minor, patch);
     char const* const named = uform_version_name();
-    expect(strncmp(named, core, strlen(core)) == 0 && (named[strlen(core)] == '\0' || named[strlen(core)] == '-'),
-           "The version name is the numeric version, a pre-release suffix at most following it");
+    expect_(strncmp(named, core, strlen(core)) == 0 && (named[strlen(core)] == '\0' || named[strlen(core)] == '-'));
 
     uform_status_t const statuses[] = {
         uform_status_success_k,
@@ -185,20 +302,17 @@ static void test_library_probes(void) {
     };
     for (size_t position = 0; position != sizeof(statuses) / sizeof(statuses[0]); ++position) {
         uform_status_t read = uform_status_internal_k;
-        expect(
-            uform_status_from_name(view_of(uform_status_name(statuses[position])), &read) == uform_status_success_k &&
-                read == statuses[position],
-            "Every status reads back from its name");
+        expect_(uform_status_from_name(view_of(uform_status_name(statuses[position])), &read) ==
+                    uform_status_success_k &&
+                read == statuses[position]);
     }
-    expect(strcmp(uform_status_name(uform_status_deferred_k), "deferred") == 0, "The non-final status spells deferred");
-    expect(strcmp(uform_status_name(uform_status_out_of_memory_k), "out-of-memory") == 0, "Names are dash-separated");
-    expect(strcmp(uform_status_name(uform_status_uninitialized_k), "uninitialized") == 0,
-           "A NULL handle's status spells uninitialized");
-    expect(strcmp(uform_status_name((uform_status_t)6), "unrecognized") == 0, "An unused value spells unrecognized");
+    expect_(strcmp(uform_status_name(uform_status_deferred_k), "deferred") == 0);
+    expect_(strcmp(uform_status_name(uform_status_out_of_memory_k), "out-of-memory") == 0);
+    expect_(strcmp(uform_status_name(uform_status_uninitialized_k), "uninitialized") == 0);
+    expect_(strcmp(uform_status_name((uform_status_t)6), "unrecognized") == 0);
     uform_status_t untouched_status = uform_status_io_k;
-    expect(uform_status_from_name(view_of("no-such"), &untouched_status) == uform_status_invalid_argument_k &&
-               untouched_status == uform_status_io_k,
-           "An unrecognized status name fails and writes nothing");
+    expect_(uform_status_from_name(view_of("no-such"), &untouched_status) == uform_status_invalid_argument_k &&
+            untouched_status == uform_status_io_k);
 
     uform_scalar_t const scalars[] = {
         uform_scalar_f64_k,  uform_scalar_f32_k,  uform_scalar_bf16_k, uform_scalar_f16_k, uform_scalar_e5m2_k,
@@ -206,68 +320,56 @@ static void test_library_probes(void) {
         uform_scalar_i32_k,  uform_scalar_u8_k,   uform_scalar_u4x2_k, uform_scalar_u1x8_k};
     for (size_t position = 0; position != sizeof(scalars) / sizeof(scalars[0]); ++position) {
         uform_scalar_t read = uform_scalar_unknown_k;
-        expect(uform_scalar_from_name(view_of(uform_scalar_name(scalars[position])), &read) == uform_status_success_k &&
-                   read == scalars[position],
-               "Every scalar reads back from its name");
+        expect_(uform_scalar_from_name(view_of(uform_scalar_name(scalars[position])), &read) ==
+                    uform_status_success_k &&
+                read == scalars[position]);
     }
-    expect(strcmp(uform_scalar_name(uform_scalar_f32_k), "f32") == 0, "A scalar spells its name");
+    expect_(strcmp(uform_scalar_name(uform_scalar_f32_k), "f32") == 0);
     uform_scalar_t untouched_scalar = uform_scalar_f32_k;
-    expect(uform_scalar_from_name(view_of("f33"), &untouched_scalar) == uform_status_invalid_argument_k &&
-               untouched_scalar == uform_scalar_f32_k,
-           "An unrecognized scalar fails and writes nothing");
+    expect_(uform_scalar_from_name(view_of("f33"), &untouched_scalar) == uform_status_invalid_argument_k &&
+            untouched_scalar == uform_scalar_f32_k);
 
     uform_mood_t mood = uform_mood_parked_k;
-    expect(uform_mood_from_name(view_of("spinning"), &mood) == uform_status_success_k && mood == uform_mood_spinning_k,
-           "A mood reads back from its name");
-    expect(uform_mood_from_name(view_of("sleepy"), &mood) == uform_status_invalid_argument_k &&
-               mood == uform_mood_spinning_k,
-           "An unrecognized mood fails rather than reading as parked");
-    expect(strcmp(uform_mood_name(uform_mood_parked_k), "parked") == 0, "A mood spells its name");
+    expect_(uform_mood_from_name(view_of("spinning"), &mood) == uform_status_success_k &&
+            mood == uform_mood_spinning_k);
+    expect_(uform_mood_from_name(view_of("sleepy"), &mood) == uform_status_invalid_argument_k &&
+            mood == uform_mood_spinning_k);
+    expect_(strcmp(uform_mood_name(uform_mood_parked_k), "parked") == 0);
     uform_modality_t const modalities[] = {uform_modality_text_k, uform_modality_image_k, uform_modality_video_k,
                                            uform_modality_audio_k};
     for (size_t position = 0; position != 4; ++position) {
         uform_modality_t read = uform_modality_audio_k;
-        expect(uform_modality_from_name(view_of(uform_modality_name(modalities[position])), &read) ==
-                       uform_status_success_k &&
-                   read == modalities[position],
-               "Every modality reads back from its name");
+        expect_(uform_modality_from_name(view_of(uform_modality_name(modalities[position])), &read) ==
+                    uform_status_success_k &&
+                read == modalities[position]);
     }
-    expect(strcmp(uform_multimem_tier_name(uform_multimem_tier_peer_read_k), "peer-read") == 0,
-           "A multimem tier spells its name");
+    expect_(strcmp(uform_multimem_tier_name(uform_multimem_tier_peer_read_k), "peer-read") == 0);
     uform_multimem_tier_t tier = uform_multimem_tier_switch_reduced_k;
-    expect(uform_multimem_tier_from_name(view_of("peer-read"), &tier) == uform_status_success_k &&
-               tier == uform_multimem_tier_peer_read_k,
-           "A multimem tier reads back from its name");
-    expect(uform_multimem_tier_from_name(view_of("ring"), &tier) == uform_status_invalid_argument_k &&
-               tier == uform_multimem_tier_peer_read_k,
-           "An unrecognized multimem tier fails rather than reading as switch-reduced");
+    expect_(uform_multimem_tier_from_name(view_of("peer-read"), &tier) == uform_status_success_k &&
+            tier == uform_multimem_tier_peer_read_k);
+    expect_(uform_multimem_tier_from_name(view_of("ring"), &tier) == uform_status_invalid_argument_k &&
+            tier == uform_multimem_tier_peer_read_k);
     for (int value = 0; value != 4; ++value) {
         uform_pair_loss_form_t form = uform_pair_loss_form_sigmoid_k;
         uform_late_interaction_side_t side = uform_late_interaction_side_query_and_document_k;
         uform_gpu_vendor_t vendor = uform_gpu_vendor_apple_k;
-        expect(uform_pair_loss_form_from_name(view_of(uform_pair_loss_form_name((uform_pair_loss_form_t)value)),
-                                              &form) == uform_status_success_k &&
-                   form == (uform_pair_loss_form_t)value,
-               "Every pair-loss form reads back from its name");
-        expect(uform_late_interaction_side_from_name(
-                   view_of(uform_late_interaction_side_name((uform_late_interaction_side_t)value)), &side) ==
-                       uform_status_success_k &&
-                   side == (uform_late_interaction_side_t)value,
-               "Every late-interaction side reads back from its name");
-        expect(uform_gpu_vendor_from_name(view_of(uform_gpu_vendor_name((uform_gpu_vendor_t)value)), &vendor) ==
-                       uform_status_success_k &&
-                   vendor == (uform_gpu_vendor_t)value,
-               "Every GPU vendor reads back from its name");
+        expect_(uform_pair_loss_form_from_name(view_of(uform_pair_loss_form_name((uform_pair_loss_form_t)value)),
+                                               &form) == uform_status_success_k &&
+                form == (uform_pair_loss_form_t)value);
+        expect_(uform_late_interaction_side_from_name(
+                    view_of(uform_late_interaction_side_name((uform_late_interaction_side_t)value)), &side) ==
+                    uform_status_success_k &&
+                side == (uform_late_interaction_side_t)value);
+        expect_(uform_gpu_vendor_from_name(view_of(uform_gpu_vendor_name((uform_gpu_vendor_t)value)), &vendor) ==
+                    uform_status_success_k &&
+                vendor == (uform_gpu_vendor_t)value);
     }
-    expect(strcmp(uform_late_interaction_side_name(uform_late_interaction_side_query_and_document_k),
-                  "query-and-document") == 0,
-           "A late-interaction side spells its name");
+    expect_(strcmp(uform_late_interaction_side_name(uform_late_interaction_side_query_and_document_k),
+                   "query-and-document") == 0);
     uform_pair_loss_form_t untouched_form = uform_pair_loss_form_ranked_k;
-    expect(uform_pair_loss_form_from_name(view_of("steep"), &untouched_form) == uform_status_invalid_argument_k &&
-               untouched_form == uform_pair_loss_form_ranked_k,
-           "An unrecognized pair-loss form fails and leaves its output");
-    expect(strcmp(uform_gpu_vendor_name((uform_gpu_vendor_t)7), "unrecognized") == 0,
-           "An unused vendor value spells unrecognized");
+    expect_(uform_pair_loss_form_from_name(view_of("steep"), &untouched_form) == uform_status_invalid_argument_k &&
+            untouched_form == uform_pair_loss_form_ranked_k);
+    expect_(strcmp(uform_gpu_vendor_name((uform_gpu_vendor_t)7), "unrecognized") == 0);
 
     // Classes fit a byte, so walking every byte meets each class and every gap between blocks;
     // the CPU walk starts at "unknown", which a pin spells too.
@@ -276,33 +378,27 @@ static void test_library_probes(void) {
         char const* const spelled = uform_cpu_class_name(code);
         uform_cpu_class_t read = uform_cpu_class_serial_k;
         uform_status_t const status = uform_cpu_class_from_name(view_of(spelled), &read);
-        expect(strcmp(spelled, "unrecognized") == 0 ? status == uform_status_invalid_argument_k
-                                                    : status == uform_status_success_k && read == code,
-               "Every CPU class reads back from its name, and a gap spells none");
+        expect_(strcmp(spelled, "unrecognized") == 0 ? status == uform_status_invalid_argument_k
+                                                     : status == uform_status_success_k && read == code);
     }
     for (int value = 1; value != 256; ++value) {
         uform_gpu_class_t const code = (uform_gpu_class_t)value;
         char const* const spelled = uform_gpu_class_name(code);
         uform_gpu_class_t read = uform_gpu_class_unknown_k;
         uform_status_t const status = uform_gpu_class_from_name(view_of(spelled), &read);
-        expect(strcmp(spelled, "unrecognized") == 0 ? status == uform_status_invalid_argument_k
-                                                    : status == uform_status_success_k && read == code,
-               "Every GPU class reads back from its name, and a gap spells none");
+        expect_(strcmp(spelled, "unrecognized") == 0 ? status == uform_status_invalid_argument_k
+                                                     : status == uform_status_success_k && read == code);
     }
-    expect(strcmp(uform_cpu_class_name(uform_cpu_class_ibm_power10_k), "ibm-power10") == 0,
-           "The Power class spells its name as USearch does");
-    expect(strcmp(uform_cpu_class_name(uform_cpu_class_intel_haswell_k), "intel-haswell") == 0,
-           "A CPU class spells its name as USearch does");
+    expect_(strcmp(uform_cpu_class_name(uform_cpu_class_ibm_power10_k), "ibm-power10") == 0);
+    expect_(strcmp(uform_cpu_class_name(uform_cpu_class_intel_haswell_k), "intel-haswell") == 0);
     uform_cpu_class_t untouched_cpu_class = uform_cpu_class_intel_haswell_k;
-    expect(
-        uform_cpu_class_from_name(view_of("intel-haswel"), &untouched_cpu_class) == uform_status_invalid_argument_k &&
-            untouched_cpu_class == uform_cpu_class_intel_haswell_k,
-        "A misspelled CPU class fails and writes nothing");
+    expect_(uform_cpu_class_from_name(view_of("intel-haswel"), &untouched_cpu_class) ==
+                uform_status_invalid_argument_k &&
+            untouched_cpu_class == uform_cpu_class_intel_haswell_k);
     uform_gpu_class_t untouched_gpu_class = uform_gpu_class_nvidia_ada_k;
-    expect(
-        uform_gpu_class_from_name(view_of("nvidia-volta"), &untouched_gpu_class) == uform_status_invalid_argument_k &&
-            untouched_gpu_class == uform_gpu_class_nvidia_ada_k,
-        "An unrecognized GPU class fails and writes nothing");
+    expect_(uform_gpu_class_from_name(view_of("nvidia-volta"), &untouched_gpu_class) ==
+                uform_status_invalid_argument_k &&
+            untouched_gpu_class == uform_gpu_class_nvidia_ada_k);
 
     uform_outcome_t outcome = {0};
     uform_gpu_device_t devices[8];
@@ -311,42 +407,39 @@ static void test_library_probes(void) {
                                               .devices = devices,
                                               .devices_capacity = 8,
                                               .devices_count = &devices_count});
-    expect(!outcome.message, outcome.message);
+    expect_at(!outcome.message, __FILE__, __LINE__, outcome.message);
     for (size_t position = 0; position != devices_count && position != 8; ++position) {
         printf("- GPU #%zu: %s %s, %u units, %llu MiB\n", position, devices[position].name,
                uform_gpu_class_name(devices[position].gpu_class), devices[position].compute_units,
                (unsigned long long)(devices[position].memory_bytes >> 20));
-        expect(devices[position].vendor != uform_gpu_vendor_unknown_k, "A listed GPU names its vendor");
+        expect_(devices[position].vendor != uform_gpu_vendor_unknown_k);
     }
-    printf("Test: Library Probes - PASSED\n");
 }
 
 /** Every executor kind: RAM always, VRAM where the build and the machine have one, a borrowed pool
  *  nowhere yet; a drain of an idle executor succeeds, and every free takes @c NULL. */
 static void test_executors(void) {
-    printf("Test: Executors\n");
     uform_executor_t const executor = create_executor();
     uform_outcome_t outcome = {uform_status_io_k, "a stale message the call must overwrite"};
     uform_executor_drain(&(uform_executor_drain_t) {.executor = executor, .outcome = &outcome});
-    expect(outcome.status == uform_status_success_k && outcome.message == NULL, "An idle drain succeeds clean");
+    expect_(outcome.status == uform_status_success_k && outcome.message == NULL);
 
     uform_executor_t gpu = NULL;
     uform_executor_for_vram(&(uform_executor_for_vram_t) {.executor = &gpu, .outcome = &outcome});
-    expect(outcome.status == uform_status_success_k || outcome.status == uform_status_device_k,
-           "A VRAM executor exists, or the build or machine lacks a GPU");
-    expect((outcome.status == uform_status_success_k) == (gpu != NULL), "Only a created executor is written");
+    expect_(outcome.status == uform_status_success_k || outcome.status == uform_status_device_k);
+    expect_((outcome.status == uform_status_success_k) == (gpu != NULL));
     uform_executor_free(gpu);
 
     // A borrowed stream is refused before any device is looked for, so every build answers alike.
     void* const borrowed[] = {&outcome};
     gpu = NULL;
     uform_executor_for_vram(&(uform_executor_for_vram_t) {.executor = &gpu, .outcome = &outcome, .streams = borrowed});
-    expect(outcome.status == uform_status_unsupported_k && gpu == NULL, "Borrowed streams are refused");
+    expect_(outcome.status == uform_status_unsupported_k && gpu == NULL);
     uform_executor_for_vram(&(uform_executor_for_vram_t) {.executor = &gpu,
                                                           .outcome = &outcome,
                                                           .vram = {.devices = NULL, .devices_count = 1},
                                                           .streams = borrowed});
-    expect(outcome.status == uform_status_invalid_argument_k, "A malformed device list is refused before the streams");
+    expect_(outcome.status == uform_status_invalid_argument_k);
 
     uform_executor_free(NULL);
     uform_arena_free(NULL);
@@ -354,20 +447,18 @@ static void test_executors(void) {
     uform_mesh_free(NULL);
     uform_trainer_free(NULL);
     uform_executor_free(executor);
-    printf("Test: Executors - PASSED\n");
 }
 
 /** A checkpoint loads from a path and from a buffer, in either quantization, and its description
  *  echoes the quantization asked for; another quantization and a missing file are refused,
  *  leaving no model. */
 static void test_model_load(void) {
-    printf("Test: Model Load\n");
     uform_executor_t const executor = create_executor();
     uform_model_description_t description = {0};
     uform_model_t const model = load_model(executor, &description);
-    expect(description.quantization == uform_scalar_bf16_k, "A model runs in the quantization asked for");
-    expect(description.cpu_class != uform_cpu_class_unknown_k, "A RAM model names the class it was packed for");
-    expect(description.gpu_class == uform_gpu_class_unknown_k, "A RAM model names no GPU class");
+    expect_(description.quantization == uform_scalar_bf16_k);
+    expect_(description.cpu_class != uform_cpu_class_unknown_k);
+    expect_(description.gpu_class == uform_gpu_class_unknown_k);
 
     uform_outcome_t pin_outcome = {0};
     // A monoversioned build compiles its one class alone, so no serial floor is there to cap at.
@@ -380,13 +471,13 @@ static void test_model_load(void) {
                                                     .path = view_of(checkpoint_path),
                                                     .ram = {.cpu_class_ceiling = capped_class},
                                                     .quantization = uform_scalar_bf16_k});
-    expect(!pin_outcome.message, pin_outcome.message);
+    expect_at(!pin_outcome.message, __FILE__, __LINE__, pin_outcome.message);
     uform_model_description_t capped_description = {0};
     uform_model_describe(&(uform_model_describe_t) {.model = capped,
                                                     .executor = executor,
                                                     .outcome = &pin_outcome,
                                                     .description = &capped_description});
-    expect(capped_description.cpu_class == capped_class, "A ceiling the CPU runs packs for that class");
+    expect_(capped_description.cpu_class == capped_class);
     uform_model_free(capped);
 
     // A ceiling of another family shares only the serial floor with this CPU, so it runs as serial.
@@ -401,28 +492,27 @@ static void test_model_load(void) {
                                                     .ram = {.cpu_class_ceiling = foreign_class},
                                                     .quantization = uform_scalar_bf16_k});
     if (monoversioned) {
-        expect(pin_outcome.status == uform_status_unsupported_k, "A ceiling below the one class is refused");
-        expect(foreign == NULL, "A refused ceiling leaves no model");
+        expect_(pin_outcome.status == uform_status_unsupported_k);
+        expect_(foreign == NULL);
     }
     else {
-        expect(!pin_outcome.message, pin_outcome.message);
+        expect_at(!pin_outcome.message, __FILE__, __LINE__, pin_outcome.message);
         uform_model_description_t foreign_description = {0};
         uform_model_describe(&(uform_model_describe_t) {.model = foreign,
                                                         .executor = executor,
                                                         .outcome = &pin_outcome,
                                                         .description = &foreign_description});
-        expect(foreign_description.cpu_class == uform_cpu_class_serial_k,
-               "A ceiling this CPU does not run falls to the best class under it");
+        expect_(foreign_description.cpu_class == uform_cpu_class_serial_k);
         uform_model_free(foreign);
     }
 
     FILE* const file = fopen(checkpoint_path, "rb");
-    expect(file != NULL, "The checkpoint must be readable");
+    expect_(file != NULL);
     fseek(file, 0, SEEK_END);
     long const length = ftell(file);
     fseek(file, 0, SEEK_SET);
     uint8_t* const buffer = (uint8_t*)malloc((size_t)length);
-    expect(buffer && fread(buffer, 1, (size_t)length, file) == (size_t)length, "The checkpoint must be read");
+    expect_(buffer && fread(buffer, 1, (size_t)length, file) == (size_t)length);
     fclose(file);
 
     uform_outcome_t outcome = {0};
@@ -435,7 +525,7 @@ static void test_model_load(void) {
                                                                   .quantization = quantization});
     // A class without E4M3 products refuses E4M3, so the buffer path is then checked in BFloat16.
     if (outcome.status == uform_status_unsupported_k) {
-        expect(buffered == NULL, "A refused load leaves no model");
+        expect_(buffered == NULL);
         quantization = uform_scalar_bf16_k;
         uform_model_load_ram_buffer(&(uform_model_load_ram_buffer_t) {.model = &buffered,
                                                                       .executor = executor,
@@ -443,16 +533,16 @@ static void test_model_load(void) {
                                                                       .buffer = {buffer, (size_t)length},
                                                                       .quantization = quantization});
     }
-    expect(!outcome.message, outcome.message);
+    expect_at(!outcome.message, __FILE__, __LINE__, outcome.message);
     free(buffer);
     uform_model_description_t buffered_description = {0};
     uform_model_describe(&(uform_model_describe_t) {.model = buffered,
                                                     .executor = executor,
                                                     .outcome = &outcome,
                                                     .description = &buffered_description});
-    expect(!outcome.message, outcome.message);
-    expect(buffered_description.quantization == quantization, "A buffer loads in the quantization asked for");
-    expect(buffered_description.dimensions == description.dimensions, "A buffer loads the geometry a path does");
+    expect_at(!outcome.message, __FILE__, __LINE__, outcome.message);
+    expect_(buffered_description.quantization == quantization);
+    expect_(buffered_description.dimensions == description.dimensions);
 
     uform_model_t refused = NULL;
     uform_model_load_ram(&(uform_model_load_ram_t) {.model = &refused,
@@ -460,41 +550,39 @@ static void test_model_load(void) {
                                                     .outcome = &outcome,
                                                     .path = view_of(checkpoint_path),
                                                     .quantization = uform_scalar_f32_k});
-    expect(outcome.status == uform_status_unsupported_k, "Blocks run in bf16 or e4m3 only");
-    expect(refused == NULL, "A refused load leaves no model");
+    expect_(outcome.status == uform_status_unsupported_k);
+    expect_(refused == NULL);
     uform_model_load_ram(&(uform_model_load_ram_t) {.model = &refused,
                                                     .executor = executor,
                                                     .outcome = &outcome,
                                                     .path = view_of("/no/such/uform/checkpoint.safetensors"),
                                                     .quantization = uform_scalar_bf16_k});
-    expect(outcome.status == uform_status_io_k, "A missing checkpoint is an I/O failure");
-    expect(refused == NULL, "A failed load leaves no model");
+    expect_(outcome.status == uform_status_io_k);
+    expect_(refused == NULL);
     char const nul_path[] = "tiny.safetensors\0.missing";
     uform_model_load_ram(&(uform_model_load_ram_t) {.model = &refused,
                                                     .executor = executor,
                                                     .outcome = &outcome,
                                                     .path = {(uint8_t const*)nul_path, sizeof(nul_path) - 1},
                                                     .quantization = uform_scalar_bf16_k});
-    expect(outcome.status == uform_status_invalid_argument_k, "A checkpoint path holding a NUL is refused");
-    expect(refused == NULL, "A refused path leaves no model");
+    expect_(outcome.status == uform_status_invalid_argument_k);
+    expect_(refused == NULL);
 
     uform_model_free(buffered);
     uform_model_free(model);
     uform_executor_free(executor);
-    printf("Test: Model Load - PASSED\n");
 }
 
 /** Text in every output scalar: one embedding per item, one state per byte up to the context, and
  *  an item past the context cut there and counted; a scalar no output takes is refused with every
  *  output left null. */
 static void test_text_shapes(void) {
-    printf("Test: Text Shapes\n");
     uform_executor_t const executor = create_executor();
     uform_arena_t const arena = create_arena(executor);
     uform_model_description_t model_description = {0};
     uform_model_t const model = load_model(executor, &model_description);
     size_t const context = model_description.context;
-    expect(context < text_bytes_capacity - 16, "The test's long item must pass the context");
+    expect_(context < text_bytes_capacity - 16);
     size_t const lengths[] = {1, 5, context + 7};
     texts_t texts;
     fill_texts(&texts, 3, lengths);
@@ -515,12 +603,12 @@ static void test_text_shapes(void) {
                                                   .arena = arena,
                                                   .outputs_scalar = scalars[position],
                                                   .stats = &stats});
-        expect(!outcome.message, outcome.message);
+        expect_at(!outcome.message, __FILE__, __LINE__, outcome.message);
         check_rows(&embeddings, model_description.dimensions, scalars[position]);
         check_states(&states, texts.count, &model_description, scalars[position], stats.tokens);
-        expect(stats.truncated == 1, "Only the item past the context is truncated");
-        expect(stats.tokens == 1 + 5 + context, "Every byte is a token, up to the context");
-        expect(states.offsets[1] == 1 && states.offsets[2] == 6, "Each item spans its bytes");
+        expect_(stats.truncated == 1);
+        expect_(stats.tokens == 1 + 5 + context);
+        expect_(states.offsets[1] == 1 && states.offsets[2] == 6);
     }
 
     uform_outcome_t outcome = {0};
@@ -533,20 +621,18 @@ static void test_text_shapes(void) {
                                               .embeddings = &embeddings,
                                               .arena = arena,
                                               .outputs_scalar = uform_scalar_u8_k});
-    expect(outcome.status == uform_status_unsupported_k, "Outputs land as floats");
-    expect(embeddings.data == NULL, "A refused call leaves its outputs NULL");
+    expect_(outcome.status == uform_status_unsupported_k);
+    expect_(embeddings.data == NULL);
 
     uform_model_free(model);
     uform_arena_free(arena);
     uform_executor_free(executor);
-    printf("Test: Text Shapes - PASSED\n");
 }
 
 /** Token vectors and choices: with the heads, unit-length vectors on the states' offsets and
  *  probabilities summing to one over each item's choices, a group past the model's refused; without
  *  them, @c unsupported_k. */
 static void test_heads(void) {
-    printf("Test: Heads\n");
     uform_executor_t const executor = create_executor();
     uform_arena_t const arena = create_arena(executor);
     uform_model_description_t description = {0};
@@ -566,19 +652,18 @@ static void test_heads(void) {
                                               .token_vectors = &token_vectors,
                                               .arena = arena,
                                               .outputs_scalar = uform_scalar_f32_k});
-    if (!description.token_width) expect(outcome.status == uform_status_unsupported_k, "No token head, no vectors");
+    if (!description.token_width) expect_(outcome.status == uform_status_unsupported_k);
     else {
-        expect(!outcome.message, outcome.message);
-        expect(token_vectors.rows.columns == description.token_width, "Token vectors are token_width wide");
-        for (size_t item = 0; item <= texts.count; ++item)
-            expect(token_vectors.offsets[item] == states.offsets[item], "Token vectors share the states' offsets");
+        expect_at(!outcome.message, __FILE__, __LINE__, outcome.message);
+        expect_(token_vectors.rows.columns == description.token_width);
+        for (size_t item = 0; item <= texts.count; ++item) expect_(token_vectors.offsets[item] == states.offsets[item]);
         for (size_t row = 0; row != token_vectors.offsets[texts.count]; ++row) {
             float const* const vector = (float const*)((char const*)token_vectors.rows.data +
                                                        row * token_vectors.rows.stride);
             float squares = 0;
             for (size_t column = 0; column != description.token_width; ++column)
                 squares += vector[column] * vector[column];
-            expect(squares > 0.98f && squares < 1.02f, "Every token vector has unit length");
+            expect_(squares > 0.98f && squares < 1.02f);
         }
     }
 
@@ -597,31 +682,29 @@ static void test_heads(void) {
                                   .arena = arena};
     uform_text_choose(&choose);
     if (!description.choice_temperature_groups) {
-        expect(outcome.status == uform_status_unsupported_k, "No byte decoder, no choices");
-        expect(probabilities.data == NULL, "A refused choice leaves its probabilities NULL");
+        expect_(outcome.status == uform_status_unsupported_k);
+        expect_(probabilities.data == NULL);
     }
     else {
-        expect(!outcome.message, outcome.message);
+        expect_at(!outcome.message, __FILE__, __LINE__, outcome.message);
         float const* const values = (float const*)probabilities.data;
         for (size_t item = 0; item != texts.count; ++item) {
-            expect(probabilities.offsets[item + 1] - probabilities.offsets[item] ==
-                       choice_offsets[item + 1] - choice_offsets[item],
-                   "One probability per choice");
+            expect_(probabilities.offsets[item + 1] - probabilities.offsets[item] ==
+                    choice_offsets[item + 1] - choice_offsets[item]);
             float sum = 0;
             for (size_t choice = probabilities.offsets[item]; choice != probabilities.offsets[item + 1]; ++choice)
-                expect(values[choice] >= 0 && values[choice] <= 1, "Probabilities lie in [0,1]"), sum += values[choice];
-            expect(sum > 0.999f && sum < 1.001f, "Each item's probabilities sum to one");
+                expect_(values[choice] >= 0 && values[choice] <= 1), sum += values[choice];
+            expect_(sum > 0.999f && sum < 1.001f);
         }
         uint32_t const past[] = {0, (uint32_t)description.choice_temperature_groups, 0};
         choose.temperature_groups = past;
         uform_text_choose(&choose);
-        expect(outcome.status == uform_status_invalid_argument_k, "A group past the model's is refused");
+        expect_(outcome.status == uform_status_invalid_argument_k);
     }
 
     uform_model_free(model);
     uform_arena_free(arena);
     uform_executor_free(executor);
-    printf("Test: Heads - PASSED\n");
 }
 
 /** CRC-32 of @p length bytes, as PNG chunks carry it. */
@@ -707,19 +790,18 @@ typedef struct media_outputs_t {
 } media_outputs_t;
 
 static void check_media(media_outputs_t const* outputs, size_t count, uform_model_description_t const* model) {
-    expect(!outputs->outcome.message, outputs->outcome.message);
+    expect_at(!outputs->outcome.message, __FILE__, __LINE__, outputs->outcome.message);
     check_rows(&outputs->embeddings, model->dimensions, uform_scalar_f32_k);
     check_states(&outputs->states, count, model, uform_scalar_f32_k, outputs->tokens);
-    expect(outputs->truncated <= count, "No more items are truncated than encoded");
+    expect_(outputs->truncated <= count);
     for (size_t item = 0; item != count; ++item)
-        expect(outputs->states.offsets[item + 1] > outputs->states.offsets[item], "Every media item spans a token");
+        expect_(outputs->states.offsets[item + 1] > outputs->states.offsets[item]);
 }
 
 /** Every media verb lands one embedding per item and states whose offsets agree with its stats. A
  *  file the engine cannot decode fails whole as malformed, leaving its outputs null; the stand-in
  *  decodes nothing, so it encodes any bytes. */
 static void test_media_shapes(void) {
-    printf("Test: Media Shapes\n");
     uform_executor_t const executor = create_executor();
     uform_arena_t const arena = create_arena(executor);
     uform_model_description_t model = {0};
@@ -746,10 +828,9 @@ static void test_media_shapes(void) {
     bool const decodes_files = outputs.outcome.status != uform_status_unsupported_k;
     if (decodes_files) {
         check_media(&outputs, 2, &model);
-        expect(outputs.states.offsets[1] * 2 == outputs.states.offsets[2], "Equal images span equal tokens");
+        expect_(outputs.states.offsets[1] * 2 == outputs.states.offsets[2]);
     }
-    else
-        expect(outputs.embeddings.data == NULL && outputs.states.offsets == NULL, "A refused call leaves outputs NULL");
+    else expect_(outputs.embeddings.data == NULL && outputs.states.offsets == NULL);
 
     /* A JPEG cut after its frame header plans from the header, then fails whole as malformed, and
      *  the process lives. */
@@ -769,7 +850,7 @@ static void test_media_shapes(void) {
                                                 .stats = &image_stats});
     outputs.truncated = image_stats.truncated, outputs.tokens = image_stats.tokens;
     if (!decodes_files || outputs.outcome.status == uform_status_malformed_k)
-        expect(outputs.embeddings.data == NULL && outputs.states.offsets == NULL, "A failed call leaves outputs NULL");
+        expect_(outputs.embeddings.data == NULL && outputs.states.offsets == NULL);
     else check_media(&outputs, 1, &model);
 
     enum { pixel_bytes = 16 * 8 * 3 + 5 * 3 * 3 };
@@ -796,8 +877,8 @@ static void test_media_shapes(void) {
     uint32_t const wrong_heights[] = {8, 4};
     encode_pixels.heights = wrong_heights;
     uform_image_encode_pixels(&encode_pixels);
-    expect(outputs.outcome.status == uform_status_shape_mismatch_k, "Pixels must fill their height and width");
-    expect(outputs.embeddings.data == NULL && outputs.states.offsets == NULL, "A refused call leaves outputs NULL");
+    expect_(outputs.outcome.status == uform_status_shape_mismatch_k);
+    expect_(outputs.embeddings.data == NULL && outputs.states.offsets == NULL);
 
     uint8_t clip[300];
     for (size_t byte = 0; byte != sizeof(clip); ++byte) clip[byte] = (uint8_t)(byte * 13);
@@ -816,7 +897,7 @@ static void test_media_shapes(void) {
                                                 .stats = &video_stats});
     outputs.truncated = video_stats.truncated, outputs.tokens = video_stats.tokens;
     if (!decodes_files || outputs.outcome.status == uform_status_malformed_k)
-        expect(outputs.embeddings.data == NULL && outputs.states.offsets == NULL, "A failed call leaves outputs NULL");
+        expect_(outputs.embeddings.data == NULL && outputs.states.offsets == NULL);
     else check_media(&outputs, 1, &model);
 
     uint8_t recording[wav_bytes];
@@ -835,8 +916,7 @@ static void test_media_shapes(void) {
                                                 .stats = &audio_stats});
     outputs.truncated = audio_stats.truncated, outputs.tokens = audio_stats.tokens;
     if (decodes_files) check_media(&outputs, 1, &model);
-    else
-        expect(outputs.embeddings.data == NULL && outputs.states.offsets == NULL, "A refused call leaves outputs NULL");
+    else expect_(outputs.embeddings.data == NULL && outputs.states.offsets == NULL);
 
     enum { samples_count = 1000 + 300 };
     float samples[samples_count];
@@ -857,13 +937,11 @@ static void test_media_shapes(void) {
                                          .stats = &audio_stats});
     outputs.truncated = audio_stats.truncated, outputs.tokens = audio_stats.tokens;
     check_media(&outputs, 2, &model);
-    expect(outputs.states.offsets[1] >= outputs.states.offsets[2] - outputs.states.offsets[1],
-           "A longer recording spans no fewer frames");
+    expect_(outputs.states.offsets[1] >= outputs.states.offsets[2] - outputs.states.offsets[1]);
 
     uform_model_free(handle);
     uform_arena_free(arena);
     uform_executor_free(executor);
-    printf("Test: Media Shapes - PASSED\n");
 }
 
 /** One text call's outputs, the arena they land in, and its outcome, which a deferred call
@@ -903,14 +981,13 @@ static bool same_outputs(text_outputs_t const* first, text_outputs_t const* seco
 static void drain(uform_executor_t executor) {
     uform_outcome_t outcome = {0};
     uform_executor_drain(&(uform_executor_drain_t) {.executor = executor, .outcome = &outcome});
-    expect(!outcome.message, outcome.message);
+    expect_at(!outcome.message, __FILE__, __LINE__, outcome.message);
 }
 
 /** A deferred call finishes on the executor's own thread while its caller only polls, lands what a
  *  blocking one does though its descriptor died at submission, and refuses every other call on its
  *  executor meanwhile; without an executor a call is final when it returns. */
 static void test_blocking_and_deferred(void) {
-    printf("Test: Blocking and Deferred\n");
     uform_executor_t const executor = create_executor();
     uform_model_description_t description = {0};
     uform_model_t const model = load_model(executor, &description);
@@ -922,39 +999,42 @@ static void test_blocking_and_deferred(void) {
     uform_progress_t const silent = {0};
 
     encode_texts(model, executor, uform_completion_blocking_k, &texts, &blocking, silent);
-    expect(!blocking.outcome.message, blocking.outcome.message);
+    expect_at(!blocking.outcome.message, __FILE__, __LINE__, blocking.outcome.message);
 
     encode_texts(model, executor, uform_completion_deferred_k, &texts, &deferred, silent);
-    expect(uform_outcome_wait(&deferred.outcome) == uform_status_success_k, "A waited call finishes");
-    expect(same_outputs(&blocking, &deferred, texts.count), "A waited call lands what a blocking one does");
+    expect_(uform_outcome_wait(&deferred.outcome) == uform_status_success_k);
+    expect_(same_outputs(&blocking, &deferred, texts.count));
     encode_texts(model, executor, uform_completion_blocking_k, &texts, &blocking, silent);
-    expect(!blocking.outcome.message, "A final call lets go of its executor at once");
+    expect_(!blocking.outcome.message);
 
     // An arena made by an executor serves a call without one, since both compute on the host.
     encode_texts(model, NULL, uform_completion_deferred_k, &texts, &deferred, silent);
-    expect(deferred.outcome.status == uform_status_success_k, "A call without an executor is final when it returns");
-    expect(same_outputs(&blocking, &deferred, texts.count), "Every receiver agrees");
+    expect_(deferred.outcome.status == uform_status_success_k);
+    expect_(same_outputs(&blocking, &deferred, texts.count));
 
     // A drain waits for the call holding the executor, then parks its threads until the next call.
     encode_texts(model, executor, uform_completion_deferred_k, &texts, &deferred, silent);
     drain(executor);
-    expect(deferred.outcome.status == uform_status_success_k, "A drain waits for the call holding the executor");
+    expect_(deferred.outcome.status == uform_status_success_k);
     encode_texts(model, executor, uform_completion_blocking_k, &texts, &blocking, silent);
-    expect(!blocking.outcome.message, "A parked executor takes the next call");
+    expect_(!blocking.outcome.message);
 
     // Freeing the executor waits for the call holding it.
     encode_texts(model, executor, uform_completion_deferred_k, &texts, &deferred, silent);
     uform_executor_free(executor);
-    expect(deferred.outcome.status == uform_status_success_k, "A free waits for the call holding the executor");
-    expect(same_outputs(&blocking, &deferred, texts.count), "A call outliving its submission lands its outputs");
+    expect_(deferred.outcome.status == uform_status_success_k);
+    expect_(same_outputs(&blocking, &deferred, texts.count));
 
     uform_arena_free(deferred.arena);
     uform_arena_free(blocking.arena);
     uform_model_free(model);
-    printf("Test: Blocking and Deferred - PASSED\n");
 }
 
 #if !UFORM_TEST_STUB
+
+/** How long a check waits for what it expects to happen. A passing test never waits it out, so it
+ *  bounds hangs rather than speed, and leaves room for sanitizers and emulated CPUs. */
+static time_t const wait_limit_seconds = 120;
 
 /** Holds the call reporting to it at its first progress report until the test opens it, so a
  *  deferred call stays in flight while the test probes the executor and the arena it holds. */
@@ -974,7 +1054,7 @@ static uform_continuation_t wait_at_gate(size_t completed, size_t total, void* s
     gate_t* const gate = (gate_t*)state;
     gate->completed = completed, gate->total = total;
     atomic_store(&gate->reached, 1);
-    time_t const deadline = time(NULL) + UFORM_TEST_WAIT_LIMIT_SECONDS;
+    time_t const deadline = time(NULL) + wait_limit_seconds;
     while (!atomic_load(&gate->opened) && time(NULL) < deadline) {}
     return uform_continue_k;
 }
@@ -983,7 +1063,6 @@ static uform_continuation_t wait_at_gate(size_t completed, size_t total, void* s
  *  every other call; once the gate opens, polling alone sees the call land what a blocking one
  *  does, and both serve again. */
 static void test_held_calls(void) {
-    printf("Test: Held Calls\n");
     uform_executor_t const executor = create_executor();
     uform_model_description_t description = {0};
     uform_model_t const model = load_model(executor, &description);
@@ -994,40 +1073,39 @@ static void test_held_calls(void) {
     text_outputs_t deferred = {.arena = create_arena(executor)};
     uform_progress_t const silent = {0};
     encode_texts(model, executor, uform_completion_blocking_k, &texts, &blocking, silent);
-    expect(!blocking.outcome.message, blocking.outcome.message);
+    expect_at(!blocking.outcome.message, __FILE__, __LINE__, blocking.outcome.message);
 
     gate_t gate = {0, 0, 0, 0};
     encode_texts(model, executor, uform_completion_deferred_k, &texts, &deferred,
                  (uform_progress_t) {wait_at_gate, &gate, 1});
-    time_t const deadline = time(NULL) + UFORM_TEST_WAIT_LIMIT_SECONDS;
+    time_t const deadline = time(NULL) + wait_limit_seconds;
     while (!atomic_load(&gate.reached) && time(NULL) < deadline) {}
-    expect(atomic_load(&gate.reached), "A deferred call reaches its first progress report");
-    expect(gate.completed <= gate.total && gate.total == texts.count, "A report counts the batch's items");
-    expect(uform_outcome_status(&deferred.outcome) == uform_status_deferred_k, "A running call is deferred");
+    expect_(atomic_load(&gate.reached));
+    expect_(gate.completed <= gate.total && gate.total == texts.count);
+    expect_(uform_outcome_status(&deferred.outcome) == uform_status_deferred_k);
 
     text_outputs_t contender = {.arena = blocking.arena};
     encode_texts(model, executor, uform_completion_blocking_k, &texts, &contender, silent);
-    expect(contender.outcome.status == uform_status_contended_k, "A held executor refuses a blocking call");
+    expect_(contender.outcome.status == uform_status_contended_k);
     encode_texts(model, executor, uform_completion_deferred_k, &texts, &contender, silent);
-    expect(contender.outcome.status == uform_status_contended_k, "A held executor refuses a deferred call");
+    expect_(contender.outcome.status == uform_status_contended_k);
     text_outputs_t borrower = {.arena = deferred.arena};
     encode_texts(model, NULL, uform_completion_blocking_k, &texts, &borrower, silent);
-    expect(borrower.outcome.status == uform_status_contended_k, "A held arena refuses a call without an executor");
-    expect(borrower.embeddings.data == NULL, "A refused call leaves its outputs NULL");
+    expect_(borrower.outcome.status == uform_status_contended_k);
+    expect_(borrower.embeddings.data == NULL);
 
     atomic_store(&gate.opened, 1);
-    time_t const landing_deadline = time(NULL) + UFORM_TEST_WAIT_LIMIT_SECONDS;
+    time_t const landing_deadline = time(NULL) + wait_limit_seconds;
     while (uform_outcome_status(&deferred.outcome) == uform_status_deferred_k && time(NULL) < landing_deadline) {}
-    expect(deferred.outcome.status == uform_status_success_k, "Polling alone sees a deferred call finish");
-    expect(same_outputs(&blocking, &deferred, texts.count), "A deferred call lands what a blocking one does");
+    expect_(deferred.outcome.status == uform_status_success_k);
+    expect_(same_outputs(&blocking, &deferred, texts.count));
     encode_texts(model, NULL, uform_completion_blocking_k, &texts, &borrower, silent);
-    expect(!borrower.outcome.message, "A final call lets go of its arena");
+    expect_(!borrower.outcome.message);
 
     uform_arena_free(deferred.arena);
     uform_arena_free(blocking.arena);
     uform_model_free(model);
     uform_executor_free(executor);
-    printf("Test: Held Calls - PASSED\n");
 }
 
 #endif
@@ -1035,19 +1113,18 @@ static void test_held_calls(void) {
 /** An executor over a pool its lender spawned encodes what an owned one does, and a null
  *  pool is refused. */
 static void test_executor_on_pool(void) {
-    printf("Test: Executor On Pool\n");
     fu_topology_t topology = NULL;
     fu_pool_t pool = NULL;
-    expect(fu_topology_new(&topology) == fu_success_k, "A topology must be harvested");
-    expect(fu_pool_new("uform_test", fu_capabilities_all_k, &pool) == fu_success_k, "A pool must be created");
+    expect_(fu_topology_new(&topology) == fu_success_k);
+    expect_(fu_pool_new("uform_test", fu_capabilities_all_k, &pool) == fu_success_k);
     size_t const threads = (fu_comptime_capabilities() & fu_capability_os_threads_k) ? 2 : 1;
-    expect(fu_pool_spawn(topology, pool, threads, fu_caller_inclusive_k) == fu_success_k, "A pool must spawn");
+    expect_(fu_pool_spawn(topology, pool, threads, fu_caller_inclusive_k) == fu_success_k);
 
     uform_outcome_t outcome = {0};
     uform_executor_t lent = NULL;
     uform_executor_on_pool(&(uform_executor_on_pool_t) {.executor = &lent, .outcome = &outcome, .pool = pool});
-    expect(!outcome.message, outcome.message);
-    expect(lent != NULL, "An executor over a lent pool must be created");
+    expect_at(!outcome.message, __FILE__, __LINE__, outcome.message);
+    expect_(lent != NULL);
 
     uform_executor_t const owned = create_executor();
     uform_model_description_t description = {0};
@@ -1060,10 +1137,10 @@ static void test_executor_on_pool(void) {
     uform_progress_t const silent = {0};
 
     encode_texts(model, owned, uform_completion_blocking_k, &texts, &on_owned, silent);
-    expect(!on_owned.outcome.message, on_owned.outcome.message);
+    expect_at(!on_owned.outcome.message, __FILE__, __LINE__, on_owned.outcome.message);
     encode_texts(model, lent, uform_completion_blocking_k, &texts, &on_lent, silent);
-    expect(!on_lent.outcome.message, on_lent.outcome.message);
-    expect(same_outputs(&on_owned, &on_lent, texts.count), "A lent pool lands what an owned one does");
+    expect_at(!on_lent.outcome.message, __FILE__, __LINE__, on_lent.outcome.message);
+    expect_(same_outputs(&on_owned, &on_lent, texts.count));
 
     uform_arena_free(on_lent.arena);
     uform_arena_free(on_owned.arena);
@@ -1076,16 +1153,14 @@ static void test_executor_on_pool(void) {
     uform_outcome_t refused = {0};
     uform_executor_t none = NULL;
     uform_executor_on_pool(&(uform_executor_on_pool_t) {.executor = &none, .outcome = &refused, .pool = NULL});
-    expect(refused.status != uform_status_success_k, "A null pool is refused");
-    expect(none == NULL, "A refused pool leaves no executor");
-    printf("Test: Executor On Pool - PASSED\n");
+    expect_(refused.status != uform_status_success_k);
+    expect_(none == NULL);
 }
 
 /** An arena keeps its high-water mark, so a repeated call lands where the last did; inputs inside
  *  it are refused; a running call holds it, refusing another call meanwhile, until final; and it
  *  describes the host pages a RAM executor gave it. */
 static void test_arenas(void) {
-    printf("Test: Arenas\n");
     uform_executor_t const executor = create_executor();
     uform_model_description_t description = {0};
     uform_model_t const model = load_model(executor, &description);
@@ -1096,11 +1171,11 @@ static void test_arenas(void) {
     uform_progress_t const silent = {0};
 
     encode_texts(model, executor, uform_completion_blocking_k, &texts, &outputs, silent);
-    expect(!outputs.outcome.message, outputs.outcome.message);
+    expect_at(!outputs.outcome.message, __FILE__, __LINE__, outputs.outcome.message);
     void const* const first_landing = outputs.embeddings.data;
     encode_texts(model, executor, uform_completion_blocking_k, &texts, &outputs, silent);
-    expect(!outputs.outcome.message, outputs.outcome.message);
-    expect(outputs.embeddings.data == first_landing, "A steady loop reuses the arena it grew once");
+    expect_at(!outputs.outcome.message, __FILE__, __LINE__, outputs.outcome.message);
+    expect_(outputs.embeddings.data == first_landing);
 
     // The previous call's offsets live in the arena the next call rewinds.
     uform_outcome_t outcome = {0};
@@ -1113,24 +1188,22 @@ static void test_arenas(void) {
                                               .embeddings = &embeddings,
                                               .arena = outputs.arena,
                                               .outputs_scalar = uform_scalar_f32_k});
-    expect(outcome.status == uform_status_invalid_argument_k, "Inputs inside the rewound arena are refused");
-    expect(embeddings.data == NULL, "A refused call leaves its outputs NULL");
+    expect_(outcome.status == uform_status_invalid_argument_k);
+    expect_(embeddings.data == NULL);
 
     uform_arena_description_t placement = {uform_residency_unknown_k, 0};
     uform_arena_describe(
         &(uform_arena_describe_t) {.arena = outputs.arena, .outcome = &outcome, .description = &placement});
-    expect(outcome.status == uform_status_success_k && placement.residency == uform_residency_ram_k &&
-               placement.device == -1,
-           "A RAM executor's arena lives in host pages");
+    expect_(outcome.status == uform_status_success_k && placement.residency == uform_residency_ram_k &&
+            placement.device == -1);
     uform_arena_describe(&(uform_arena_describe_t) {.arena = NULL, .outcome = &outcome, .description = &placement});
-    expect(outcome.status == uform_status_uninitialized_k, "A NULL arena is refused");
+    expect_(outcome.status == uform_status_uninitialized_k);
     uform_arena_describe(&(uform_arena_describe_t) {.arena = outputs.arena, .outcome = &outcome, .description = NULL});
-    expect(outcome.status == uform_status_invalid_argument_k, "A NULL description is refused");
+    expect_(outcome.status == uform_status_invalid_argument_k);
 
     uform_arena_free(outputs.arena);
     uform_model_free(model);
     uform_executor_free(executor);
-    printf("Test: Arenas - PASSED\n");
 }
 
 /** What a progress handler heard over one call, and the report at which it stops the call;
@@ -1156,7 +1229,6 @@ static uform_continuation_t record_progress(size_t completed, size_t total, void
  *  derive ten; a handler stopping the call at its first report cancels it with every output left
  *  null, blocking or deferred. */
 static void test_progress(void) {
-    printf("Test: Progress\n");
     uform_executor_t const executor = create_executor();
     uform_model_description_t description = {0};
     uform_model_t const model = load_model(executor, &description);
@@ -1169,32 +1241,31 @@ static void test_progress(void) {
     progress_reports_t reports = {0, 0, 0, true, 0};
     encode_texts(model, executor, uform_completion_blocking_k, &texts, &outputs,
                  (uform_progress_t) {record_progress, &reports, 4});
-    expect(!outputs.outcome.message, outputs.outcome.message);
-    expect(reports.ascending && reports.calls == 4, "Every step is reported once, in order");
-    expect(reports.completed == texts.count && reports.total == texts.count, "The last report covers the batch");
+    expect_at(!outputs.outcome.message, __FILE__, __LINE__, outputs.outcome.message);
+    expect_(reports.ascending && reports.calls == 4);
+    expect_(reports.completed == texts.count && reports.total == texts.count);
 
     reports = (progress_reports_t) {0, 0, 0, true, 0};
     encode_texts(model, executor, uform_completion_blocking_k, &texts, &outputs,
                  (uform_progress_t) {record_progress, &reports, 0});
-    expect(reports.ascending && reports.calls == 10, "Zero steps derive ten");
+    expect_(reports.ascending && reports.calls == 10);
 
     reports = (progress_reports_t) {0, 0, 0, true, 1};
     encode_texts(model, executor, uform_completion_blocking_k, &texts, &outputs,
                  (uform_progress_t) {record_progress, &reports, 4});
-    expect(outputs.outcome.status == uform_status_cancelled_k, "A handler's cancel stops the call");
-    expect(reports.calls == 1, "A cancelled call reports nothing more");
-    expect(outputs.embeddings.data == NULL && outputs.states.offsets == NULL, "A cancelled call leaves outputs NULL");
+    expect_(outputs.outcome.status == uform_status_cancelled_k);
+    expect_(reports.calls == 1);
+    expect_(outputs.embeddings.data == NULL && outputs.states.offsets == NULL);
 
     reports = (progress_reports_t) {0, 0, 0, true, 1};
     encode_texts(model, executor, uform_completion_deferred_k, &texts, &outputs,
                  (uform_progress_t) {record_progress, &reports, 4});
-    expect(uform_outcome_wait(&outputs.outcome) == uform_status_cancelled_k, "A deferred call cancels too");
-    expect(outputs.embeddings.data == NULL, "A cancelled deferred call leaves outputs NULL");
+    expect_(uform_outcome_wait(&outputs.outcome) == uform_status_cancelled_k);
+    expect_(outputs.embeddings.data == NULL);
 
     uform_arena_free(outputs.arena);
     uform_model_free(model);
     uform_executor_free(executor);
-    printf("Test: Progress - PASSED\n");
 }
 
 #if !UFORM_TEST_STUB
@@ -1204,7 +1275,7 @@ static uform_outcome_t load_forged(uform_executor_t executor, char const* header
     size_t const header_bytes = strlen(header), header_length = (header_bytes + 7) / 8 * 8;
     size_t const length = 8 + header_length + payload_bytes;
     uint8_t* const buffer = (uint8_t*)calloc(length, 1);
-    expect(buffer != NULL, "The forged checkpoint must be allocated");
+    expect_(buffer != NULL);
     for (size_t byte = 0; byte != 8; ++byte) buffer[byte] = (uint8_t)((uint64_t)header_length >> (byte * 8));
     memset(buffer + 8, ' ', header_length);
     memcpy(buffer + 8, header, header_bytes);
@@ -1230,7 +1301,6 @@ static bool refused_as(uform_outcome_t outcome, char const* message) {
  *  storage, and GPU-only verbs given a RAM executor; against the engine also forged checkpoints and
  *  pixel counts that wrap. */
 static void test_refusals(void) {
-    printf("Test: Refusals\n");
     uform_executor_t const executor = create_executor();
     uform_arena_t const arena = create_arena(executor);
     uform_model_description_t description = {0};
@@ -1252,25 +1322,25 @@ static void test_refusals(void) {
                                   .arena = NULL,
                                   .outputs_scalar = uform_scalar_f32_k};
     uform_text_encode(&encode);
-    expect(outcome.status == uform_status_invalid_argument_k, "A null arena is refused");
-    expect(embeddings.data == NULL && states.offsets == NULL, "A refused call leaves outputs NULL");
+    expect_(outcome.status == uform_status_invalid_argument_k);
+    expect_(embeddings.data == NULL && states.offsets == NULL);
 
     encode.arena = arena, encode.embeddings = NULL, encode.states = NULL;
     uform_text_encode(&encode);
-    expect(outcome.status == uform_status_invalid_argument_k, "A call naming no output is refused");
+    expect_(outcome.status == uform_status_invalid_argument_k);
 
     encode.model = NULL;
     uform_text_encode(&encode);
-    expect(outcome.status == uform_status_uninitialized_k, "A null model is refused before the outputs");
+    expect_(outcome.status == uform_status_uninitialized_k);
 
     encode.model = model, encode.embeddings = &embeddings, encode.texts.offsets = NULL;
     uform_text_encode(&encode);
-    expect(outcome.status == uform_status_invalid_argument_k, "A tape without offsets is refused");
+    expect_(outcome.status == uform_status_invalid_argument_k);
 
     size_t const descending[] = {0, 8, 4};
     encode.texts.offsets = descending;
     uform_text_encode(&encode);
-    expect(outcome.status == uform_status_invalid_argument_k, "A tape whose offsets descend is refused");
+    expect_(outcome.status == uform_status_invalid_argument_k);
     encode.texts = tape_of(&texts);
 
 #if !UFORM_TEST_STUB // the stand-in loads any readable bytes and multiplies pixels unchecked
@@ -1288,16 +1358,15 @@ static void test_refusals(void) {
                                         .embeddings = &embeddings,
                                         .arena = arena,
                                         .outputs_scalar = uform_scalar_f32_k});
-    expect(outcome.status == uform_status_shape_mismatch_k, "Pixels whose three channels wrap 64 bits are refused");
+    expect_(outcome.status == uform_status_shape_mismatch_k);
 
     char const* const reading = "The checkpoint is not a safetensors file";
     char const* const measuring = "The checkpoint carries no usable geometry";
-    expect(refused_as(load_forged(executor,
-                                  "{\"model.embedding\":{\"dtype\":\"BF16\",\"shape\":[1152921504606846976,8]," //
-                                  "\"data_offsets\":[0,0]}}",
-                                  0),
-                      reading),
-           "A shape whose product wraps is refused while reading");
+    expect_(refused_as(load_forged(executor,
+                                   "{\"model.embedding\":{\"dtype\":\"BF16\",\"shape\":[1152921504606846976,8]," //
+                                   "\"data_offsets\":[0,0]}}",
+                                   0),
+                       reading));
     char const geometry[] =
         "{\"__metadata__\":{\"depth\":\"1\",\"hidden\":\"8\",\"ffn_expansion\":\"1\",\"head_width\":\"8\"," //
         "\"rms_epsilon\":\"0.00001\",\"rope_temporal\":\"4\",\"rope_height\":\"2\",\"rope_width\":\"2\","   //
@@ -1313,19 +1382,17 @@ static void test_refusals(void) {
     size_t const short_vocabulary = 200, full_vocabulary = 258;
     snprintf(header, sizeof(header), geometry, "1", short_vocabulary, short_vocabulary * 16, short_vocabulary * 16,
              short_vocabulary * 16 + 256, short_vocabulary * 16 + 256, short_vocabulary * 16 + 288);
-    expect(refused_as(load_forged(executor, header, short_vocabulary * 16 + 288), measuring),
-           "An embedding short of the bytes and the mask is refused with the geometry");
+    expect_(refused_as(load_forged(executor, header, short_vocabulary * 16 + 288), measuring));
     // Two-channel tubes of 2^31+1 frames take 2^32+2 scalars, which 32 bits wrap to 2.
     snprintf(header, sizeof(header), geometry, "2147483649", full_vocabulary, full_vocabulary * 16,
              full_vocabulary * 16, full_vocabulary * 16 + 256, full_vocabulary * 16 + 256, full_vocabulary * 16 + 288);
-    expect(refused_as(load_forged(executor, header, full_vocabulary * 16 + 288), measuring),
-           "A tube that misses its projection is refused with the geometry");
+    expect_(refused_as(load_forged(executor, header, full_vocabulary * 16 + 288), measuring));
 #endif
 
     uform_mesh_t mesh = NULL;
     uform_mesh_bootstrap(&(uform_mesh_bootstrap_t) {.mesh = &mesh, .executor = executor, .outcome = &outcome});
-    expect(outcome.status == uform_status_device_k, "A mesh needs a VRAM executor");
-    expect(mesh == NULL, "A refused bootstrap leaves no mesh");
+    expect_(outcome.status == uform_status_device_k);
+    expect_(mesh == NULL);
     uform_trainer_t trainer = NULL;
     uform_trainer_init_vram(&(uform_trainer_init_vram_t) {.trainer = &trainer,
                                                           .executor = executor,
@@ -1333,16 +1400,16 @@ static void test_refusals(void) {
                                                           .depth = 2,
                                                           .hidden = 256,
                                                           .schedule = {.steps = 1}});
-    expect(outcome.status == uform_status_device_k, "A trainer needs a VRAM executor");
-    expect(trainer == NULL, "A refused trainer is never created");
+    expect_(outcome.status == uform_status_device_k);
+    expect_(trainer == NULL);
     uform_trainer_step(&(uform_trainer_step_t) {.trainer = NULL, .executor = executor, .outcome = &outcome});
-    expect(outcome.status == uform_status_uninitialized_k, "A null trainer is refused before its executor");
+    expect_(outcome.status == uform_status_uninitialized_k);
     uform_trainer_save(&(uform_trainer_save_t) {.trainer = NULL, .executor = executor, .outcome = &outcome});
-    expect(outcome.status == uform_status_uninitialized_k, "A null trainer is refused before its path");
+    expect_(outcome.status == uform_status_uninitialized_k);
     uform_mesh_describe(&(uform_mesh_describe_t) {.mesh = NULL, .outcome = &outcome, .description = NULL});
-    expect(outcome.status == uform_status_uninitialized_k, "A null mesh is refused before its description");
+    expect_(outcome.status == uform_status_uninitialized_k);
     uform_model_describe(&(uform_model_describe_t) {.model = NULL, .executor = executor, .outcome = &outcome});
-    expect(outcome.status == uform_status_uninitialized_k, "A null model is refused before its description");
+    expect_(outcome.status == uform_status_uninitialized_k);
 
     uform_model_t gpu_model = NULL;
     uform_model_load_vram(&(uform_model_load_vram_t) {.model = &gpu_model,
@@ -1350,13 +1417,12 @@ static void test_refusals(void) {
                                                       .outcome = &outcome,
                                                       .path = view_of(checkpoint_path),
                                                       .quantization = uform_scalar_bf16_k});
-    expect(outcome.status == uform_status_device_k, "A VRAM load needs a VRAM executor");
-    expect(gpu_model == NULL, "A refused load leaves no model");
+    expect_(outcome.status == uform_status_device_k);
+    expect_(gpu_model == NULL);
 
     uform_model_free(model);
     uform_arena_free(arena);
     uform_executor_free(executor);
-    printf("Test: Refusals - PASSED\n");
 }
 
 /** Writes a small stand-in checkpoint to the temporary directory, answering its path. */
@@ -1367,13 +1433,12 @@ static char const* write_scratch_checkpoint(void) {
     if (!directory || !*directory) directory = "/tmp";
     snprintf(path, sizeof(path), "%s/uform-test-checkpoint.safetensors", directory);
     FILE* const file = fopen(path, "wb");
-    expect(file != NULL, "The scratch checkpoint must be writable");
+    expect_(file != NULL);
     char const contents[] = "{\"__metadata__\":{\"stand-in\":\"any readable bytes load\"}}";
     uint64_t const header_length = sizeof(contents) - 1;
     uint8_t length_bytes[8];
     for (size_t byte = 0; byte != 8; ++byte) length_bytes[byte] = (uint8_t)(header_length >> (byte * 8));
-    expect(fwrite(length_bytes, 1, 8, file) == 8 && fwrite(contents, 1, header_length, file) == header_length,
-           "The scratch checkpoint must be written");
+    expect_(fwrite(length_bytes, 1, 8, file) == 8 && fwrite(contents, 1, header_length, file) == header_length);
     fclose(file);
     return path;
 }
@@ -1392,7 +1457,6 @@ static float quickstart_cosine(uform_rows_view_t texts, size_t i, uform_rows_vie
  *  of @c model.safetensors , taking the photo from @ref write_png in place of reading @c cat.png ,
  *  and expecting each status where the README chains them. */
 static void test_quickstart(void) {
-    printf("Test: Quickstart\n");
     uform_outcome_t outcome = {0};
     uform_executor_t executor = NULL;
     uform_model_t model = NULL;
@@ -1438,10 +1502,11 @@ static void test_quickstart(void) {
 
     // A build without host decoders refuses the photo, which the README's build decodes.
     bool const decodes_files = outcome.status != uform_status_unsupported_k;
-    expect(!outcome.status || !decodes_files, outcome.message);
+    expect_at(!outcome.status || !decodes_files, __FILE__, __LINE__,
+              outcome.message ? outcome.message : uform_status_name(outcome.status));
     size_t const best = !decodes_files ? 0 : quickstart_cosine(texts, 1, images) > quickstart_cosine(texts, 0, images);
     float const cosine = decodes_files ? quickstart_cosine(texts, best, images) : 0;
-    expect(strlen(captions[best]) != 0 && cosine == cosine, "The Quickstart names a caption at a finite cosine");
+    expect_(strlen(captions[best]) != 0 && cosine == cosine);
 
     uform_arena_free(images_arena), uform_arena_free(texts_arena);
     uform_model_free(model), uform_executor_free(executor);
@@ -1459,9 +1524,7 @@ int main(int argc, char* argv[]) {
     char const* const summary_path = getenv("GITHUB_STEP_SUMMARY");
     FILE* const summary = summary_path ? fopen(summary_path, "a") : NULL;
     if (summary) print_machine(summary), fclose(summary);
-    char const* const filter = getenv("UFORM_FILTER");
-    if (filter && *filter) test_filter = filter;
-    printf("- Filter: %s\n", test_filter ? test_filter : "none");
+    start_test_run(argc, argv);
 
     char const* const environment_checkpoint = getenv("UFORM_TEST_CHECKPOINT");
     char const* scratch = NULL;
@@ -1470,23 +1533,24 @@ int main(int argc, char* argv[]) {
     else checkpoint_path = scratch = write_scratch_checkpoint();
     printf("- Checkpoint: %s\n", checkpoint_path);
 
-    if (selected("library_probes")) test_library_probes();
-    if (selected("executors")) test_executors();
-    if (selected("model_load")) test_model_load();
-    if (selected("text_shapes")) test_text_shapes();
-    if (selected("heads")) test_heads();
-    if (selected("media_shapes")) test_media_shapes();
-    if (selected("blocking_and_deferred")) test_blocking_and_deferred();
+    if (start_test_case("test_library_probes")) test_library_probes(), finish_test_case(NULL);
+    if (start_test_case("test_executors")) test_executors(), finish_test_case(NULL);
+    if (start_test_case("test_model_load")) test_model_load(), finish_test_case(NULL);
+    if (start_test_case("test_text_shapes")) test_text_shapes(), finish_test_case(NULL);
+    if (start_test_case("test_heads")) test_heads(), finish_test_case(NULL);
+    if (start_test_case("test_media_shapes")) test_media_shapes(), finish_test_case(NULL);
+    if (start_test_case("test_blocking_and_deferred")) test_blocking_and_deferred(), finish_test_case(NULL);
 #if !UFORM_TEST_STUB
-    if (selected("held_calls")) test_held_calls();
+    if (start_test_case("test_held_calls")) test_held_calls(), finish_test_case(NULL);
 #endif
-    if (selected("executor_on_pool")) test_executor_on_pool();
-    if (selected("arenas")) test_arenas();
-    if (selected("progress")) test_progress();
-    if (selected("refusals")) test_refusals();
-    if (selected("quickstart")) test_quickstart();
+    if (start_test_case("test_executor_on_pool")) test_executor_on_pool(), finish_test_case(NULL);
+    if (start_test_case("test_arenas")) test_arenas(), finish_test_case(NULL);
+    if (start_test_case("test_progress")) test_progress(), finish_test_case(NULL);
+    if (start_test_case("test_refusals")) test_refusals(), finish_test_case(NULL);
+    if (start_test_case("test_quickstart")) test_quickstart(), finish_test_case(NULL);
 
     if (scratch) remove(scratch);
-    printf("All tests passed!\n");
-    return 0;
+    return finish_test_run();
 }
+
+#undef expect_

@@ -2,36 +2,40 @@
  *  @file test/mesh.cpp
  *  @author Ash Vardanian
  *  @date July 5, 2026
- *  @brief Conformance test of the mesh bootstrap — the one job `mesh.hpp` exists for: minting each
+ *  @brief Conformance test of the mesh bootstrap — the one job @c mesh.hpp exists for: minting each
  *      host_domain's facts and reconciling them over a shared filesystem into one agreed world.
  *
  *  Five cases, the first four proving an operation that must @b succeed — the integer accessors
  *  are one-line divisions and carry no test:
  *
- *      - @ref exchange_round_trips — the durable primitive every wiring phase reuses:
- *        `publish_text` writes atomically and `await_text` reads the bytes back verbatim.
+ *      - @ref test_exchange_round_trips — the durable primitive every wiring phase reuses:
+ *        @c publish_text writes atomically and @c await_text reads the bytes back verbatim.
  *        Hand-built topology, no GPU.
- *      - @ref rendezvous_generations — two forked processes wire one phase three times over one
- *        directory, and every round reads its own generation's payload. No GPU.
- *      - @ref single_box_world — the common one-box case: `bootstrap(0,1)` assembles the whole
- *        topology from the local probe and never opens the exchange directory.
- *      - @ref world_reconciles — the substance: a lead reads a peer's facts, validates agreement,
- *        and assembles the world; a follower adopts the lead's manifest. Both are driven against a
- *        @b matching simulated peer planted with this box's real GPU identity, so agreement
- *        genuinely passes, and a peer of another GPU class is refused. Needs a visible GPU
- *        (bootstrap front-loads `discover_mesh_shape`); a box without one SKIPs.
- *      - @ref barrier_traps_past_deadline — a domain barrier no other arrival reaches traps after
- *        the domain's timeout rather than hanging, and leaves the sentence naming why in the mesh's
- *        fault table. Needs a visible GPU and runs last, since the trap poisons the context.
+ *      - @ref test_rendezvous_generations — two forked processes wire one phase three times over
+ *        one directory, and every round reads its own generation's payload. No GPU.
+ *      - @ref test_single_box_world — the common one-box case: @c bootstrap(0,1) assembles the
+ *        whole topology from the local probe and never opens the exchange directory.
+ *      - @ref test_world_reconciles — the substance: a lead reads a peer's facts, validates
+ *        agreement and assembles the world; a follower adopts the lead's manifest. Needs a GPU.
+ *      - @ref test_barrier_traps_past_deadline — a barrier no other arrival reaches traps after
+ *        the domain's timeout rather than hanging. Needs a GPU, runs last.
  *
- *  The genuine multi-node happy path is @ref run_cluster_exchange , driven by
- *  `scripts/slurm/test_mesh-4-8-16.sbatch`: every rank bootstraps for real and must assemble a
+ *  @ref test_world_reconciles drives both sides against a @b matching simulated peer planted with
+ *  this box's real GPU identity, so agreement genuinely passes, and a peer of another GPU class is
+ *  refused; bootstrap front-loads @c discover_mesh_shape, so a box without a visible GPU SKIPs.
+ *  @ref test_barrier_traps_past_deadline leaves the sentence naming why in the mesh's fault table,
+ *  and runs last, since the trap poisons the context.
+ *
+ *  The genuine multi-node happy path is @ref test_cluster_exchange , driven by
+ *  @c scripts/slurm/test_mesh-4-8-16.sbatch: every rank bootstraps for real and must assemble a
  *  @b byte-identical world table.
  */
+#undef NDEBUG // ! A test's oracle must stay live in every build
+
 #include <cstdio>  // `std::fopen`, `std::fwrite`, `std::fclose` — planting a simulated peer's exchange files
 #include <cstdlib> // `std::getenv`, `std::atoi`
 
-#include <unistd.h>   // `::getpid`, `::fork`, `::_exit`
+#include <unistd.h>   // `::fork`, `::_exit`
 #include <sys/wait.h> // `::waitpid`, `WIFEXITED`, `WEXITSTATUS`
 
 #include <chrono> // `std::chrono::milliseconds`
@@ -46,7 +50,7 @@
 #include "uform/utilities/mesh.hpp"
 #include "uform/utilities/multimem_collectives.cuh"
 
-#include "harness.hpp"
+#include "harness.hpp" // `run_test_case`, `expect_true`, `scratch_directory_t`
 
 using namespace unum::uform::utilities;
 using namespace unum::uform::test;
@@ -107,30 +111,32 @@ static bool probe_local_device_name(sz::string_t& name) {
  *  atomically (temp + rename, no leftover), `await_text` reads it whole, and a second publish
  *  replaces the first — the primitive every wiring phase carries its coordinates over.
  *  Hand-built topology, no GPU. */
-static void exchange_round_trips(test_suite_t& suite, fs::path const& base) {
+static void test_exchange_round_trips() {
+    scratch_directory_t const scratch;
+    fs::path const& base = scratch.path;
     fs::path const directory = base / "exchange";
     std::error_code error;
     fs::create_directories(directory, error);
 
     mesh_topology_t topology;
-    if (st::failed(topology.host_domains.resize(2))) return suite.check(false, "topology table alloc");
+    if (!expect_true(!st::failed(topology.host_domains.resize(2)), "topology table alloc")) return;
     topology.host_domain_index = 0;
     topology.poll_pause = &pause_between_polls;
     (void)format_into(topology.exchange_directory, "{}", directory.c_str());
 
     sz::string_view_t const payload = "qpn 42\npsn 7\nrkey 3735928559\n";
-    suite.check(static_cast<bool>(topology.publish_text("wiring", payload)), "publish_text should succeed");
-    suite.check(!fs::exists(directory / "host_domain0.wiring.tmp"), "publish should leave no temporary file");
+    expect_true(static_cast<bool>(topology.publish_text("wiring", payload)), "publish_text should succeed");
+    expect_true(!fs::exists(directory / "host_domain0.wiring.tmp"), "publish should leave no temporary file");
     sz::string_t received;
-    expected_t awaited = topology.await_text(0, "wiring", received, wait_limit_seconds_k);
-    suite.check(static_cast<bool>(awaited), "await_text should find the payload: {}", awaited.description_);
-    suite.check(received.view() == payload, "payload should round-trip verbatim: got {}", received);
+    expected_t awaited = topology.await_text(0, "wiring", received, wait_limit_k.count());
+    expect_true(static_cast<bool>(awaited), "await_text should find the payload: {}", awaited.description_);
+    expect_true(received.view() == payload, "payload should round-trip verbatim: got {}", received);
 
     sz::string_view_t const replacement = "qpn 99\n";
-    suite.check(static_cast<bool>(topology.publish_text("wiring", replacement)), "republish_text should succeed");
+    expect_true(static_cast<bool>(topology.publish_text("wiring", replacement)), "republish_text should succeed");
     sz::string_t again;
-    [[maybe_unused]] expected_t const reawaited = topology.await_text(0, "wiring", again, wait_limit_seconds_k);
-    suite.check(again.view() == replacement, "republish should atomically replace: got {}", again);
+    [[maybe_unused]] expected_t const reawaited = topology.await_text(0, "wiring", again, wait_limit_k.count());
+    expect_true(again.view() == replacement, "republish should atomically replace: got {}", again);
 }
 
 /** A hand-built two-host_domain topology over @p directory , as host_domain @p index : what
@@ -159,10 +165,10 @@ static bool wire_rounds(mesh_topology_t& topology, u32_t rounds) {
             return false;
         if (round != 0 && topology.is_lead()) std::this_thread::sleep_for(std::chrono::milliseconds {300});
         if (!topology.publish_text(key.view(), payload.view())) return false;
-        if (!topology.await_text(peer, key.view(), received, wait_limit_seconds_k) ||
+        if (!topology.await_text(peer, key.view(), received, wait_limit_k.count()) ||
             received.view() != expected_payload.view())
             return false;
-        if (!topology.barrier(barrier_key.view(), wait_limit_seconds_k)) return false;
+        if (!topology.barrier(barrier_key.view(), wait_limit_k.count())) return false;
     }
     return true;
 }
@@ -171,13 +177,15 @@ static bool wire_rounds(mesh_topology_t& topology, u32_t rounds) {
  *  phase three times, as the two measuring trainers and the real one each make a multimem domain,
  *  and every round must read its own generation's payload, never the one before. Host-only: a
  *  forked peer, no GPU. */
-static void rendezvous_generations(test_suite_t& suite, fs::path const& base) {
+static void test_rendezvous_generations() {
+    scratch_directory_t const scratch;
+    fs::path const& base = scratch.path;
     fs::path const directory = base / "generations";
     std::error_code error;
     fs::create_directories(directory, error);
     constexpr u32_t rounds_k = 3;
     pid_t const child = ::fork();
-    if (child < 0) return suite.check(false, "fork failed");
+    if (!expect_true(child >= 0, "fork failed")) return;
     if (child == 0) {
         mesh_topology_t follower;
         ::_exit(two_host_topology(follower, directory, 1u) && wire_rounds(follower, rounds_k) ? 0 : 1);
@@ -186,35 +194,40 @@ static void rendezvous_generations(test_suite_t& suite, fs::path const& base) {
     bool const wired = two_host_topology(lead, directory, 0u) && wire_rounds(lead, rounds_k);
     int status = 0;
     ::waitpid(child, &status, 0);
-    suite.check(wired, "the lead should read every round's own payload");
-    suite.check(WIFEXITED(status) && WEXITSTATUS(status) == 0, "the follower should read every round's own payload");
-    suite.check(lead.next_collective_id() == rounds_k, "every round should claim one generation");
+    expect_true(wired, "the lead should read every round's own payload");
+    expect_true(WIFEXITED(status) && WEXITSTATUS(status) == 0, "the follower should read every round's own payload");
+    expect_true(lead.next_collective_id() == rounds_k, "every round should claim one generation");
 }
 
 /** The single-host_domain world: `bootstrap(0,1)` assembles the whole topology from the local probe
  *  and never opens the exchange directory — the common one-box case. */
-static void single_box_world(test_suite_t& suite, fs::path const& base, u32_t local_devices) {
-    if (local_devices == 0) return suite.skip(no_cuda_device_k);
+static case_result_t test_single_box_world(u32_t local_devices) {
+    if (local_devices == 0) return case_result_t::skipped(no_gpu_device_k);
+    scratch_directory_t const scratch;
+    fs::path const& base = scratch.path;
     auto result = mesh_topology_t::bootstrap(0, 1, &pause_between_polls, local_devices, base.c_str(), "single_box",
-                                             wait_limit_seconds_k);
-    if (!result) return suite.check(false, "single-box bootstrap should succeed: {}", result.description_);
+                                             wait_limit_k.count());
+    if (!expect_true(result, "single-box bootstrap should succeed: {}", result.description_)) return {};
     mesh_topology_t topology = std::move(*result);
-    suite.check(topology.host_domain_count() == 1, "world should hold one host_domain: got {}",
+    expect_true(topology.host_domain_count() == 1, "world should hold one host_domain: got {}",
                 topology.host_domain_count());
-    suite.check(topology.is_lead(), "the sole host_domain should lead");
-    suite.check(topology.self().device_count == local_devices, "self facts should carry the probed device count: {}",
+    expect_true(topology.is_lead(), "the sole host_domain should lead");
+    expect_true(topology.self().device_count == local_devices, "self facts should carry the probed device count: {}",
                 topology.self().device_count);
-    suite.check(topology.exchange_directory.empty(), "a single-box world should not touch the filesystem");
-    suite.check(!fs::exists(base / "single_box"), "a single-box world should create no exchange files");
+    expect_true(topology.exchange_directory.empty(), "a single-box world should not touch the filesystem");
+    expect_true(!fs::exists(base / "single_box"), "a single-box world should create no exchange files");
+    return {};
 }
 
 /** The substance: a lead reads a peer's published facts, validates agreement, and assembles the
  *  world; a follower adopts the lead's manifest. Both halves run against a matching simulated peer
  *  carrying this box's real GPU identity, and each must arrive at the correct world table. */
-static void world_reconciles(test_suite_t& suite, fs::path const& base, u32_t local_devices) {
-    if (local_devices == 0) return suite.skip(no_cuda_device_k);
+static case_result_t test_world_reconciles(u32_t local_devices) {
+    if (local_devices == 0) return case_result_t::skipped(no_gpu_device_k);
+    scratch_directory_t const scratch;
+    fs::path const& base = scratch.path;
     sz::string_t device_name;
-    if (!probe_local_device_name(device_name)) return suite.check(false, "probing the local GPU name");
+    if (!expect_true(probe_local_device_name(device_name), "probing the local GPU name")) return {};
     std::error_code error;
 
     // The lead assembles the world by reading a peer's facts, then publishing the merged manifest.
@@ -226,17 +239,17 @@ static void world_reconciles(test_suite_t& suite, fs::path const& base, u32_t lo
               facts_payload(job, 1, 2, local_devices, local_devices, "faux-peer", device_name, 0x3));
         plant(directory / "host_domain1.mesh.arrive", "1\n"); // the peer's arrival at the closing barrier
         auto result = mesh_topology_t::bootstrap(0, 2, &pause_between_polls, local_devices, base.c_str(), job,
-                                                 wait_limit_seconds_k, 0x3);
-        if (!result) suite.check(false, "lead should assemble the world: {}", result.description_);
+                                                 wait_limit_k.count(), 0x3);
+        if (!result) expect_true(false, "lead should assemble the world: {}", result.description_);
         else {
             mesh_topology_t lead = std::move(*result);
             mesh_host_domain_t const& peer = lead.host_domains[1];
             sz::string_view_t const peer_host {peer.hostname};
-            suite.check(lead.host_domain_count() == 2, "lead world size: got {} want 2", lead.host_domain_count());
-            suite.check(lead.host_domains[0].device_count == local_devices, "lead self row should reflect the probe");
-            suite.check(peer_host == sz::string_view_t {"faux-peer"}, "peer hostname: got {} want faux-peer",
+            expect_true(lead.host_domain_count() == 2, "lead world size: got {} want 2", lead.host_domain_count());
+            expect_true(lead.host_domains[0].device_count == local_devices, "lead self row should reflect the probe");
+            expect_true(peer_host == sz::string_view_t {"faux-peer"}, "peer hostname: got {} want faux-peer",
                         peer_host);
-            suite.check(sz::string_view_t {peer.device_name} == device_name.view(), "peer device_name: got {} want {}",
+            expect_true(sz::string_view_t {peer.device_name} == device_name.view(), "peer device_name: got {} want {}",
                         sz::string_view_t {peer.device_name}, device_name);
         }
     }
@@ -249,8 +262,8 @@ static void world_reconciles(test_suite_t& suite, fs::path const& base, u32_t lo
         plant(directory / "host_domain1.mesh",
               facts_payload(job, 1, 2, local_devices, local_devices, "faux-peer", device_name, 0x1));
         auto result = mesh_topology_t::bootstrap(0, 2, &pause_between_polls, local_devices, base.c_str(), job,
-                                                 wait_limit_seconds_k, 0x3);
-        suite.check(!result && result.status_ == status_t::unsupported_k,
+                                                 wait_limit_k.count(), 0x3);
+        expect_true(!result && result.status_ == status_t::unsupported_k,
                     "lead should refuse a peer of another GPU class: {}", result.description_);
     }
 
@@ -262,62 +275,68 @@ static void world_reconciles(test_suite_t& suite, fs::path const& base, u32_t lo
         plant(directory / "host_domain0.manifest", manifest_payload(job, local_devices, 2, local_devices, device_name));
         plant(directory / "host_domain0.mesh.release", "1\n"); // the lead's release at the closing barrier
         auto result = mesh_topology_t::bootstrap(1, 2, &pause_between_polls, local_devices, base.c_str(), job,
-                                                 wait_limit_seconds_k);
-        if (!result) suite.check(false, "follower should adopt the world: {}", result.description_);
+                                                 wait_limit_k.count());
+        if (!result) expect_true(false, "follower should adopt the world: {}", result.description_);
         else {
             mesh_topology_t follower = std::move(*result);
             mesh_host_domain_t const& self = follower.self();
-            suite.check(follower.host_domain_count() == 2, "follower world size: got {} want 2",
+            expect_true(follower.host_domain_count() == 2, "follower world size: got {} want 2",
                         follower.host_domain_count());
-            suite.check(
+            expect_true(
                 self.device_count == local_devices && sz::string_view_t {self.device_name} == device_name.view(),
                 "follower self row should agree with its probe: got {}", sz::string_view_t {self.device_name});
         }
     }
+    return {};
 }
 
 /** A barrier whose other arrivals never come traps once it outwaits the domain's timeout instead of
  *  hanging, and member 0's fault record names the barrier target it gave up on. Member 0's round
  *  scalar is set one round ahead, so even a one-GPU domain waits for an arrival no member will
  *  make. The trap poisons the context, so this case runs last. */
-static void barrier_traps_past_deadline(test_suite_t& suite, fs::path const& base, u32_t local_devices) {
-    if (local_devices == 0) return suite.skip(no_cuda_device_k);
+static case_result_t test_barrier_traps_past_deadline(u32_t local_devices) {
+    if (local_devices == 0) return case_result_t::skipped(no_gpu_device_k);
+    scratch_directory_t const scratch;
+    fs::path const& base = scratch.path;
     auto bootstrapped = mesh_topology_t::bootstrap(0, 1, &pause_between_polls, local_devices, base.c_str(),
-                                                   "barrier_deadline", wait_limit_seconds_k);
-    if (!bootstrapped) return suite.check(false, "single-box bootstrap: {}", bootstrapped.description_);
+                                                   "barrier_deadline", wait_limit_k.count());
+    if (!expect_true(bootstrapped, "single-box bootstrap: {}", bootstrapped.description_)) return {};
     mesh_topology_t topology = std::move(bootstrapped.value_);
     per_gpu_array<i32_t> devices;
     per_gpu_array<gpu_stream_t> streams;
     for (u32_t device = 0; device != local_devices; ++device) {
         expected<gpu_stream_t> stream = gpu_stream_t::make(static_cast<i32_t>(device));
-        if (!stream) return suite.check(false, "stream on GPU {}: {}", device, stream.description_);
-        if (devices.push_back(static_cast<i32_t>(device)) != status_t::success_k ||
-            streams.push_back(std::move(stream.value_)) != status_t::success_k)
-            return suite.check(false, "member tables full");
+        if (!expect_true(stream, "stream on GPU {}: {}", device, stream.description_)) return {};
+        if (!expect_true(devices.push_back(static_cast<i32_t>(device)) == status_t::success_k &&
+                             streams.push_back(std::move(stream.value_)) == status_t::success_k,
+                         "member tables full"))
+            return {};
     }
     f64_t const timeout_seconds = 1.0;
     auto made = multimem_domain_t::make(topology, devices.view(), 1u, streams.span(), timeout_seconds);
-    if (!made) return suite.check(false, "multimem domain make: {}", made.description_);
+    if (!expect_true(made, "multimem domain make: {}", made.description_)) return {};
     multimem_domain_t domain = std::move(made.value_);
 
     switch_to_gpu_t gpu_scope {streams[0]};
-    if (!gpu_scope.ok()) return suite.check(false, "context entry failed");
-    if (cuMemsetD32(device_address(domain.member(0).round), 1u, 1) != CUDA_SUCCESS)
-        return suite.check(false, "round scalar advance failed");
+    if (!expect_true(gpu_scope.ok(), "context entry failed")) return {};
+    if (!expect_true(cuMemsetD32(device_address(domain.member(0).round), 1u, 1) == CUDA_SUCCESS,
+                     "round scalar advance failed"))
+        return {};
     auto const started = std::chrono::steady_clock::now();
     expected_t const launched = domain.barrier(0, streams[0]);
     CUresult const drained = cuStreamSynchronize(streams[0]);
     std::chrono::duration<f64_t> const waited = std::chrono::steady_clock::now() - started;
-    suite.check(static_cast<bool>(launched), "barrier launch: {}", launched.description_);
-    suite.check(drained != CUDA_SUCCESS, "the starved barrier should trap, not pass");
-    suite.check(waited.count() < 10.0 * timeout_seconds, "the trap should land near the {}s timeout, took {}s",
+    expect_true(static_cast<bool>(launched), "barrier launch: {}", launched.description_);
+    expect_true(drained != CUDA_SUCCESS, "the starved barrier should trap, not pass");
+    expect_true(waited.count() < 10.0 * timeout_seconds, "the trap should land near the {}s timeout, took {}s",
                 timeout_seconds, waited.count());
 
     sz::string_t expected_sentence, sentence;
     (void)format_into(expected_sentence, "member 0 waited past its deadline at barrier target {}", local_devices + 1u);
     std::span<gpu_fault_t> const faults = topology.faults();
     (void)format_fault_into(sentence, faults[0]);
-    suite.check(sentence.view() == expected_sentence.view(), "the trap should record why: got \"{}\"", sentence);
+    expect_true(sentence.view() == expected_sentence.view(), "the trap should record why: got \"{}\"", sentence);
+    return {};
 }
 
 /** The cluster tier, activated by `$UFORM_HOST_DOMAIN_INDEX` and driven by `mesh-4-8-16.sbatch`:
@@ -325,8 +344,8 @@ static void barrier_traps_past_deadline(test_suite_t& suite, fs::path const& bas
  *  byte-identical across ranks (round-trip fidelity + phase ordering) and the closing barrier
  *  completes. The world size travels as `$UFORM_HOST_DOMAIN_COUNT` (Slurm's `$SLURM_NTASKS`
  *  as a fallback). */
-static void run_cluster_exchange(test_suite_t& suite, u32_t local_devices) {
-    if (local_devices == 0) return suite.skip(no_cuda_device_k);
+static case_result_t test_cluster_exchange(u32_t local_devices) {
+    if (local_devices == 0) return case_result_t::skipped(no_gpu_device_k);
     u32_t const index = host_domain_index_from_environment();
     u32_t count = 0;
     for (char const* variable : {"UFORM_HOST_DOMAIN_COUNT", "SLURM_NTASKS"})
@@ -334,12 +353,12 @@ static void run_cluster_exchange(test_suite_t& suite, u32_t local_devices) {
             count = static_cast<u32_t>(std::atoi(value));
             break;
         }
-    if (count == 0) return suite.check(false, "world size should be set ($UFORM_HOST_DOMAIN_COUNT / $SLURM_NTASKS)");
+    if (!expect_true(count != 0, "world size should be set ($UFORM_HOST_DOMAIN_COUNT / $SLURM_NTASKS)")) return {};
 
     auto result = mesh_topology_t::bootstrap(index, count, &pause_between_polls);
-    if (!result) return suite.check(false, "the cluster should bootstrap: {}", result.description_);
+    if (!expect_true(result, "the cluster should bootstrap: {}", result.description_)) return {};
     mesh_topology_t topology = std::move(*result);
-    suite.check(topology.host_domain_count() == count, "world size should match the launch: got {}",
+    expect_true(topology.host_domain_count() == count, "world size should match the launch: got {}",
                 topology.host_domain_count());
 
     sz::string_t table;
@@ -353,41 +372,33 @@ static void run_cluster_exchange(test_suite_t& suite, u32_t local_devices) {
     for (u32_t peer = 0; peer != count && identical; ++peer) {
         if (peer == index) continue;
         sz::string_t other;
-        if (expected_t awaited = topology.await_text(peer, "table", other, wait_limit_seconds_k); !awaited)
+        if (expected_t awaited = topology.await_text(peer, "table", other, wait_limit_k.count()); !awaited)
             identical = false;
         else identical = other.view() == table.view();
     }
-    suite.check(identical, "every rank should assemble a byte-identical world table");
-    suite.check(static_cast<bool>(topology.barrier("done", wait_limit_seconds_k)),
+    expect_true(identical, "every rank should assemble a byte-identical world table");
+    expect_true(static_cast<bool>(topology.barrier("done", wait_limit_k.count())),
                 "the closing barrier should complete");
+    return {};
 }
 
-int main(int, char** argv) {
-    test_suite_t suite = test_suite_t::make(argv[0]);
+int main(int argc, char** argv) {
+    start_test_run(argc, argv);
     bool const cluster = std::getenv("UFORM_HOST_DOMAIN_INDEX") != nullptr;
 
-    sz::string_t base_name;
-    (void)format_into(base_name, "uform_mesh_test_{}", ::getpid());
-    fs::path const base = fs::temp_directory_path() / base_name.c_str();
-    std::error_code error;
-    fs::remove_all(base, error);
-    fs::create_directories(base, error);
-
     // Host-only: the exchange primitive needs no driver.
-    suite.run("exchange_round_trips", exchange_round_trips, base);
-    suite.run("rendezvous_generations", rendezvous_generations, base);
+    run_test_case("test_exchange_round_trips", test_exchange_round_trips);
+    run_test_case("test_rendezvous_generations", test_rendezvous_generations);
 
     // Bootstrap front-loads `discover_mesh_shape`, so the assembly tiers need a visible GPU.
     u32_t local_devices = 0;
     if (cuInit(0) == CUDA_SUCCESS)
         if (auto discovered = discover_mesh_shape(); discovered) local_devices = discovered->gpus_per_host_domain;
-    if (cluster) suite.run("cluster_exchange", run_cluster_exchange, local_devices);
+    if (cluster) run_test_case("test_cluster_exchange", test_cluster_exchange, local_devices);
     else {
-        suite.run("single_box_world", single_box_world, base, local_devices);
-        suite.run("world_reconciles", world_reconciles, base, local_devices);
-        suite.run("barrier_traps_past_deadline", barrier_traps_past_deadline, base, local_devices);
+        run_test_case("test_single_box_world", test_single_box_world, local_devices);
+        run_test_case("test_world_reconciles", test_world_reconciles, local_devices);
+        run_test_case("test_barrier_traps_past_deadline", test_barrier_traps_past_deadline, local_devices);
     }
-
-    fs::remove_all(base, error);
-    return suite.finish();
+    return finish_test_run();
 }

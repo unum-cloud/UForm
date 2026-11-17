@@ -9,27 +9,36 @@
  *  measured rather than the host's enqueue rate, and the median of its windows beside the rate.
  *  @ref run prints one row per benchmark the filter selects.
  *
+ *  Every setting is a @c UFORM_ variable, and a flag of the same name overrides it:
+ *
  *  @verbatim
- *  Variable          Default  Meaning
- *  UFORM_FILTER      none     Benchmarks to run, by name, as an ECMAScript regex or a substring
- *  UFORM_SEED        42       Seed the synthetic inputs derive from, an unsigned integer or random
- *  UFORM_WARMUP      1s       Untimed run per benchmark, like 200ms or 1s
- *  UFORM_TIME_LIMIT  10s      Timed run per benchmark, like 200ms or 10s
+ *  Variable          Flag          Default  Meaning
+ *  UFORM_FILTER      --filter      none     Benchmarks to run, by label, as an ECMAScript regex or a substring
+ *  UFORM_SEED        --seed        42       Seed the synthetic inputs derive from, an unsigned integer or random
+ *  UFORM_WARMUP      --warmup      1s       Untimed run per benchmark, like 200ms or 1s
+ *  UFORM_TIME_LIMIT  --time-limit  10s      Timed run per benchmark, like 200ms or 10s
  *  @endverbatim
  */
 #pragma once
 
+#include <cctype>  // `std::tolower`
+#include <cmath>   // `std::isfinite`
 #include <cstdint> // `std::uint64_t`, `std::uint8_t`
-#include <cstdlib> // `std::getenv`, `std::exit`
+#include <cstdio>  // `std::fprintf`, `std::snprintf`
+#include <cstdlib> // `std::getenv`, `std::exit`, `std::strtod`
+#include <cstring> // `std::strcmp`, `std::strncmp`
 
-#include <algorithm>   // `std::nth_element` — the median window
-#include <array>       // `std::array` — the windows the median reads
-#include <charconv>    // `std::from_chars`
-#include <chrono>      // `std::chrono::steady_clock`, `std::chrono::milliseconds`
-#include <random>      // `std::random_device`
-#include <regex>       // `std::regex`, `std::regex_search`
-#include <string_view> // `std::string_view`
-#include <type_traits> // `std::type_identity_t`
+#include <algorithm>    // `std::nth_element` — the median window
+#include <array>        // `std::array` — the windows the median reads
+#include <charconv>     // `std::from_chars`
+#include <chrono>       // `std::chrono::steady_clock`, `std::chrono::milliseconds`
+#include <optional>     // `std::optional` — the filter's regex
+#include <random>       // `std::random_device`
+#include <regex>        // `std::regex`, `std::regex_search`
+#include <string>       // `std::string` — the filter's pattern
+#include <string_view>  // `std::string_view`
+#include <system_error> // `std::errc`
+#include <type_traits>  // `std::type_identity_t`
 
 #include <fmt/format.h> // `fmt::println`
 
@@ -37,101 +46,216 @@
 
 namespace unum::uform::bench {
 
-/** The text of the environment variable @p name , empty when it is unset. */
-[[nodiscard]] inline std::string_view environment_text(char const* name) noexcept {
-    char const* const text = std::getenv(name);
-    return text == nullptr ? std::string_view {} : std::string_view {text};
-}
+#pragma region Shared Settings
 
-/** Exits with status 1, naming the variable @p name whose @p text does not parse as @p wanted . */
-[[noreturn]] inline void refuse_setting(char const* name, std::string_view text, char const* wanted) noexcept {
-    fmt::println(stderr, "{}=\"{}\" does not parse, expected {}", name, text, wanted);
+/** Exits with one line naming a setting that does not parse, so a bad value never runs anything. */
+[[noreturn]] inline void exit_unparsed(char const* variable, char const* text, char const* expected) noexcept {
+    std::fprintf(stderr, "%s=\"%s\" does not parse, expected %s\n", variable, text, expected);
     std::exit(1);
 }
 
-/** The duration the variable @p name spells as an unsigned integer and @c ms or @c s , or
- *  @p fallback when it is unset; exits with status 1 when it does not parse. */
-[[nodiscard]] inline std::chrono::milliseconds environment_duration(char const* name,
-                                                                    std::chrono::milliseconds fallback) noexcept {
-    std::string_view const text = environment_text(name);
-    if (text.empty()) return fallback;
-    std::uint64_t count = 0;
-    auto const [unit_begin, parse_status] = std::from_chars(text.data(), text.data() + text.size(), count);
-    std::string_view const unit = text.substr(static_cast<std::size_t>(unit_begin - text.data()));
-    if (parse_status == std::errc {} && unit == "ms") return std::chrono::milliseconds(count);
-    if (parse_status == std::errc {} && unit == "s") return std::chrono::seconds(count);
-    refuse_setting(name, text, "a duration like 200ms or 10s");
+/** The text of a setting: its @p flag when given, else its environment @p variable , else null. */
+inline char const* setting_text(int argc, char** argv, char const* variable, std::string_view flag) noexcept {
+    for (int index = 1; index < argc; ++index) {
+        std::string_view const argument {argv[index]};
+        if (argument == flag)
+            return index + 1 < argc && std::strncmp(argv[index + 1], "--", 2) != 0 ? argv[index + 1] : "1";
+        if (argument.size() > flag.size() && argument.starts_with(flag) && argument[flag.size()] == '=')
+            return argv[index] + flag.size() + 1;
+    }
+    char const* text = std::getenv(variable);
+    return text && *text ? text : nullptr;
 }
 
-/** A regex over benchmark names, or a substring when it does not compile; empty selects all. */
-struct filter_t {
+/** A switch, @p fallback when unset: 0, false, off and no turn it off, anything else on. */
+inline bool read_flag_setting(int argc, char** argv, char const* variable, std::string_view flag,
+                              bool fallback = false) noexcept {
+    char const* text = setting_text(argc, argv, variable, flag);
+    if (!text) return fallback;
+    for (char const* off : {"0", "false", "off", "no"})
+        if (std::strcmp(text, off) == 0) return false;
+    return true;
+}
 
-    /** The filter as given. */
-    std::string_view text {};
+/** A whole number, @p fallback when unset. */
+inline std::size_t read_count_setting(int argc, char** argv, char const* variable, std::string_view flag,
+                                      std::size_t fallback) noexcept {
+    char const* text = setting_text(argc, argv, variable, flag);
+    if (!text) return fallback;
+    std::string_view const spelled {text};
+    std::size_t count = 0;
+    auto const [end, error] = std::from_chars(spelled.data(), spelled.data() + spelled.size(), count);
+    if (error != std::errc {} || end != spelled.data() + spelled.size())
+        exit_unparsed(variable, text, "a whole number");
+    return count;
+}
 
-    /** The filter compiled, matching nothing when @ref text is not a regex. */
-    std::regex pattern {};
+/** A positive real, @p fallback when unset. */
+inline double read_real_setting(int argc, char** argv, char const* variable, std::string_view flag,
+                                double fallback) noexcept {
+    char const* text = setting_text(argc, argv, variable, flag);
+    if (!text) return fallback;
+    char* end = nullptr;
+    double const value = std::strtod(text, &end);
+    if (*end != '\0' || !(value > 0) || !std::isfinite(value))
+        exit_unparsed(variable, text, "a positive number like 0.1 or 10");
+    return value;
+}
 
-    /** Compiles @p text , keeping the empty pattern when it is not a regex. */
-    [[nodiscard]] static filter_t make(std::string_view text) noexcept {
-        filter_t filter {text, {}};
-        if (text.empty()) return filter;
-        try {
-            filter.pattern.assign(text.begin(), text.end(),
-                                  std::regex_constants::ECMAScript | std::regex_constants::nosubs);
-        }
-        catch (std::regex_error const&) {
-        }
-        return filter;
+/** A positive duration such as 200ms, 10s or 2m, @p fallback when unset. */
+inline std::chrono::milliseconds read_duration_setting(int argc, char** argv, char const* variable,
+                                                       std::string_view flag,
+                                                       std::chrono::milliseconds fallback) noexcept {
+    char const* text = setting_text(argc, argv, variable, flag);
+    if (!text) return fallback;
+    std::string_view const spelled {text};
+    std::uint32_t count = 0;
+    auto const [end, error] = std::from_chars(spelled.data(), spelled.data() + spelled.size(), count);
+    std::string_view const unit = spelled.substr(static_cast<std::size_t>(end - spelled.data()));
+    if (error == std::errc {} && count != 0) {
+        if (unit == "ms") return std::chrono::milliseconds(count);
+        if (unit == "s") return std::chrono::seconds(count);
+        if (unit == "m") return std::chrono::minutes(count);
     }
+    exit_unparsed(variable, text, "a duration like 200ms, 10s or 2m");
+}
 
-    /** Whether the benchmark named @p name runs. */
-    [[nodiscard]] bool selects(std::string_view name) const noexcept {
-        return text.empty() || std::regex_search(name.begin(), name.end(), pattern) ||
-               name.find(text) != std::string_view::npos;
+/** The run's seed: 42 when unset, drawn afresh for @c random , else any unsigned 64-bit value. */
+inline std::uint64_t read_seed_setting(int argc, char** argv, char const* variable, std::string_view flag) noexcept {
+    char const* text = setting_text(argc, argv, variable, flag);
+    if (!text) return 42;
+    std::string_view const spelled {text};
+    if (spelled == "random") {
+        std::random_device device;
+        return (static_cast<std::uint64_t>(device()) << 32) ^ device();
+    }
+    std::uint64_t seed = 0;
+    auto const [end, error] = std::from_chars(spelled.data(), spelled.data() + spelled.size(), seed);
+    if (error != std::errc {} || end != spelled.data() + spelled.size())
+        exit_unparsed(variable, text, "an unsigned integer or random");
+    return seed;
+}
+
+/** Which labels a run selects: a regex search when the pattern compiles, else a substring. */
+struct filter_t {
+    std::string pattern;
+    std::optional<std::regex> regex;
+
+    bool selects(std::string_view label) const noexcept {
+        if (pattern.empty()) return true;
+        if (regex) return std::regex_search(label.begin(), label.end(), *regex);
+        return label.find(pattern) != std::string_view::npos;
     }
 };
 
-/** Every setting the benchmarks read, defaults as initializers, filled by @ref read_settings . */
-struct settings_t {
+/** The filter a setting spells, compiled once; empty, selecting everything, when unset. */
+inline filter_t read_filter_setting(int argc, char** argv, char const* variable, std::string_view flag) noexcept {
+    filter_t filter;
+    char const* text = setting_text(argc, argv, variable, flag);
+    if (!text) return filter;
+    filter.pattern = text;
+#if defined(__cpp_exceptions) && __cpp_exceptions
+    try {
+        filter.regex.emplace(filter.pattern);
+    }
+    catch (std::regex_error const&) {
+    }
+#else
+    filter.regex.emplace(filter.pattern);
+#endif
+    return filter;
+}
 
-    /** Benchmarks to run. */
-    filter_t filter {};
-
-    /** Seed the synthetic inputs derive from. */
+/** What every suite and bench reads before its own settings; @c program starts the rerun lines. */
+struct common_settings_t {
     std::uint64_t seed = 42;
+    filter_t filter;
+    char const* program = "";
+};
 
-    /** Untimed run per benchmark. */
+/** SplitMix64's finalizer, a bijection that spreads every input bit over all 64 output bits. */
+constexpr std::uint64_t split_mix_bits(std::uint64_t value) noexcept {
+    value = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9ull;
+    value = (value ^ (value >> 27)) * 0x94D049BB133111EBull;
+    return value ^ (value >> 31);
+}
+
+/** The @p index -th stream of the family @p name under @p seed , identical in every language. */
+constexpr std::uint64_t stream_key(std::uint64_t seed, std::string_view name, std::uint64_t index = 0) noexcept {
+    std::uint64_t hashed = 0xCBF29CE484222325ull;
+    for (char const character : name) hashed = (hashed ^ static_cast<std::uint8_t>(character)) * 0x100000001B3ull;
+    return split_mix_bits(split_mix_bits(seed ^ hashed) + index);
+}
+
+/**
+ *  @brief SplitMix64 over one 64-bit state, seeded by a @ref stream_key , bit-identical to the
+ *      JavaScript generator NumKong ships.
+ *
+ *  Distributions are not specified to draw the same sequence on every standard library, so a
+ *  failure would stop reproducing from its seed when the toolchain changed; @ref below is the
+ *  portable bounded draw.
+ */
+struct split_mix_generator_t {
+    using result_type = std::uint64_t;
+    std::uint64_t state = 0;
+
+    explicit split_mix_generator_t(std::uint64_t key) noexcept : state(key) {}
+    static constexpr result_type(min)() noexcept { return 0; }
+    static constexpr result_type(max)() noexcept { return ~result_type {0}; }
+    result_type operator()() noexcept { return split_mix_bits(state += 0x9E3779B97F4A7C15ull); }
+
+    /** A uniform draw below @p bound , zero for an empty bound, without the bias of a modulo. */
+    std::uint64_t below(std::uint64_t bound) noexcept {
+        if (bound == 0) return 0;
+        std::uint64_t const rejection_floor = (0u - bound) % bound;
+        std::uint64_t draw = (*this)();
+        while (draw < rejection_floor) draw = (*this)();
+        return draw % bound;
+    }
+};
+
+#pragma endregion Shared Settings
+
+/** What every benchmark reads: the common settings, then how long each one warms up and runs. */
+struct bench_settings_t : common_settings_t {
     std::chrono::milliseconds warmup {1000};
-
-    /** Timed run per benchmark. */
     std::chrono::milliseconds time_limit {10000};
 };
 
-/** Reads every @ref settings_t variable, exiting with status 1 on the first that does not parse. */
-[[nodiscard]] inline settings_t read_settings() noexcept {
-    settings_t settings;
-    settings.filter = filter_t::make(environment_text("UFORM_FILTER"));
-    std::string_view const seed_text = environment_text("UFORM_SEED");
-    if (seed_text == "random") settings.seed = std::random_device {}();
-    else if (!seed_text.empty()) {
-        char const* const seed_end = seed_text.data() + seed_text.size();
-        auto const [parsed_end, parse_status] = std::from_chars(seed_text.data(), seed_end, settings.seed);
-        if (parse_status != std::errc {} || parsed_end != seed_end)
-            refuse_setting("UFORM_SEED", seed_text, "an unsigned integer or random");
-    }
-    settings.warmup = environment_duration("UFORM_WARMUP", settings.warmup);
-    settings.time_limit = environment_duration("UFORM_TIME_LIMIT", settings.time_limit);
+/** Reads every @ref bench_settings_t field, exiting with status 1 on the first unparsable one. */
+[[nodiscard]] inline bench_settings_t read_bench_settings(int argc, char** argv) noexcept {
+    bench_settings_t settings;
+    settings.seed = read_seed_setting(argc, argv, "UFORM_SEED", "--seed");
+    settings.filter = read_filter_setting(argc, argv, "UFORM_FILTER", "--filter");
+    settings.warmup = read_duration_setting(argc, argv, "UFORM_WARMUP", "--warmup", settings.warmup);
+    settings.time_limit = read_duration_setting(argc, argv, "UFORM_TIME_LIMIT", "--time-limit", settings.time_limit);
+    settings.program = argc != 0 ? argv[0] : "";
     return settings;
 }
 
-/** Prints the version, the capabilities and the settings, one per line. */
-inline void print(settings_t const& settings) noexcept {
-    fmt::println("UForm {}", uform_version_name());
-    fmt::println("- Compiled for: {}", uform_capabilities_compiled());
-    fmt::println("- This machine: {}", uform_capabilities_available());
+/** The library's version and the capabilities it was compiled for and finds on this machine. */
+struct machine_t {
+    char const* version = "";
+    char const* compiled = "";
+    char const* available = "";
+};
+
+/** Reads @ref machine_t through the C interface. */
+[[nodiscard]] inline machine_t probe_machine() noexcept {
+    return {uform_version_name(), uform_capabilities_compiled(), uform_capabilities_available()};
+}
+
+/** Prints the version line, then the capabilities as "- Compiled for:" and "- This machine:". */
+inline void print(machine_t const& machine) noexcept {
+    fmt::println("UForm {}", machine.version);
+    fmt::println("- Compiled for: {}", machine.compiled);
+    fmt::println("- This machine: {}", machine.available);
+}
+
+/** Prints the settings, one <tt>- Name: value</tt> line each. */
+inline void print(bench_settings_t const& settings) noexcept {
     fmt::println("- Seed: {}", settings.seed);
-    std::string_view const filter = settings.filter.text;
+    std::string_view const filter = settings.filter.pattern;
     fmt::println("- Filter: {}", filter.empty() ? std::string_view {"none"} : filter);
     fmt::println("- Warmup: {}ms, time limit: {}ms", settings.warmup.count(), settings.time_limit.count());
 }
@@ -260,7 +384,7 @@ class loop_t {
  *  to compile here.
  */
 template <typename... parameters_types_>
-[[nodiscard]] bool run(settings_t const& settings, std::string_view name,
+[[nodiscard]] bool run(bench_settings_t const& settings, std::string_view name,
                        void (*bench_function)(loop_t&, parameters_types_...),
                        std::type_identity_t<parameters_types_>... arguments) noexcept {
     if (!settings.filter.selects(name)) return false;

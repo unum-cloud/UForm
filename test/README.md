@@ -1,8 +1,8 @@
 # `test/` — conformance suite
 
 Plain `int main` binaries that check the primitives cell against Float64 oracles, byte-for-byte determinism, and — for the distributed cells — a real multi-node rendezvous.
-Each file builds one `uform_test_<name>` binary, targets one library cell, and shares one primitive: `harness.hpp`'s `test_suite_t`, threaded by reference into every case.
-A green run prints one summary line; the only per-check output is a failure, which names its `file:line` and the actual-versus-expected operands (it reuses `expected::fail`'s `format_at_t` + `format_into` machinery).
+Each file builds one `uform_test_<name>` binary and targets one library cell, sharing `harness.hpp`, whose one mutable global, `test_run`, is the run in progress.
+How to run, filter and write them, and the variables they read, are in [CONTRIBUTING.md](../CONTRIBUTING.md#test-suites).
 
 ## Tiers
 

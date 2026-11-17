@@ -5,7 +5,10 @@ Each test takes a fenced block from a README and executes it in a directory hold
 unchanged; a showcase snippet is a fragment, so its test supplies the `import uform` the page made above. On the
 stub library every caption ties, so the tests check that the block runs and prints, not which caption wins.
 
-File: test/python/quickstart.py
+Run:
+    uv run pytest test/python/readme.py
+
+File: test/python/readme.py
 Author: Ash Vardanian
 Date: November 16, 2026
 """
@@ -13,7 +16,7 @@ Date: November 16, 2026
 from pathlib import Path
 
 import pytest
-from encode import png
+from base import numpy_available, png
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -34,8 +37,9 @@ def workspace(tmp_path: Path, checkpoint: Path, monkeypatch: pytest.MonkeyPatch)
     return tmp_path
 
 
+@pytest.mark.skipif(not numpy_available, reason="NumPy is not installed")
 @pytest.mark.parametrize("readme", ["README.md", "python/README.md"])
-def test_quickstart(readme: str, workspace: Path, capsys: pytest.CaptureFixture[str]):
+def test_readme_quickstart(readme: str, workspace: Path, capsys: pytest.CaptureFixture[str]):
     """The Quickstart encodes two captions and a photo and names the caption closest to the photo."""
     exec(compile(block(readme, "Quickstart"), readme, "exec"), {})
     printed = capsys.readouterr().out
@@ -43,7 +47,7 @@ def test_quickstart(readme: str, workspace: Path, capsys: pytest.CaptureFixture[
     assert printed.startswith(("'a cat on a mat'", "'a sunrise over the bay'"))
 
 
-def test_models(workspace: Path, capsys: pytest.CaptureFixture[str]):
+def test_readme_models(workspace: Path, capsys: pytest.CaptureFixture[str]):
     """The Models snippet loads a Float8 model and prints its description."""
     exec(compile("import uform\n" + block("python/README.md", "Models"), "python/README.md", "exec"), {})
     assert len(capsys.readouterr().out.split()) == 4

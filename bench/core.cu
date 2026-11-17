@@ -6,9 +6,10 @@
  *
  *  Each row times device windows of back-to-back calls over keyed synthetic inputs:
  *
- *  - "tower/forward_backward": a text-only tower forward to the pooled vertices and its backward.
- *  - "contrastive/loss": the rank-local contrastive loss and its forces over self-edges.
- *  - "contrastive/tokens": the late-interaction loss and its forces, 256 queries of 64 tokens
+ *  - "core.tower.forward_backward": a text-only tower forward to the pooled vertices, and its
+ *    backward.
+ *  - "core.contrastive.loss": the rank-local contrastive loss and its forces over self-edges.
+ *  - "core.contrastive.tokens": the late-interaction loss and its forces, 256 queries of 64 tokens
  *    against 256 documents of 1024 tokens at width 128, each query attracting one document
  *    under ranked BCE.
  */
@@ -289,14 +290,15 @@ static void contrastive_tokens(loop_t& loop, u64_t seed) {
     });
 }
 
-int main() {
-    settings_t const settings = read_settings();
+int main(int argc, char** argv) {
+    bench_settings_t const settings = read_bench_settings(argc, argv);
+    print(probe_machine());
     print(settings);
     int device_count = 0;
     if (cuInit(0) != CUDA_SUCCESS || cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count == 0)
-        return fmt::println(stderr, "no CUDA device detected"), 1;
-    bool const tower_failed = run(settings, "tower/forward_backward", tower_forward_backward, settings.seed);
-    bool const loss_failed = run(settings, "contrastive/loss", contrastive_loss, settings.seed);
-    bool const tokens_failed = run(settings, "contrastive/tokens", contrastive_tokens, settings.seed);
+        return fmt::println(stderr, "no GPU device"), 1;
+    bool const tower_failed = run(settings, "core.tower.forward_backward", tower_forward_backward, settings.seed);
+    bool const loss_failed = run(settings, "core.contrastive.loss", contrastive_loss, settings.seed);
+    bool const tokens_failed = run(settings, "core.contrastive.tokens", contrastive_tokens, settings.seed);
     return tower_failed || loss_failed || tokens_failed ? 1 : 0;
 }

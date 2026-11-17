@@ -13,6 +13,8 @@
  *     arena is grown first, so the range sits past a used tail.
  *  3. Rendezvous filesystem: the exchange directory the mesh names must be writable from the node.
  */
+#undef NDEBUG // ! A test's oracle must stay live in every build
+
 #include <cstdlib> // `std::getenv`
 #include <cstdio>  // `std::fopen`, `std::remove`
 
@@ -22,7 +24,7 @@
 #include "uform/utilities/infiniband_collectives.cuh" // `infiniband_nic_t`, `infiniband_endpoint_t` — the probed transport
 #include "uform/utilities/mesh.hpp"                   // `host_domain_count_from_environment`
 
-#include "harness.hpp" // `test_suite_t`
+#include "harness.hpp" // `run_test_case`, `expect_true`
 
 using namespace unum::uform::utilities;
 using namespace unum::uform::test;
@@ -43,74 +45,71 @@ inline constexpr std::size_t probe_tail_bytes_k = 3ull * 1024 * 1024;
 /**
  *  @brief Register one GPU's registrable arena range through the endpoint the collectives build,
  *      on the NIC the transport picks for that GPU, and report the outcome.
- *  @param[in,out] suite The probe suite the checks report into.
  *  @param[in] device The GPU ordinal.
  */
-static void probe_gpu_registration_(test_suite_t& suite, int device) noexcept {
+static void probe_gpu_registration_(int device) noexcept {
     CUcontext context = nullptr;
     CUdevice handle = 0;
-    if (cuDeviceGet(&handle, device) != CUDA_SUCCESS || cuDevicePrimaryCtxRetain(&context, handle) != CUDA_SUCCESS ||
-        cuCtxSetCurrent(context) != CUDA_SUCCESS) {
-        suite.check(false, "context entry failed (device={})", device);
-        return;
-    }
+    bool const entered = cuDeviceGet(&handle, device) == CUDA_SUCCESS &&
+                         cuDevicePrimaryCtxRetain(&context, handle) == CUDA_SUCCESS &&
+                         cuCtxSetCurrent(context) == CUDA_SUCCESS;
+    if (!expect_true(entered, "context entry failed (device={})", device)) return;
 
     expected<gpu_arena_t> arena = gpu_arena_t::make(device, probe_reserve_bytes_k);
-    suite.check(bool(arena), "probe arena reservation failed (device={})", device);
-    if (!arena) return;
+    if (!expect_true(arena, "probe arena reservation failed (device={})", device)) return;
     std::byte* const tail = arena.value_.allocate_bytes(probe_tail_bytes_k);
     std::byte* const heap = arena.value_.allocate_registrable_bytes(probe_heap_bytes_k);
-    suite.check(tail != nullptr && heap != nullptr, "probe arena allocation failed (device={})", device);
+    expect_true(tail != nullptr && heap != nullptr, "probe arena allocation failed (device={})", device);
     if (heap == nullptr) return;
 
     expected<infiniband_nic_t> nic = infiniband_nic_t::make(static_cast<u32_t>(device));
-    suite.check(bool(nic), "no NIC serves GPU {}: {}", device, nic.description_);
-    if (!nic) return;
+    if (!expect_true(nic, "no NIC serves GPU {}: {}", device, nic.description_)) return;
     expected<infiniband_endpoint_t> endpoint = infiniband_endpoint_t::make(nic.value_,
                                                                            b8r1_span_t {heap, probe_heap_bytes_k});
-    suite.check(bool(endpoint), "GPUDirect registration failed on GPU {}: {}", device, endpoint.description_);
+    expect_true(endpoint, "GPUDirect registration failed on GPU {}: {}", device, endpoint.description_);
 }
 
 /** Registers every one of the @p device_count local GPUs with its same-index NIC. */
-static void probe_gpudirect_(test_suite_t& suite, int device_count) noexcept {
-    if (device_count == 0) return suite.skip(no_cuda_device_k);
-    for (int device = 0; device < device_count; ++device) probe_gpu_registration_(suite, device);
+static case_result_t test_gpudirect_registration(int device_count) noexcept {
+    if (device_count == 0) return case_result_t::skipped(no_gpu_device_k);
+    for (int device = 0; device < device_count; ++device) probe_gpu_registration_(device);
+    return {};
 }
 #else
 
 /** Skips the GPUDirect check, which a build without InfiniBand cannot make. */
-static void probe_gpudirect_(test_suite_t& suite, int) noexcept { suite.skip("built without UFORM_WITH_INFINIBAND"); }
+static case_result_t test_gpudirect_registration(int) noexcept {
+    return case_result_t::skipped("built without UFORM_WITH_INFINIBAND");
+}
 #endif
 
 /**
  *  @brief When the mesh contract names an exchange directory, prove it is writable from this node
  *      by creating and removing a probe file.
- *  @param[in,out] suite The probe suite the check reports into.
  */
-static void probe_exchange_directory_(test_suite_t& suite) noexcept {
+static case_result_t test_exchange_directory() noexcept {
     char const* const exchange_directory = std::getenv("UFORM_EXCHANGE_DIR");
-    if (host_domain_count_from_environment() == 1u) return suite.skip("a single-node run needs no rendezvous");
-    suite.check(exchange_directory != nullptr, "UFORM_EXCHANGE_DIR unset in a multi-node world");
-    if (exchange_directory == nullptr) return;
+    if (host_domain_count_from_environment() == 1u)
+        return case_result_t::skipped("needs UFORM_HOST_DOMAIN_COUNT above 1");
+    if (!expect_true(exchange_directory != nullptr, "UFORM_EXCHANGE_DIR unset in a multi-node world")) return {};
     sz::string_t probe_path;
-    if (!format_into(probe_path, "{}/env-probe", exchange_directory)) {
-        suite.check(false, "probe path formatting failed");
-        return;
-    }
+    if (!expect_true(format_into(probe_path, "{}/env-probe", exchange_directory), "probe path formatting failed"))
+        return {};
     std::FILE* const probe_file = std::fopen(probe_path.c_str(), "w");
-    suite.check(probe_file != nullptr, "exchange directory not writable: {}", exchange_directory);
+    expect_true(probe_file != nullptr, "exchange directory not writable: {}", exchange_directory);
     if (probe_file != nullptr) {
         std::fclose(probe_file);
         std::remove(probe_path.c_str());
     }
+    return {};
 }
 
-int main(int, char** argv) {
-    test_suite_t suite = test_suite_t::make(argv[0]);
-    suite.run("exchange_directory", probe_exchange_directory_);
+int main(int argc, char** argv) {
+    start_test_run(argc, argv);
+    run_test_case("test_exchange_directory", test_exchange_directory);
 
     int device_count = 0;
     if (cuInit(0) != CUDA_SUCCESS || cuDeviceGetCount(&device_count) != CUDA_SUCCESS) device_count = 0;
-    suite.run("gpudirect_registration", probe_gpudirect_, device_count);
-    return suite.finish();
+    run_test_case("test_gpudirect_registration", test_gpudirect_registration, device_count);
+    return finish_test_run();
 }

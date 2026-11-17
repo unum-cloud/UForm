@@ -136,7 +136,8 @@ def test_mixture_files_load() -> None:
         assert isinstance(spec, dict), f"{name}: top-level JSON is not an object"
         assert spec.get("mixture") == name, f"{name}: 'mixture' key is {spec.get('mixture')!r}, expected {name!r}"
         datasets = spec.get("datasets")
-        assert isinstance(datasets, list) and datasets, f"{name}: 'datasets' must be a non-empty list"
+        assert isinstance(datasets, list), f"{name}: 'datasets' is not a list"
+        assert datasets, f"{name}: 'datasets' is empty"
 
 
 def test_dataset_entry_fields() -> None:
@@ -144,17 +145,20 @@ def test_dataset_entry_fields() -> None:
     for name in expected_mixtures:
         for entry in _load_mixture(name)["datasets"]:
             label = f"{name}:{entry.get('name')!r}"
-            assert isinstance(entry.get("name"), str) and entry["name"], f"{label}: missing 'name'"
+            assert isinstance(entry.get("name"), str), f"{label}: missing 'name'"
+            assert entry["name"], f"{label}: empty 'name'"
             weight = entry.get("weight")
-            assert isinstance(weight, (int, float)) and not isinstance(weight, bool), f"{label}: 'weight' not a number"
+            assert isinstance(weight, (int, float)), f"{label}: 'weight' not a number"
+            assert not isinstance(weight, bool), f"{label}: 'weight' is a bool"
             assert 0.0 < float(weight) <= 1.0, f"{label}: 'weight' {weight} not in (0, 1]"
-            assert isinstance(entry.get("glob"), str) and entry["glob"], f"{label}: missing non-empty 'glob'"
+            assert isinstance(entry.get("glob"), str), f"{label}: missing 'glob'"
+            assert entry["glob"], f"{label}: empty 'glob'"
             has_column = "text" in entry or "anchor" in entry or "positive" in entry
             assert has_column, f"{label}: no column field (need 'text' or 'anchor'/'positive')"
             epochs = entry.get("epochs", 1)
-            assert isinstance(epochs, int) and not isinstance(epochs, bool) and epochs > 0, (
-                f"{label}: 'epochs' {epochs!r} not a positive integer"
-            )
+            assert isinstance(epochs, int), f"{label}: 'epochs' {epochs!r} not an integer"
+            assert not isinstance(epochs, bool), f"{label}: 'epochs' is a bool"
+            assert epochs > 0, f"{label}: 'epochs' {epochs} not positive"
 
 
 def test_column_consistency() -> None:
@@ -172,8 +176,10 @@ def test_resolve_mixture_triples() -> None:
         resolved = mixtures.resolve_mixture(name)
         assert len(resolved) == len(entries), f"{name}: resolve_mixture dropped/added rows"
         for resolved_glob, weight, text_field in resolved:
-            assert isinstance(resolved_glob, str) and resolved_glob, f"{name}: empty resolved glob"
-            assert isinstance(weight, float) and weight > 0.0, f"{name}: non-positive weight {weight}"
+            assert isinstance(resolved_glob, str), f"{name}: resolved glob {resolved_glob!r} is not a string"
+            assert resolved_glob, f"{name}: empty resolved glob"
+            assert isinstance(weight, float), f"{name}: weight {weight!r} is not a float"
+            assert weight > 0.0, f"{name}: non-positive weight {weight}"
             assert text_field is None or isinstance(text_field, str), f"{name}: bad text_field {text_field!r}"
 
 

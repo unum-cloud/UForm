@@ -148,8 +148,8 @@ before-build = ["rd /s /q {project}\\build_python {project}\\.pytest_cache || ec
 [dependency-groups]
 lint = ["clang-format==22.*", "cmakelang", "ruff>=0.15.8"]
 # The `scripts/data/test_*.py` suites import only the standard library and their sibling modules, and the
-# `test/python` suites only the extension.
-test = ["pytest>=8"]
+# `test/python` suites the extension, plus NumPy for the README quickstart.
+test = ["numpy>=1.21", "pytest>=8"]
 
 [tool.pytest.ini_options]
 # `-p no:randomly` keeps `<PROJECT>_SEED` in charge wherever pytest-randomly happens to be installed.
@@ -157,7 +157,9 @@ addopts = ["-ra", "--showlocals", "--strict-markers", "--strict-config", "-p", "
 filterwarnings = ["error"]
 minversion = "8.0"
 python_files = ["test_*.py", "*/test/python/*.py"]
-testpaths = ["scripts/data", "test/python"]
+# `scripts/data` brings its own `base` and `conftest`, which cannot share a session with these, so it
+# runs on its own as `pytest scripts/data`.
+testpaths = ["test/python"]
 xfail_strict = true
 
 # RAPIDS cuDF / RMM and the versioned NVIDIA CUDA wheels live on NVIDIA's index alongside PyPI.
@@ -171,7 +173,7 @@ target-version = "py312"
 
 [tool.ruff.lint]
 ignore = ["C408", "C901", "E501", "E741"]
-select = ["C", "D", "E", "F", "I", "PLC0415", "TID", "UP", "W"]
+select = ["C", "D", "E", "F", "I", "PLC0415", "PT", "TID", "UP", "W"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"

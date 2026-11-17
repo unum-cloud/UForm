@@ -1351,6 +1351,7 @@ impl<Location: AsRef<Path>, Progress: FnMut(usize, usize) -> ControlFlow<()> + S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing;
 
     /// A trainer whose handle is null, which every verb refuses past the binding's own checks.
     fn null_trainer() -> Trainer<'static> {
@@ -1402,8 +1403,8 @@ mod tests {
     /// Training is GPU-only, so a build without GPUs refuses both constructors as
     /// the device's fault.
     #[test]
-    fn a_build_without_gpus_refuses_to_train() -> Result<()> {
-        let executor = Executor::for_ram(&[], None, 1)?;
+    fn a_build_without_gpus_refuses_to_train() {
+        let executor = testing::executor();
         let options = MeshOptions { directory: Path::new("/tmp"), job: "uform-rust", ..MeshOptions::default() };
         assert_eq!(status_of(Mesh::bootstrap(&executor, &options)), Some(Status::Device));
         #[cfg(unix)]
@@ -1422,15 +1423,14 @@ mod tests {
             ..TrainerInitVramConfig::default()
         };
         assert_eq!(status_of(Trainer::init_vram(&executor, config)), Some(Status::Device));
-        Ok(())
     }
 
     /// The library reads every list a step names for its count of items, so a list of another
     /// length, or an edge naming an item outside the step, is refused before the call.
     #[test]
-    fn steps_check_their_lists_before_the_call() -> Result<()> {
+    fn steps_check_their_lists_before_the_call() {
         let trainer = null_trainer();
-        let executor = Executor::for_ram(&[], None, 1)?;
+        let executor = testing::executor();
         let receiver = trainer.on(&executor);
         let modalities = [Modality::Text, Modality::Image];
         let contents = ["a caption".as_bytes(), b"\xff\xd8\xff".as_slice()];
@@ -1466,7 +1466,7 @@ mod tests {
         // A well-formed step reaches the library, which refuses the null trainer before the RAM
         // executor.
         let refused = Some(Status::Uninitialized);
-        let mut arena = Arena::new_in(&executor)?;
+        let mut arena = Arena::new_in(&executor).unwrap();
         let config = TrainerStepConfig {
             relations: edges(&[0, 1, 2], &[1, 0]),
             arena: Some(&mut arena),
@@ -1474,10 +1474,9 @@ mod tests {
         };
         assert_eq!(status_of(receiver.step(modalities, contents, config)), refused);
         let deferred =
-            trainer.deferred(&executor).step(vec![Modality::Text], vec!["a"], TrainerStepConfig::default())?;
+            trainer.deferred(&executor).step(vec![Modality::Text], vec!["a"], TrainerStepConfig::default()).unwrap();
         assert_eq!(status_of(deferred.wait()), refused);
         assert_eq!(status_of(receiver.save("/tmp/uform-rust.safetensors")), refused);
-        Ok(())
     }
 }
 

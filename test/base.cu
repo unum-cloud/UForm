@@ -6,35 +6,42 @@
  *      verbs drive and asserts the invariants the loop never checks — deep replay conformance for
  *      tokens and omni mixtures, and a sweep over media subsets, row budgets, model-region modes.
  *
- *  This is a test: a plain @c int @c main builds one @ref test_suite_t and threads it by reference
- *  into every case, consuming @c uform/train/trainer.hpp 's typed surface instead of copying the
- *  driver. Two meshes are made once in @c main — the bootstrapped world and a one-GPU narrowing of
- *  it — and every case builds its own trainer over one of them, exactly as the C verbs compose
- *  production. Launched under Slurm via @c scripts/slurm/test_base-4-8-16.sbatch , the same binary
- *  runs the distributed tiers: @c main honors @c UFORM_HOST_DOMAIN_COUNT , so a two-node world
- *  exercises the InfiniBand reduce under every case below.
+ *  This is a test: a plain @c int @c main runs every case through @ref run_test_case , consuming
+ *  @c uform/train/trainer.hpp 's typed surface instead of copying the driver. Two meshes are made
+ *  once in @c main — the bootstrapped world and a one-GPU narrowing of it — and every case builds
+ *  its own trainer over one of them, exactly as the C verbs compose production. Launched under
+ *  Slurm via @c scripts/slurm/test_base-4-8-16.sbatch , the same binary runs the distributed
+ *  tiers: @c main honors @c UFORM_HOST_DOMAIN_COUNT , so a two-node world exercises the InfiniBand
+ *  reduce under every case below.
  *
  *  The case matrix:
  *
- *      - @ref learning_rate_schedule — the warmup / cosine policy's properties, pure host
+ *      - @ref test_learning_rate_schedule — the warmup / cosine policy's properties, pure host
  *        math, no GPU.
- *      - @ref run_base_conformance for the tokens and omni mixtures at full width — @b A every
- *        replica bitwise-matches the lead, @b B every member's barrier round advanced and they all
- *        agree, @b C an eager trainer of the same seed lands on the captured run, @b D each head's
- *        loss fell between its first and last scored steps, @b E every live head's loss read
- *        nonzero at least once, @b F the captured window moved the weights off their seed.
- *      - @ref mixture_sweep — two width tiers: every media subset (2³) crossed with one-row and
- *        two-row budgets on the one-GPU mesh (plus the uneven five-row and 96-column omni
- *        corners), then every subset again at the bootstrapped world's full width. Each cell steps
- *        eagerly, then captures and replays over the same trainer, so both model-region modes run
- *        under every mixture.
- *      - @ref graph_capture — the capture contract holds and two replays agree, on the one-GPU mesh.
- *      - @ref choices_replay — choices alone replay through the items source: their term falls.
- *      - @ref spectrum_spike : the pooled-code regularizers ride a contrastive step, and a forced
- *        gradient spike refuses the next step with the weights untouched.
- *      - @ref spectrum_world : on two or more GPUs every rank reaches the same coding rate bitwise,
- *        matching one GPU holding every row; a one-GPU world skips it.
+ *      - @ref test_base_conformance covers the tokens and omni mixtures at full width.
+ *      - @ref mixture_sweep covers every media subset on the one-GPU mesh, then at full width.
+ *      - @ref test_graph_capture — the capture contract holds and two replays agree, on the
+ *        one-GPU mesh.
+ *      - @ref test_choices_replay — choices alone replay through the items source: their term
+ *        falls.
+ *      - @ref test_spectrum_spike : the pooled-code regularizers ride a contrastive step, and a
+ *        forced gradient spike refuses the next step with the weights untouched.
+ *      - @ref test_spectrum_world : on two or more GPUs every rank reaches the same coding rate
+ *        bitwise, matching one GPU holding every row; a one-GPU world skips it.
+ *
+ *  @ref test_base_conformance checks six things at full width: @b A every replica bitwise-matches
+ *  the lead, @b B every member's barrier round advanced and they all agree, @b C an eager trainer
+ *  of the same seed lands on the captured run, @b D each head's loss fell between its first and
+ *  last scored steps, @b E every live head's loss read nonzero at least once, @b F the captured
+ *  window moved the weights off their seed.
+ *
+ *  @ref mixture_sweep runs two width tiers: every media subset (2³) crossed with one-row and
+ *  two-row budgets on the one-GPU mesh (plus the uneven five-row and 96-column omni corners), then
+ *  every subset again at the bootstrapped world's full width. Each cell steps eagerly, then
+ *  captures and replays over the same trainer, so both model-region modes run under every mixture.
  */
+#undef NDEBUG // ! A test's oracle must stay live in every build
+
 #include <cmath>   // `std::isfinite`
 #include <cstdlib> // `std::getenv`, `std::strtod`
 #include <cstring> // `std::memcmp`, `std::memcpy`, `std::strlen`
@@ -48,7 +55,7 @@
 
 #include "train/numerics.hpp" // `gpu_numerics_of`
 
-#include "harness.hpp" // `test_suite_t` — the cumulative pass/fail tally
+#include "harness.hpp" // `run_test_case`, `expect_true`
 
 namespace ue = unum::uform::encoder;
 using ue::audio_batch_shape_t;
@@ -124,7 +131,7 @@ struct tier_t {
     return {};
 }
 
-/** The world's health, owned by @c main beside the suite and threaded by reference into every case:
+/** The world's health, owned by @c main and threaded by reference into every case:
  *  a device-side fault poisons the local context (every later case fails with the same unrelated
  *  "unspecified launch failure"), and a dead peer domain makes every later rendezvous wait its full
  *  deadline — either way the first detection reports once and the remaining cases return
@@ -140,25 +147,24 @@ struct world_health_t {
 };
 
 /** The reason every case after the first unhealthy detection skips with. */
-inline constexpr char const* world_unhealthy_k = "an earlier case found the world unhealthy";
+inline constexpr char const* world_unhealthy_k = "needs a healthy world";
 
 /**
  *  @brief Probe @p health before a case: report the first poisoned-context or unresponsive-peer
  *      detection once, and tell every later case to return immediately.
- *  @param[in,out] suite The suite the one abort line reports into.
  *  @param[in,out] health The world's health record, cleared at the first detection.
  */
-[[nodiscard]] static bool world_still_healthy_(test_suite_t& suite, world_health_t& health) noexcept {
+[[nodiscard]] static bool world_still_healthy_(world_health_t& health) noexcept {
     if (!health.alive) return false;
     if (health.consecutive_setup_failures >= 2u) {
         health.alive = false;
-        suite.check(false, "peer domain unresponsive — aborting the remaining cases");
+        expect_true(false, "peer domain unresponsive — aborting the remaining cases");
         return false;
     }
     expected<gpu_stream_t> probe = gpu_stream_t::make(0);
     if (probe) return true;
     health.alive = false;
-    suite.check(false, "device context poisoned — aborting the remaining cases: {}", probe.description_);
+    expect_true(false, "device context poisoned — aborting the remaining cases: {}", probe.description_);
     return false;
 }
 
@@ -260,9 +266,9 @@ inline constexpr char const* world_unhealthy_k = "an earlier case found the worl
 /** The warmup / cosine policy's own properties, pure host math: a strictly monotone ramp topping
  *  out exactly at the peak, a never-rising decay bounded by @b [floor, peak] , and a tail settling
  *  onto the floor. */
-static void learning_rate_schedule(test_suite_t& suite) {
+static void test_learning_rate_schedule() {
     trainer_config_t config;
-    config.seed = suite.settings.seed;
+    config.seed = test_run.settings.seed;
     config.learning_rate = 1.0e-3f;
     config.min_learning_rate = 1.0e-5f;
     config.warmup_steps = 10;
@@ -272,9 +278,9 @@ static void learning_rate_schedule(test_suite_t& suite) {
     for (u32_t ordinal = 1; ordinal < config.warmup_steps; ++ordinal)
         ramp_monotone = ramp_monotone && config.learning_rate_for(optimizer_step_t {ordinal}) >
                                              config.learning_rate_for(optimizer_step_t {ordinal - 1u});
-    suite.check(ramp_monotone, "the warmup ramp is strictly monotone");
+    expect_true(ramp_monotone, "the warmup ramp is strictly monotone");
     f32_t const peak = config.learning_rate_for(optimizer_step_t {config.warmup_steps - 1u});
-    suite.check(peak == config.learning_rate, "the ramp tops out exactly at the peak: got {} want {}", peak,
+    expect_true(peak == config.learning_rate, "the ramp tops out exactly at the peak: got {} want {}", peak,
                 config.learning_rate);
 
     bool decay_monotone = true, bounded = true;
@@ -285,10 +291,10 @@ static void learning_rate_schedule(test_suite_t& suite) {
         bounded = bounded && rate >= config.min_learning_rate && rate <= config.learning_rate;
         previous = rate;
     }
-    suite.check(decay_monotone, "the cosine decay never rises");
-    suite.check(bounded, "every decay rate stays within the floor-to-peak band");
+    expect_true(decay_monotone, "the cosine decay never rises");
+    expect_true(bounded, "every decay rate stays within the floor-to-peak band");
     f32_t const tail = config.learning_rate_for(optimizer_step_t {config.steps - 1u});
-    suite.check(tail <= config.min_learning_rate * 1.1f, "the tail settles onto the floor: got {} want <= {}", tail,
+    expect_true(tail <= config.min_learning_rate * 1.1f, "the tail settles onto the floor: got {} want <= {}", tail,
                 config.min_learning_rate * 1.1f);
 }
 
@@ -297,15 +303,15 @@ static void learning_rate_schedule(test_suite_t& suite) {
  *  prefix), derived from @p config and asserted in full order — a @c fill reorder or rename fails
  *  loudly here before it silently re-keys a checkpoint. Piggybacks on an already-built trainer, so
  *  it costs no bring-up of its own. */
-static void check_weight_naming_(test_suite_t& suite, char const* label, trainer_config_t const& config,
+static void check_weight_naming_(char const* label, trainer_config_t const& config,
                                  std::span<differentiable_weights_t const> weights) {
     std::size_t index = 0;
     auto expect = [&](sz::string_view_t want) {
         if (index >= weights.size()) {
-            suite.check(false, "[{}] weight {} missing: want {}", label, index, want);
+            expect_true(false, "[{}] weight {} missing: want {}", label, index, want);
             return;
         }
-        suite.check(weights[index].name.view() == want, "[{}] weight {}: got {} want {}", label, index,
+        expect_true(weights[index].name.view() == want, "[{}] weight {}: got {} want {}", label, index,
                     weights[index].name.view(), want);
         ++index;
     };
@@ -317,8 +323,9 @@ static void check_weight_naming_(test_suite_t& suite, char const* label, trainer
     for (u32_t layer_index = 0; layer_index != config.depth; ++layer_index)
         for (sz::string_view_t part : {"qkv", "out", "gate_up", "down", "pre_norm", "post_norm"}) {
             name.clear();
-            if (!format_into(name, "blocks.{}.{}", layer_index, part))
-                return suite.check(false, "[{}] weight name format failed", label);
+            if (!expect_true(format_into(name, "blocks.{}.{}", layer_index, part), "[{}] weight name format failed",
+                             label))
+                return;
             expect(name.view());
         }
     expect("final_norm");
@@ -330,30 +337,31 @@ static void check_weight_naming_(test_suite_t& suite, char const* label, trainer
     if (config.batch.contains(modality_t::image_k)) expect("masked_image");
     if (config.batch.contains(modality_t::video_k)) expect("masked_video");
     if (config.batch.contains(modality_t::audio_k)) expect("masked_audio");
-    suite.check(index == weights.size(), "[{}] registration count: got {} want {}", label, weights.size(), index);
+    expect_true(index == weights.size(), "[{}] registration count: got {} want {}", label, weights.size(), index);
 }
 
 /** Bring up a captured trainer for one mixture, run its loop reading telemetry every step, and fold
- *  the invariants A, B, D, E and F into @p suite ; then an eager trainer of the same seed checks C.
+ *  the invariants A, B, D, E and F into the run; then an eager trainer of the same seed checks C.
  *  D and E read the ledger's running loss statistics — every local member's sample mass, not a
  *  lead-only coin flip. */
-static void run_base_conformance(test_suite_t& suite, world_health_t& health, char const* label,
-                                 trainer_config_t const& config, tier_t tier) {
-    if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
+static case_result_t test_base_conformance(world_health_t& health, char const* label, trainer_config_t const& config,
+                                           tier_t tier) {
+    if (!world_still_healthy_(health)) return case_result_t::skipped(world_unhealthy_k);
     mesh_topology_t const& topology = tier.mesh.topology;
     st::basic_vector<bf16_t> captured_lead;
     {
         trainer_t trainer;
-        if (expected_t built = make_trainer_(trainer, tier, config, health); !built)
-            return suite.check(false, "[{}] trainer bring-up: {}", label, built.description_);
+        if (expected_t built = make_trainer_(trainer, tier, config, health);
+            !expect_true(built, "[{}] trainer bring-up: {}", label, built.description_))
+            return {};
         u32_t const gpus = static_cast<u32_t>(trainer.replicas.size());
-        check_weight_naming_(suite, label, config, trainer.replicas[0].weights);
+        check_weight_naming_(label, config, trainer.replicas[0].weights);
 
         // Assertion F's reference: the lead replica's freshly seeded weights, untouched
         // by the capture.
         expected<st::basic_vector<bf16_t>> seed_lead = snapshot_weights_(trainer.replicas[0].weights,
                                                                          trainer.streams[0]);
-        if (!seed_lead) return suite.check(false, "[{}] seed snapshot: {}", label, seed_lead.description_);
+        if (!expect_true(seed_lead, "[{}] seed snapshot: {}", label, seed_lead.description_)) return {};
 
         // The captured run, telemetry every step. A midpoint snapshot splits the run into two
         // halves; assertion D compares their sample-weighted means, so a head scored on only some
@@ -364,8 +372,9 @@ static void run_base_conformance(test_suite_t& suite, world_health_t& health, ch
         synthetic_source_t source;
         step_report_t report;
         for (u32_t ordinal = 0; ordinal != config.steps; ++ordinal) {
-            if (expected_t ran = trainer.step(batch_source_of(source), optimizer_step_t {ordinal}, report); !ran)
-                return suite.check(false, "[{}] captured step {}: {}", label, ordinal, ran.description_);
+            if (expected_t ran = trainer.step(batch_source_of(source), optimizer_step_t {ordinal}, report);
+                !expect_true(ran, "[{}] captured step {}: {}", label, ordinal, ran.description_))
+                return {};
             (void)trainer.telemetry(optimizer_step_t {ordinal});
             if (ordinal + 1u == config.steps / 2u)
                 for (u32_t head = 0; head != 4u; ++head) mid_stats[head] = trainer.ledger.losses(head_probes[head]);
@@ -388,19 +397,20 @@ static void run_base_conformance(test_suite_t& suite, world_health_t& health, ch
                                         end_stats[head].scored_steps);
             sz::string_t key;
             formatted = formatted && static_cast<bool>(format_into(key, "conformance.{}.loss_summands", label));
-            if (!formatted) return suite.check(false, "[{}] loss-summand exchange formatting failed", label);
-            if (expected_t published = topology.publish_text(key.view(), mine.view()); !published)
-                return suite.check(false, "[{}] loss-summand publish: {}", label, published.description_);
+            if (!expect_true(formatted, "[{}] loss-summand exchange formatting failed", label)) return {};
+            if (expected_t published = topology.publish_text(key.view(), mine.view());
+                !expect_true(published, "[{}] loss-summand publish: {}", label, published.description_))
+                return {};
             telemetry_loss_stats_t world_mid[4] {}, world_end[4] {};
             for (u32_t domain_index = 0; domain_index != host_domains; ++domain_index) {
                 sz::string_t text;
                 if (domain_index == topology.host_domain_index) {
-                    if (sz::failed(text.assign(mine.view())))
-                        return suite.check(false, "[{}] loss-summand staging failed", label);
+                    if (!expect_true(!sz::failed(text.assign(mine.view())), "[{}] loss-summand staging failed", label))
+                        return {};
                 }
-                else if (expected_t arrived = topology.await_text(domain_index, key.view(), text, wait_limit_seconds_k);
-                         !arrived)
-                    return suite.check(false, "[{}] loss-summand exchange: {}", label, arrived.description_);
+                else if (expected_t arrived = topology.await_text(domain_index, key.view(), text, wait_limit_k.count());
+                         !expect_true(arrived, "[{}] loss-summand exchange: {}", label, arrived.description_))
+                    return {};
                 char const* cursor = text.c_str();
                 for (u32_t head = 0; head != 4u; ++head) {
                     char* next = nullptr;
@@ -417,10 +427,11 @@ static void run_base_conformance(test_suite_t& suite, world_health_t& health, ch
                 end_stats[head] = world_end[head];
             }
         }
-        if (expected_t drained = trainer.synchronize(); !drained)
-            return suite.check(false, "[{}] drain: {}", label, drained.description_);
+        if (expected_t drained = trainer.synchronize();
+            !expect_true(drained, "[{}] drain: {}", label, drained.description_))
+            return {};
         expected<st::basic_vector<bf16_t>> lead = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
-        if (!lead) return suite.check(false, "[{}] lead snapshot: {}", label, lead.description_);
+        if (!expect_true(lead, "[{}] lead snapshot: {}", label, lead.description_)) return {};
         captured_lead = std::move(lead.value_);
 
         // A — every replica byte-matches the lead. Vacuous at one GPU (the peer loop is empty), but
@@ -431,7 +442,7 @@ static void run_base_conformance(test_suite_t& suite, world_health_t& health, ch
                                                                         trainer.streams[member_index]);
             replicas_identical = replicas_identical && peer && snapshots_match_(peer.value_, captured_lead);
         }
-        suite.check(replicas_identical, "[{}] every replica matches the lead bitwise (A)", label);
+        expect_true(replicas_identical, "[{}] every replica matches the lead bitwise (A)", label);
 
         // B — every member's own barrier round advanced off zero, never moved backwards, and they all agree:
         //     the ledger's monotone round rows carry all three (each member's scalar counts its own barriers).
@@ -445,11 +456,11 @@ static void run_base_conformance(test_suite_t& suite, world_health_t& health, ch
                             member_round.value_.last_scalar == lead_round.value_.last_scalar;
             round_monotone = round_monotone && member_round && member_round.value_.violations == 0u;
         }
-        suite.check(rounds_read && lead_round.value_.last_scalar > 0.0f,
+        expect_true(rounds_read && lead_round.value_.last_scalar > 0.0f,
                     "[{}] barrier round advanced off zero: got {} (B)", label,
                     rounds_read ? lead_round.value_.last_scalar : 0.0f);
-        suite.check(round_uniform, "[{}] barrier round reads identically through every member (B)", label);
-        suite.check(round_monotone, "[{}] no member's barrier round ever moved backwards (B)", label);
+        expect_true(round_uniform, "[{}] barrier round reads identically through every member (B)", label);
+        expect_true(round_monotone, "[{}] no member's barrier round ever moved backwards (B)", label);
 
         // D — per live head, the sample-weighted mean of the run's late half fell below
         // the early half's;
@@ -465,25 +476,25 @@ static void run_base_conformance(test_suite_t& suite, world_health_t& health, ch
             late_mean_sum += (end_stats[head].weighted_sum - mid_stats[head].weighted_sum) / late_weight;
             ++voting_heads;
         }
-        suite.check(voting_heads != 0u && std::isfinite(late_mean_sum) && late_mean_sum < early_mean_sum,
+        expect_true(voting_heads != 0u && std::isfinite(late_mean_sum) && late_mean_sum < early_mean_sum,
                     "[{}] mean loss fell over {} steps: late-half {} want < early-half {} ({} heads voting) (D)", label,
                     config.steps, late_mean_sum, early_mean_sum, voting_heads);
 
         // E — every live head scored at least once: the keyed partition fed every modality
         // rows, and every
         //     head actually trained.
-        suite.check(end_stats[0].scored_steps > 0u, "[{}] the token head trained (E)", label);
+        expect_true(end_stats[0].scored_steps > 0u, "[{}] the token head trained (E)", label);
         if (config.batch.contains(modality_t::image_k))
-            suite.check(end_stats[1].scored_steps > 0u, "[{}] the image head trained (E)", label);
+            expect_true(end_stats[1].scored_steps > 0u, "[{}] the image head trained (E)", label);
         if (config.batch.contains(modality_t::video_k))
-            suite.check(end_stats[2].scored_steps > 0u, "[{}] the video head trained (E)", label);
+            expect_true(end_stats[2].scored_steps > 0u, "[{}] the video head trained (E)", label);
         if (config.batch.contains(modality_t::audio_k))
-            suite.check(end_stats[3].scored_steps > 0u, "[{}] the audio head trained (E)", label);
+            expect_true(end_stats[3].scored_steps > 0u, "[{}] the audio head trained (E)", label);
 
         // F — the captured window moved the weights off their seed: gradients propagated
         // through the whole
         //     backbone and the optimizer applied them.
-        suite.check(!snapshots_match_(seed_lead.value_, captured_lead),
+        expect_true(!snapshots_match_(seed_lead.value_, captured_lead),
                     "[{}] the captured window moved the weights off their seed (F)", label);
     }
 
@@ -493,50 +504,59 @@ static void run_base_conformance(test_suite_t& suite, world_health_t& health, ch
     trainer_config_t eager_config = config;
     eager_config.capture = eager_k;
     trainer_t eager;
-    if (expected_t built = make_trainer_(eager, tier, eager_config, health); !built)
-        return suite.check(false, "[{}] eager trainer bring-up: {}", label, built.description_);
-    if (expected_t ran = run_steps_(eager, 0u, config.steps); !ran)
-        return suite.check(false, "[{}] eager run: {}", label, ran.description_);
-    if (expected_t drained = eager.synchronize(); !drained)
-        return suite.check(false, "[{}] eager drain: {}", label, drained.description_);
+    if (expected_t built = make_trainer_(eager, tier, eager_config, health);
+        !expect_true(built, "[{}] eager trainer bring-up: {}", label, built.description_))
+        return {};
+    if (expected_t ran = run_steps_(eager, 0u, config.steps);
+        !expect_true(ran, "[{}] eager run: {}", label, ran.description_))
+        return {};
+    if (expected_t drained = eager.synchronize();
+        !expect_true(drained, "[{}] eager drain: {}", label, drained.description_))
+        return {};
     expected<st::basic_vector<bf16_t>> eager_lead = snapshot_weights_(eager.replicas[0].weights, eager.streams[0]);
-    suite.check(eager_lead && snapshots_near_(eager_lead.value_, captured_lead),
+    expect_true(eager_lead && snapshots_near_(eager_lead.value_, captured_lead),
                 "[{}] captured replay lands on the eager run (C)", label);
+    return {};
 }
 
 /** One sweep cell: bring up an eager trainer, run two steps, then capture and replay two more over
  *  the same trainer — both model-region modes under one mixture — asserting finite losses and the
  *  final-norm extents every head reconstructs against. */
-static void run_sweep_cell_(test_suite_t& suite, world_health_t& health, tier_t tier, sz::string_view_t label,
-                            trainer_config_t config) {
-    if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
+static case_result_t test_sweep_cell(world_health_t& health, tier_t tier, sz::string_view_t label,
+                                     trainer_config_t config) {
+    if (!world_still_healthy_(health)) return case_result_t::skipped(world_unhealthy_k);
     config.capture = eager_k;
     trainer_t trainer;
-    if (expected_t built = make_trainer_(trainer, tier, config, health); !built)
-        return suite.check(false, "[{}] trainer bring-up: {}", label, built.description_);
+    if (expected_t built = make_trainer_(trainer, tier, config, health);
+        !expect_true(built, "[{}] trainer bring-up: {}", label, built.description_))
+        return {};
 
     // The eager state first, then the captured one over the same trainer — capture must also hold
     // after the optimizer has stepped (the capture-stable addresses survive weight updates).
-    if (expected_t ran = run_steps_(trainer, 0u, 2u); !ran)
-        return suite.check(false, "[{}] eager steps: {}", label, ran.description_);
+    if (expected_t ran = run_steps_(trainer, 0u, 2u);
+        !expect_true(ran, "[{}] eager steps: {}", label, ran.description_))
+        return {};
     f32_t const eager_loss = trainer.telemetry(optimizer_step_t {1u}).composite();
-    if (expected_t captured = trainer.capture(); !captured)
-        return suite.check(false, "[{}] capture: {}", label, captured.description_);
-    if (expected_t ran = run_steps_(trainer, 2u, 4u); !ran)
-        return suite.check(false, "[{}] replayed steps: {}", label, ran.description_);
+    if (expected_t captured = trainer.capture();
+        !expect_true(captured, "[{}] capture: {}", label, captured.description_))
+        return {};
+    if (expected_t ran = run_steps_(trainer, 2u, 4u);
+        !expect_true(ran, "[{}] replayed steps: {}", label, ran.description_))
+        return {};
     f32_t const replayed_loss = trainer.telemetry(optimizer_step_t {3u}).composite();
 
-    suite.check(std::isfinite(eager_loss) && std::isfinite(replayed_loss),
+    expect_true(std::isfinite(eager_loss) && std::isfinite(replayed_loss),
                 "[{}] losses finite through both modes: eager {} replayed {}", label, eager_loss, replayed_loss);
     std::size_t const max_tokens = static_cast<std::size_t>(config.batch.max_rows_per_gpu) *
                                    config.batch.max_columns_per_row;
     bf16r2_view_t const normalized = trainer.replicas[0].tower.normalized();
-    suite.check(normalized.extent(0) == max_tokens && normalized.extent(1) == config.hidden,
+    expect_true(normalized.extent(0) == max_tokens && normalized.extent(1) == config.hidden,
                 "[{}] normalized carries [max_tokens, hidden]: got [{}, {}] want [{}, {}]", label, normalized.extent(0),
                 normalized.extent(1), max_tokens, config.hidden);
 
     if (expected_t drained = trainer.synchronize(); !drained)
-        suite.check(false, "[{}] end-of-case drain: {}", label, drained.description_);
+        expect_true(false, "[{}] end-of-case drain: {}", label, drained.description_);
+    return {};
 }
 
 /** One sweep cell's config: @p subset 's media bits over @p rows full-width rows of
@@ -562,66 +582,68 @@ static void run_sweep_cell_(test_suite_t& suite, world_health_t& health, tier_t 
  *  at the bootstrapped world's full width, so shape handling composes with the real collectives —
  *  and widens to the multi-node world automatically under the sbatch launcher.
  */
-static void mixture_sweep(test_suite_t& suite, world_health_t& health, tier_t wide, tier_t cheap) {
+static void mixture_sweep(world_health_t& health, tier_t wide, tier_t cheap) {
     for (u32_t subset = 0; subset != 8u; ++subset)
         for (u32_t rows = 1; rows != 3u; ++rows) {
             sz::string_t label;
-            if (!format_into(label, "sweep/1gpu/tokens{}{}{}/rows={}", (subset & 1u) ? ",image" : "",
-                             (subset & 2u) ? ",video" : "", (subset & 4u) ? ",audio" : "", rows))
-                return suite.check(false, "sweep label format failed");
-            suite.run(label.view(), run_sweep_cell_, health, cheap, label.view(),
-                      sweep_config_(subset, rows, 64u, suite.settings.seed));
+            if (!expect_true(format_into(label, "test_sweep_cell(cheap, {}, {}, 64)", subset, rows),
+                             "sweep label format failed"))
+                return;
+            run_test_case(label.c_str(), test_sweep_cell, health, cheap, label.view(),
+                          sweep_config_(subset, rows, 64u, test_run.settings.seed));
         }
-    suite.run("sweep/1gpu/omni/rows=5", run_sweep_cell_, health, cheap, "sweep/1gpu/omni/rows=5",
-              sweep_config_(7u, 5u, 64u, suite.settings.seed));
-    suite.run("sweep/1gpu/omni/rows=2,columns=96", run_sweep_cell_, health, cheap, "sweep/1gpu/omni/rows=2,columns=96",
-              sweep_config_(7u, 2u, 96u, suite.settings.seed));
+    run_test_case("test_sweep_cell(cheap, 7, 5, 64)", test_sweep_cell, health, cheap,
+                  "test_sweep_cell(cheap, 7, 5, 64)", sweep_config_(7u, 5u, 64u, test_run.settings.seed));
+    run_test_case("test_sweep_cell(cheap, 7, 2, 96)", test_sweep_cell, health, cheap,
+                  "test_sweep_cell(cheap, 7, 2, 96)", sweep_config_(7u, 2u, 96u, test_run.settings.seed));
     for (u32_t subset = 0; subset != 8u; ++subset) {
         sz::string_t label;
-        if (!format_into(label, "sweep/wide/tokens{}{}{}/rows=2", (subset & 1u) ? ",image" : "",
-                         (subset & 2u) ? ",video" : "", (subset & 4u) ? ",audio" : ""))
-            return suite.check(false, "sweep label format failed");
-        suite.run(label.view(), run_sweep_cell_, health, wide, label.view(),
-                  sweep_config_(subset, 2u, 64u, suite.settings.seed));
+        if (!expect_true(format_into(label, "test_sweep_cell(wide, {}, 2, 64)", subset), "sweep label format failed"))
+            return;
+        run_test_case(label.c_str(), test_sweep_cell, health, wide, label.view(),
+                      sweep_config_(subset, 2u, 64u, test_run.settings.seed));
     }
 }
 
 /** @ref batch_capacity keeps a segment per row at least and one per cell at most, and otherwise
  *  gives the rows times the density, rounded up. */
-static void segment_budget(test_suite_t& suite) {
+static void test_segment_budget() {
     multimodal_batch_shape_t const shape {0u, 0u, 64u};
-    suite.check(batch_capacity(shape, 64u, 3.05).max_segments_per_gpu == 196u,
+    expect_true(batch_capacity(shape, 64u, 3.05).max_segments_per_gpu == 196u,
                 "64 rows at 3.05 segments per row hold 196 segments");
-    suite.check(batch_capacity(shape, 64u, 0.5).max_segments_per_gpu == 64u, "a row holds one segment at least");
-    suite.check(batch_capacity(shape, 2u, 1000.0).max_segments_per_gpu == 128u, "a row holds one per cell at most");
-    suite.check(batch_capacity(shape, 7u, 1.0).max_rows_per_gpu == 7u, "the rows stay as given");
+    expect_true(batch_capacity(shape, 64u, 0.5).max_segments_per_gpu == 64u, "a row holds one segment at least");
+    expect_true(batch_capacity(shape, 2u, 1000.0).max_segments_per_gpu == 128u, "a row holds one per cell at most");
+    expect_true(batch_capacity(shape, 7u, 1.0).max_rows_per_gpu == 7u, "the rows stay as given");
 }
 
 /** The synthetic corpus packs every token row with the segment budget's share of it, so the
  *  envelope probe measures the real batch's density: at three segments per row, each row's
  *  segments cover it exactly once and in order, and the step still trains finitely. */
-static void packed_rows(test_suite_t& suite, world_health_t& health, tier_t tier) {
-    if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
-    trainer_config_t config = test_geometry_(false, suite.settings.seed);
+static case_result_t test_packed_rows(world_health_t& health, tier_t tier) {
+    if (!world_still_healthy_(health)) return case_result_t::skipped(world_unhealthy_k);
+    trainer_config_t config = test_geometry_(false, test_run.settings.seed);
     config.batch = batch_capacity(config.batch, 2u, 3.0);
     config.capture = eager_k;
     trainer_t trainer;
-    if (expected_t built = make_trainer_(trainer, tier, config, health); !built)
-        return suite.check(false, "packed trainer bring-up: {}", built.description_);
+    if (expected_t built = make_trainer_(trainer, tier, config, health);
+        !expect_true(built, "packed trainer bring-up: {}", built.description_))
+        return {};
     switch_to_gpu_t gpu_scope {trainer.streams[0]};
-    if (!gpu_scope.ok()) return suite.check(false, "packed context entry");
+    if (!expect_true(gpu_scope.ok(), "packed context entry")) return {};
     base_replica_t& lead = trainer.replicas[0];
-    if (expected_t drawn = lead.draw(config, 0u, data_epoch_t {0u}, trainer.streams[0]); !drawn)
-        return suite.check(false, "packed draw: {}", drawn.description_);
+    if (expected_t drawn = lead.draw(config, 0u, data_epoch_t {0u}, trainer.streams[0]);
+        !expect_true(drawn, "packed draw: {}", drawn.description_))
+        return {};
     std::size_t const rows = config.batch.max_rows_per_gpu, columns = config.batch.max_columns_per_row;
     std::size_t const segments = config.batch.max_segments_per_gpu;
     u32r1_tensor_pinned_t offsets = u32r1_tensor_pinned_t::uninitialized({segments + 1}, pinned_alloc<u32_t> {}).value;
     u32r1_tensor_pinned_t lengths = u32r1_tensor_pinned_t::uninitialized({segments}, pinned_alloc<u32_t> {}).value;
-    if (!offsets || !lengths ||
-        !copy_device_to_host(lead.batch.segment_offsets.view(), offsets.span(), trainer.streams[0]) ||
-        !copy_device_to_host(lead.batch.segment_lengths.view(), lengths.span(), trainer.streams[0]) ||
-        cuStreamSynchronize(trainer.streams[0].get()) != CUDA_SUCCESS)
-        return suite.check(false, "packed readback");
+    if (!expect_true(offsets && lengths &&
+                         copy_device_to_host(lead.batch.segment_offsets.view(), offsets.span(), trainer.streams[0]) &&
+                         copy_device_to_host(lead.batch.segment_lengths.view(), lengths.span(), trainer.streams[0]) &&
+                         cuStreamSynchronize(trainer.streams[0].get()) == CUDA_SUCCESS,
+                     "packed readback"))
+        return {};
     bool covered = segments == 3u * rows && offsets[segments] == rows * columns;
     for (std::size_t row = 0; covered && row != rows; ++row) {
         std::size_t cursor = row * columns;
@@ -631,44 +653,49 @@ static void packed_rows(test_suite_t& suite, world_health_t& health, tier_t tier
         }
         covered = covered && cursor == (row + 1u) * columns;
     }
-    suite.check(covered, "{} rows of {} columns cut into three segments each, in order", rows, columns);
-    if (expected_t ran = run_steps_(trainer, 0u, 2u); !ran)
-        return suite.check(false, "packed steps: {}", ran.description_);
+    expect_true(covered, "{} rows of {} columns cut into three segments each, in order", rows, columns);
+    if (expected_t ran = run_steps_(trainer, 0u, 2u); !expect_true(ran, "packed steps: {}", ran.description_))
+        return {};
     f32_t const loss = trainer.telemetry(optimizer_step_t {1u}).composite();
-    suite.check(std::isfinite(loss), "packed rows train finitely: loss {}", loss);
+    expect_true(std::isfinite(loss), "packed rows train finitely: loss {}", loss);
     if (expected_t drained = trainer.synchronize(); !drained)
-        suite.check(false, "packed end-of-case drain: {}", drained.description_);
+        expect_true(false, "packed end-of-case drain: {}", drained.description_);
+    return {};
 }
 
 /** The capture contract holds, one forward and one backward replay graph per replica build, and
  *  two forward replays over one fixed eager preamble produce the same shared @c d(normalized) up
  *  to reduction order. */
-static void graph_capture(test_suite_t& suite, world_health_t& health, tier_t tier) {
-    if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
-    trainer_config_t const config = test_geometry_(false, suite.settings.seed);
+static case_result_t test_graph_capture(world_health_t& health, tier_t tier) {
+    if (!world_still_healthy_(health)) return case_result_t::skipped(world_unhealthy_k);
+    trainer_config_t const config = test_geometry_(false, test_run.settings.seed);
     trainer_t trainer;
-    if (expected_t built = make_trainer_(trainer, tier, config, health); !built)
-        return suite.check(false, "capture trainer bring-up: {}", built.description_);
+    if (expected_t built = make_trainer_(trainer, tier, config, health);
+        !expect_true(built, "capture trainer bring-up: {}", built.description_))
+        return {};
     std::size_t const gpus = trainer.replicas.size();
-    suite.check(trainer.forward_graphs.size() == gpus && trainer.backward_graphs.size() == gpus,
+    expect_true(trainer.forward_graphs.size() == gpus && trainer.backward_graphs.size() == gpus,
                 "one captured forward and backward region per replica: got {} and {} want {}",
                 trainer.forward_graphs.size(), trainer.backward_graphs.size(), gpus);
-    if (trainer.forward_graphs.size() != gpus) return;
+    if (trainer.forward_graphs.size() != gpus) return {};
 
     switch_to_gpu_t gpu_scope {trainer.streams[0]};
-    if (!gpu_scope.ok()) return suite.check(false, "capture context entry");
+    if (!expect_true(gpu_scope.ok(), "capture context entry")) return {};
     base_replica_t& lead = trainer.replicas[0];
     expected_t prepared = lead.draw(config, 0u, data_epoch_t {0u}, trainer.streams[0]);
     if (prepared) prepared = lead.prepare(config, data_epoch_t {0u}, trainer.streams[0]);
-    if (!prepared) return suite.check(false, "capture preamble: {}", prepared.description_);
-    if (expected_t first = trainer.forward_graphs[0].launch(trainer.streams[0].get()); !first)
-        return suite.check(false, "first replay: {}", first.description_);
+    if (!expect_true(prepared, "capture preamble: {}", prepared.description_)) return {};
+    if (expected_t first = trainer.forward_graphs[0].launch(trainer.streams[0].get());
+        !expect_true(first, "first replay: {}", first.description_))
+        return {};
     expected<st::basic_vector<bf16_t>> first_grad = snapshot_grad_(lead, trainer.streams[0]);
-    if (expected_t second = trainer.forward_graphs[0].launch(trainer.streams[0].get()); !second)
-        return suite.check(false, "second replay: {}", second.description_);
+    if (expected_t second = trainer.forward_graphs[0].launch(trainer.streams[0].get());
+        !expect_true(second, "second replay: {}", second.description_))
+        return {};
     expected<st::basic_vector<bf16_t>> second_grad = snapshot_grad_(lead, trainer.streams[0]);
-    suite.check(first_grad && second_grad && snapshots_near_(first_grad.value_, second_grad.value_),
+    expect_true(first_grad && second_grad && snapshots_near_(first_grad.value_, second_grad.value_),
                 "two captured replays agree");
+    return {};
 }
 
 /** Download one replica's @b [groups] Float32 temperatures, β then bias, into @p host . */
@@ -691,53 +718,62 @@ static void graph_capture(test_suite_t& suite, world_health_t& health, tier_t ti
 /** The late-interaction temperatures and their Adafactor moments survive a checkpoint: a
  *  trainer resumed from another's file takes the identical next temperature step, which zeroed
  *  moments would not. */
-static void late_interaction_resume(test_suite_t& suite, world_health_t& health, tier_t tier) {
-    if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
-    trainer_config_t config = test_geometry_(false, suite.settings.seed);
+static case_result_t test_late_interaction_resume(world_health_t& health, tier_t tier) {
+    if (!world_still_healthy_(health)) return case_result_t::skipped(world_unhealthy_k);
+    trainer_config_t config = test_geometry_(false, test_run.settings.seed);
     config.objective = objective_t::contrastive_k;
     config.late_interaction.weight = 1.0f;
     config.late_interaction.width = 32;
     config.capture = eager_k;
-    sz::string_view_t const path = "/tmp/uform_test_late_interaction_resume.safetensors";
+    scratch_directory_t const scratch;
+    sz::string_t path;
+    if (!expect_true(format_into(path, "{}/late_interaction.safetensors", scratch.path.c_str()),
+                     "checkpoint path formatting failed"))
+        return {};
     st::basic_vector<f32_t> started, continued, resumed;
     {
         trainer_t trainer;
-        if (expected_t built = make_trainer_(trainer, tier, config, health); !built)
-            return suite.check(false, "late-interaction trainer bring-up: {}", built.description_);
+        if (expected_t built = make_trainer_(trainer, tier, config, health);
+            !expect_true(built, "late-interaction trainer bring-up: {}", built.description_))
+            return {};
         switch_to_gpu_t gpu_scope {trainer.streams[0]};
         expected_t stepped = read_temperatures_(trainer.replicas[0], trainer.streams[0], started)
                                  ? run_steps_(trainer, 0, 3)
                                  : expected_t::fail(status_t::device_error_k, "temperature download failed");
         if (stepped) stepped = trainer.synchronize();
-        if (stepped) stepped = trainer.save(path);
+        if (stepped) stepped = trainer.save(path.view());
         if (stepped) stepped = run_steps_(trainer, 3, 4);
         if (stepped) stepped = trainer.synchronize();
-        if (!stepped || !read_temperatures_(trainer.replicas[0], trainer.streams[0], continued))
-            return suite.check(false, "late-interaction steps: {}", stepped.description_);
+        if (!expect_true(stepped && read_temperatures_(trainer.replicas[0], trainer.streams[0], continued),
+                         "late-interaction steps: {}", stepped.description_))
+            return {};
     }
     trainer_t trainer;
-    if (expected_t built = make_trainer_(trainer, tier, config, health); !built)
-        return suite.check(false, "resumed trainer bring-up: {}", built.description_);
+    if (expected_t built = make_trainer_(trainer, tier, config, health);
+        !expect_true(built, "resumed trainer bring-up: {}", built.description_))
+        return {};
     switch_to_gpu_t gpu_scope {trainer.streams[0]};
-    expected_t stepped = trainer.resume(path);
+    expected_t stepped = trainer.resume(path.view());
     if (stepped) stepped = run_steps_(trainer, 3, 4);
     if (stepped) stepped = trainer.synchronize();
-    if (!stepped || !read_temperatures_(trainer.replicas[0], trainer.streams[0], resumed))
-        return suite.check(false, "resumed step: {}", stepped.description_);
-    suite.check(std::memcmp(started.data(), continued.data(), started.size() * sizeof(f32_t)) != 0,
+    if (!expect_true(stepped && read_temperatures_(trainer.replicas[0], trainer.streams[0], resumed),
+                     "resumed step: {}", stepped.description_))
+        return {};
+    expect_true(std::memcmp(started.data(), continued.data(), started.size() * sizeof(f32_t)) != 0,
                 "four late-interaction steps move the temperatures");
-    suite.check(std::memcmp(continued.data(), resumed.data(), continued.size() * sizeof(f32_t)) == 0,
+    expect_true(std::memcmp(continued.data(), resumed.data(), continued.size() * sizeof(f32_t)) == 0,
                 "the resumed trainer takes the identical temperature step: β {} vs {}, bias {} vs {}", continued[0],
                 resumed[0], continued[continued.size() / 2], resumed[resumed.size() / 2]);
+    return {};
 }
 
 /** Calibrated choices train end to end through the items source the C verb drives: four text
  *  states, each offering two or three legal bytes against a one-hot or soft target, replay eight
  *  captured steps with the masked term weighted out — the choices term reads finite and positive
  *  first, falls by the last step, and the token term stays zero throughout. */
-static void choices_replay(test_suite_t& suite, world_health_t& health, tier_t tier) {
-    if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
-    trainer_config_t config = test_geometry_(false, suite.settings.seed);
+static case_result_t test_choices_replay(world_health_t& health, tier_t tier) {
+    if (!world_still_healthy_(health)) return case_result_t::skipped(world_unhealthy_k);
+    trainer_config_t config = test_geometry_(false, test_run.settings.seed);
     // Rows as wide as the model: the envelope's one-row probe reads choices off its tokens.
     config.batch = multimodal_batch_shape_t {2u, 4u, 256u};
     config.batch.max_choices_per_segment = 4u;
@@ -745,11 +781,13 @@ static void choices_replay(test_suite_t& suite, world_health_t& health, tier_t t
     config.text_weight = 0.0f;
     config.choices.weight = 1.0f;
     trainer_t trainer;
-    if (expected_t built = make_trainer_(trainer, tier, config, health); !built)
-        return suite.check(false, "choices trainer bring-up: {}", built.description_);
+    if (expected_t built = make_trainer_(trainer, tier, config, health);
+        !expect_true(built, "choices trainer bring-up: {}", built.description_))
+        return {};
     items_source_t source;
-    if (expected_t made = items_source_t::make(source, trainer); !made)
-        return suite.check(false, "choices items source: {}", made.description_);
+    if (expected_t made = items_source_t::make(source, trainer);
+        !expect_true(made, "choices items source: {}", made.description_))
+        return {};
 
     char const text[] = "2+2="           //
                         "is ice cold? "  //
@@ -767,70 +805,75 @@ static void choices_replay(test_suite_t& suite, world_health_t& health, tier_t t
     f32_t first = 0.0f, last = 0.0f, token = 0.0f;
     step_report_t report;
     for (u32_t ordinal = 0; ordinal != config.steps; ++ordinal) {
-        if (expected_t stepped = trainer.step(batch_source_of(source), optimizer_step_t {ordinal}, report); !stepped)
-            return suite.check(false, "choices step {}: {}", ordinal, stepped.description_);
+        if (expected_t stepped = trainer.step(batch_source_of(source), optimizer_step_t {ordinal}, report);
+            !expect_true(stepped, "choices step {}: {}", ordinal, stepped.description_))
+            return {};
         telemetry_t const telemetry = trainer.telemetry(optimizer_step_t {ordinal});
         if (ordinal == 0u) first = telemetry.choices;
         last = telemetry.choices;
         token = fu::max_of(token, std::fabs(telemetry.token_ce));
     }
-    suite.check(std::isfinite(first) && first > 0.0f, "the first choices term is finite and positive: {}", first);
+    expect_true(std::isfinite(first) && first > 0.0f, "the first choices term is finite and positive: {}", first);
     // Seed 42 settles from 1.17 onto the soft target's entropy floor, ln2/4 ≈ 0.17: a wide margin.
-    suite.check(std::isfinite(last) && last < 0.5f * first, "the choices term halves: first {} last {}", first, last);
-    suite.check(token == 0.0f, "the weighted-out token term reads zero: peak {}", token);
+    expect_true(std::isfinite(last) && last < 0.5f * first, "the choices term halves: first {} last {}", first, last);
+    expect_true(token == 0.0f, "the weighted-out token term reads zero: peak {}", token);
     if (expected_t drained = trainer.synchronize(); !drained)
-        suite.check(false, "choices end-of-case drain: {}", drained.description_);
+        expect_true(false, "choices end-of-case drain: {}", drained.description_);
+    return {};
 }
 
 /** The regularizers ride a contrastive step, and a forced gradient spike fails the next step before
  *  the optimizer moves a weight: a threshold far below one makes every second gradient a spike. */
-static void spectrum_spike(test_suite_t& suite, world_health_t& health, tier_t tier) {
-    if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
-    trainer_config_t config = test_geometry_(false, suite.settings.seed);
+static case_result_t test_spectrum_spike(world_health_t& health, tier_t tier) {
+    if (!world_still_healthy_(health)) return case_result_t::skipped(world_unhealthy_k);
+    trainer_config_t config = test_geometry_(false, test_run.settings.seed);
     config.objective = objective_t::contrastive_k;
     config.tcr_lambda = 0.1f;
     config.lipschitz_lambda = 1.0e-3f;
     config.grad_spike_threshold = 1.0e-6f;
     trainer_t trainer;
-    if (expected_t built = make_trainer_(trainer, tier, config, health); !built)
-        return suite.check(false, "spectrum trainer bring-up: {}", built.description_);
-    if (expected_t first = run_steps_(trainer, 0u, 1u); !first)
-        return suite.check(false, "the first step, with nothing to spike against: {}", first.description_);
+    if (expected_t built = make_trainer_(trainer, tier, config, health);
+        !expect_true(built, "spectrum trainer bring-up: {}", built.description_))
+        return {};
+    if (expected_t first = run_steps_(trainer, 0u, 1u);
+        !expect_true(first, "the first step, with nothing to spike against: {}", first.description_))
+        return {};
     switch_to_gpu_t gpu_scope {trainer.streams[0]};
     f32_t terms[2] = {};
     if (expected_t copied = copy_device_to_host(trainer.spectrum.terms(0), std::span<f32_t> {terms},
                                                 trainer.streams[0]);
-        !copied)
-        return suite.check(false, "terms download: {}", copied.description_);
+        !expect_true(copied, "terms download: {}", copied.description_))
+        return {};
     cuStreamSynchronize(trainer.streams[0].get());
-    suite.check(std::isfinite(terms[0]) && terms[0] > 0.0f && std::isfinite(terms[1]) && terms[1] > 0.0f,
+    expect_true(std::isfinite(terms[0]) && terms[0] > 0.0f && std::isfinite(terms[1]) && terms[1] > 0.0f,
                 "the coding rate {} and the top eigenvalue {} read finite and positive", terms[0], terms[1]);
     expected<st::basic_vector<bf16_t>> before = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
     expected_t const spiked = run_steps_(trainer, 1u, 2u);
     expected<st::basic_vector<bf16_t>> after = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
-    suite.check(!spiked && spiked.status_ == status_t::internal_k, "a threshold of {} refuses the second step",
+    expect_true(!spiked && spiked.status_ == status_t::internal_k, "a threshold of {} refuses the second step",
                 config.grad_spike_threshold);
-    suite.check(before && after && snapshots_match_(before.value_, after.value_),
+    expect_true(before && after && snapshots_match_(before.value_, after.value_),
                 "the refused step leaves the weights untouched");
     if (expected_t drained = trainer.synchronize(); !drained)
-        suite.check(false, "spectrum end-of-case drain: {}", drained.description_);
+        expect_true(false, "spectrum end-of-case drain: {}", drained.description_);
+    return {};
 }
 
 /** Every rank of a world of two or more GPUs reaches the same coding rate bit for bit, and it
  *  matches one GPU holding every row of the world. */
-static void spectrum_world(test_suite_t& suite, world_health_t& health, tier_t wide, tier_t cheap) {
-    if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
+static case_result_t test_spectrum_world(world_health_t& health, tier_t wide, tier_t cheap) {
+    if (!world_still_healthy_(health)) return case_result_t::skipped(world_unhealthy_k);
     mesh_topology_t& topology = wide.mesh.topology;
     std::size_t const gpus = wide.devices.size(), world_gpus = topology.shape.gpus_per_colocated_domain;
-    if (world_gpus < 2u) return suite.skip("the world holds one GPU, and the world Gram needs two");
+    if (world_gpus < 2u) return case_result_t::skipped("needs two GPUs in the world");
     std::size_t const rows = 24, hidden = 64, world_rows = rows * world_gpus;
     // A shared offset gives the rows the anisotropy pooled codes carry.
     std::vector<f64_t> world_values(world_rows * hidden);
     std::vector<nk_bf16_t> world_pooled(world_rows * hidden);
     for (std::size_t index = 0; index != world_values.size(); ++index)
-        world_values[index] = 0.3 + f64_t(splitmix64_hash_t {}(suite.settings.seed, 13u, index) >> 40) * 0x1.0p-23 -
+        world_values[index] = 0.3 + f64_t(splitmix64_hash_t {}(test_run.settings.seed, 13u, index) >> 40) * 0x1.0p-23 -
                               1.0;
-    if (!narrow_to_bf16(world_values, world_pooled)) return suite.check(false, "host rounding failed");
+    if (!expect_true(narrow_to_bf16(world_values, world_pooled), "host rounding failed")) return {};
 
     // The coding rate over `devices`, each holding its slice of the world rows from `first_row`,
     // read back from every rank.
@@ -869,11 +912,11 @@ static void spectrum_world(test_suite_t& suite, world_health_t& health, tier_t w
         }
         expected<multimem_domain_t> domain = multimem_domain_t::make(
             mesh.topology, devices, distributed_pooled_spectrum_t::payload_scalars_needed(config), streams.span(),
-            wait_limit_seconds_k);
+            wait_limit_k.count());
         if (!domain) return expected_t::fail(std::move(domain));
         expected<distributed_pooled_spectrum_t> spectrum = distributed_pooled_spectrum_t::make(
             domain.value_, mesh.colocated, arenas.span(), streams.span(), {}, 0, config, numerics,
-            wait_limit_seconds_k);
+            wait_limit_k.count());
         if (!spectrum) return expected_t::fail(std::move(spectrum));
         for (std::size_t rank = 0; rank != devices.size(); ++rank)
             if (expected_t shaped = spectrum.value_(rank, pooled[rank].view(), pooled_grad[rank].span(), streams[rank]);
@@ -896,48 +939,47 @@ static void spectrum_world(test_suite_t& suite, world_health_t& health, tier_t w
 
     std::vector<f32_t> world_rates, single_rate;
     std::size_t const first_row = topology.first_gpu_index() * rows;
-    if (expected_t ran = coding_rates(wide.mesh, wide.devices, wide.numerics, rows, first_row, world_rates); !ran)
-        return suite.check(false, "world coding rate: {}", ran.description_);
-    if (expected_t ran = coding_rates(cheap.mesh, cheap.devices, cheap.numerics, world_rows, 0, single_rate); !ran)
-        return suite.check(false, "single-GPU coding rate: {}", ran.description_);
+    if (expected_t ran = coding_rates(wide.mesh, wide.devices, wide.numerics, rows, first_row, world_rates);
+        !expect_true(ran, "world coding rate: {}", ran.description_))
+        return {};
+    if (expected_t ran = coding_rates(cheap.mesh, cheap.devices, cheap.numerics, world_rows, 0, single_rate);
+        !expect_true(ran, "single-GPU coding rate: {}", ran.description_))
+        return {};
     for (std::size_t rank = 1; rank != gpus; ++rank)
-        suite.check(std::memcmp(&world_rates[rank], &world_rates[0], sizeof(f32_t)) == 0,
+        expect_true(std::memcmp(&world_rates[rank], &world_rates[0], sizeof(f32_t)) == 0,
                     "rank {} reads the coding rate {} where rank 0 reads {}", rank, world_rates[rank], world_rates[0]);
     // The world sums Float32 Grams in another order than one GPU's NumKong product does.
-    suite.check(std::fabs(world_rates[0] - single_rate[0]) <= 1.0e-4f * single_rate[0],
+    expect_true(std::fabs(world_rates[0] - single_rate[0]) <= 1.0e-4f * single_rate[0],
                 "the world's coding rate {} against one GPU holding every row {}", world_rates[0], single_rate[0]);
+    return {};
 }
 
-int main(int, char** argv) {
+int main(int argc, char** argv) {
     // Lazy module loading deadlocks against the InfiniBand doorbell kernels' flag spins: the
     // spinning wait blocks its context, the peer's next launch blocks on module loading behind it,
     // and neither side progresses. Eager loading before `cuInit` front-loads every module — the
     // mixer suite's fix.
     ::setenv("CUDA_MODULE_LOADING", "EAGER", 1);
 
-    test_suite_t suite = test_suite_t::make(argv[0]);
+    start_test_run(argc, argv);
 
-    // The schedule's properties are pure host math — asserted before any GPU work.
-    suite.run("learning_rate_schedule", learning_rate_schedule);
+    // The schedule and the segment budget are pure host math — asserted before any GPU work.
+    run_test_case("test_learning_rate_schedule", test_learning_rate_schedule);
+    run_test_case("test_segment_budget", test_segment_budget);
 
     int device_count = 0;
     if (cuInit(0) != CUDA_SUCCESS || cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count <= 0) {
-        suite.skip("capture/replay", no_cuda_device_k);
-        suite.skip("resume/late_interaction", no_cuda_device_k);
-        suite.skip("choices/replay", no_cuda_device_k);
-        suite.skip("spectrum/spike", no_cuda_device_k);
-        suite.skip("spectrum/world", no_cuda_device_k);
-        suite.skip("conformance/tokens", no_cuda_device_k);
-        suite.skip("conformance/omni", no_cuda_device_k);
-        suite.skip("sweep", no_cuda_device_k);
-        return suite.finish();
+        for (char const* label :
+             {"test_packed_rows", "test_graph_capture", "test_late_interaction_resume", "test_choices_replay",
+              "test_spectrum_spike", "test_spectrum_world", "test_base_conformance(\"tokens\")",
+              "test_base_conformance(\"omni\")", "mixture_sweep"})
+            run_test_case(label, [] { return case_result_t::skipped(no_gpu_device_k); });
+        return finish_test_run();
     }
     st::basic_vector<i32_t> devices;
     for (int device = 0; device != device_count; ++device)
-        if (st::failed(devices.push_back(static_cast<i32_t>(device)))) {
-            suite.check(false, "device table allocation failed");
-            return suite.finish();
-        }
+        if (!expect_true(!st::failed(devices.push_back(static_cast<i32_t>(device))), "device table allocation failed"))
+            return finish_test_run();
 
     // One process per host_domain; the sbatch launcher raises UFORM_HOST_DOMAIN_COUNT for the
     // two-node tier and names the exchange, which this main maps onto the mesh options, as the
@@ -945,41 +987,37 @@ int main(int, char** argv) {
     mesh_options_t options;
     options.host_domain_index = host_domain_index_from_environment();
     options.host_domain_count = host_domain_count_from_environment();
-    options.timeout_seconds = wait_limit_seconds_k;
+    options.timeout_seconds = wait_limit_k.count();
     if (char const* directory = std::getenv("UFORM_EXCHANGE_DIR"); directory != nullptr)
         options.directory = sz::string_view_t {directory, std::strlen(directory)};
     if (char const* job = std::getenv("UFORM_JOB_ID"); job != nullptr)
         options.job = sz::string_view_t {job, std::strlen(job)};
-    if (nk_capabilities_enabled_cuda(0, &options.capabilities) != nk_success_k) {
-        suite.check(false, "NumKong cannot query device 0");
-        return suite.finish();
-    }
+    if (!expect_true(nk_capabilities_enabled_cuda(0, &options.capabilities) == nk_success_k,
+                     "NumKong cannot query device 0"))
+        return finish_test_run();
     mesh_t wide_mesh;
-    if (expected_t joined = mesh_t::make(wide_mesh, options, devices); !joined) {
-        suite.check(false, "mesh bootstrap: {}", joined.description_);
-        return suite.finish();
-    }
+    if (expected_t joined = mesh_t::make(wide_mesh, options, devices);
+        !expect_true(joined, "mesh bootstrap: {}", joined.description_))
+        return finish_test_run();
     mesh_t cheap_mesh;
-    if (expected_t narrowed = narrow_mesh_(cheap_mesh, wide_mesh.topology, 1u); !narrowed) {
-        suite.check(false, "narrowed mesh: {}", narrowed.description_);
-        return suite.finish();
-    }
+    if (expected_t narrowed = narrow_mesh_(cheap_mesh, wide_mesh.topology, 1u);
+        !expect_true(narrowed, "narrowed mesh: {}", narrowed.description_))
+        return finish_test_run();
     gpu_numerics_t const numerics = gpu_numerics_of(options.capabilities);
     tier_t const wide {wide_mesh, devices, numerics};
     tier_t const cheap {cheap_mesh, std::span<i32_t const> {devices}.first(1), numerics};
 
     world_health_t health;
-    suite.run("segment_budget", segment_budget);
-    suite.run("packed_rows", packed_rows, health, cheap);
-    suite.run("capture/replay", graph_capture, health, cheap);
-    suite.run("resume/late_interaction", late_interaction_resume, health, cheap);
-    suite.run("choices/replay", choices_replay, health, cheap);
-    suite.run("spectrum/spike", spectrum_spike, health, cheap);
-    suite.run("spectrum/world", spectrum_world, health, wide, cheap);
-    suite.run("conformance/tokens", run_base_conformance, health, "tokens", test_geometry_(false, suite.settings.seed),
-              wide);
-    suite.run("conformance/omni", run_base_conformance, health, "omni", test_geometry_(true, suite.settings.seed),
-              wide);
-    mixture_sweep(suite, health, wide, cheap);
-    return suite.finish();
+    run_test_case("test_packed_rows", test_packed_rows, health, cheap);
+    run_test_case("test_graph_capture", test_graph_capture, health, cheap);
+    run_test_case("test_late_interaction_resume", test_late_interaction_resume, health, cheap);
+    run_test_case("test_choices_replay", test_choices_replay, health, cheap);
+    run_test_case("test_spectrum_spike", test_spectrum_spike, health, cheap);
+    run_test_case("test_spectrum_world", test_spectrum_world, health, wide, cheap);
+    run_test_case(R"(test_base_conformance("tokens"))", test_base_conformance, health, "tokens",
+                  test_geometry_(false, test_run.settings.seed), wide);
+    run_test_case(R"(test_base_conformance("omni"))", test_base_conformance, health, "omni",
+                  test_geometry_(true, test_run.settings.seed), wide);
+    mixture_sweep(health, wide, cheap);
+    return finish_test_run();
 }

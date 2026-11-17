@@ -1213,10 +1213,11 @@ mod tests {
 
     use super::*;
     use crate::model::Model;
+    use crate::testing;
     use crate::types::{Executor, Mood};
 
-    fn model() -> Result<Model> {
-        Model::load_ram_buffer(&crate::model::tests::checkpoint())
+    fn model() -> Model {
+        Model::load_ram_buffer(&testing::checkpoint()).unwrap()
     }
 
     /// CRC-32 of `bytes`, as PNG chunks carry it.
@@ -1278,15 +1279,10 @@ mod tests {
         .concat()
     }
 
-    /// One executor per test, since an executor runs one call at a time.
-    fn executor() -> Result<Executor> {
-        Executor::for_ram(&[], None, 1)
-    }
-
     /// The rows an embeddings surface holds, copied out of the arena.
-    fn embeddings_of(encoded: &Encoded<'_>) -> Result<Vec<f32>> {
-        let embeddings = encoded.embeddings.as_ref().ok_or(fail(Status::Internal, "no embeddings were kept"))?;
-        Ok(embeddings.values::<f32>()?.to_vec())
+    fn embeddings_of(encoded: &Encoded<'_>) -> Vec<f32> {
+        let embeddings = encoded.embeddings.as_ref().expect("no embeddings were kept");
+        embeddings.values::<f32>().unwrap().to_vec()
     }
 
     #[test]
@@ -1301,47 +1297,50 @@ mod tests {
 
     /// One embedding per item, one state per byte, and the same rows from every receiver.
     #[test]
-    fn texts_land_one_embedding_per_item_and_one_state_per_byte() -> Result<()> {
-        let model = model()?;
-        let dimensions = model.describe()?.dimensions;
+    fn texts_land_one_embedding_per_item_and_one_state_per_byte() {
+        let model = model();
+        let dimensions = model.describe().unwrap().dimensions;
         let texts = ["a caption", "", "another, longer caption"];
-        let mut arena = Arena::new()?;
+        let mut arena = Arena::new().unwrap();
         let mut stats = TextEncodeStats::default();
         let config = TextEncodeConfig { stats: Some(&mut stats), ..TextEncodeConfig::from(Scalar::F32) };
-        let encoded = model.text_encode(&texts, Outputs::EMBEDDINGS | Outputs::STATES, config, &mut arena)?;
+        let encoded = model.text_encode(&texts, Outputs::EMBEDDINGS | Outputs::STATES, config, &mut arena).unwrap();
 
-        let embeddings = encoded.embeddings.as_ref().ok_or(fail(Status::Internal, "no embeddings"))?;
+        let embeddings = encoded.embeddings.as_ref().expect("no embeddings");
         assert_eq!((embeddings.count(), embeddings.columns()), (texts.len(), dimensions));
         assert_eq!(embeddings.scalar(), Some(Scalar::F32));
-        assert_eq!(embeddings.values::<f32>()?.len(), texts.len() * dimensions);
-        assert_eq!(embeddings.as_bytes()?.len(), texts.len() * embeddings.stride());
+        assert_eq!(embeddings.values::<f32>().unwrap().len(), texts.len() * dimensions);
+        assert_eq!(embeddings.as_bytes().unwrap().len(), texts.len() * embeddings.stride());
         assert_eq!(embeddings.values::<f64>().unwrap_err().status, Status::InvalidArgument);
 
-        let states = encoded.states.as_ref().ok_or(fail(Status::Internal, "no states"))?;
-        assert_eq!(states.offsets()?, [0, 9, 9, 32]);
-        assert_eq!(states.rows()?.count(), 32);
-        assert_eq!(states.item(1)?.count(), 0);
-        assert_eq!(states.item(2)?.values::<f32>()?, &states.rows()?.values::<f32>()?[9 * dimensions..]);
+        let states = encoded.states.as_ref().expect("no states");
+        assert_eq!(states.offsets().unwrap(), [0, 9, 9, 32]);
+        assert_eq!(states.rows().unwrap().count(), 32);
+        assert_eq!(states.item(1).unwrap().count(), 0);
+        assert_eq!(
+            states.item(2).unwrap().values::<f32>().unwrap(),
+            &states.rows().unwrap().values::<f32>().unwrap()[9 * dimensions..]
+        );
         assert_eq!(states.item(3).err().map(|error| error.status), Some(Status::InvalidArgument));
-        let local = embeddings_of(&encoded)?;
+        let local = embeddings_of(&encoded);
         assert_eq!((stats.truncated, stats.tokens), (0, 32));
 
-        let executor = executor()?;
-        let blocking = model.on(&executor).text_encode(texts, Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
-        assert_eq!(embeddings_of(&blocking)?, local);
+        let executor = testing::executor();
+        let blocking = model.on(&executor).text_encode(texts, Outputs::EMBEDDINGS, Scalar::F32, &mut arena).unwrap();
+        assert_eq!(embeddings_of(&blocking), local);
         let texts: Vec<String> = texts.iter().map(|text| text.to_string()).collect();
-        let deferred = model.deferred(&executor).text_encode(texts, Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
-        assert_eq!(embeddings_of(&deferred.wait()?)?, local);
-        Ok(())
+        let deferred =
+            model.deferred(&executor).text_encode(texts, Outputs::EMBEDDINGS, Scalar::F32, &mut arena).unwrap();
+        assert_eq!(embeddings_of(&deferred.wait().unwrap()), local);
     }
 
     /// Token vectors share the states' offsets and have unit length, or a model without a token
     /// head refuses them.
     #[test]
-    fn token_vectors_follow_the_states_or_are_refused() -> Result<()> {
-        let model = model()?;
-        let token_width = model.describe()?.token_width;
-        let mut arena = Arena::new()?;
+    fn token_vectors_follow_the_states_or_are_refused() {
+        let model = model();
+        let token_width = model.describe().unwrap().token_width;
+        let mut arena = Arena::new().unwrap();
         let encoded = model.text_encode(
             &["query: uform", "a"],
             Outputs::STATES | Outputs::TOKEN_VECTORS,
@@ -1350,106 +1349,96 @@ mod tests {
         );
         if token_width == 0 {
             assert_eq!(encoded.err().map(|error| error.status), Some(Status::Unsupported));
-            return Ok(());
+            return testing::skipped("needs a checkpoint with a token head");
         }
-        let encoded = encoded?;
-        let states = encoded.states.ok_or(fail(Status::Internal, "no states"))?;
-        let vectors = encoded.token_vectors.ok_or(fail(Status::Internal, "no token vectors"))?;
-        assert_eq!(vectors.offsets()?, states.offsets()?);
-        let rows = vectors.rows()?;
+        let encoded = encoded.unwrap();
+        let states = encoded.states.expect("no states");
+        let vectors = encoded.token_vectors.expect("no token vectors");
+        assert_eq!(vectors.offsets().unwrap(), states.offsets().unwrap());
+        let rows = vectors.rows().unwrap();
         assert_eq!(rows.columns(), token_width);
-        for vector in rows.values::<f32>()?.chunks(token_width) {
+        for vector in rows.values::<f32>().unwrap().chunks(token_width) {
             let squares: f32 = vector.iter().map(|value| value * value).sum();
             assert!((0.98..1.02).contains(&squares), "every token vector has unit length");
         }
-        Ok(())
     }
 
     /// Each item's probabilities pair with its choices and sum to one, or a model without the byte
     /// decoder refuses them.
     #[test]
-    fn choices_sum_to_one_or_are_refused() -> Result<()> {
-        let model = model()?;
-        let groups = model.describe()?.choice_temperature_groups;
-        let mut arena = Arena::new()?;
+    fn choices_sum_to_one_or_are_refused() {
+        let model = model();
+        let groups = model.describe().unwrap().choice_temperature_groups;
+        let mut arena = Arena::new().unwrap();
         let texts = ["keep this candidate?", "expand which neighbour?"];
         let choices = ["yn", "ABCD"];
         let probabilities = model.text_choose(&texts, &choices, TextChooseConfig::default(), &mut arena);
         if groups == 0 {
             assert_eq!(probabilities.err().map(|error| error.status), Some(Status::Unsupported));
-            return Ok(());
+            return testing::skipped("needs a checkpoint with a byte decoder");
         }
-        let probabilities = probabilities?;
-        assert_eq!(probabilities.offsets()?, [0, 2, 6]);
+        let probabilities = probabilities.unwrap();
+        assert_eq!(probabilities.offsets().unwrap(), [0, 2, 6]);
         for item in 0..texts.len() {
-            let sum: f32 = probabilities.item::<f32>(item)?.iter().sum();
+            let sum: f32 = probabilities.item::<f32>(item).unwrap().iter().sum();
             assert!((0.999..1.001).contains(&sum), "each item's probabilities sum to one");
         }
         let past = TextChooseConfig { temperature_groups: &[0, groups as u32], ..TextChooseConfig::default() };
         let refused = model.text_choose(&texts, &choices, past, &mut arena);
         assert_eq!(refused.err().map(|error| error.status), Some(Status::InvalidArgument));
-        Ok(())
     }
 
     #[test]
-    fn states_alone_skip_the_embeddings() -> Result<()> {
-        let model = model()?;
-        let mut arena = Arena::new()?;
-        let encoded = model.text_encode(&["uform"], Outputs::STATES, Scalar::BF16, &mut arena)?;
+    fn states_alone_skip_the_embeddings() {
+        let model = model();
+        let mut arena = Arena::new().unwrap();
+        let encoded = model.text_encode(&["uform"], Outputs::STATES, Scalar::BF16, &mut arena).unwrap();
         assert!(encoded.embeddings.is_none());
-        let states = encoded.states.ok_or(fail(Status::Internal, "no states"))?;
-        assert_eq!(states.rows()?.scalar(), Some(Scalar::BF16));
-        assert_eq!(states.offsets()?, [0, 5]);
-        Ok(())
+        let states = encoded.states.expect("no states");
+        assert_eq!(states.rows().unwrap().scalar(), Some(Scalar::BF16));
+        assert_eq!(states.offsets().unwrap(), [0, 5]);
     }
 
     /// A borrowed tape reaches the library as it is, and lands what the same items gathered land.
     #[test]
-    fn borrowed_tapes_match_gathered_items() -> Result<()> {
-        let model = model()?;
-        let (mut gathered, mut borrowed) = (Arena::new()?, Arena::new()?);
+    fn borrowed_tapes_match_gathered_items() {
+        let model = model();
+        let (mut gathered, mut borrowed) = (Arena::new().unwrap(), Arena::new().unwrap());
         let image = png();
         let items = vec![image.clone(), image.clone()];
         let joined = items.concat();
         let tape = (joined.as_slice(), [0usize, image.len(), 2 * image.len()]);
-        let from_items = model.image_encode(&items, Outputs::EMBEDDINGS, Scalar::F32, &mut gathered)?;
-        let from_tape = model.image_encode(tape, Outputs::EMBEDDINGS, Scalar::F32, &mut borrowed)?;
-        assert_eq!(embeddings_of(&from_items)?, embeddings_of(&from_tape)?);
+        let from_items = model.image_encode(&items, Outputs::EMBEDDINGS, Scalar::F32, &mut gathered).unwrap();
+        let from_tape = model.image_encode(tape, Outputs::EMBEDDINGS, Scalar::F32, &mut borrowed).unwrap();
+        assert_eq!(embeddings_of(&from_items), embeddings_of(&from_tape));
 
         let past_the_end = (b"first".as_slice(), [0usize, 6]);
         let refusal = model.video_encode(past_the_end, Outputs::EMBEDDINGS, Scalar::F32, &mut borrowed);
         assert_eq!(refusal.err().map(|error| error.status), Some(Status::ShapeMismatch));
-        Ok(())
     }
 
     #[test]
-    fn texts_past_the_context_are_truncated() -> Result<()> {
-        let model = model()?;
-        let context = model.describe()?.context;
+    fn texts_past_the_context_are_truncated() {
+        let model = model();
+        let context = model.describe().unwrap().context;
         let mut stats = TextEncodeStats::default();
         let config = TextEncodeConfig { stats: Some(&mut stats), ..TextEncodeConfig::from(Scalar::F32) };
         let long = "u".repeat(context + 7);
-        let mut arena = Arena::new()?;
-        let encoded = model.text_encode(&[long.as_str(), "short"], Outputs::STATES, config, &mut arena)?;
-        let offsets = encoded.states.ok_or(fail(Status::Internal, "no states"))?.offsets()?.to_vec();
+        let mut arena = Arena::new().unwrap();
+        let encoded = model.text_encode(&[long.as_str(), "short"], Outputs::STATES, config, &mut arena).unwrap();
+        let offsets = encoded.states.expect("no states").offsets().unwrap().to_vec();
         assert_eq!(offsets, [0, context, context + 5]);
         assert_eq!((stats.truncated, stats.tokens), (1, context + 5));
-        Ok(())
     }
 
     #[test]
-    fn pixels_need_one_height_and_width_per_item() -> Result<()> {
-        let model = model()?;
-        let mut arena = Arena::new()?;
+    fn pixels_need_one_height_and_width_per_item() {
+        let model = model();
+        let mut arena = Arena::new().unwrap();
         let image = vec![0u8; 16 * 8 * 3];
-        let encoded = model.image_encode_pixels(
-            [image.as_slice()],
-            [16u32],
-            [8u32],
-            Outputs::EMBEDDINGS,
-            Scalar::F16,
-            &mut arena,
-        )?;
+        let encoded = model
+            .image_encode_pixels([image.as_slice()], [16u32], [8u32], Outputs::EMBEDDINGS, Scalar::F16, &mut arena)
+            .unwrap();
         assert_eq!(encoded.embeddings.map(|rows| rows.count()), Some(1));
 
         let unpaired =
@@ -1458,69 +1447,62 @@ mod tests {
         let misshapen =
             model.image_encode_pixels([&image], [16u32], [9u32], Outputs::EMBEDDINGS, Scalar::F16, &mut arena);
         assert_eq!(misshapen.err().map(|error| error.status), Some(Status::ShapeMismatch));
-        Ok(())
     }
 
     #[test]
-    fn samples_and_recordings_encode_through_their_own_verbs() -> Result<()> {
-        let model = model()?;
-        let mut arena = Arena::new()?;
+    fn samples_and_recordings_encode_through_their_own_verbs() {
+        let model = model();
+        let mut arena = Arena::new().unwrap();
         let samples = vec![vec![0.25f32; 1000], vec![-0.5f32; 10]];
         let mut stats = AudioEncodeStats::default();
         let config =
             AudioEncodeSamplesConfig { stats: Some(&mut stats), ..AudioEncodeSamplesConfig::from(Scalar::F32) };
-        let encoded = model.audio_encode_samples(&samples, 16_000, Outputs::EMBEDDINGS, config, &mut arena)?;
+        let encoded = model.audio_encode_samples(&samples, 16_000, Outputs::EMBEDDINGS, config, &mut arena).unwrap();
         assert_eq!(encoded.embeddings.map(|rows| rows.count()), Some(2));
         assert!(stats.tokens >= 2, "every recording spans a frame");
 
         let recording = wav();
         let recordings = [recording.as_slice()];
-        let encoded = model.audio_encode(recordings, Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
+        let encoded = model.audio_encode(recordings, Outputs::EMBEDDINGS, Scalar::F32, &mut arena).unwrap();
         assert_eq!(encoded.embeddings.map(|rows| rows.count()), Some(1));
-        Ok(())
     }
 
     #[test]
-    fn a_stopping_handler_cancels_the_call() -> Result<()> {
-        let model = model()?;
-        let mut arena = Arena::new()?;
+    fn a_stopping_handler_cancels_the_call() {
+        let model = model();
+        let mut arena = Arena::new().unwrap();
         let mut stop = |_, _| ControlFlow::Break(());
         let config = TextEncodeConfig { progress: Some(&mut stop as _), ..TextEncodeConfig::from(Scalar::F32) };
         let stopped = model.text_encode(&["a", "b"], Outputs::EMBEDDINGS, config, &mut arena);
         assert_eq!(stopped.err().map(|error| error.status), Some(Status::Cancelled));
-        Ok(())
     }
 
     /// An awaited call stays pending until a poll sees it final, then answers what a blocking one
     /// does, and a poll past that refuses rather than answering twice.
     #[test]
-    fn an_awaited_call_answers_once_final() -> Result<()> {
-        let model = model()?;
-        let executor = executor()?;
-        let mut arena = Arena::new_in(&executor)?;
+    fn an_awaited_call_answers_once_final() {
+        let model = model();
+        let executor = testing::executor();
+        let mut arena = Arena::new_in(&executor).unwrap();
         let call =
-            model.deferred(&executor).text_encode(vec!["uform"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
+            model.deferred(&executor).text_encode(vec!["uform"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena).unwrap();
         let mut awaited = pin!(call.into_future());
+        let encoded = testing::block_on(awaited.as_mut());
+        let blocking = embeddings_of(
+            &model.text_encode(&["uform"], Outputs::EMBEDDINGS, Scalar::F32, &mut Arena::new().unwrap()).unwrap(),
+        );
+        assert_eq!(embeddings_of(&encoded.unwrap()), blocking);
         let mut context = Context::from_waker(Waker::noop());
-        let encoded = loop {
-            if let Poll::Ready(encoded) = awaited.as_mut().poll(&mut context) {
-                break encoded;
-            }
-        };
-        let blocking =
-            embeddings_of(&model.text_encode(&["uform"], Outputs::EMBEDDINGS, Scalar::F32, &mut Arena::new()?)?)?;
-        assert_eq!(embeddings_of(&encoded?)?, blocking);
         assert!(matches!(awaited.as_mut().poll(&mut context), Poll::Ready(Err(_))));
-        Ok(())
     }
 
     /// While a deferred call holds its executor at a gate in its handler, a blocking call there
     /// fails `Contended` without running. Where the call ran at submission, it is final on return.
     #[test]
-    fn a_held_executor_refuses_other_calls() -> Result<()> {
-        let model = model()?;
-        let executor = executor()?;
-        let mut arena = Arena::new_in(&executor)?;
+    fn a_held_executor_refuses_other_calls() {
+        let model = model();
+        let executor = testing::executor();
+        let mut arena = Arena::new_in(&executor).unwrap();
         let (reached, opened) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
         let submitter = std::thread::current().id();
         let gate = {
@@ -1541,7 +1523,8 @@ mod tests {
             progress_steps: 0,
             stats: Some(TextEncodeStats::default()),
         };
-        let call = model.deferred(&executor).text_encode(vec!["uform"], Outputs::EMBEDDINGS, config, &mut arena)?;
+        let call =
+            model.deferred(&executor).text_encode(vec!["uform"], Outputs::EMBEDDINGS, config, &mut arena).unwrap();
         if call.status() == Err(Status::Deferred) {
             while !reached.load(Ordering::Acquire) {}
             let refused = model.on(&executor).describe();
@@ -1553,36 +1536,36 @@ mod tests {
         assert!(config.progress.is_some(), "the call hands its handler back");
         assert_eq!(config.stats.map(|stats| stats.tokens), Some(5));
         assert!(model.on(&executor).describe().is_ok(), "a final call gives its executor back");
-        Ok(())
     }
 
     /// Dropping an unfinished call waits for it, and a leaked one still ends on the executor's own
     /// thread, giving its arena back once a drain sees the executor free.
     #[test]
-    fn unfinished_calls_drop_by_waiting_and_leaked_ones_keep_their_arena() -> Result<()> {
-        let model = model()?;
-        let executor = executor()?;
-        let mut arena = Arena::new_in(&executor)?;
-        let call = model.deferred(&executor).text_encode(vec!["a"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
+    fn unfinished_calls_drop_by_waiting_and_leaked_ones_keep_their_arena() {
+        let model = model();
+        let executor = testing::executor();
+        let mut arena = Arena::new_in(&executor).unwrap();
+        let call =
+            model.deferred(&executor).text_encode(vec!["a"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena).unwrap();
         drop(call);
         assert!(model.text_encode(&["b"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena).is_ok());
 
-        let leaked = model.deferred(&executor).text_encode(vec!["c"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
+        let leaked =
+            model.deferred(&executor).text_encode(vec!["c"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena).unwrap();
         core::mem::forget(leaked);
-        executor.drain(Mood::Parked)?;
+        executor.drain(Mood::Parked).unwrap();
         assert!(model.text_encode(&["d"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena).is_ok());
-        Ok(())
     }
 
     /// The Quickstart of `rust/README.md`, line for line, but loading the suite's checkpoint
     /// bytes and photo in place of `model.safetensors` and `cat.png`, and checking the caption
     /// it prints.
     #[test]
-    fn the_quickstart_names_the_caption_closest_to_the_photo() -> core::result::Result<(), Box<dyn std::error::Error>> {
+    fn readme_quickstart() -> core::result::Result<(), Box<dyn std::error::Error>> {
         let executor = Executor::for_ram(&[], None, 0)?;
         let mut texts_arena = Arena::new_in(&executor)?;
         let mut images_arena = Arena::new_in(&executor)?;
-        let model = model()?;
+        let model = model();
 
         let captions = ["a cat on a mat", "a sunrise over the bay"];
         let photo = png();

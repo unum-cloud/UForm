@@ -1,7 +1,10 @@
 """The six encode verbs: outputs selection, shapes, stats, tapes, arenas, deferred calls and progress.
 
-Run with `uv run pytest test/python/encode.py`. Texts are tokenizer-free, a byte per token, so their shapes
-follow from the inputs and the model's own description; media shapes are only checked for consistency.
+Texts are tokenizer-free, a byte per token, so their shapes follow from the inputs and the model's own
+description; media shapes are only checked for consistency.
+
+Run:
+    uv run pytest test/python/encode.py
 
 File: test/python/encode.py
 Author: Ash Vardanian
@@ -10,29 +13,15 @@ Date: October 18, 2026
 
 import asyncio
 import io
-import struct
-import sys
 import wave
-import zlib
 from array import array
-from typing import Any
 
 import pytest
+from base import png
 
 import uform
 
 TEXTS = ["first document", "the second", ""]
-
-
-def png(side: int = 8) -> bytes:
-    """A valid `side` x `side` RGB PNG of a gradient."""
-    rows = b"".join(b"\0" + bytes((row * 32 + byte * 8) & 0xFF for byte in range(side * 3)) for row in range(side))
-
-    def chunk(kind: bytes, data: bytes) -> bytes:
-        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
-
-    header = struct.pack(">IIBBBBB", side, side, 8, 2, 0, 0, 0)
-    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b"")
 
 
 def wav(samples: int = 1600) -> bytes:
@@ -46,17 +35,19 @@ def wav(samples: int = 1600) -> bytes:
     return buffer.getvalue()
 
 
-def test_embeddings_alone_by_default(model: uform.Model, arena: uform.Arena):
+def test_embeddings_are_kept_alone_by_default(model: uform.Model, arena: uform.Arena):
     """Without `outputs`, a call keeps the pooled embeddings alone, one row of `dimensions` per item."""
     dimensions = model.describe().dimensions
     embeddings, states, token_vectors = model.text_encode(TEXTS, arena)
-    assert states is None and token_vectors is None
+    assert states is None
+    assert token_vectors is None
     view = memoryview(embeddings)
-    assert view.shape == (len(TEXTS), dimensions) and view.format == "f"
+    assert view.shape == (len(TEXTS), dimensions)
+    assert view.format == "f"
     assert len(embeddings) == len(TEXTS)
 
 
-def test_states_alone(model: uform.Model, arena: uform.Arena):
+def test_states_alone_skip_the_embeddings(model: uform.Model, arena: uform.Arena):
     """`Outputs.STATES` keeps one row per byte, split by `count + 1` offsets, and skips the embeddings."""
     encoded = model.text_encode(TEXTS, arena, outputs=uform.Outputs.STATES)
     assert encoded.embeddings is None
@@ -65,14 +56,14 @@ def test_states_alone(model: uform.Model, arena: uform.Arena):
     assert memoryview(encoded.states).shape == (24, model.describe().dimensions)
 
 
-def test_both_outputs_from_one_forward(model: uform.Model, arena: uform.Arena):
+def test_both_outputs_land_from_one_forward(model: uform.Model, arena: uform.Arena):
     """Both flags keep both surfaces, landing in the one arena."""
     encoded = model.text_encode(TEXTS, arena, outputs=uform.Outputs.EMBEDDINGS | uform.Outputs.STATES)
     assert len(encoded.embeddings) == len(TEXTS)
     assert len(encoded.states) == sum(len(text) for text in TEXTS)
 
 
-def test_token_vectors_follow_the_token_head(model: uform.Model, arena: uform.Arena):
+def test_token_vectors_follow_the_states_or_are_refused(model: uform.Model, arena: uform.Arena):
     """Token vectors are unit rows of `token_width` on the states' offsets, and a model without the head refuses them."""
     token_width = model.describe().token_width
     outputs = uform.Outputs.STATES | uform.Outputs.TOKEN_VECTORS
@@ -83,11 +74,12 @@ def test_token_vectors_follow_the_token_head(model: uform.Model, arena: uform.Ar
     encoded = model.text_encode(TEXTS, arena, outputs=outputs)
     assert memoryview(encoded.token_vectors.offsets).tolist() == memoryview(encoded.states.offsets).tolist()
     rows = memoryview(encoded.token_vectors).tolist()
-    assert len(rows) == len(encoded.states) and all(len(row) == token_width for row in rows)
+    assert len(rows) == len(encoded.states)
+    assert all(len(row) == token_width for row in rows)
     assert all(abs(sum(value * value for value in row) - 1) < 0.02 for row in rows)
 
 
-def test_choices_sum_to_one_per_text(model: uform.Model, arena: uform.Arena):
+def test_choices_sum_to_one_or_are_refused(model: uform.Model, arena: uform.Arena):
     """Each text's probabilities follow its choices and sum to one; a model without the byte decoder refuses."""
     texts, choices = ["keep or drop? ", "pick a neighbour: ", "stop? "], ["yn", "ABC", "s"]
     groups = model.describe().choice_temperature_groups
@@ -98,7 +90,8 @@ def test_choices_sum_to_one_per_text(model: uform.Model, arena: uform.Arena):
     stats = uform.TextEncodeStats()
     probabilities = model.text_choose(texts, choices, arena, temperature_groups=[0, 0, 0], stats=stats)
     offsets, values = memoryview(probabilities.offsets).tolist(), memoryview(probabilities).tolist()
-    assert offsets == [0, 2, 5, 6] and stats.truncated == 0
+    assert offsets == [0, 2, 5, 6]
+    assert stats.truncated == 0
     assert all(abs(sum(values[begin:end]) - 1) < 1e-3 for begin, end in zip(offsets, offsets[1:]))
     with pytest.raises(uform.InvalidArgumentError):
         model.text_choose(texts, choices, arena, temperature_groups=[0, groups, 0])
@@ -124,15 +117,18 @@ def test_naming_no_output_is_refused(model: uform.Model, arena: uform.Arena):
     ("scalar", "format", "item_bytes"),
     [(uform.Scalar.F32, "f", 4), (uform.Scalar.F16, "e", 2), (uform.Scalar.BF16, "B", 1)],
 )
-def test_outputs_scalar(model: uform.Model, arena: uform.Arena, scalar: uform.Scalar, format: str, item_bytes: int):
+def test_outputs_scalar_picks_the_exported_format(
+    model: uform.Model, arena: uform.Arena, scalar: uform.Scalar, format: str, item_bytes: int
+):
     """Formattable scalars export a (count, dimensions) matrix, and `bf16` a (count, row_bytes) run of bytes."""
     dimensions = model.describe().dimensions
     view = memoryview(model.text_encode(TEXTS, arena, outputs_scalar=scalar).embeddings)
-    assert view.format == format and view.itemsize == item_bytes
+    assert view.format == format
+    assert view.itemsize == item_bytes
     assert view.nbytes == len(TEXTS) * dimensions * (2 if scalar != uform.Scalar.F32 else 4)
 
 
-def test_truncation_is_counted(model: uform.Model, arena: uform.Arena):
+def test_texts_past_the_context_are_truncated(model: uform.Model, arena: uform.Arena):
     """A text past the context keeps its first `context` tokens, and the stats count it as truncated."""
     context = model.describe().context
     stats = uform.TextEncodeStats()
@@ -196,7 +192,8 @@ def test_an_arena_serves_one_call_at_a_time(model: uform.Model, executor: uform.
         return True
 
     assert len(model.on(executor).text_encode(TEXTS, arena, progress=contend).embeddings) == len(TEXTS)
-    assert refused and all(error.status is uform.Status.CONTENDED for error in refused)
+    assert refused
+    assert all(error.status is uform.Status.CONTENDED for error in refused)
     model.text_encode(TEXTS, arena)
 
 
@@ -207,7 +204,7 @@ def test_deferred_matches_blocking(model: uform.Model, executor: uform.Executor)
     assert bytes(memoryview(call.wait().embeddings)) == blocking
 
 
-def test_deferred_awaits(model: uform.Model, executor: uform.Executor):
+def test_deferred_encodings_await(model: uform.Model, executor: uform.Executor):
     """`await` polls the call between turns of the event loop, which stays free for other coroutines."""
 
     async def encode() -> uform.Encoded:
@@ -234,14 +231,15 @@ def test_progress_reports_and_cancels(model: uform.Model, arena: uform.Arena):
     """Reports never decrease and end at the total; a handler answering False raises `CancelledError`."""
     reports: list[tuple[int, int]] = []
     model.text_encode(["a"] * 8, arena, progress=lambda completed, total: reports.append((completed, total)))
-    assert reports and reports[-1] == (8, 8)
+    assert reports
+    assert reports[-1] == (8, 8)
     assert [completed for completed, _ in reports] == sorted(completed for completed, _ in reports)
     with pytest.raises(uform.CancelledError):
         model.text_encode(["a"] * 8, arena, progress=lambda completed, total: completed < 4, progress_steps=4)
 
 
 def test_progress_cancels_a_deferred_call(
-    model: uform.Model, executor: uform.Executor, arena: uform.Arena, monkeypatch: pytest.MonkeyPatch
+    model: uform.Model, executor: uform.Executor, arena: uform.Arena, unraisable: list[object]
 ):
     """A deferred call's handler runs on the executor's thread and reports its exception, then cancels.
 
@@ -251,16 +249,15 @@ def test_progress_cancels_a_deferred_call(
     def explode(completed: int, total: int) -> bool:
         raise LookupError("from the handler")
 
-    unraised: list[Any] = []
-    monkeypatch.setattr(sys, "unraisablehook", unraised.append)
     call = model.deferred(executor).text_encode(TEXTS, arena, progress=explode)
     with pytest.raises(uform.CancelledError):
         call.wait()
-    assert len(unraised) == 1 and isinstance(unraised[0].exc_value, LookupError)
+    assert len(unraisable) == 1
+    assert isinstance(unraisable[0].exc_value, LookupError)
     model.text_encode(TEXTS, arena)
 
 
-def test_image_encode_pixels(model: uform.Model, arena: uform.Arena):
+def test_pixels_encode_with_their_tokens_split_by_offsets(model: uform.Model, arena: uform.Arena):
     """Pixels arrive as [height, width, 3] uint8 buffers, and their tokens split by offsets."""
     images = [
         memoryview(bytearray(17 * 9 * 3)).cast("B", (17, 9, 3)),
@@ -272,7 +269,8 @@ def test_image_encode_pixels(model: uform.Model, arena: uform.Arena):
     )
     assert len(encoded.embeddings) == 2
     offsets = memoryview(encoded.states.offsets).tolist()
-    assert len(offsets) == 3 and offsets[-1] == len(encoded.states) == stats.tokens
+    assert len(offsets) == 3
+    assert offsets[-1] == len(encoded.states) == stats.tokens
 
 
 def test_image_encode_pixels_refuses_other_shapes(model: uform.Model, arena: uform.Arena):
@@ -284,7 +282,7 @@ def test_image_encode_pixels_refuses_other_shapes(model: uform.Model, arena: ufo
 
 
 @pytest.mark.parametrize(("verb", "file"), [("image_encode", png()), ("audio_encode", wav())])
-def test_encoded_files(model: uform.Model, arena: uform.Arena, verb: str, file: bytes):
+def test_file_verbs_take_any_bytes_like_entry(model: uform.Model, arena: uform.Arena, verb: str, file: bytes):
     """Every file verb takes bytes-like entries and lands one embedding per file."""
     files = [file, bytearray(file), memoryview(file)]
     encoded = getattr(model, verb)(files, arena, outputs=uform.Outputs.EMBEDDINGS | uform.Outputs.STATES)
@@ -302,7 +300,7 @@ def test_an_undecodable_file_fails_whole(model: uform.Model, arena: uform.Arena)
     assert len(encoded.embeddings) == 1
 
 
-def test_audio_encode_samples(model: uform.Model, arena: uform.Arena):
+def test_samples_encode_from_buffers_or_a_tape_pair(model: uform.Model, arena: uform.Arena):
     """Decoded samples arrive as 1-D float32 buffers, or as a (data, offsets) pair counted in samples."""
     recordings = [array("f", [0.0] * 1000), array("f", [0.5] * 300)]
     gathered = bytes(memoryview(model.audio_encode_samples(recordings, 16000, arena).embeddings))

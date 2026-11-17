@@ -1826,6 +1826,7 @@ impl<Verb: Calling> Future for Wait<'_, Verb> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing;
 
     #[test]
     fn scalar_kinds_round_trip_through_their_tags() {
@@ -1904,17 +1905,16 @@ mod tests {
     }
 
     #[test]
-    fn separate_items_gather_into_one_tape() -> Result<()> {
+    fn separate_items_gather_into_one_tape() {
         let mut gathered = Gathered::default();
-        let batch = TapeView::<u8>::tape(&["", "uform", "ab"], &mut gathered)?;
+        let batch = TapeView::<u8>::tape(&["", "uform", "ab"], &mut gathered).unwrap();
         assert_eq!(batch.count, 3);
         assert_eq!(gathered.offsets, [0, 0, 5, 7]);
         assert_eq!(gathered.data, b"uformab");
         assert_eq!(batch.tape.scalar, Scalar::U8 as i32);
 
-        let batch = TapeView::<f32>::tape(&vec![vec![0.5f32; 3], vec![]], &mut Gathered::default())?;
+        let batch = TapeView::<f32>::tape(&vec![vec![0.5f32; 3], vec![]], &mut Gathered::default()).unwrap();
         assert_eq!((batch.count, batch.tape.scalar), (2, Scalar::F32 as i32));
-        Ok(())
     }
 
     /// A borrowed tape reaches the library as it is, so offsets that would read past its data are
@@ -1941,30 +1941,29 @@ mod tests {
 
     /// An arena lives where the executor that made it computes, and the host reads only host pages.
     #[test]
-    fn arenas_live_where_their_executor_computes() -> Result<()> {
-        let local = Arena::new()?;
+    fn arenas_live_where_their_executor_computes() {
+        let local = Arena::new().unwrap();
         let host = ArenaDescription { residency: Residency::Ram, device: None };
-        assert_eq!(local.describe()?, host);
+        assert_eq!(local.describe().unwrap(), host);
         assert!(local.host().is_ok());
 
-        let executor = Executor::for_ram(&[], None, 1)?;
-        let placed = Arena::new_in(&executor)?;
+        let executor = testing::executor();
+        let placed = Arena::new_in(&executor).unwrap();
         drop(executor);
-        assert_eq!(placed.describe()?, host, "an arena outlives its executor");
+        assert_eq!(placed.describe().unwrap(), host, "an arena outlives its executor");
 
         // A GPU arena frees on its executor's first stream, so it keeps the executor past its drop.
         let Ok(gpu) = (unsafe { Executor::for_vram(&[0], None, &[], None, &[], 0) }) else {
-            return Ok(());
+            return testing::skipped("no GPU device");
         };
-        let device = Arena::new_in(&gpu)?;
-        assert_eq!(device.describe()?, ArenaDescription { residency: Residency::Vram, device: Some(0) });
+        let device = Arena::new_in(&gpu).unwrap();
+        assert_eq!(device.describe().unwrap(), ArenaDescription { residency: Residency::Vram, device: Some(0) });
         let share = Arc::downgrade(&gpu.share);
         drop(gpu);
         assert!(share.upgrade().is_some(), "a GPU arena holds its executor");
         assert_eq!(device.host().unwrap_err().status, Status::Device);
         drop(device);
         assert!(share.upgrade().is_none(), "the last GPU arena frees its executor");
-        Ok(())
     }
 
     /// A pool that lends no threads and streams that do not pair with the devices are refused.
@@ -1996,14 +1995,13 @@ mod tests {
 
     /// A machine without GPUs, or a build without their vendors, lists none and still succeeds.
     #[test]
-    fn listed_devices_never_outnumber_their_count() -> Result<()> {
+    fn listed_devices_never_outnumber_their_count() {
         let mut devices = [GPUDevice::default(); 4];
-        let count = gpu_devices(&mut devices)?;
-        assert_eq!(gpu_devices(&mut [])?, count);
+        let count = gpu_devices(&mut devices).unwrap();
+        assert_eq!(gpu_devices(&mut []).unwrap(), count);
         for device in &devices[..count.min(devices.len())] {
             assert!(device.vendor().is_some() && !device.name().is_empty(), "{device:?}");
         }
-        Ok(())
     }
 
     #[test]

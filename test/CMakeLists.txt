@@ -1,6 +1,6 @@
 # The host tower's suites: `uform_tiny_checkpoint` writes the seeded checkpoint once per `ctest` run as a fixture, which
 # the parity test here and the C tests in `c/` load. Every suite prints through {fmt} and reads the version and the
-# capabilities through the C interface. Labels sort the suites by what they need: `host` runs anywhere, `cuda` wants a
+# capabilities through the C interface. Labels sort the suites by what they need: `host` runs anywhere, `gpu` wants a
 # GPU, and `cluster` names the preflight every multi-node sbatch runs first.
 add_executable(uform_tiny_checkpoint tiny_checkpoint.cpp)
 target_link_libraries(uform_tiny_checkpoint PRIVATE fmt::fmt)
@@ -61,10 +61,10 @@ if (UFORM_BUILD_TRAIN)
         target_link_libraries(uform_test_${test_name_} PRIVATE fmt::fmt)
         target_include_directories(uform_test_${test_name_} PRIVATE "${PROJECT_SOURCE_DIR}/c")
         add_test(NAME uform_test_${test_name_} COMMAND uform_test_${test_name_})
-        set_tests_properties(uform_test_${test_name_} PROPERTIES LABELS cuda)
+        set_tests_properties(uform_test_${test_name_} PROPERTIES LABELS gpu)
         list(APPEND uform_bundled_files_ $<TARGET_FILE:uform_test_${test_name_}>)
     endforeach ()
-    set_tests_properties(uform_test_env PROPERTIES LABELS "cuda;cluster")
+    set_tests_properties(uform_test_env PROPERTIES LABELS "gpu;cluster")
     # The world relations, every process's slice against the single-process construction, on the host alone.
     add_executable(uform_test_relations relations.cpp)
     target_link_libraries(uform_test_relations PRIVATE uform::train fmt::fmt)
@@ -84,5 +84,5 @@ if (UFORM_BUILD_TRAIN)
     target_link_libraries(uform_test_gradients PRIVATE uform::train fmt::fmt)
     target_include_directories(uform_test_gradients PRIVATE "${PROJECT_SOURCE_DIR}/c")
     add_test(NAME uform_test_gradients COMMAND uform_test_gradients)
-    set_tests_properties(uform_test_gradients PROPERTIES LABELS cuda)
+    set_tests_properties(uform_test_gradients PROPERTIES LABELS gpu)
 endif ()

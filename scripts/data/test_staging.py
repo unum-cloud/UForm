@@ -1,8 +1,11 @@
 """Unit checks for the acquisition-layer sizing primitives: cap_shards, index-cap, budget allocator.
 
-Plain-script test (mirrors `test_mixtures.py`): `uv run scripts/data/test_staging.py` or `python3 ...`;
-exits non-zero on the first failed assertion. Pure stdlib — imports `acquire_shared` / `acquire_clips` /
-`acquire_manifest`, none of which pull a heavy dependency at import time.
+Imports `acquire_shared` / `acquire_clips` / `acquire_manifest`, none of which pull a heavy dependency at
+import time, so pytest is the one dependency beyond the standard library.
+
+Run:
+    uv run scripts/data/test_staging.py
+    python -m pytest scripts/data/test_staging.py
 
 File: scripts/data/test_staging.py
 Author: Ash Vardanian
@@ -11,15 +14,15 @@ Date: July 6, 2026
 
 # /// script
 # requires-python = ">=3.12"
-# dependencies = []
+# dependencies = ["pytest>=8"]
 # ///
 
 import math
-import os
 
 import acquire_clips
 import acquire_manifest
 import acquire_shared
+import pytest
 
 
 def test_cap_shards_leading_slice() -> None:
@@ -51,30 +54,24 @@ def test_cap_shards_matches_old_inline() -> None:
             assert acquire_shared.cap_shards(items, fraction, max_shards) == old(items, fraction, max_shards)
 
 
-def test_resolve_index_cap_precedence() -> None:
+def test_resolve_index_cap_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
     """`--index-cap` > `$UFORM_INDEX_CAP` > the dataset default; None stays None."""
-    os.environ.pop("UFORM_INDEX_CAP", None)
+    monkeypatch.delenv("UFORM_INDEX_CAP", raising=False)
     assert acquire_clips.resolve_index_cap(None, None) is None
     assert acquire_clips.resolve_index_cap(None, 200_000) == 200_000
     assert acquire_clips.resolve_index_cap(5, 200_000) == 5  # cli wins over default
-    os.environ["UFORM_INDEX_CAP"] = "1234"
-    try:
-        assert acquire_clips.resolve_index_cap(None, 200_000) == 1234  # env beats default
-        assert acquire_clips.resolve_index_cap(9, 200_000) == 9  # cli beats env
-    finally:
-        os.environ.pop("UFORM_INDEX_CAP", None)
+    monkeypatch.setenv("UFORM_INDEX_CAP", "1234")
+    assert acquire_clips.resolve_index_cap(None, 200_000) == 1234  # env beats default
+    assert acquire_clips.resolve_index_cap(9, 200_000) == 9  # cli beats env
 
 
-def test_resolve_budget_precedence() -> None:
+def test_resolve_budget_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
     """`--budget-gb` > `$UFORM_DATA_BUDGET_GB` (auto free-disk default not exercised here)."""
-    os.environ.pop("UFORM_DATA_BUDGET_GB", None)
+    monkeypatch.delenv("UFORM_DATA_BUDGET_GB", raising=False)
     assert acquire_manifest.resolve_budget_gigabytes(6000.0) == 6000.0
-    os.environ["UFORM_DATA_BUDGET_GB"] = "4321"
-    try:
-        assert acquire_manifest.resolve_budget_gigabytes(None) == 4321.0
-        assert acquire_manifest.resolve_budget_gigabytes(7000.0) == 7000.0  # cli beats env
-    finally:
-        os.environ.pop("UFORM_DATA_BUDGET_GB", None)
+    monkeypatch.setenv("UFORM_DATA_BUDGET_GB", "4321")
+    assert acquire_manifest.resolve_budget_gigabytes(None) == 4321.0
+    assert acquire_manifest.resolve_budget_gigabytes(7000.0) == 7000.0  # cli beats env
 
 
 def test_allocate_within_budget_and_full() -> None:
@@ -103,13 +100,15 @@ def test_derive_cap() -> None:
     """GB targets convert to the right `(cap_flag, value)`, clamped at full; always-full rows give None."""
     cc12m = next(r for r in acquire_manifest.STAGING_ROWS if r.dataset == "cc12m")
     flag, value = acquire_manifest.derive_cap(cc12m, cc12m.estimated_full_gigabytes / 2)
-    assert flag == "--max-shards" and int(value) == round(cc12m.full_units * 0.5)
+    assert flag == "--max-shards"
+    assert int(value) == round(cc12m.full_units * 0.5)
     _flag, value = acquire_manifest.derive_cap(cc12m, cc12m.estimated_full_gigabytes * 5)
     assert int(value) == cc12m.full_units  # target >= full clamps to all units
 
     pes2o = next(r for r in acquire_manifest.STAGING_ROWS if r.dataset == "pes2o")
     flag, value = acquire_manifest.derive_cap(pes2o, pes2o.estimated_full_gigabytes * 0.25)
-    assert flag == "--fraction" and abs(float(value) - 0.25) < 1e-3
+    assert flag == "--fraction"
+    assert abs(float(value) - 0.25) < 1e-3
 
     coco = next(r for r in acquire_manifest.STAGING_ROWS if r.dataset == "coco_captions")
     assert acquire_manifest.derive_cap(coco, 10.0) is None  # cap_flag None -> always-full
@@ -127,7 +126,8 @@ def test_resolved_download_command_injection() -> None:
 
     audioset = next(r for r in acquire_manifest.STAGING_ROWS if r.dataset == "audioset")
     acmd = audioset.resolved_download_command(targets["audioset"])
-    assert "--fraction" in acmd and 0.0 < float(acmd[acmd.index("--fraction") + 1]) <= 1.0
+    assert "--fraction" in acmd
+    assert 0.0 < float(acmd[acmd.index("--fraction") + 1]) <= 1.0
 
     coco = next(r for r in acquire_manifest.STAGING_ROWS if r.dataset == "coco_captions")
     assert coco.resolved_download_command(targets["coco_captions"]) == list(coco.download_command)
@@ -153,26 +153,5 @@ def test_shardable_classification() -> None:
     assert not by_name["paq"].shardable  # download_text_pairs (multi-repo, whole)
 
 
-def main() -> int:
-    """Run every sizing check, printing one line per test; return non-zero on the first failure."""
-    tests = [
-        test_cap_shards_leading_slice,
-        test_cap_shards_matches_old_inline,
-        test_resolve_index_cap_precedence,
-        test_resolve_budget_precedence,
-        test_allocate_within_budget_and_full,
-        test_allocate_scales_with_budget,
-        test_derive_cap,
-        test_resolved_download_command_injection,
-        test_no_row_uses_unsupported_acquire_flags,
-        test_shardable_classification,
-    ]
-    for test in tests:
-        test()
-        print(f"  ok   {test.__name__}")
-    print("\nPASS — all staging / sizing checks green")
-    return 0
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(pytest.main([__file__]))

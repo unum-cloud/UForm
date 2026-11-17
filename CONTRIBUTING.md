@@ -336,46 +336,155 @@ A comment that explains the line pins it just as well, and a bare `//` on a memb
 | a fixed-shape collection a verb fills                            | outputs                               | landing, lander                               |
 | a member of a plan, cursor or walk                               | what it holds and when it holds it    | bits, current, state, data, flags, tmp, scratch |
 
-## Tests and Benchmarks
+## Test Suites
 
-Suites are plain `int main` binaries, one `uform_test_<name>` per cell, built under `UFORM_BUILD_TEST` and sharing `test/harness.hpp` rather than a framework.
-`test_suite_t::make` reads the settings and prints the version, the capabilities, the seed, the filter and the devices, `run` calls a case for every name the filter selects, and `finish` answers the exit code:
+### Principles
 
-```cpp
-static void divide_round_up_bounds(test_suite_t &suite, std::size_t denominator) {
-    for (std::size_t numerator = 0; numerator != 100; ++numerator) {
-        std::size_t const quotient = divide_round_up(numerator, denominator);
-        suite.check(quotient * denominator >= numerator, "{} / {} rounded to {}", numerator, denominator, quotient);
-    }
-    suite.check_equal(divide_round_up(0, denominator), std::size_t {0}, "zero over {}", denominator);
-}
+The C++ suites are plain `int main` binaries, one `uform_test_<name>` per cell, built under `UFORM_BUILD_TEST` and sharing `test/harness.hpp` rather than a framework.
+The C suites, `c/test.c` and `test/vram.c`, reach the library through `c/uform/*.h` alone, and each binding's suite through that binding.
+Oracles compute in Float64 through NumKong's `nk::cast` and `nk::dot` rather than loops widening one BFloat16 at a time, and never through `assert`, so every test unit opens with `#undef NDEBUG // ! A test's oracle must stay live in every build`.
+Benchmarks never include `test/`, each tree keeps its own harness, and neither uses a test or benchmark framework.
 
-int main(int, char **argv) {
-    test_suite_t suite = test_suite_t::make(argv[0]);
-    suite.run("divide_round_up/bounds", divide_round_up_bounds, std::size_t {7});
-    return suite.finish();
-}
-```
+The harness owns stdout, and a case body prints nothing there.
+Settings are read once, before the first case, and a value that does not parse prints one line naming it and exits with 1.
+Skips are honest: a case that cannot run says why, a filter that selects no case fails the run, and a test missing a dependency names it.
 
-A passing check is silent, a failing one prints its file, line and operands to stderr, and `run` prints one result line per case and a rerun line under a failure.
-A case body prints nothing to stdout, since the harness owns the output.
-Oracles compute in Float64 through NumKong's `nk::cast` and `nk::dot` rather than loops widening one BFloat16 at a time, and never through `assert`, which compiles out under `NDEBUG`.
-Every suite reads three variables once:
+The harness holds one mutable global, `test_run`, the run in progress.
+Checks fire on worker threads and inside helpers as well as in a case's own body, so the run counts failed checks in one place and `run_test_case` diffs that count around each case, rather than threading a tally through every call.
+After a crash, `p test_run` in a core dump names the case in progress and the last failed check, and the signal handlers print the case too.
 
-- `UFORM_SEED`: the seed every draw derives from, `42` by default or `random` for a fresh one.
-- `UFORM_FILTER`: the cases to run by name, as an ECMAScript regex or else as a substring; a filter matching no case fails the suite.
-- `UFORM_DEVICES`: the comma-separated UForm device ordinals the GPU cases run on, the first device of every vendor when unset.
+### Running
 
-CTest labels sort the suites by what they need: `host` runs anywhere, `cuda` wants a GPU, and `cluster` marks `uform_test_env`, the preflight every multi-node `sbatch` runs first.
+Every preset that sets `UFORM_BUILD_TEST` builds the suites, and CTest labels sort them by what they need: `host` runs anywhere, `gpu` wants a GPU, and `cluster` marks `uform_test_env`, the preflight every multi-node `sbatch` runs first.
 `uform_tiny_checkpoint` writes `tiny.safetensors` into the build tree once per run, the fixture `uform_test_inference` and the C tests `uform_test_c` and `uform_test_vram` load.
 
 ```sh
-ctest --test-dir build_library -L host
-UFORM_SEED=random ctest --test-dir build_cuda -L cuda --output-on-failure
+cmake --preset debug
+cmake --build --preset debug
+ctest --test-dir build_debug -L host
+UFORM_SEED=random ctest --test-dir build_cuda -L gpu --output-on-failure
 ```
 
-[`test/README.md`](test/README.md) describes the tiers from one process to many nodes.
-The benchmarks in `bench/` share `bench/harness.hpp`: `uform_bench_encoder` builds on every tree, `uform_bench_core` needs CUDA, and [`bench/README.md`](bench/README.md) lists their flags.
+Each binary prints the library's version, the machine and its settings, then one verdict line per case and a summary:
+
+```text
+- Seed: 42, scale: 1, filter: none
+- test_slices_match_world(1, 1, 1) ... ok (0.12 s)
+  check failed at test/relations.cpp:131
+    expected 4, got 5
+- test_slices_match_world(2, 8, 16) ... FAILED: 1 failed check(s)
+  rerun: build_debug/test/uform_test_relations --seed 42 --filter '^test_slices_match_world\(2, 8, 16\)$'
+- test_slices_match_world(4, 8, 16) ... ok (0.31 s)
+2 passed, 1 failed, 0 skipped, seed 42
+```
+
+A failed check prints where it failed and the operands, and the case goes on, so one run lists every mismatch it reaches.
+The run exits with 1 when a case failed, a check failed outside any case, or nothing ran, and with 3 when `UFORM_NO_SKIPS` is set and a case skipped.
+`UFORM_TRAP_ON_FAILURE=1` raises `SIGTRAP` at the first failed check instead, which stops a debugger there, or dumps a core without one:
+
+```sh
+UFORM_TRAP_ON_FAILURE=1 gdb -ex run --args build_debug/test/uform_test_relations --filter '^test_slices_match_world\(2, 8, 16\)$'
+```
+
+Each binding links either the engine or the stand-in, and its suite loads the tiny checkpoint `UFORM_TEST_CHECKPOINT` names, or else stand-in bytes only the stub loads, reading every shape from the model's description.
+The CI runs them the same way:
+
+```sh
+pip install --group test . && UFORM_TEST_CHECKPOINT=build_library/tiny.safetensors pytest -x test/python
+pip install --group test && pytest -x scripts/data
+cargo test --features stub
+pixi run test
+npm install --ignore-scripts && npm run build-native-stub && npm run build-js && npm test
+cmake --preset swift -D UFORM_BUILD_STUB=ON && cmake --build --preset swift
+UFORM_SWIFT_ARTIFACT=build_swift/UFormC.artifactbundle swift test
+```
+
+`test/python` and `scripts/data` run as separate pytest sessions, as each has a `conftest.py` and a `base.py` of its own.
+`npm run build-wasm` adds the WebAssembly module, whose tests then run in the same `npm test`.
+Swift formatting follows the `.swift-format` file at the root, applied with `swift-format . -i -r`.
+
+### Environment
+
+The suites and benchmarks read these variables, and a C++ test or bench binary also takes each as a flag, which overrides it:
+
+| Variable                | Flag                | Default            | Meaning                                                                                  |
+| :---------------------- | :------------------ | :----------------- | :--------------------------------------------------------------------------------------- |
+| `UFORM_SEED`            | `--seed`            | `42`               | Seed every draw derives from, an unsigned 64-bit integer or `random`, which a run prints |
+| `UFORM_FILTER`          | `--filter`          | unset              | C++ case labels or pytest node IDs to run, as an ECMAScript regex or else a substring    |
+| `UFORM_SCALE`           | `--scale`           | `1`                | Multiplier of every baseline iteration count and sweep, like `0.1` or `10`               |
+| `UFORM_TRAP_ON_FAILURE` | `--trap-on-failure` | unset              | C++ only: raises `SIGTRAP` at the first failed check, to stop there under a debugger     |
+| `UFORM_NO_SKIPS`        | `--no-skips`        | unset              | C++ only: a run in which a case skipped exits with 3                                     |
+| `UFORM_DEVICES`         | `--devices`         | one of each vendor | C++ only: comma-separated UForm device ordinals the GPU cases run on                     |
+| `UFORM_TEST_CHECKPOINT` | none                | unset              | The tiny checkpoint `c/test.c` and every binding's suite load when no argument names one |
+| `UFORM_WARMUP`          | `--warmup`          | `1s`               | Benchmarks only: the untimed run per benchmark, like `200ms` or `1s`                     |
+| `UFORM_TIME_LIMIT`      | `--time-limit`      | `10s`              | Benchmarks only: the timed run per benchmark, like `200ms` or `10s`                      |
+
+The C suites read `UFORM_SEED` and `UFORM_FILTER`, matching the filter as a substring, as C has no portable regex.
+The Python suites read `UFORM_SEED`, `UFORM_FILTER` and `UFORM_SCALE`, alongside `pytest -k`, and the Rust suite reads `UFORM_SEED`.
+
+`UFORM_SEED` keys every case's own stream by the case's name, as `stream_key(seed, name, index)`, identical in C++, C, Python, Rust and Mojo.
+A case's inputs therefore never depend on which cases ran before it, so `UFORM_SEED` together with `UFORM_FILTER` is a faithful reproduction recipe.
+
+### Writing a Test
+
+A C++ case is a function `main` registers through `run_test_case`, under a label `<area>.<case>[.<variant>…]` in lowercase snake case, where the area is the file's stem and the case is the function's name without `test_`:
+
+```cpp
+static void test_divide_round_up_bounds(std::size_t denominator) {
+    for (std::size_t numerator = 0; numerator != 100; ++numerator) {
+        std::size_t const quotient = divide_round_up(numerator, denominator);
+        expect_true(quotient * denominator >= numerator, "{} / {} rounded to {}", numerator, denominator, quotient);
+    }
+    expect_equal(divide_round_up(0, denominator), std::size_t {0});
+}
+
+int main(int argc, char **argv) {
+    print(probe_machine());
+    start_test_run(argc, argv);
+    run_test_case("tools.divide_round_up_bounds", test_divide_round_up_bounds, std::size_t {7});
+    return finish_test_run();
+}
+```
+
+Each check counts a failed check, lets the case go on, and returns whether it held; a message is always the trailing `format_at_t` and its operands:
+
+- `expect_true(held)`, for any condition;
+- `expect_equal(actual, wanted)`, which prints both operands when they differ;
+- `expect_near(actual, wanted, tolerance)`, which holds when `|actual - wanted| <= tolerance * max(1, |actual|, |wanted|)`.
+
+Where the step after a failed check would index or dereference past what it checked, the case stops on the check's answer, as in `if (!expect_equal(rows.size(), wanted.size())) return;`.
+A case that cannot run returns `case_result_t::skipped(reason)`, with the reason in one of four forms: `needs <resource>`, `built without <SWITCH>`, `<facility> is refused on this machine` or `no <device>`, as in `no_gpu_device_k`.
+A case draws from `split_mix_generator_t {case_stream_key()}`, sizes its loops with `scaled_iterations(baseline)` and `sweep_stride(coverage)`, and waits with `spin_until`, bounded by `wait_limit_k`.
+A C case runs between `start_test_case(label)` and `finish_test_case(skip_reason)`, and checks with `expect_(condition)`, or `expect_at` where a message names the subject.
+
+A Python test is a `test_<behaviour sentence>` function with a one-line docstring, and its module imports `base` and `uform`, never another test module.
+It draws from the `seed` or `rng` fixture, never from a literal seed, and checks what the interpreter reports as unraisable through the `unraisable` fixture.
+A test the build cannot run takes a named mark from `base.py`, as `@requires_cpu_only_build`, and one that needs an optional dependency says so where it is decided, as `@pytest.mark.skipif(not numpy_available, reason="NumPy is not installed")`.
+`MAX_CASES_PER_TEST` in `base.py` caps how many cases one test function expands to, and raising it is a decision for review.
+
+A Rust test is named as a behaviour sentence, returns `()` and calls `.unwrap()`, so a failure names its own line.
+One that cannot run on this machine returns `testing::skipped(reason)`, which prints the reason, and the helpers several modules' tests share, like `testing::checkpoint` and `testing::executor`, live in `rust/testing.rs`.
+A Mojo test is registered in `main`, as Mojo has no test discovery, and one that cannot run calls `_skipped(reason)` and returns.
+
+One behaviour keeps one name in every language: the Rust test's name is the stem, and C, C++, Python and Mojo name theirs `test_<stem>`, as `a_held_executor_refuses_other_calls` and `test_a_held_executor_refuses_other_calls`.
+
+### Benchmarks
+
+The benchmarks in `bench/` share `bench/harness.hpp`, which reads the same settings through the same readers as the suites: `uform_bench_encoder` builds on every tree, and `uform_bench_core` needs CUDA.
+Their rows follow the suites' label grammar, and [`bench/README.md`](bench/README.md) lists their flags.
+
+### Devices
+
+`UFORM_DEVICES=0,2` picks the devices the GPU cases run on, by the ordinals `uform_gpu_devices` lists, whatever their vendor.
+Unset, the cases visit the first listed device of every vendor, and a named device past the listed count ends the run with 1.
+On a machine without a GPU, every GPU case reports `skipped: no GPU device`.
+
+### Private Surface Waivers
+
+The C++ suites test the templates in `include/uform/`, as those are the cells, and these reach into `src/` for what neither surface exports:
+
+- `test/inference.cpp` includes `src/encoder_punned.hpp` for `encoder_verbs`, `encoder_class_tables`, `pick_gpu_variant` and `visit_vram_residency`, the ladder a load walks to pick a variant.
+- `test/base.cu`, `test/contrastive.cu` and `test/gradients.cu` include `src/train/numerics.hpp` for `gpu_numerics_of`, the kernel table a mesh's agreed capabilities map to.
 
 ## Flags and Constants
 
@@ -413,15 +522,7 @@ A namespace-scope `_k` constant names an invariant or the default a zero field d
 
 Every script in `scripts/data/` carries a PEP 723 header, so it runs on its own as `uv run scripts/data/<name>.py`.
 Datasets land under `UFORM_DATA_ROOT`, or under the untracked `data/` at the repository root when it is unset.
-The tests run the way CI runs them, from the repository root:
-
-```sh
-pip install --group test
-python -X faulthandler -m pytest -x scripts/data
-```
-
-`UFORM_FILTER` keeps the tests whose node id matches it, as a regex or else as a substring.
-`UFORM_SEED` pins the seed, `42` by default or `random`, and pytest prints both in its header.
+Their tests run as [Test Suites](#test-suites) describes, in a pytest session of their own.
 
 ## Bindings
 
@@ -465,22 +566,6 @@ Tests never restate a struct's layout that the compiler already pins: no `offset
 Tests of how names print and parse, and of an engine run again through the binding, stay.
 
 `.githooks/pre-commit` refuses locks in binding sources, throwing callback types, caught unwinds and kept exceptions.
-
-### Testing the Bindings
-
-Each binding links either the engine or the stand-in, and its suite loads the tiny checkpoint `UFORM_TEST_CHECKPOINT` names, or else stand-in bytes only the stub loads, reading every shape from the model's description.
-The CI runs them the same way:
-
-```sh
-pip install --group test . && UFORM_TEST_CHECKPOINT=build_library/tiny.safetensors pytest -x test/python
-cargo test --features stub
-npm install --ignore-scripts && npm run build-native-stub && npm run build-js && npm test
-cmake --preset swift -D UFORM_BUILD_STUB=ON && cmake --build --preset swift
-UFORM_SWIFT_ARTIFACT=build_swift/UFormC.artifactbundle swift test
-```
-
-`npm run build-wasm` adds the WebAssembly module, whose tests then run in the same `npm test`.
-Swift formatting follows the `.swift-format` file at the root, applied with `swift-format . -i -r`.
 
 ## Commits
 
