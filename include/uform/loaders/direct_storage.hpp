@@ -47,8 +47,8 @@ enum class storage_read_path_t : u8_t {
  *
  *  Owns nothing: KvikIO's state is process-global, so construction is a one-shot
  *  @c set_up_kvikio call behind the exception firewall of this cell's @c .cpp . That call also
- *  gives KvikIO a thread per core and every device a stream-ordered RMM pool, so cuDF's frees
- *  never synchronize the device.
+ *  gives KvikIO a thread per core the root's pools leave idle and every device a stream-ordered RMM
+ *  pool, so cuDF's frees never synchronize the device.
  */
 struct gpu_direct_storage_session_t {
 
@@ -61,8 +61,9 @@ struct gpu_direct_storage_session_t {
     gpu_direct_storage_session_t(gpu_direct_storage_session_t&&) noexcept = default;
     gpu_direct_storage_session_t& operator=(gpu_direct_storage_session_t&&) noexcept = default;
 
-    /** Configure KvikIO once — idempotent, process-wide. */
-    [[nodiscard]] static expected<gpu_direct_storage_session_t> make() noexcept;
+    /** Configure KvikIO once per process, idempotently, with a thread for each of the
+     *  @p idle_cores the root's pools leave idle, which the root counts before it spawns them. */
+    [[nodiscard]] static expected<gpu_direct_storage_session_t> make(std::size_t idle_cores) noexcept;
 
     /** The read path KvikIO's environment selected — diagnostics only. */
     [[nodiscard]] storage_read_path_t read_path() const noexcept { return read_path_; }

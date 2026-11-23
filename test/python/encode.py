@@ -144,23 +144,23 @@ def test_stats_type_is_checked(model: uform.Model, arena: uform.Arena):
     assert uform.ImageEncodeStats().tokens == 0
 
 
-def test_a_tape_pair_is_lent_as_is(model: uform.Model, arena: uform.Arena):
+def test_a_tape_pair_is_read_in_place(model: uform.Model, arena: uform.Arena):
     """A (data, offsets) pair of buffers encodes exactly as the sequence it lays out."""
     data = "".join(TEXTS).encode()
     offsets = array("Q", [0, 14, 24, 24])
-    lent = bytes(memoryview(model.text_encode((data, offsets), arena).embeddings))
+    packed = bytes(memoryview(model.text_encode((data, offsets), arena).embeddings))
     gathered = bytes(memoryview(model.text_encode([text.encode() for text in TEXTS], arena).embeddings))
-    assert lent == gathered
+    assert packed == gathered
 
 
 def test_outputs_cross_as_dlpack(model: uform.Model, arena: uform.Arena):
-    """Host outputs export DLPack, lend a tape pair as a buffer would, and keep their arena alive while exported."""
+    """Host outputs export DLPack, join a tape pair as a buffer would, and keep their arena alive while exported."""
     encoded = model.text_encode(TEXTS, arena, outputs=uform.Outputs.STATES)
     assert encoded.states.offsets.__dlpack_device__() == (1, 0)
     data = "".join(TEXTS).encode()
-    lent = bytes(memoryview(model.text_encode((data, encoded.states.offsets), uform.Arena()).embeddings))
+    packed = bytes(memoryview(model.text_encode((data, encoded.states.offsets), uform.Arena()).embeddings))
     gathered = bytes(memoryview(model.text_encode([text.encode() for text in TEXTS], uform.Arena()).embeddings))
-    assert lent == gathered
+    assert packed == gathered
     capsule = encoded.states.__dlpack__()
     del encoded, arena
     del capsule
@@ -305,8 +305,8 @@ def test_samples_encode_from_buffers_or_a_tape_pair(model: uform.Model, arena: u
     recordings = [array("f", [0.0] * 1000), array("f", [0.5] * 300)]
     gathered = bytes(memoryview(model.audio_encode_samples(recordings, 16000, arena).embeddings))
     data = array("f", [0.0] * 1000 + [0.5] * 300)
-    lent = bytes(memoryview(model.audio_encode_samples((data, array("Q", [0, 1000, 1300])), 16000, arena).embeddings))
-    assert gathered == lent
+    packed = bytes(memoryview(model.audio_encode_samples((data, array("Q", [0, 1000, 1300])), 16000, arena).embeddings))
+    assert gathered == packed
     with pytest.raises(uform.InvalidArgumentError):
         model.audio_encode_samples(recordings, 0, arena)
     with pytest.raises(uform.ShapeMismatchError):

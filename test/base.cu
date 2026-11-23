@@ -112,7 +112,7 @@ struct tier_t {
  *      @p gpus GPUs as an isolated one-host-domain mesh — the sweep's cheap tier and the
  *      capture case's world.
  *
- *  Safe because a single-host topology carries no rendezvous state; the one cross-field invariant
+ *  Safe because a single-host topology has no rendezvous state; the one cross-field invariant
  *  is that @c host_domains sizes to @c shape.host_domain_count() .
  */
 [[nodiscard]] static expected_t narrow_mesh_(mesh_t& placed, mesh_topology_t const& world, u32_t gpus) noexcept {
@@ -298,11 +298,11 @@ static void test_learning_rate_schedule() {
                 config.min_learning_rate * 1.1f);
 }
 
-/** The checkpoint naming contract over one built replica: the registration list carries the
- *  semantic per-weight names every SafeTensors parser keys by (under the driver's @c model.
- *  prefix), derived from @p config and asserted in full order — a @c fill reorder or rename fails
- *  loudly here before it silently re-keys a checkpoint. Piggybacks on an already-built trainer, so
- *  it costs no bring-up of its own. */
+/** The checkpoint naming contract over one built replica: the registration list holds the semantic
+ *  per-weight names every SafeTensors parser keys by (under the driver's @c model. prefix), derived
+ *  from @p config and asserted in full order — a @c fill reorder or rename fails loudly here before
+ *  it silently re-keys a checkpoint. Piggybacks on an already-built trainer, so it costs no
+ *  bring-up of its own. */
 static void check_weight_naming_(char const* label, trainer_config_t const& config,
                                  std::span<differentiable_weights_t const> weights) {
     std::size_t index = 0;
@@ -444,8 +444,9 @@ static case_result_t test_base_conformance(world_health_t& health, char const* l
         }
         expect_true(replicas_identical, "[{}] every replica matches the lead bitwise (A)", label);
 
-        // B — every member's own barrier round advanced off zero, never moved backwards, and they all agree:
-        //     the ledger's monotone round rows carry all three (each member's scalar counts its own barriers).
+        // B — every member's own barrier round advanced off zero, never moved backwards, and they
+        // all agree: the ledger's monotone round rows hold all three (each member's scalar counts
+        // its own barriers).
         expected<telemetry_row_t> lead_round = trainer.ledger.row(trainer.probes.rounds[0], trainer.streams[0]);
         bool rounds_read = static_cast<bool>(lead_round), round_uniform = true, round_monotone = true;
         for (u32_t member_index = 0; member_index < gpus; ++member_index) {
@@ -551,7 +552,7 @@ static case_result_t test_sweep_cell(world_health_t& health, tier_t tier, sz::st
                                    config.batch.max_columns_per_row;
     bf16r2_view_t const normalized = trainer.replicas[0].tower.normalized();
     expect_true(normalized.extent(0) == max_tokens && normalized.extent(1) == config.hidden,
-                "[{}] normalized carries [max_tokens, hidden]: got [{}, {}] want [{}, {}]", label, normalized.extent(0),
+                "[{}] normalized spans [max_tokens, hidden]: got [{}, {}] want [{}, {}]", label, normalized.extent(0),
                 normalized.extent(1), max_tokens, config.hidden);
 
     if (expected_t drained = trainer.synchronize(); !drained)
@@ -867,7 +868,7 @@ static case_result_t test_spectrum_world(world_health_t& health, tier_t wide, ti
     std::size_t const gpus = wide.devices.size(), world_gpus = topology.shape.gpus_per_colocated_domain;
     if (world_gpus < 2u) return case_result_t::skipped("needs two GPUs in the world");
     std::size_t const rows = 24, hidden = 64, world_rows = rows * world_gpus;
-    // A shared offset gives the rows the anisotropy pooled codes carry.
+    // A shared offset gives the rows the anisotropy pooled codes have.
     std::vector<f64_t> world_values(world_rows * hidden);
     std::vector<nk_bf16_t> world_pooled(world_rows * hidden);
     for (std::size_t index = 0; index != world_values.size(); ++index)

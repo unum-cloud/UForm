@@ -19,7 +19,7 @@
  *        embedding opens with the source's own.
  *
  *  The optimizer moments stay behind, so a @c --resume restarts them from zero and warms up afresh;
- *  the contrastive temperatures and biases carry over. A tensor with no rule here stops the tool
+ *  the contrastive temperatures and biases are kept. A tensor with no rule here stops the tool
  *  before it writes anything.
  *
  *  Halving a BFloat16 weight is exact, so a widened product differs from the source's only in the
@@ -169,18 +169,18 @@ static constexpr char const* kept_metadata_k[] = {
 }
 
 /** Fill @p grown with the weights and geometry of @p source taken one @p step up, refusing a
- *  source tensor this neither grows, carries nor leaves behind, and reporting each block into
+ *  source tensor this neither grows, copies nor leaves behind, and reporting each block into
  *  @p phase . */
 [[nodiscard]] static expected_t grow_(checkpoint_to_load_t const& source, ue::geometry_t const& geometry, step_t step,
                                       verb_phase_t& phase, checkpoint_to_save_t& grown) noexcept {
     std::size_t accounted = 0;
     // The Float32 state goes first, as the payload packs it ahead of the BFloat16 weights.
-    for (char const* carried : {"contrastive.inverse_temperatures", "contrastive.biases",
-                                "late_interaction.inverse_temperatures", "late_interaction.biases"}) {
-        f32r2_view_t const values = source.float32(carried);
+    for (char const* copied : {"contrastive.inverse_temperatures", "contrastive.biases",
+                               "late_interaction.inverse_temperatures", "late_interaction.biases"}) {
+        f32r2_view_t const values = source.float32(copied);
         if (values.empty()) continue;
         ++accounted;
-        if (expected_t inserted = grown.insert(carried, values); !inserted) return inserted;
+        if (expected_t inserted = grown.insert(copied, values); !inserted) return inserted;
     }
     for (char const* moments : {"contrastive.temperature_moments", "late_interaction.temperature_moments"})
         accounted += !source.float32(moments).empty();

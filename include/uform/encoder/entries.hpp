@@ -57,7 +57,8 @@ using uu::i16r2_view_t;
 using uu::u32r1_span_t;
 using uu::u32r1_view_t;
 
-/** BFloat16 and E4M3 borrows, in NumKong's vendor-neutral scalars. */
+/** BFloat16 and E4M3 views and spans into memory owned elsewhere, in NumKong's vendor-neutral
+ *  scalars. */
 using bf16r1_view_t = nk::tensor_view<nk_bf16_t, 1>;
 using bf16r1_span_t = nk::tensor_span<nk_bf16_t, 1>;
 using bf16r2_view_t = nk::tensor_view<nk_bf16_t, 2>;

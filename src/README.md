@@ -84,7 +84,7 @@ The variant libraries link after `uform_host`, so the baseline's copy of any sha
 
 - `uform_host`: the verbs, `geometry.cpp`, the checkpoint reader, and the media planning and resize, joined by the host codecs outside WebAssembly, all compiled at the baseline.
 - `uform_encoder_ram_variants`: the CPU class units, each compiled with the flags its `uform_cpu_class` row computes, its parent's plus those of every delta capability NumKong compiled, and present only when its parent is and some delta compiled.
-- `uform_encoder_vram_nvidia_variants`, `uform_encoder_vram_amd_variants` and `uform_encoder_vram_apple_variants`: the GPU class units and the entries, which compile no device code of their own, since NumKong's libraries carry every generation's kernels.
+- `uform_encoder_vram_nvidia_variants`, `uform_encoder_vram_amd_variants` and `uform_encoder_vram_apple_variants`: the GPU class units and the entries, which compile no device code of their own, since NumKong's libraries include every generation's kernels.
 - `uform_encoder_nvidia` and `uform_encoder_amd`: the device-only bundles of UForm's own kernels, linked into a read-only section through an assembler stub and loaded by name, so nothing registers them with a GPU runtime.
 - `vram_entries_apple.cpp` embeds the source of `vram_kernels_apple.metal` behind NumKong's `types.metal` instead, which each Apple GPU compiles at its first launch, so no Metal toolchain builds it.
 - `uform::train`, `uform::loaders` and `uform::datasets`: the training engine, the mesh and the loaders, built with CUDA alone, with `uform_nvidia_train` serving the verbs of `train.h`.

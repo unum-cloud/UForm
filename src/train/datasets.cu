@@ -188,6 +188,8 @@ bool mixture_t::chooses() const noexcept {
     return false;
 }
 
+bool mixture_t::pairs() const noexcept { return !datasets.empty() && !datasets[0].anchor.empty(); }
+
 multimodal_batch_shape_t mixture_t::shape(multimodal_batch_shape_t shape) const noexcept {
     // The paired loader's bag holds an anchor and a positive, and a negative when the entry names
     // one.
@@ -295,21 +297,12 @@ void mixture_sampler_t::reweigh_(u32_t epoch, void (*report)(sz::string_view_t) 
 }
 
 expected_t dataset_source_t::open(dataset_source_t& placed, trainer_config_t& config,
-                                  gpu_direct_storage_session_t& session, mixture_t mixture,
+                                  gpu_direct_storage_session_t& session, mixture_t mixture, pool_view_t pool,
                                   std::size_t batches_per_fill) noexcept {
     multimodal_batch_shape_t const& shape = config.batch;
     placed.mixture_ = std::move(mixture);
     std::span<mixture_entry_t const> const entries = placed.mixture_.datasets;
-    bool const pairs = !entries.empty() && !entries[0].anchor.empty();
-
-    if (pairs) {
-        expected<topology_t> topology = topology_t::make();
-        if (!topology) return expected_t::fail(std::move(topology));
-        expected<executor_t> pool = executor_t::make(*topology, topology->logical_cores_count(),
-                                                     caller_exclusivity_t::caller_inclusive_k);
-        if (!pool) return expected_t::fail(std::move(pool));
-        placed.pool_ = std::move(*pool);
-    }
+    bool const pairs = placed.mixture_.pairs();
 
     auto adopt = [&](auto loader) noexcept -> expected_t {
         if (!loader) return expected_t::fail(std::move(loader));
@@ -340,7 +333,7 @@ expected_t dataset_source_t::open(dataset_source_t& placed, trainer_config_t& co
                                     entry.name.view());
         else
             made = adopt(
-                paired_loader_parquet_t::make(session, glob, config.seed, placed.pool_.view(),
+                paired_loader_parquet_t::make(session, glob, config.seed, pool,
                                               {entry.anchor.view(), entry.positive.view(), entry.negative.view(),
                                                entry.anchor_prefix.view(), entry.positive_prefix.view(), entry.sides},
                                               entry.modality, shape));

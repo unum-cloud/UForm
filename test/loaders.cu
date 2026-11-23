@@ -658,7 +658,7 @@ static void test_pack_tokens_starts_with_prefix(gpu_arena_t& arena, gpu_stream_t
 /**
  *  @brief Decode @p clip into a one-row audio batch and assert the raw-frame contract: one
  *      @c audio_k segment filling the row, finite samples, and a PAD @c text_k remainder.
- *  @param[in] label The case label the diagnostics carry.
+ *  @param[in] label The case label the diagnostics print.
  *  @param[in] clip The encoded clip bytes; an empty clip skips the case.
  *  @param[in,out] arena The device arena.
  *  @param[in,out] stream The stream every stage enqueues on.
@@ -720,7 +720,7 @@ static case_result_t test_audio_decode(sz::string_view_t label, st::basic_vector
     expect_true(finite, "[{}] every audio sample must be finite", label);
     bool pad = true;
     for (std::size_t s = 1; s != max_segments; ++s) pad = pad && lengths[s] == 0u && modality[s] == modality_t::text_k;
-    expect_true(pad, "[{}] audio PAD segments must carry zero length and text_k", label);
+    expect_true(pad, "[{}] audio PAD segments must have zero length and text_k", label);
     expect_true(offsets[max_segments] == lengths[0], "[{}] terminal offset must close the last segment", label);
     return {};
 }
@@ -795,7 +795,7 @@ static case_result_t test_audio_fault_isolation(gpu_arena_t& arena, gpu_stream_t
 /**
  *  @brief Decode @p blob into a one-row RGBA image batch and assert: one @c image_k segment, its
  *      @c (patch_rows,patch_cols) factoring its length, sub-row placement, and a valid alpha byte.
- *  @param[in] label The case label the diagnostics carry.
+ *  @param[in] label The case label the diagnostics print.
  *  @param[in] blob The encoded image bytes; an empty blob skips the case.
  *  @param[in,out] arena The device arena.
  *  @param[in,out] stream The stream every stage enqueues on.
@@ -956,7 +956,7 @@ static case_result_t test_image_batch_matches_single(std::span<st::basic_vector<
  *  Distinct strides yield distinct temporal factorizations. The footprint is derived from the
  *  fixture's native resolution and clamped to a row, so a fixture of any size downscales to fit.
  *
- *  @param[in] label The case label the diagnostics carry.
+ *  @param[in] label The case label the diagnostics print.
  *  @param[in] clip The encoded clip bytes; an empty clip skips the case.
  *  @param[in] frame_strides One temporal stride per representation.
  *  @param[in,out] arena The device arena.
@@ -1209,7 +1209,7 @@ static void test_paired_fill_replays_after_back_to_back_fills(ut::mixture_entry_
                                                               gpu_stream_t& stream, pool_view_t pool,
                                                               nvjpeg_session_t& jpeg) {
     sz::string_view_t const name = entry.name.view();
-    expected<gpu_direct_storage_session_t> session = gpu_direct_storage_session_t::make();
+    expected<gpu_direct_storage_session_t> session = gpu_direct_storage_session_t::make(1);
     if (!expect_true(session, "the storage session should make: {}", session.description_)) return;
     u32_t const columns = 256u, patch = 16u, channels = 4u, rows = 8u, segments = 16u;
     multimodal_batch_shape_t shape {};
@@ -1302,7 +1302,7 @@ static case_result_t test_cross_rank_sampling() {
     if (!expect_true(bootstrapped, "the cluster should bootstrap: {}", bootstrapped.description_)) return {};
     mesh_topology_t topology = std::move(bootstrapped.value_);
 
-    auto session_made = gpu_direct_storage_session_t::make();
+    auto session_made = gpu_direct_storage_session_t::make(1);
     if (!expect_true(session_made, "the GDS session should make: {}", session_made.description_)) return {};
     gpu_direct_storage_session_t session = std::move(session_made.value_);
 
@@ -1371,7 +1371,7 @@ int main(int argc, char** argv) {
     auto arena_made = gpu_arena_t::make(0, 2ull << 30);
     if (!expect_true(arena_made, "gpu arena make: {}", to_string(arena_made.status_))) return finish_test_run();
     gpu_arena_t arena = std::move(arena_made.value_);
-    expected<executor_t> executor = executor_t::make(4, caller_exclusivity_t::caller_inclusive_k);
+    expected<ram_executor_t> executor = ram_executor_t::make(4, caller_exclusivity_t::caller_inclusive_k);
     if (!expect_true(executor, "the CPU decode pool should spawn")) return finish_test_run();
     pool_view_t const pool = executor->view();
 

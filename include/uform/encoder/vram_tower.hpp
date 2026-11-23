@@ -14,7 +14,7 @@
  */
 #pragma once
 
-#include <span> // `std::span` — the scratch a call borrows
+#include <span> // `std::span` — the scratch a call writes, owned by its caller
 
 #include "uform/encoder/tower.hpp" // `tower_weights_t`, `pack_weights`, `encode_steps`
 

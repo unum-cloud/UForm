@@ -434,7 +434,7 @@ int main(int argc, char** argv) {
     expected<geometry_t> geometry = geometry_t::from(*checkpoint);
     if (!expect_true(geometry, "geometry: {}", geometry.description_)) return finish_test_run();
 
-    expected<executor_t> pool = executor_t::make(4, caller_exclusivity_t::caller_inclusive_k);
+    expected<ram_executor_t> pool = ram_executor_t::make(4, caller_exclusivity_t::caller_inclusive_k);
     if (!expect_true(pool, "pool: {}", pool.description_)) return finish_test_run();
 
     encoder_verbs<vendored_residency_t::ram_k> const& reference =

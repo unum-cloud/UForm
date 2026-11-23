@@ -6,8 +6,8 @@
  *      element-wise steps per NVIDIA, AMD and Apple generation, and a ladder per family whose floor
  *      is the vendor's generic kit.
  *
- *  Every kernel a kit names queues on the stream it is handed. Where a generation carries only some
- *  of a family's kernels, its kit borrows the rest from its vendor's earlier generations, and
+ *  Every kernel a kit names queues on the stream it is handed. Where a generation has only some
+ *  of a family's kernels, its kit takes the rest from its vendor's earlier generations, and
  *  @c capability_k is the union of every bit the kit calls, as in @ref ram_kits.hpp . NVIDIA, AMD
  *  and Apple masks never overlap, so one ladder per family serves every vendor.
  *
@@ -71,6 +71,10 @@ struct vram_nvidia_entries_kit_t {
      *  vendor; an empty policy when the build or the machine lacks them. */
     static nk_allocator_t policy(nk_stream_t stream, uform_residency_t residency) noexcept;
 
+    /** Makes the vendor's device @p vendor_ordinal current on the calling thread, so the per-thread
+     *  default stream, every allocation and free, and every step after it land there. */
+    static nk_status_t select(std::size_t vendor_ordinal) noexcept;
+
     /** Waits for everything queued on @p stream . */
     static nk_status_t synchronize(nk_stream_t stream) noexcept;
 
@@ -114,6 +118,7 @@ struct vram_nvidia_entries_kit_t {
 struct vram_amd_entries_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
     static nk_allocator_t policy(nk_stream_t stream, uform_residency_t residency) noexcept;
+    static nk_status_t select(std::size_t vendor_ordinal) noexcept;
     static nk_status_t synchronize(nk_stream_t stream) noexcept;
     static nk_status_t describe(std::size_t vendor_ordinal, device_description_t& description) noexcept;
     static nk_status_t copy(uu::bytes_span_t target, uu::bytes_view_t source, nk_stream_t stream) noexcept;
@@ -150,6 +155,9 @@ struct vram_amd_entries_kit_t {
 struct vram_apple_entries_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_metal_k;
     static nk_allocator_t policy(nk_stream_t stream, uform_residency_t residency) noexcept;
+
+    /** Succeeds without a call, as every Metal queue names its own device. */
+    static nk_status_t select(std::size_t vendor_ordinal) noexcept;
     static nk_status_t synchronize(nk_stream_t stream) noexcept;
 
     static nk_status_t describe(std::size_t vendor_ordinal, device_description_t& description) noexcept;
@@ -432,7 +440,7 @@ struct apple10_products_kit_t {
 };
 #endif // NUMKONG_TARGET_APPLE10
 
-/** The kit of the vendor whose group bit @p caps_ carries, NVIDIA's where it carries neither of the
+/** The kit of the vendor whose group bit @p caps_ sets, NVIDIA's where it sets neither of the
  *  others. */
 template <nk_capability_t caps_, typename rocm_kit_type_, typename metal_kit_type_, typename cuda_kit_type_>
 using vendor_floor_kit =

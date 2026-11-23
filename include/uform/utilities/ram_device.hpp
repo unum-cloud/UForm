@@ -4,9 +4,8 @@
  *  @date October 27, 2026
  *  @brief The one owner of host threads and topology, over ForkUnion's C ABI.
  *
- *  Engines, loaders, tools and tests dispatch through a @c pool_view_t of either an
- *  @c executor_t, a pool spawned here, or a @c lent_pool_t, a pool another library lends; nothing
- *  else calls @c fu_* .
+ *  Engines, loaders, tools and tests dispatch through a @c pool_view_t of an @c ram_executor_t, a
+ *  pool spawned and deleted here; nothing else calls @c fu_* .
  */
 #pragma once
 
@@ -189,26 +188,26 @@ inline void free_on_memory_domain(fu_memory_domain_id_t domain, bytes_span_t mem
  *  coordinator only waits. Every dispatch blocks until all threads return, and refuses while
  *  another one runs.
  */
-class executor_t {
+class ram_executor_t {
   public:
 
-    /** The label the pool's threads carry in the OS. */
+    /** The label the pool's threads have in the OS. */
     static constexpr char const pool_name_k[] = "uform";
 
     /** An executor holding no pool, as a moved-from one does, until @ref make assigns one. */
-    constexpr executor_t() noexcept = default;
+    constexpr ram_executor_t() noexcept = default;
 
-    executor_t(executor_t&& other) noexcept : pool_(std::exchange(other.pool_, nullptr)) {}
+    ram_executor_t(ram_executor_t&& other) noexcept : pool_(std::exchange(other.pool_, nullptr)) {}
 
-    executor_t& operator=(executor_t&& other) noexcept {
+    ram_executor_t& operator=(ram_executor_t&& other) noexcept {
         std::swap(pool_, other.pool_);
         return *this;
     }
 
-    executor_t(executor_t const&) = delete;
-    executor_t& operator=(executor_t const&) = delete;
+    ram_executor_t(ram_executor_t const&) = delete;
+    ram_executor_t& operator=(ram_executor_t const&) = delete;
 
-    ~executor_t() noexcept { fu_pool_delete(pool_); }
+    ~ram_executor_t() noexcept { fu_pool_delete(pool_); }
 
     /**
      *  @brief Harvests the topology and spawns @p threads threads across the whole machine, the
@@ -216,24 +215,56 @@ class executor_t {
      *  @param[in] threads Thread count, at least one.
      *  @param[in] exclusivity Whether the caller is one of the @p threads or only coordinates them.
      */
-    [[nodiscard]] static expected<executor_t> make(std::size_t threads, caller_exclusivity_t exclusivity) noexcept {
+    [[nodiscard]] static expected<ram_executor_t> make(std::size_t threads, caller_exclusivity_t exclusivity) noexcept {
         expected<topology_t> topology = topology_t::make();
-        if (!topology) return expected<executor_t>::fail(std::move(topology));
+        if (!topology) return expected<ram_executor_t>::fail(std::move(topology));
         return make(*topology, threads, exclusivity);
     }
 
     /** Spawns @p threads threads interleaved across every compute domain of @p topology , or only
      *  the caller in a build without OS threads, such as WebAssembly's. */
-    [[nodiscard]] static expected<executor_t> make(topology_t const& topology, std::size_t threads,
-                                                   caller_exclusivity_t exclusivity) noexcept {
+    [[nodiscard]] static expected<ram_executor_t> make(topology_t const& topology, std::size_t threads,
+                                                       caller_exclusivity_t exclusivity) noexcept {
         if ((fu_comptime_capabilities() & fu_capability_os_threads_k) == 0) threads = 1;
-        executor_t executor;
+        ram_executor_t executor;
         if (fu_status_t const status = fu_pool_new(pool_name_k, fu_capabilities_all_k, &executor.pool_);
             status != fu_success_k)
-            return expected<executor_t>::fail(status_from_(status), "pool creation failed");
+            return expected<ram_executor_t>::fail(status_from_(status), "pool creation failed");
         if (fu_status_t const status = fu_pool_spawn(topology.get(), executor.pool_, threads, spawned_(exclusivity));
             status != fu_success_k)
-            return expected<executor_t>::fail(status_from_(status), "spawning {} threads failed", threads);
+            return expected<ram_executor_t>::fail(status_from_(status), "spawning {} threads failed", threads);
+        return executor;
+    }
+
+    /** Spawns @p threads threads over the compute domains local to @p memory_domain , or only the
+     *  caller in a build without OS threads. */
+    [[nodiscard]] static expected<ram_executor_t> spawn_near(topology_t const& topology,
+                                                             fu_memory_domain_id_t memory_domain, std::size_t threads,
+                                                             caller_exclusivity_t exclusivity) noexcept {
+        if ((fu_comptime_capabilities() & fu_capability_os_threads_k) == 0) threads = 1;
+        ram_executor_t executor;
+        if (fu_status_t const status = fu_pool_new(pool_name_k, fu_capabilities_all_k, &executor.pool_);
+            status != fu_success_k)
+            return expected<ram_executor_t>::fail(status_from_(status), "pool creation failed");
+        if (fu_status_t const status = fu_pool_spawn_near_memory_domain(topology.get(), executor.pool_, memory_domain,
+                                                                        threads, spawned_(exclusivity));
+            status != fu_success_k)
+            return expected<ram_executor_t>::fail(
+                status_from_(status), "spawning {} threads near memory domain {} failed", threads, memory_domain);
+        return executor;
+    }
+
+    /** The calling thread alone, a pool of one that probes no topology and spawns no thread, for a
+     *  call without an executor. */
+    [[nodiscard]] static expected<ram_executor_t> on_calling_thread() noexcept {
+        fu_capabilities_t const flat = static_cast<fu_capabilities_t>(fu_capabilities_all_k &
+                                                                      ~fu_capability_place_memory_on_domain_k);
+        ram_executor_t executor;
+        if (fu_status_t const status = fu_pool_new(pool_name_k, flat, &executor.pool_); status != fu_success_k)
+            return expected<ram_executor_t>::fail(status_from_(status), "pool creation failed");
+        if (fu_status_t const status = fu_pool_spawn(nullptr, executor.pool_, 1, fu_caller_inclusive_k);
+            status != fu_success_k)
+            return expected<ram_executor_t>::fail(status_from_(status), "spawning the calling thread failed");
         return executor;
     }
 
@@ -252,28 +283,6 @@ class executor_t {
 
     /** The pool every dispatch runs on, owned and deleted here. */
     fu_pool_t pool_ = nullptr;
-};
-
-/** A pool lent by another library: dispatched on while its lender's own dispatch does not
- *  run, never deleted. */
-class lent_pool_t {
-  public:
-
-    /** Borrows @p pool , refusing a null pool or one holding no threads. */
-    [[nodiscard]] static expected<lent_pool_t> borrow(fu_pool_t pool) noexcept {
-        if (!pool || pool_view_t {pool}.threads_count() == 0)
-            return expected<lent_pool_t>::fail(status_t::invalid_argument_k, "the lent pool holds no threads");
-        return lent_pool_t {pool};
-    }
-
-    /** The right to dispatch on the pool, which stays with its lender. */
-    [[nodiscard]] pool_view_t view() const noexcept { return pool_view_t {pool_}; }
-
-  private:
-    explicit constexpr lent_pool_t(fu_pool_t pool) noexcept : pool_(pool) {}
-
-    /** The pool every dispatch runs on, which its lender deletes. */
-    fu_pool_t pool_;
 };
 
 #pragma endregion Executor

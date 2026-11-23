@@ -7,7 +7,7 @@
  *      and its checkpoints.
  *
  *  A mesh is made once per process over a VRAM executor, whose devices are its members, and
- *  borrowed by every trainer made over the same executor; a trainer without one makes a one-process
+ *  used by every trainer made over the same executor; a trainer without one makes a one-process
  *  mesh of its own. Every option is explicit: the library never reads the environment.
  */
 #include <memory> // `std::unique_ptr` - a handle under construction
@@ -39,11 +39,11 @@ using utilities::switch_to_gpu_t;
 using utilities::u32_t;
 
 /** What @c uform_mesh_t owns: the bootstrapped mesh over its executor's devices, and how many
- *  trainers borrow it. */
+ *  trainers use it. */
 struct uform_mesh_handle_t {
     uform_executor_t executor = nullptr;
 
-    /** Trainers borrowing the mesh, touched through the standard atomic reference; a free
+    /** Trainers using the mesh, touched through the standard atomic reference; a free
      *  waits for zero. */
     u64_t trainers = 0;
 
@@ -55,7 +55,7 @@ struct uform_mesh_handle_t {
 };
 
 /** What @c uform_trainer_t owns: its run, the items source feeding it, and the host columns a step
- *  converts into; the mesh is the caller's borrowed one or a one-process mesh of its own. */
+ *  converts into; the mesh is the caller's own or a one-process mesh the trainer owns. */
 struct uform_trainer_handle_t {
     uform_executor_t executor = nullptr;
     std::variant<uform_mesh_t, std::unique_ptr<uform_mesh_handle_t>> mesh;
@@ -95,13 +95,13 @@ struct uform_trainer_handle_t {
     return std::get<vram_executor_t>(executor->executor).devices[0].capabilities;
 }
 
-/** The mesh a trainer runs over, borrowed or its own. */
+/** The mesh a trainer runs over, the caller's or its own. */
 [[nodiscard]] static uform_mesh_handle_t& mesh_of(uform_trainer_handle_t& trainer) noexcept {
-    if (uform_mesh_t const* borrowed = std::get_if<uform_mesh_t>(&trainer.mesh)) return **borrowed;
+    if (uform_mesh_t const* caller_mesh = std::get_if<uform_mesh_t>(&trainer.mesh)) return **caller_mesh;
     return *std::get<std::unique_ptr<uform_mesh_handle_t>>(trainer.mesh);
 }
 
-/** The static message an outcome carries for a fault a GPU recorded before it trapped. */
+/** The static message an outcome holds for a fault a GPU recorded before it trapped. */
 [[nodiscard]] static char const* fault_message(gpu_fault_code_t code) noexcept {
     switch (code) {
     case gpu_fault_code_t::none_k: return nullptr;
@@ -114,7 +114,7 @@ struct uform_trainer_handle_t {
     return nullptr;
 }
 
-/** The static messages one verb's engine failures carry, one per engine status, since the engine's
+/** The static messages one verb's engine failures hold, one per engine status, since the engine's
  *  own formatted description cannot outlive the call. */
 struct failure_messages_t {
     char const* other;
@@ -364,7 +364,7 @@ static bool propagate_train_error(expected_t const& failure, uform_mesh_handle_t
 }
 
 /** Land the pooled vertex of every item of the last step in @p memory as @p scalar rows, zero for
- *  items that carried no tokens. False once @p outcome records why not. */
+ *  items that had no tokens. False once @p outcome records why not. */
 [[nodiscard]] static bool land_embeddings(uform_trainer_handle_t& handle, std::size_t count, uform_scalar_t scalar,
                                           chunked_arena_t& memory, uform_rows_view_t& rows,
                                           uform_outcome_t* outcome) noexcept {
@@ -633,8 +633,8 @@ UFORM_EXPORT void uform_trainer_free(uform_trainer_t trainer) {
     wait_named_calls(trainer->named_calls);
     trainer->items.reset();
     trainer->trainer.reset();
-    if (uform_mesh_t const* borrowed = std::get_if<uform_mesh_t>(&trainer->mesh))
-        fu::standard_atomic_ref<u64_t> {(*borrowed)->trainers}.fetch_sub(1, std::memory_order_acq_rel);
+    if (uform_mesh_t const* caller_mesh = std::get_if<uform_mesh_t>(&trainer->mesh))
+        fu::standard_atomic_ref<u64_t> {(*caller_mesh)->trainers}.fetch_sub(1, std::memory_order_acq_rel);
     delete trainer;
 }
 

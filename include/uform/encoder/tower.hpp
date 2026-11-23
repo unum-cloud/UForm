@@ -8,10 +8,10 @@
  *  The towers reproduce the training tower's recipes step for step, so a checkpoint embeds the same
  *  on every residency. Precision is a runtime value, never a type:
  *
- *  - @c precision_t::bf16_k carries a Float32 residual stream: each norm narrows it to BFloat16
+ *  - @c precision_t::bf16_k keeps a Float32 residual stream: each norm narrows it to BFloat16
  *    operands (rmscast), the QK-norm reads the Float32 product, and the products add back into
  *    Float32.
- *  - @c precision_t::e4m3_k carries a BFloat16 residual stream: each product quantizes its
+ *  - @c precision_t::e4m3_k keeps a BFloat16 residual stream: each product quantizes its
  *    activations per token, multiplies against per-tensor-scaled E4M3 weights, and rescales with
  *    the residual folded in; Q, K and V cast unscaled into E4M3 for attention.
  *
@@ -31,7 +31,7 @@
 #include <cmath>   // `std::sqrt`
 #include <cstddef> // `std::size_t`
 
-#include <span> // `std::span` — the scratch a call borrows
+#include <span> // `std::span` — the scratch a call writes, owned by its caller
 
 #include <numkong/capabilities.h> // `nk_stream_t`, `nk_status_t`
 #include <numkong/memory.hpp>     // `nk::allocator` — packs on NumKong's alignment
@@ -223,7 +223,7 @@ struct scratch_cursor_t {
     }
 };
 
-/** Every activation one call writes, reserved in its scratch. The wide buffers carry the
+/** Every activation one call writes, reserved in its scratch. The wide buffers hold the
  *  BFloat16 recipe's Float32 residual stream, the narrow ones the E4M3 recipe's BFloat16 stream
  *  and every operand. The products, patches and shadow rows serve steps of several widths, so
  *  they stay flat. */
@@ -566,9 +566,9 @@ template <typename steps_type_>
         outputs.masked_logits.empty())
         return expected_t::fail(uu::status_t::invalid_argument_k, "an encode keeps at least one surface");
     if (!outputs.token_vectors.empty() && weights.token_head.projection.bytes.empty())
-        return expected_t::fail(uu::status_t::invalid_argument_k, "the checkpoint carries no token head");
+        return expected_t::fail(uu::status_t::invalid_argument_k, "the checkpoint has no token head");
     if (!outputs.masked_logits.empty() && weights.masked_tokens.decoder.bytes.empty())
-        return expected_t::fail(uu::status_t::invalid_argument_k, "the checkpoint carries no byte decoder");
+        return expected_t::fail(uu::status_t::invalid_argument_k, "the checkpoint has no byte decoder");
     std::size_t tokens = 0;
     for (std::size_t segment = 0; segment != segments; ++segment) {
         if (batch.segment_lengths[segment] > geometry.context)
@@ -833,7 +833,7 @@ template <typename steps_type_>
                                               : rmsnorm(a.narrow_residual, pool.final_norm, a.states, 1, hidden);
     if (staged && !outputs.states.empty()) staged = cast({a.states, nk_bf16_k}, outputs.states);
 
-    if (staged && !outputs.token_vectors.empty()) { // the block activations are dead, so they lend the heads room
+    if (staged && !outputs.token_vectors.empty()) { // the block activations are dead, so the heads reuse their room
         token_head_weights_t const& head = weights.token_head;
         std::size_t const width = head.projection.outputs;
         f32r2_span_t const projected = products_of(tokens, width);

@@ -24,7 +24,7 @@ using uu::expected;
 using uu::f32_t;
 using uu::u32_t;
 
-/** Most channels a pixel carries, the extent of the per-channel statistics. */
+/** Most channels a pixel holds, the extent of the per-channel statistics. */
 inline constexpr u32_t pixel_channels_max_k = 4;
 
 /** The tower's geometry: block extents, rotary split, context, and each modality's entry. */

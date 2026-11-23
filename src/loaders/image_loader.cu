@@ -287,7 +287,7 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
         st::failed(probes.resize(images)) || st::failed(pending.resize(images)))
         return result_t::fail(status_t::bad_alloc_k, "header gather staging allocation failed");
     for (std::size_t index = 0; index != images; ++index) pending[index] = index;
-    // Web-scale shards carry the occasional unprobeable blob — one bad row PADs its segment loudly
+    // Web-scale shards have the occasional unprobeable blob — one bad row PADs its segment loudly
     // instead of failing the whole fill, the same containment the overflow drop has.
     auto const warn_dropped = [&](std::size_t index, sz::string_view_t reason) noexcept {
         sz::string_t warning;
@@ -610,7 +610,7 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, pixel_t
  *  shared patch grid. The scratch and device-resident offsets free stream-ordered behind it, so
  *  nothing waits here. Budgets vary per image now, so each resized frame's byte size (and its base
  *  in the tape) is a running prefix, not a fixed stride. @p segment_offsets / @p segment_lengths
- *  carry the placement the segment kernel laid down. */
+ *  hold the placement the segment kernel laid down. */
 [[nodiscard]] static expected_t resize_plans_(std::span<image_plan_t const> plans, u8_t* scratch,
                                               pixel_patches_span_t pixels, image_shape_view_t image_shapes,
                                               u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
@@ -702,10 +702,10 @@ expected_t ul::decode_images(nvjpeg_session_t& jpeg, pool_view_t pool, column_vi
         return expected_t::fail(status_t::unsupported_k, "batch segments cannot hold {} images", images);
     if (patch_size == 0 || columns_per_row == 0)
         return expected_t::fail(status_t::unsupported_k, "patch_size and columns must be nonzero");
-    // The shape is the single source of geometry; the grid is the validated destination. Image
-    // carries no per- representation variation yet (footprint is native-derived, patch side and
-    // channels are shared), so it consumes one representation, matching the uniform decode contract
-    // while multi-representation awaits a varying field.
+    // The shape is the single source of geometry; the grid is the validated destination. Image has
+    // no per- representation variation yet (footprint is native-derived, patch side and channels
+    // are shared), so it consumes one representation, matching the uniform decode contract while
+    // multi-representation awaits a varying field.
     if (representations.empty())
         return expected_t::fail(status_t::invalid_argument_k,
                                 "decode_images requires a non-empty representations span");
@@ -796,7 +796,7 @@ expected_t image_loader_parquet_t::fill(gpu_stream_t& gpu_stream, nvjpeg_session
     // rows·columns grid holds.
     std::size_t const images_per_batch = batches[0].segment_lengths.extent(0);
     if (images_per_batch == 0 || batches[0].images.extent(0) == 0)
-        return expected_t::fail(status_t::unsupported_k, "the batch carries no image segments");
+        return expected_t::fail(status_t::unsupported_k, "the batch has no image segments");
     std::size_t const total_images = unroll * images_per_batch;
 
     std::size_t const shard_count = absolute_paths_.size();

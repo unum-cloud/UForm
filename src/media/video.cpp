@@ -31,7 +31,8 @@ inline constexpr std::size_t video_avio_buffer_bytes_k = 32u * 1024u;
 /** Backing state for the in-memory @c AVIOContext read and seek callbacks. */
 struct video_memory_reader_t {
 
-    /** The clip's container bytes — borrowed, not owned; their end is the seek's bound. */
+    /** The clip's container bytes, owned by the caller and read only during the demux; their end
+     *  bounds a seek. */
     bytes_view_t bytes {};
 
     /** The read cursor, advanced by every read and moved by every seek. */
@@ -159,7 +160,7 @@ expected<demuxed_t> um::demux_video(bytes_view_t container) noexcept {
     if (st::failed(clip.packet_offsets.push_back(0u)))
         return result_t::fail(status_t::bad_alloc_k, "packet table allocation failed");
     if (looks_like_annex_b_(container)) {
-        // A raw elementary stream carries no dimensions until decoded.
+        // A raw elementary stream has no dimensions until decoded.
         if (append_packet_(clip, container) != status_t::success_k)
             return result_t::fail(status_t::bad_alloc_k, "elementary stream copy failed ({} bytes)", container.size());
         clip.codec = sniff_annex_b_codec_(container);
@@ -215,7 +216,7 @@ expected<demuxed_t> um::demux_video(bytes_view_t container) noexcept {
         return fail(status_t::invalid_argument_k, "unsupported video codec");
     clip.extent.width = static_cast<u32_t>(fu::max_of(video_stream->codecpar->width, 0));
     clip.extent.height = static_cast<u32_t>(fu::max_of(video_stream->codecpar->height, 0));
-    // Many mp4 / webm containers carry no frame index (`nb_frames == 0`); estimate the count from
+    // Many mp4 / webm containers have no frame index (`nb_frames == 0`); estimate the count from
     // duration × average frame rate, in integers since `duration` is in AV_TIME_BASE units, so
     // sampled frames still spread over the clip.
     if (video_stream->nb_frames > 0) clip.frames = static_cast<u32_t>(video_stream->nb_frames);

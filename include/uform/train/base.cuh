@@ -14,7 +14,7 @@
  *
  *  Every batch is a modality mixture: any number of token / image / video / audio rows, constrained
  *  only by the aggregate row and segment budgets @ref unum::uform::train::multimodal_batch_shape_t
- *  carries — the same envelope the loaders fill and @c multimodal_batch_mixer_t shuffles in real
+ *  sets — the same envelope the loaders fill and @c multimodal_batch_mixer_t shuffles in real
  *  training. A modality participates iff its nested shape slice is live (a nonzero @c patch_side /
  *  @c chunk_samples ), so presence is read off the shape everywhere. The synthetic corpus draws a
  *  keyed per-step partition of the row budget across the live modalities and orders the rows tokens
@@ -227,7 +227,8 @@ struct trainer_config_t {
      *  parity test drives both over identical seeds. */
     capture_t capture = replayed_k;
 
-    /** Checkpoint path; empty writes none. Borrows the storage the tool parsed it from. */
+    /** Checkpoint path; empty writes none. Points into the storage the tool parsed it from, valid
+     *  while it lives. */
     sz::string_view_t checkpoint {};
 
     /** Steps between checkpoints, beside the one at the run's end; zero writes only that one. */
@@ -240,11 +241,12 @@ struct trainer_config_t {
     u32_t eval_every = 0;
 
     /** The mixture JSON of the held-out batches; empty evaluates on the training source's next
-     *  batch. Borrows the storage it was parsed from. */
+     *  batch. Points into the storage it was parsed from, valid while it lives. */
     sz::string_view_t eval_mixture {};
 
     /** Warm-start path; empty starts from the keyed seed. Every replica loads the same file and the
-     *  run continues from the file's saved step. Borrows the storage it was parsed from. */
+     *  run continues from the file's saved step. Points into the storage it was parsed from, valid
+     *  while it lives. */
     sz::string_view_t resume {};
 
     /** The ledger channels this run arms — losses and rounds by default; @c --telemetry adds more
@@ -252,11 +254,11 @@ struct trainer_config_t {
      *  channels from its launcher contract; the library itself never reads environment. */
     u32_t telemetry_channels = telemetry_losses_k | telemetry_rounds_k;
 
-    /** The mixture JSON the run loads its data from; empty trains on the synthetic draw. Borrows
-     *  the storage it was parsed from. */
+    /** The mixture JSON the run loads its data from; empty trains on the synthetic draw. Points
+     *  into the storage it was parsed from, valid while it lives. */
     sz::string_view_t mixture {};
 
-    /** The NVDEC engines a GPU carries, which no query reports; a mixture with video needs it. */
+    /** The NVDEC engines a GPU has, which no query reports; a mixture with video needs it. */
     u32_t nvdec_engines = 0;
 
     /** How many steps' batches one data fill packs per GPU from one shard read, so the read is paid
@@ -305,16 +307,16 @@ struct trainer_config_t {
  *  "Replica" is literal: every GPU holds bitwise-identical weights, indexed by the same
  *  @c member_index the @ref multimem_domain_t and @ref distributed_adafactor_t take. A head or the
  *  contrastive scratch exists iff the objective and the batch slice call for it, so presence is
- *  read off the allocation. Movable: every borrow points outward at the composition's
- *  address-stable session tables, never into this struct.
+ *  read off the allocation. Movable: every view points outward at the composition's address-stable
+ *  session tables, never into this struct.
  */
 struct base_replica_t {
 
-    /** The encoder — per-modality entry, block stack, final RMSNorm, pool and head; borrows
-     *  the placed session. */
+    /** The encoder — per-modality entry, block stack, final RMSNorm, pool and head; reads
+     *  the placed session, which outlives it. */
     encoder_tower_bf16_t tower {};
 
-    /** The input batch; after @ref prepare its tokens / media carry the distorted stream. */
+    /** The input batch; after @ref prepare its tokens / media hold the distorted stream. */
     multimodal_batch_on_gpu_t batch {};
 
     /** The span-masking corruptor + untied byte decoder with fused cross-entropy, present when the

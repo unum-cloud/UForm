@@ -61,7 +61,7 @@ struct pair_tags_span_t_ {
  *  Pair @c i takes its positive, its anchor shifted by @p anchor_begin , and with three roles its
  *  negative shifted by @p negative_begin . All three share bag @c i , so the mixer routes a triplet
  *  whole and the relations read its negative as a repel edge of its anchor. The anchor and the
- *  positive carry the pair's sample key from @p pair_keys , the negative none. A text segment's
+ *  positive hold the pair's sample key from @p pair_keys , the negative none. A text segment's
  *  prefix length is the bytes its role's prefix kept, and the segments past the first @p pairs PAD
  *  at @p end with bag @p pairs . Sides stay @c none_k until mixtures name them.
  *
@@ -155,8 +155,7 @@ expected<paired_loader_parquet_t> paired_loader_parquet_t::make(gpu_direct_stora
                                                                 multimodal_batch_shape_t const& shape) noexcept {
     using result_t = expected<paired_loader_parquet_t>;
     if (modality != modality_t::text_k && !shape.contains(modality))
-        return result_t::fail(status_t::invalid_argument_k, "the run carries no slice for the media of {}",
-                              path_or_glob);
+        return result_t::fail(status_t::invalid_argument_k, "the run has no slice for the media of {}", path_or_glob);
     auto paths = expand_glob(path_or_glob);
     if (!paths) return result_t::fail(std::move(paths));
 

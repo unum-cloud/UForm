@@ -15,7 +15,7 @@
 #include <cstdlib> // `std::getenv`, `std::atoi`, `std::atof`
 #include <cstring> // `std::memcpy` — the tokens cases' compacted head rows
 
-#include <span>    // `std::span` — the oracle's borrowed towers
+#include <span>    // `std::span` — the oracle's views of the towers
 #include <utility> // `std::move`
 #include <vector>  // `std::vector`
 
@@ -778,7 +778,7 @@ static case_result_t test_distributed() {
     config.to_vertices_per_gpu = vertices_k;
     config.gpu_subgraphs_per_step = gpus;
     // The composition-root order: topology → arenas (visibility declared) → streams → the ONE
-    // multimem domain → the ONE colocated domain → the consumer, borrowing all of it.
+    // multimem domain → the ONE colocated domain → the consumer, which uses all of it.
     for (std::size_t rank = 0; rank != gpus; ++rank) {
         auto stream_made = gpu_stream_t::make(devices[rank]);
         if (!expect_true(stream_made && streams.push_back(std::move(stream_made.value_)) == status_t::success_k,
@@ -1085,7 +1085,7 @@ static case_result_t test_pool_parity() {
 
     // A fabricated ragged batch: three live text segments of lengths {8, 5, 2}, a gap token closing
     // the second row, and one PAD — the batch packer's contract (offsets repeat on PAD, lengths
-    // carry the live counts).
+    // hold the live counts).
     auto batch = multimodal_batch_on_gpu_t::make(gpu_arena_alloc<b8_t> {arena.value_}, shape);
     if (!batch) {
         expect_true(false, "pool-parity batch make: {}", batch.description_);
@@ -1316,9 +1316,9 @@ static case_result_t test_pool_parity() {
                     query_worst);
     }
 
-    // The quarter-precision twin: quantize the same tower and require every live vertex to
-    // stay on the BFloat16 tower's direction — the blocks carry the E4M3 error, the tail is
-    // a BFloat16 snapshot.
+    // The quarter-precision twin: quantize the same tower and require every live vertex to stay on
+    // the BFloat16 tower's direction, since the blocks introduce the E4M3 error and the tail is a
+    // BFloat16 snapshot of the same weights.
     auto twin = tower.value_.quantize_weights(arena.value_, stream.value_);
     expect_true(static_cast<bool>(twin), "twin quantization: {}", twin.description_);
     if (twin) {

@@ -13,10 +13,10 @@
 
 #include <cstddef> // `std::size_t`
 
-#include <span> // `std::span` — the mixer borrows the composition root's per-GPU tables as views
+#include <span> // `std::span` — the mixer's views of the per-GPU tables the composition root owns
 
 #include "uform/utilities/vram_nvidia_device.hpp"     // `gpu_arena_alloc_t`, `pinned_alloc_t`
-#include "uform/utilities/infiniband_collectives.cuh" // `colocated_domain_t` — the cross-host_domain lane
+#include "uform/utilities/infiniband_collectives.cuh" // `colocated_domain_t` — the cross-host_domain queues
 #include "uform/utilities/multimem_collectives.cuh"   // `multimem_domain_t` — the barrier the exchange brackets
 #include "uform/encoder/multimodal_batch.hpp"         // the shape, the batch template, the views, `modality_t`
 #include "uform/utilities/vram_nvidia_schedule.cuh"   // `gpu_stream_t` — the mixer's enqueue surface
@@ -66,7 +66,7 @@ using multimodal_batch_on_cpu_t = multimodal_batch<pinned_alloc_t>;
 /**
  *  @brief Shuffles the loaded batches between the GPUs of one multimem_domain — and, once wired,
  *      across the colocated_domain via InfiniBand — so every step trains on a fresh cross-GPU mix.
- *      Borrows the composition root's single @c multimem_domain_t and @c colocated_domain_t .
+ *      Uses the single @c multimem_domain_t and @c colocated_domain_t the composition root owns.
  *
  *  A mix reads every member's @b loaded batch and writes each member's @b mixed batch — two
  *  distinct per-GPU instances, so no barrier separates reads from overwrites within one mix.
@@ -154,7 +154,8 @@ struct multimodal_batch_mixer_t {
 
   private:
 
-    /** The main-owned multimem_domain — borrowed; its barrier brackets every mix. */
+    /** The multimem_domain @c main owns, which outlives the mixer; its barrier brackets every
+     *  mix. */
     multimem_domain_t* multimem_ = nullptr;
 
     /** The run's routing seed; combined with the per-call data epoch inside

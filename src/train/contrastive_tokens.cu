@@ -316,7 +316,7 @@ static __global__ void contrastive_tokens_scores_kernel_(f32r2_view_t maxima, u3
  *      lowest row whose recomputed product equals the stored maximum takes @c d(raw)/|q| , every
  *      other cell zero.
  *
- *  Ties resolve to the lowest row: a ballot over each step finds it, and the claim carries into
+ *  Ties resolve to the lowest row: a ballot over each step finds it, and the claim passes into
  *  the document's later rows, since a document never crosses a band. Wide steps inside the open
  *  document move eight rows per lane, as in @ref contrastive_tokens_band_max_kernel_ .
  *
@@ -363,8 +363,8 @@ static __global__ void contrastive_tokens_band_grad_kernel_(f32r2_view_t band_pr
         u32_t const matching_lanes = __ballot_sync(0xffffffffu, matches);
         contrastive_tokens_lane_t const position = contrastive_tokens_lane_(document, lane);
         u32_t const run_lanes = ~((1u << position.run_begin_lane) - 1u);
-        bool const carried = open_claimed && document == open_document;
-        bool const claims = matches && (matching_lanes & ((1u << lane) - 1u) & run_lanes) == 0u && !carried;
+        bool const claimed_before = open_claimed && document == open_document;
+        bool const claims = matches && (matching_lanes & ((1u << lane) - 1u) & run_lanes) == 0u && !claimed_before;
         u32_t const last_document = __shfl_sync(0xffffffffu, document, warp_size_k - 1u);
         u32_t const last_run_lanes = __shfl_sync(0xffffffffu, run_lanes, warp_size_k - 1u);
         open_claimed = (__ballot_sync(0xffffffffu, claims) & last_run_lanes) != 0u;

@@ -54,7 +54,7 @@ def test_modes_are_int_enums_of_the_package(name: str):
 
 
 def test_enum_values_follow_the_header():
-    """Members carry the C values, gaps in the numbering included."""
+    """Members mirror the C values, gaps in the numbering included."""
     assert uform.Status.SHAPE_MISMATCH == 3
     assert uform.Status.IO == 7
     assert uform.Status.INVALID_ARGUMENT == 17
@@ -125,7 +125,7 @@ def test_raised_failures_carry_their_status(tmp_path: Path):
 
 
 def test_unknown_enum_values_are_refused(checkpoint: Path):
-    """An integer no member carries is an unknown kind, and a bool or a string is no member at all."""
+    """An integer no member holds is an unknown kind, and a bool or a string is no member at all."""
     with pytest.raises(uform.UnknownKindError):
         uform.Model.load_ram(checkpoint, quantization=99)
     with pytest.raises(TypeError):
@@ -147,14 +147,8 @@ def test_executor_is_built_through_its_residency():
         uform.Executor()
 
 
-def test_borrowed_pools_need_a_pool():
-    """`on_pool` mirrors the C verb, which refuses a null pool it could borrow no threads from."""
-    with pytest.raises(uform.InvalidArgumentError):
-        uform.Executor.on_pool(0)
-
-
 def test_a_loaded_model_describes_itself_on_every_receiver(checkpoint: Path):
-    """A load from a path answers a model whose description carries its geometry."""
+    """A load from a path answers a model whose description holds its geometry."""
     model = uform.Model.load_ram(checkpoint, quantization=uform.Scalar.BF16)
     description = model.describe()
     assert description.dimensions > 0

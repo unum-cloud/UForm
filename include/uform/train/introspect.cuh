@@ -15,9 +15,9 @@
  *        @ref unum::uform::train::telemetry_ledger_t::disarmed factory, or a channel the
  *        @c telemetry_ledger_t::make mask left dark) makes every call an inert branch: no device
  *        memory, no kernels, no registered rows.
- *      - @b Root-owned, borrowed: @c main (or a suite's @c main ) constructs the one ledger and threads
- *        it by reference like the arenas and the domains (§8); the library never reads environment
- *        variables — arming is the launcher boundary's decision, mapped in the binaries' entry points.
+ *      - @b Root-owned: @c main (or a suite's @c main ) constructs the one ledger and threads it by
+ *        reference like the arenas and the domains (§8); the library never reads environment
+ *        variables — arming is the launcher's decision, mapped in the binaries' entry points.
  *      - @b Stateful device rows: each registered probe owns one @ref telemetry_row_t in a device table,
  *        updated in place by one-warp capture-safe kernels — so invariants the instant checks cannot
  *        express (changed-since-last-step, monotone rounds, zero-observation counting) are one probe.
@@ -129,7 +129,7 @@ struct telemetry_loss_stats_t {
 };
 
 /** The run's telemetry and introspection ledger — see the file header for the contract. Move-only,
- *  like the domains; constructed once at the composition root and borrowed by every consumer. */
+ *  like the domains; constructed once at the composition root and used by every consumer. */
 struct telemetry_ledger_t {
 
     telemetry_ledger_t() noexcept = default;

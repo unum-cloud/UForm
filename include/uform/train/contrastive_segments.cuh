@@ -127,7 +127,7 @@ inline constexpr u32_t max_matryoshka_prefixes_k = 8u;
  *  @brief Denominator floor for cosine normalisation @c ‖q‖ · ‖c‖ .
  *
  *  This is the @b stability floor of the contrastive backward, not a mere divide-by-zero guard.
- *  The cosine gradient carries a @c 1/(‖q‖ · ‖c‖) factor and the self-fold a @c 1/‖ · ‖² factor;
+ *  The cosine gradient has a @c 1/(‖q‖ · ‖c‖) factor and the self-fold a @c 1/‖ · ‖² factor;
  *  when pooled embeddings collapse to a small norm, those factors amplify the gradient without
  *  bound. Flooring caps the backward gain at @c β/floor while healthy unit-ish embeddings sit
  *  far above it.
@@ -495,7 +495,7 @@ struct distributed_contrastive_segments_t {
      *      every rank's loss object, reserves this consumer's window of the shared @p domain , and
      *      wires its cross-domain members through @p colocated .
      *
-     *  The caller (main) owns the infrastructure, this object only borrows it.
+     *  The caller, @c main , owns the infrastructure, which must outlive this object.
      *
      *  @param[in,out] domain The main-owned level-1 surface; one force window is reserved from it,
      *      and the world tower window when this process does not hold the whole world.
@@ -506,7 +506,7 @@ struct distributed_contrastive_segments_t {
      *      each rank's own.
      *  @param[in] streams @b [gpus] per-rank streams; their contexts scope every per-device setup.
      *  @param[in] towers @b [gpus] per-rank pooled towers — capture-stable device views, baked here
-     *      so the per-step slices carry no host arguments.
+     *      so the per-step slices have no host arguments.
      *  @param[in] relations @b [gpus] per-rank relation views — addresses baked, contents restaged
      *      by the caller per step.
      *  @param[in] from_vertices_grads @b [gpus] per-rank from-vertex-force outputs — baked
@@ -628,11 +628,12 @@ struct distributed_contrastive_segments_t {
     /** One loss object per local GPU — per-device by nature. */
     per_gpu_array<contrastive_segments_t> losses_ {};
 
-    /** The main-owned level-1 surface — borrowed; its replicas carry the column forces. */
+    /** The level-1 surface @c main owns, which outlives this object; its replicas hold the column
+     *  forces. */
     multimem_domain_t* domain_ = nullptr;
 
-    /** The main-owned level-2 surface — borrowed; retained so @ref world_domains derives the
-     *  multimem_domain span from its topology rather than caching it as a fact. */
+    /** The level-2 surface @c main owns, which outlives this object; retained so @ref world_domains
+     *  derives the multimem_domain span from its topology rather than caching it as a fact. */
     colocated_domain_t* colocated_ = nullptr;
 
     /** This consumer's disjoint window of the domain payload, reserved at @ref make . */

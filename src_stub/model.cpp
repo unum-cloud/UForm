@@ -100,14 +100,14 @@ void uform_model_load_vram(uform_model_load_vram_t* arguments) {
     if (through_executor<uform_model_load_vram>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     if (arguments->model) *arguments->model = nullptr;
-    propagate_error(uform_status_device_k, outcome, "This build carries no GPU backends");
+    propagate_error(uform_status_device_k, outcome, "This build has no GPU backends");
 }
 
 void uform_model_load_vram_buffer(uform_model_load_vram_buffer_t* arguments) {
     if (through_executor<uform_model_load_vram_buffer>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     if (arguments->model) *arguments->model = nullptr;
-    propagate_error(uform_status_device_k, outcome, "This build carries no GPU backends");
+    propagate_error(uform_status_device_k, outcome, "This build has no GPU backends");
 }
 
 void uform_model_describe(uform_model_describe_t* arguments) {

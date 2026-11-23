@@ -287,7 +287,7 @@ struct row_partition_t {
 
 /** Partition the row budget across the live modalities — any counts, no per-modality caps, exactly
  *  the freedom the real mixer has. Every live modality gets the floor share; the keyed draw rotates
- *  which ones carry the remainder, so every mixture recurs across passes (and a one-row omni batch
+ *  which ones take the remainder, so every mixture recurs across passes (and a one-row omni batch
  *  deterministically leaves most heads with zero live rows — the dynamic-M edge). */
 [[nodiscard]] static row_partition_t partition_rows_(trainer_config_t const& config,
                                                      u32_t gpu_index_in_colocated_domain,

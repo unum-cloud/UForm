@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date October 18, 2026
  *  @brief The Parquet paired loader: an anchor text and its positive, an image, clip, recording
- *      or another text read from the same rows, each pair one bag, so a single fill carries both
+ *      or another text read from the same rows, each pair one bag, so a single fill holds both
  *      halves and the relation between them, and optionally a hard negative per pair.
  *
  *  Tied to a @b dataset like the single-modality loaders:
@@ -90,7 +90,7 @@ struct paired_loader_parquet_t {
      *  @param[in,out] session GPU Direct Storage session for IO.
      *  @param[in] path_or_glob Dataset's Parquet paths or a GLOB pattern for all the files.
      *  @param[in] seed The training-run specific order-affecting seed.
-     *  @param[in,out] pool The run's CPU-decode worker pool, borrowed for the host decodes.
+     *  @param[in,out] pool The run's CPU-decode worker pool, used for the host decodes.
      *  @param[in] config The anchor, positive and negative columns and the text prefixes.
      *  @param[in] modality The positive's modality: @c image_k , @c audio_k , @c video_k or
      *      @c text_k .
@@ -171,10 +171,11 @@ struct paired_loader_parquet_t {
     [[nodiscard]] expected_t fill_(gpu_stream_t& gpu_stream, u32_t gpu_rank, u32_t training_step,
                                    std::span<multimodal_batch_on_gpu_t> batches, decode_type_&& decode) noexcept;
 
-    /** The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
+    /** The configured KvikIO / GDS storage session the reader needs, owned by the composition
+     *  root. */
     gpu_direct_storage_session_t* storage_ = nullptr;
 
-    /** The run's CPU-decode worker pool — borrowed, never spawned here. */
+    /** The run's CPU-decode worker pool, owned by the composition root and never spawned here. */
     pool_view_t pool_ {nullptr};
 
     /** The caption column, the positive column resolved to its blob leaf, and the negative column,
@@ -184,10 +185,10 @@ struct paired_loader_parquet_t {
     /** The bytes every anchor starts with, and every positive and negative text. */
     sz::string_t anchor_prefix_ {}, positive_prefix_ {};
 
-    /** The late-interaction side each role's segments carry. */
+    /** The late-interaction side each role's segments hold. */
     role_sides_t sides_ {};
 
-    /** The sample-key column, which names one media across rows, empty when shards carry none. */
+    /** The sample-key column, which names one media across rows, empty when shards have none. */
     sz::string_t key_ {};
 
     /** The run seed keying the file, row and caption draws. */

@@ -63,7 +63,7 @@
  *
  *  @section mesh_stance Design stance
  *
- *      - The colocation is @b homogeneous for now: every host_domain carries the same count of
+ *      - The colocation is @b homogeneous for now: every host_domain has the same count of
  *        identical GPUs, so three integers describe the whole world; heterogeneity is rejected at
  *        bootstrap, never papered over.
  *      - No failure recovery: the project is built around @b over-provisioning instead — a
@@ -128,7 +128,7 @@ namespace sz = ashvardanian::stringzilla;
  *        @b one global batch.
  *
  *  Invariant: @c host ≤ multimem ≤ colocated , @c multimem%host==0 , @c colocated%multimem==0 —
- *  enforced by @ref make_mesh_shape . The mesh is uniform @b by design: every host_domain carries
+ *  enforced by @ref make_mesh_shape . The mesh is uniform @b by design: every host_domain has
  *  the same count of identical GPUs, so three integers describe the whole world — heterogeneous
  *  worlds are rejected at bootstrap, never papered over. The concrete worlds in the file header:
  *  two HGX H100 boxes are @c {8,8,16} , two GB200 NVL72 racks are @c {4,72,144} , two Vera Rubin
@@ -398,7 +398,7 @@ using mesh_pause_t = void (*)() noexcept;
  *  validates agreement (identical GPU model, count and class, world size, multimem extent and job
  *  — a mismatch fails loudly naming both parties), and publishes @b one merged manifest; every
  *  follower reads only that manifest. The same @ref publish_text / @ref await_text / @ref barrier
- *  primitives then carry every later wiring phase — InfiniBand queue-pair coordinates,
+ *  primitives then serve every later wiring phase — InfiniBand queue-pair coordinates,
  *  memory-region rkeys, symmetric-heap base addresses, multicast fabric handles — so the transport
  *  adds payloads, not machinery.
  *
@@ -683,15 +683,15 @@ struct mesh_topology_t {
 
   private:
 
-    /** One parsed facts payload: the decimal fields plus views @b borrowing from
-     *  the payload text. */
+    /** One parsed facts payload: the decimal fields plus views @b into
+     *  the payload text, valid while it lives. */
     struct facts_t {
         sz::string_view_t schema {};
         sz::string_view_t job {};
         sz::string_view_t hostname {};
         sz::string_view_t device_name {};
 
-        /** The space-separated 32-hex GPU UUIDs (one per device), borrowing from the payload text —
+        /** The space-separated 32-hex GPU UUIDs (one per device), a view into the payload text —
          *  the physical GPU identities the lead proves disjoint across host_domains. */
         sz::string_view_t uuids {};
         u32_t host_domain_index = 0;

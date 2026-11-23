@@ -58,7 +58,7 @@ static bool reject_call(arguments_ const& arguments, uform_tape_view_t tape, ufo
     if (reject_if(!arguments.embeddings && !arguments.states && !arguments.token_vectors,
                   uform_status_invalid_argument_k, "Name the embeddings, the states or the token vectors", outcome))
         return true;
-    if (reject_if(arguments.token_vectors, uform_status_unsupported_k, "The model carries no token head", outcome))
+    if (reject_if(arguments.token_vectors, uform_status_unsupported_k, "The model has no token head", outcome))
         return true;
     if (reject_if(!output_scalar_bytes(arguments.outputs_scalar), uform_status_unsupported_k,
                   "Outputs land as f32, f16 or bf16 only", outcome))
@@ -161,7 +161,7 @@ void uform_text_choose(uform_text_choose_t* arguments) {
     if (arguments->probabilities) *arguments->probabilities = {};
     if (arguments->stats) *arguments->stats = {};
     if (reject_if(!arguments->model, uform_status_uninitialized_k, "The model must not be null", outcome)) return;
-    reject_if(true, uform_status_unsupported_k, "The model carries no byte decoder", outcome);
+    reject_if(true, uform_status_unsupported_k, "The model has no byte decoder", outcome);
 }
 
 void uform_image_encode(uform_image_encode_t* arguments) {

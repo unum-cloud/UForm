@@ -37,7 +37,7 @@ inline constexpr std::size_t probe_reserve_bytes_k = 64ull * 1024 * 1024;
  *  mid-page like the collectives' small heaps, which a dma-buf export rounds out to whole pages. */
 inline constexpr std::size_t probe_heap_bytes_k = 16ull * 1024 * 1024 + 384;
 
-/** The ordinary bump allocation preceding the heap, so the mapped prefix carries a used tail. */
+/** The ordinary bump allocation preceding the heap, so the mapped prefix has a used tail. */
 inline constexpr std::size_t probe_tail_bytes_k = 3ull * 1024 * 1024;
 
 #if UFORM_WITH_INFINIBAND

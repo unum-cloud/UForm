@@ -1320,7 +1320,7 @@ expected_t distributed_contrastive_segments_t::operator()(std::size_t rank, cont
     bf16r2_view_t const own_tower = world_tower_window_.scalars != 0 ? gather_sources_[rank]
                                                                      : subgraph_tables_[rank][rank].to_vertices;
 
-    // The window's tail past the column forces carries this rank's log-β, bias and loss summands,
+    // The window's tail past the column forces holds this rank's log-β, bias and loss summands,
     // so one reduce sums them across the world beside the forces.
     f32r1_span_t const tail = window_tail_(member);
     std::size_t const gradients = 2u * groups;

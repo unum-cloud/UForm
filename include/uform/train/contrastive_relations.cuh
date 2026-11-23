@@ -30,7 +30,7 @@
  *  attracts its own global copy at @c self_edge_base+i with unit weight, and every other pair
  *  repels with @c ambient_repulsion_weight — the classic in-batch contract, bit-for-bit.
  *
- *  Padding is @b state of the graph, not a parameter threaded through kernels: the view carries
+ *  Padding is @b state of the graph, not a parameter threaded through kernels: the view holds
  *  optional effective-length columns for the local vertices and the global axis, and the resolver
  *  reads them itself. Empty columns mean everything is live.
  *
@@ -62,7 +62,7 @@
 #include <cub/thread/thread_search.cuh> // `cub::LowerBound` — the per-run membership search
 #endif
 
-#include <numkong/tensor.hpp> // `nk::tensor`, `nk::tensor_view` — owning columns and borrowed views
+#include <numkong/tensor.hpp> // `nk::tensor`, `nk::tensor_view` — owning columns and views into memory owned elsewhere
 
 #include "uform/utilities/vram_nvidia_device.hpp"   // `gpu_arena_t`, `gpu_arena_alloc` backing the owning tensors
 #include "uform/encoder/multimodal_batch.hpp"       // `segment_role_t`, the bag roles the builder reads
@@ -91,7 +91,7 @@ enum class temperature_group_t : u32_t {};
  *  selects each vertex's entry — e.g. a per-modality or per-dataset temperature group, one
  *  learnable (β, bias) per group, selected per anchor vertex. An empty selector means every
  *  vertex uses entry 0, bit-identical to the single-entry path. Views instead of raw pointers:
- *  every device column carries its own extent, so the entry count is never a separately-carried
+ *  every device column has its own extent, so the entry count is never a separately-passed
  *  integer that can disagree.
  */
 struct contrastive_recipe_t {
@@ -119,14 +119,14 @@ struct contrastive_recipe_t {
      *  0 for every vertex. */
     nk::tensor_view<temperature_group_t, 1> from_vertex_temperature_group {};
 
-    /** Number of (β, bias) entries — carried by the device views; 1 on the host-scalar fallback. */
+    /** Number of (β, bias) entries — read from the device views; 1 on the host-scalar fallback. */
     [[nodiscard]] constexpr u32_t temperature_group_count() const noexcept {
         return inverse_temperature_device.empty() ? 1u : static_cast<u32_t>(inverse_temperature_device.extent(0));
     }
 };
 
 /** One resolved cell: the loss-sign multiplier and the weight; @c weight==0 means the cell is
- *  skipped and the multiplier carries no meaning. */
+ *  skipped and the multiplier has no meaning. */
 struct contrastive_pair_relation_t {
 
     /** Loss-sign multiplier (+1 attract / −1 repel) — multiplies the logit as @c target · logit . */
@@ -136,9 +136,9 @@ struct contrastive_pair_relation_t {
     f32_t weight;
 };
 
-/** One CSR edge set over a GPU's vertex rows, borrowed: @b [rows+1] offsets, the global vertex IDs
- *  ascending per row, and per-edge weights, which an ignore set carries none of. Empty offsets
- *  name no set. */
+/** One CSR edge set over a GPU's vertex rows, as views into columns owned elsewhere: @b [rows+1]
+ *  offsets, the global vertex IDs ascending per row, and per-edge weights, which an ignore set has
+ *  none of. Empty offsets name no set. */
 struct contrastive_edges_view_t {
     u32r1_view_t offsets {};
     u32r1_view_t ids {};
@@ -146,13 +146,13 @@ struct contrastive_edges_view_t {
 };
 
 /**
- *  @brief The device-readable relation graph — NumKong views borrowing the staged columns, passed
+ *  @brief The device-readable relation graph — NumKong views into the staged columns, passed
  *      to kernels @b by value.
  *
  *  Three CSR edge sets over the local vertex rows: attract and repel with per-edge scores, ignore
- *  without. Every extent is carried by its view: @ref from_vertices_per_gpu derives from the
- *  offsets row, and empty @ref ignore_offsets means no ignores. All ids are @b global vertex ids,
- *  sorted ascending within each row's run.
+ *  without. Every extent comes from its view: @ref from_vertices_per_gpu derives from the offsets
+ *  row, and empty @ref ignore_offsets means no ignores. All IDs are @b global vertex IDs, sorted
+ *  ascending within each row's run.
  */
 struct contrastive_relations_view_t {
 
@@ -231,7 +231,7 @@ struct contrastive_relations_view_t {
  *      target and weight, in the file-header precedence: PAD > ignore > self > key > attract >
  *      repel > implicit negative.
  *
- *  Padding is read from the view's own effective-length columns — the label grid carries
+ *  Padding is read from the view's own effective-length columns — the label grid holds
  *  its whole state.
  *
  *  @param[in] relations The graph views, taken by value at kernel launch.
@@ -383,7 +383,7 @@ struct contrastive_edges {
 using contrastive_edges_pinned_t = contrastive_edges<pinned_alloc_t>;
 
 /** Edges one GPU's relations hold per set: inside a bag a row names at most one partner per other
- *  segment of the bag, and a row may carry one explicit edge when no loader groups role bags. */
+ *  segment of the bag, and a row may have one explicit edge when no loader groups role bags. */
 [[nodiscard]] constexpr u32_t relation_edges_capacity(u32_t segments, u32_t max_bag_segments) noexcept {
     return segments * (max_bag_segments > 2u ? max_bag_segments - 1u : 1u);
 }
@@ -503,10 +503,10 @@ template <typename alloc_type_>
  *  so a replayed graph reads whatever @ref upload staged last. Uploads run @b outside any capture.
  *
  *  Ownership is deliberately split: the CSR columns are @b owned (they are staged copies of host
- *  data with no other home), while the effective-length columns are @b borrowed device views — the
- *  batch pipeline owns those lengths and re-fills them per step at capture-stable addresses;
- *  copying them here would duplicate per-step state. Both arrive through @ref upload /
- *  @ref upload_self_edges , the single staging entry points.
+ *  data with no other home), while the effective-length columns are device @b views — the batch
+ *  pipeline owns those lengths and re-fills them per step at capture-stable addresses; copying them
+ *  here would duplicate per-step state. Both arrive through @ref upload / @ref upload_self_edges ,
+ *  the single staging entry points.
  */
 struct contrastive_relations_t {
 
@@ -515,8 +515,8 @@ struct contrastive_relations_t {
      *      @c resize s them to the step's live extents without moving an address — the columns' own
      *      shapes are the single source of the live counts.
      *  @param[in,out] arena The arena the columns are allocated from.
-     *  @param[in] max_vertices Most local vertex rows any step will carry.
-     *  @param[in] max_edges Most explicit edges any step will carry, per edge set.
+     *  @param[in] max_vertices Most local vertex rows any step will hold.
+     *  @param[in] max_edges Most explicit edges any step will hold, per edge set.
      */
     [[nodiscard]] static expected<contrastive_relations_t> make(gpu_arena_t& arena, u32_t max_vertices,
                                                                 u32_t max_edges) noexcept {
@@ -562,15 +562,13 @@ struct contrastive_relations_t {
      *  @param[in] ignore The ignore set over the same rows, its weights unread; empty offsets
      *      mean no ignores.
      *  @param[in] from_vertex_effective_length / @p to_vertex_effective_length The per-step PAD
-     *      columns the resolver reads: @b [from_vertices_per_gpu] and @b [to_vertices_per_mesh] (by
-     *      global id) device views, 0 marking PAD, empty meaning all-live. @b Borrowed, never
-     *      copied — the batch pipeline owns them and keeps the addresses capture-stable.
+     *      columns, device views the batch pipeline owns, 0 marking PAD, empty meaning all-live.
      *  @param[in] to_vertex_effective_length The to-side PAD column over global vertex IDs,
-     *      borrowed like @p from_vertex_effective_length .
+     *      viewed like @p from_vertex_effective_length .
      *  @param[in] from_vertex_key / @p to_vertex_key The per-step key columns,
-     *      @b [from_vertices_per_gpu] and @b [to_vertices_per_mesh] device views borrowed like the
+     *      @b [from_vertices_per_gpu] and @b [to_vertices_per_mesh] device views like the
      *      lengths, zero naming no key; both empty attract no key.
-     *  @param[in] to_vertex_key The to-side key column over global vertex IDs, borrowed like
+     *  @param[in] to_vertex_key The to-side key column over global vertex IDs, viewed like
      *      @p from_vertex_key .
      *  @param[in] to_vertices_per_mesh How many global vertices the to-side columns span.
      *  @param[in] self_edge_base Global ID of local vertex 0's own copy, the base of
@@ -654,8 +652,8 @@ struct contrastive_relations_t {
     }
 
     /** Stage the zero-edge self-edge default: the offsets row is zeroed (every run empty), both
-     *  edge sets collapse to empty extents, no key attracts, and the borrowed effective-length
-     *  columns are adopted as in @ref upload . */
+     *  edge sets collapse to empty extents, no key attracts, and the effective-length column
+     *  views are adopted as in @ref upload . */
     [[nodiscard]] expected_t upload_self_edges(u32_t from_vertices_per_gpu, u32r1_view_t from_vertex_effective_length,
                                                u32r1_view_t to_vertex_effective_length, std::size_t self_edge_base,
                                                f32_t ambient_repulsion_weight, gpu_stream_t& stream) noexcept {
@@ -749,11 +747,12 @@ struct contrastive_relations_t {
     u32r1_tensor_arena_t attract_ids_ {}, repel_ids_ {}, ignore_ids_ {};
     f32r1_tensor_arena_t attract_scores_ {}, repel_scores_ {};
 
-    /** Borrowed per-step PAD state — the batch pipeline owns these at capture-stable addresses. */
+    /** Per-step PAD state, views into memory the batch pipeline owns at capture-stable
+     *  addresses. */
     u32r1_view_t from_vertex_effective_length_ {};
     u32r1_view_t to_vertex_effective_length_ {};
 
-    /** Borrowed per-step key columns, owned by the batch and the mixer like the lengths. */
+    /** Per-step key columns as views, owned by the batch and the mixer like the lengths. */
     u64r1_view_t from_vertex_key_ {};
     u64r1_view_t to_vertex_key_ {};
 

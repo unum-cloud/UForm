@@ -33,7 +33,7 @@ using uu::pixel_t;
 using uu::status_t;
 using uu::u8_t;
 
-/** The channels every decoded pixel carries — interleaved RGBA. */
+/** The channels every decoded pixel has — interleaved RGBA. */
 inline constexpr u32_t image_channels_k = 4u;
 
 /** A writable @b [height,width,4] RGBA picture, the destination of

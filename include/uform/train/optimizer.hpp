@@ -50,8 +50,8 @@
 
 #include "uform/utilities/safetensors_format.hpp" // `checkpoint_to_save_t`, `checkpoint_to_load_t` — the state a resume reads
 #include "uform/utilities/vram_nvidia_device.hpp"     // `gpu_arena_t`
-#include "uform/utilities/infiniband_collectives.cuh" // `infiniband_all_reduce` — the borrowed level-2 buffer
-#include "uform/train/introspect.cuh"                 // `telemetry_ledger_t` — the borrowed signal-probe ledger
+#include "uform/utilities/infiniband_collectives.cuh" // `infiniband_all_reduce` — the main-owned level-2 buffer
+#include "uform/train/introspect.cuh"                 // `telemetry_ledger_t` — the main-owned signal-probe ledger
 #include "uform/utilities/multimem_collectives.cuh"   // `multimem_domain_t` — the main-owned level-1 gradient surface
 #include "uform/utilities/vram_nvidia_schedule.cuh"   // `gpu_stream_t`, `launch_kernel`, `grid_size_for`
 #include "uform/utilities/types.hpp"                  // `expected`, `expected_t`, `status_t`, the scalar aliases
@@ -87,7 +87,8 @@ struct adafactor_config_t {
  *  offsets, resolved once at construction, which the kernels take by value. */
 struct adafactor_state_t {
 
-    /** The weights and their gradients, borrowed from the tower. */
+    /** The weights and their gradients, views into the tower's tensors, valid while the tower
+     *  lives. */
     nk::tensor_span<bf16_t, 2> weights {};
     nk::tensor_view<bf16_t, 2> weights_grad {};
 
@@ -168,7 +169,7 @@ struct adafactor_t {
     /** One optimizer state per weight matrix, resolved once at @ref make . */
     st::basic_vector<adafactor_state_t> states_ {};
 
-    /** Each state's weight name, in state order, which its checkpoint entries carry. */
+    /** Each state's weight name, in state order, which its checkpoint entries hold. */
     st::basic_vector<sz::string_t> names_ {};
 
     /** Every state's row + column moments, back to back in state order. */
@@ -213,12 +214,12 @@ struct distributed_adafactor_t {
     /**
      *  @brief One construction absorbs the whole world: one Adafactor per rank over its own tower's
      *      weights (all ranks must expose identically-shaped tables), one reserved gradient window of the
-     *      shared @p domain , and the borrowed @p world_reduce buffer on the gateway.
+     *      shared @p domain , and the @p world_reduce buffer @c main owns on the gateway.
      *
      *  Only member 0 touches InfiniBand, because the domain sums are already identical on every member and
      *  the world sum is peer-read back over NVLink. The ranks are this process's members of the domain,
      *  @c [domain.member_offset(),+arenas.size()) . The optimizer constructs no transport of its own:
-     *  the buffer is wired once at the composition root and borrowed here, exactly like the domain —
+     *  the buffer is wired once at the composition root and used here, exactly like the domain —
      *  so many optimizers (the conformance suite's case matrix) share one set of queue pairs.
      *
      *  @param[in,out] domain The main-owned level-1 surface; one gradient window is reserved from
@@ -234,7 +235,8 @@ struct distributed_adafactor_t {
      *  @param[in] config The Adafactor hyperparameters every rank shares.
      *  @param[in] numerics The NumKong kernels every rank's casts call.
      *  @param[in] streams Each local rank's stream.
-     *  @param[in,out] ledger The run's telemetry ledger, borrowed.
+     *  @param[in,out] ledger The run's telemetry ledger, which @c main owns
+     *      for longer than the optimizer lives.
      */
     [[nodiscard]] static expected<distributed_adafactor_t> make(
         multimem_domain_t& domain, infiniband_all_reduce<f32_t>& world_reduce, std::span<gpu_arena_t> arenas,
@@ -277,18 +279,19 @@ struct distributed_adafactor_t {
     /** One Adafactor state (and, in single-domain worlds, one reduced buffer) per local GPU. */
     per_gpu_array<optimizer_rank_t> ranks_ {};
 
-    /** The main-owned level-1 surface — borrowed; its replicas carry the staged gradients. */
+    /** The level-1 surface @c main owns, which outlives this object; its replicas hold the staged
+     *  gradients. */
     multimem_domain_t* domain_ = nullptr;
 
     /** This consumer's disjoint gradient window of the domain payload, reserved at @ref make . */
     multimem_window_t window_ {};
 
-    /** The main-owned cross-domain all-reduce buffer — borrowed, like @c domain_ ; its typed
-     *  payload is the world gradient, and its @c identity() marks single-domain worlds. */
+    /** The cross-domain all-reduce buffer @c main owns, outliving this object like @c domain_ ; its
+     *  typed payload is the world gradient, and its @c identity() marks single-domain worlds. */
     infiniband_all_reduce<f32_t>* world_reduce_ = nullptr;
 
-    /** The run's telemetry ledger — borrowed, like @c domain_ ; the per-rank probes above feed
-     *  it at the gradient boundaries, inert whenever the signals channel is dark. */
+    /** The run's telemetry ledger, owned by @c main like @c domain_ ; the per-rank probes above
+     *  feed it at the gradient boundaries, inert whenever the signals channel is dark. */
     telemetry_ledger_t* ledger_ = nullptr;
 };
 

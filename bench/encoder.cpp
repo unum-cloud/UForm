@@ -68,7 +68,7 @@ struct tape_t {
     /** Where each item starts, and the end of the last. */
     std::vector<std::size_t> offsets;
 
-    /** The tape as the C interface borrows it. */
+    /** The tape as a C view into @c bytes and @c offsets , valid while the tape stays unchanged. */
     [[nodiscard]] uform_tape_view_t view() const noexcept { return {bytes.data(), offsets.data(), uform_scalar_u8_k}; }
 };
 
@@ -91,12 +91,12 @@ static tape_t repeated_item(std::string_view item, std::size_t count) {
     return tape;
 }
 
-/** The outcome's message, or its status's name where it carries none. */
+/** The outcome's message, or its status's name where it has none. */
 static std::string_view message_of(uform_outcome_t const& outcome) noexcept {
     return outcome.message ? outcome.message : uform_status_name(outcome.status);
 }
 
-/** The bytes of @p text as the C interface borrows a name or a path. */
+/** The bytes of @p text as a C view of a name or a path, valid while @p text stays allocated. */
 static uform_bytes_view_t bytes_of(std::string_view text) noexcept {
     return {reinterpret_cast<std::uint8_t const*>(text.data()), text.size()};
 }

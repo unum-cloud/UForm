@@ -6,8 +6,8 @@
  *      arenas, names, version and capabilities.
  *
  *  A stand-in dispatches to no kernels, so it reports @c serial wherever a binding asks for
- *  capabilities. Only the RAM executor constructor succeeds: VRAM needs a GPU backend this library
- *  never carries, and a borrowed pool is not wired yet, as in the engine.
+ *  capabilities. Only the RAM executor constructor succeeds, as VRAM needs a GPU backend this
+ *  library never includes.
  */
 #include <algorithm> // `std::find`, `std::any_of`
 #include <mutex>     // `std::mutex`, `std::lock_guard`, `std::unique_lock`
@@ -125,27 +125,13 @@ void uform_executor_for_ram(uform_executor_for_ram_t* arguments) {
     *arguments->executor = executor;
 }
 
-void uform_executor_on_pool(uform_executor_on_pool_t* arguments) {
-    deferred_outcome_t outcome(arguments->outcome);
-    if (reject_if(!arguments->executor, uform_status_invalid_argument_k, "The executor output must not be null",
-                  outcome))
-        return;
-    *arguments->executor = nullptr;
-    if (reject_if(!arguments->pool, uform_status_invalid_argument_k, "The lent pool must not be null", outcome)) return;
-    uform_executor_handle_t* const executor = new (std::nothrow) uform_executor_handle_t {};
-    if (reject_if(!executor, uform_status_out_of_memory_k, "The executor could not be allocated", outcome)) return;
-    *arguments->executor = executor;
-}
-
 void uform_executor_for_vram(uform_executor_for_vram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     if (arguments->executor) *arguments->executor = nullptr;
     if (reject_if(arguments->vram.devices_count && !arguments->vram.devices, uform_status_invalid_argument_k,
                   "The devices must not be null", outcome))
         return;
-    if (reject_if(arguments->streams, uform_status_unsupported_k, "The executor drives only its own streams", outcome))
-        return;
-    propagate_error(uform_status_device_k, outcome, "This build carries no GPU backends");
+    propagate_error(uform_status_device_k, outcome, "This build has no GPU backends");
 }
 
 void uform_executor_drain(uform_executor_drain_t* arguments) {

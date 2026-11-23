@@ -161,7 +161,7 @@ expected_t ul::pack_tokens(column_view_t texts, u64r1_view_t elements, b8r1_view
         !drawn)
         return drawn;
 
-    // Each batch packs its own row of the permutation; the rectangle carries its shape.
+    // Each batch packs its own row of the permutation; the rectangle holds its shape.
     for (std::size_t batch = 0; batch != unroll; ++batch) {
         multimodal_batch_on_gpu_t& loaded = batches[batch];
         if (expected_t packed = pack_tokens(reservoir_column, batch_records[batch, nk::slice], {}, loaded.tokens.span(),
@@ -214,7 +214,7 @@ expected_t tokens_loader_parquet_t::fill(gpu_stream_t& gpu_stream, tokens_base_l
     if (batches.empty()) return {};
     std::size_t const unroll = batches.size();
     std::size_t const documents = batches[0].segment_lengths.extent(0);
-    if (documents == 0u) return expected_t::fail(status_t::unsupported_k, "the batch carries no segment capacity");
+    if (documents == 0u) return expected_t::fail(status_t::unsupported_k, "the batch has no segment capacity");
     std::size_t const total_segments = unroll * documents;
 
     // Draw row groups by the keyed weighted pick shared with `drawn_shards`, then decode only them
@@ -292,7 +292,7 @@ expected_t tokens_loader_jsonl_t::fill(gpu_stream_t& gpu_stream, tokens_base_loa
     if (batches.empty()) return {};
     std::size_t const unroll = batches.size();
     std::size_t const documents = batches[0].segment_lengths.extent(0);
-    if (documents == 0u) return expected_t::fail(status_t::unsupported_k, "the batch carries no segment capacity");
+    if (documents == 0u) return expected_t::fail(status_t::unsupported_k, "the batch has no segment capacity");
     std::size_t const total_segments = unroll * documents;
 
     std::size_t const shard_count = absolute_paths_.size();
@@ -359,7 +359,7 @@ expected_t tokens_loader_csv_t::fill(gpu_stream_t& gpu_stream, tokens_base_loade
     if (batches.empty()) return {};
     std::size_t const unroll = batches.size();
     std::size_t const documents = batches[0].segment_lengths.extent(0);
-    if (documents == 0u) return expected_t::fail(status_t::unsupported_k, "the batch carries no segment capacity");
+    if (documents == 0u) return expected_t::fail(status_t::unsupported_k, "the batch has no segment capacity");
     std::size_t const total_segments = unroll * documents;
 
     std::size_t const shard_count = absolute_paths_.size();

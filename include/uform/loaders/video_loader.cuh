@@ -18,13 +18,13 @@
  *  A container ( @c mp4 / @c webm ) can only be parsed on the host — libavformat walks its box /
  *  EBML structure and rewrites the elementary stream to Annex-B — so the drawn clips' compressed
  *  bytes make one device-to-pinned hop before demux. Demux is the one place STYLE sanctions a
- *  worker pool ( @ref unum::uform::loaders::decode_videos borrows the run's
+ *  worker pool ( @ref unum::uform::loaders::decode_videos takes the run's
  *  @ref unum::uform::utilities::pool_view_t ): container parsing is host-bound and embarrassingly
  *  parallel across clips. Everything after demux stays on device.
  *
  *  @section video_multi_engine Saturating the physical decode units — GPU-driven
  *
- *  A GPU carries several physical NVDEC engines. @ref unum::uform::loaders::nvdec_session_t holds
+ *  A GPU has several physical NVDEC engines. @ref unum::uform::loaders::nvdec_session_t holds
  *  @c engine_count independent decode @b engines — each with its own per-codec NVDEC parser plus a
  *  decoder rebuilt from every clip's sequence header — and
  *  @ref unum::uform::loaders::nvdec_session_t::decode_into feeds the drawn clips across them in
@@ -71,7 +71,7 @@
 #include <memory> // `std::unique_ptr` — the pimpl owning the NVDEC engine state
 #include <span>   // `std::span`
 
-#include "uform/utilities/ram_device.hpp"           // `pool_view_t` — the borrowed CPU demux / decode-drive pool
+#include "uform/utilities/ram_device.hpp"           // `pool_view_t` — the root-owned CPU demux / decode-drive pool
 #include "uform/utilities/vram_nvidia_device.hpp"   // `pinned_alloc`
 #include "uform/encoder/multimodal_batch.cuh"       // `multimodal_batch_on_gpu_t`
 #include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
@@ -114,7 +114,7 @@ struct nvdec_config_t {
 /** The multi-engine NVDEC RAII context: @c engine_count decode engines (each a per-codec parser /
  *  decoder entry table) plus the shared context lock — made once at the composition root with a
  *  current context on the target device, threaded by reference. The engines own no streams; decode
- *  rides the caller's stream. Move-only; all vendor state behind a pimpl. It @b borrows the run's
+ *  rides the caller's stream. Move-only; all vendor state behind a pimpl. It @b takes the run's
  *  CPU pool per call (for demux) rather than owning one. */
 struct nvdec_session_t {
 
@@ -145,7 +145,7 @@ struct nvdec_session_t {
      *  placement; write each segment's factorization into @p video_shapes . All GPU work rides
      *  @p stream .
      *
-     *  @param[in,out] pool The run's CPU pool, borrowed for the host-bound demux only — it never
+     *  @param[in,out] pool The run's CPU pool, used for the host-bound demux only — it never
      *      drives the decode.
      *  @param[in] clips The drawn clips' container bytes as a host-pinned tape;
      *      @c [0,clips.size()) clips.
@@ -211,7 +211,7 @@ struct video_loader_parquet_config_t {
  *  @ref unum::uform::loaders::image_loader_parquet_t . Holds one dataset's shard footers; keep one
  *  per input dataset. @ref unum::uform::loaders::video_loader_parquet_t::fill allocates its scratch
  *  on demand and is safe to call concurrently for different GPU ranks on different streams (each
- *  @ref unum::uform::loaders::video_loader_parquet_t::fill borrows its own engines through the
+ *  @ref unum::uform::loaders::video_loader_parquet_t::fill reaches its own engines through the
  *  @p decoder it is handed). */
 struct video_loader_parquet_t {
 
@@ -223,7 +223,7 @@ struct video_loader_parquet_t {
      *  @param[in] path_or_glob Dataset's Parquet paths or a GLOB pattern for all the files.
      *  @param[in] seed The training-run specific order-affecting seed.
      *  @param[in,out] pool The run's CPU-decode worker pool, owned at the composition root
-     *      and borrowed here.
+     *      and used here.
      *  @param[in] video The video modality's own geometry slice ( @c tube_frames , @c patch_side ,
      *      @c frame_stride ) — the single source of a step's video geometry; it never sees the
      *      sibling modalities' shapes.
@@ -253,10 +253,11 @@ struct video_loader_parquet_t {
 
   private:
 
-    /** The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
+    /** The configured KvikIO / GDS storage session the reader needs, owned by the composition
+     *  root. */
     gpu_direct_storage_session_t* storage_ = nullptr;
 
-    /** The run's CPU-decode worker pool — borrowed from the composition root, forwarded
+    /** The run's CPU-decode worker pool, owned by the composition root and forwarded
      *  to the decode. */
     pool_view_t pool_ {nullptr};
 

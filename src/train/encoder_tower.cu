@@ -83,7 +83,7 @@ static __global__ void __launch_bounds__(kernel_block_size_default_k, 1)
     std::size_t const row = blockIdx.x;
     std::size_t const tokens = sorted_tokens.extent(0);
     token_id_t const token = sorted_tokens[row];
-    // Non-text cells carry the sentinel id (>= vocabulary); they sort into one trailing run with
+    // Non-text cells hold the sentinel ID (>= vocabulary); they sort into one trailing run with
     // no table row to fold into, so the whole run is skipped and no media / PAD gradient leaks
     // into the table.
     if (static_cast<std::size_t>(token) >= table_grad.extent(0)) return;
@@ -204,7 +204,7 @@ static __global__ void tower_normalize_segment_kernel_(nk::tensor_view<pixel_t, 
  *  @brief Stage one @b audio segment's raw waveform frames in place into the
  *      projection's BFloat16 fan-in.
  *
- *  Like @ref tower_normalize_segment_kernel_ but raw samples carry no per-channel statistics to
+ *  Like @ref tower_normalize_segment_kernel_ but raw samples have no per-channel statistics to
  *  subtract, so the cast is the whole staging ( @c f32 → BFloat16 ) over the flat
  *  @c [rows,scalars] peel (a frame is @c chunk_samples raw samples); non-audio segments and the
  *  pre-zeroed remainder stay zero.
@@ -549,7 +549,7 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t& arena, en
     // its projection, pack, and scratch untouched. Fan-ins are per-modality: image is
     // ph·pw·image_channels, video folds video_tube_frames ahead of ph·pw·video_channels, and audio
     // — a 1-D signal, unpatched — is just chunk_samples raw samples per frame (its projection is
-    // the learnable spectral frontend). Image and video pixels carry an ImageNet-style per-channel
+    // the learnable spectral frontend). Image and video pixels take an ImageNet-style per-channel
     // normalization; audio raw frames upload no constants.
 
     bool const image_present = config.image_patch_height != 0 && config.image_patch_width != 0;
@@ -743,8 +743,8 @@ expected_t tower_pool_t::backward(bf16r1_view_t query, bf16r2_view_t pooled_grad
                          stream, query_partials_.view(), query_grad);
 }
 
-/** The rows segment @p segment lends the token head: its live tokens past the prefix, or none when
- *  it plays no late-interaction side. */
+/** The rows segment @p segment contributes to the token head: its live tokens past the prefix, or
+ *  none when it plays no late-interaction side. */
 [[nodiscard]] static __device__ inline u32_t tower_token_span_(multimodal_batch_view_t const& batch,
                                                                u32_t segment) noexcept {
     u32_t const length = batch.segment_lengths[segment], prefix = batch.segment_prefix_length[segment];
@@ -944,7 +944,7 @@ expected_t tower_token_head_t::backward(bf16r2_view_t vectors_grad, multimodal_b
     if (staged)
         staged = multiply_bf16(projected_grad_.view(), packed_projection_transposed_.view(), products, numerics_,
                                stream);
-    // The normalized stash is dead once the projection's weight gradient read it, so it carries the
+    // The normalized stash is dead once the projection's weight gradient read it, so it holds the
     // narrowed data gradient into the norm's backward.
     if (staged)
         staged = numkong_result(
@@ -1061,7 +1061,7 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const& batch,
                                        scratch_->products.span(), numerics_, stream);
     if (!staged) return staged;
 
-    // The block stack carries the Float32 residual stream: layer n reads layer n-1's output,
+    // The block stack keeps the Float32 residual stream: layer n reads layer n-1's output,
     // ping-ponging the two buffers, and the last output is a stash the backward reads.
     f32r2_view_t layer_input = activations_b_.view();
     for (u32_t layer_index = 0; layer_index != config_.depth; ++layer_index) {
@@ -1241,7 +1241,7 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
     }
 
     // The caller's BFloat16 masked force widens into token_grad_a_ alone, or beside the pooled
-    // force and adds onto it: the co-trained join. The caller's hidden_grad may carry a wider
+    // force and adds onto it: the co-trained join. The caller's hidden_grad may have a wider
     // capacity than the live extent.
     if (masked_present) {
         bf16r2_view_t const masked_grad = hidden_grad[nk::range(0, live_tokens), nk::slice];

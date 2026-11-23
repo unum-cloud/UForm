@@ -13,7 +13,7 @@
  *      - @ref test_token_head_finite_differences : the late-interaction token head and its join
  *        into the tower, under a linear loss over the token vectors, with prefixes and side-less
  *        segments left out.
- *      - @ref test_masked_text_rows : every text row with bytes carries at least one masked
+ *      - @ref test_masked_text_rows : every text row with bytes has at least one masked
  *        position.
  *      - @ref test_masked_media_rows : each media head scores only the cells of its own modality.
  *      - @ref test_chance_cross_entropy : a freshly seeded model starts at the uniform byte
@@ -39,7 +39,7 @@
  *  projections, the token cross-entropy head and the patch and frame MSE heads.
  *
  *  The forward and the backward both round their activations to BFloat16, so a forward's loss
- *  carries a few thousandths of a nat of rounding noise and a finite difference agrees with the
+ *  has a few thousandths of a nat of rounding noise and a finite difference agrees with the
  *  analytic gradient to a few percent, not to Float32 precision; a wrong Jacobian term misses by
  *  tens of percent, and the block replay checks the attention path exactly.
  */
@@ -104,7 +104,7 @@ using namespace unum::uform::test;
     return true;
 }
 
-/** The GPU every case borrows, owned by @c main : one stream whose context the cases enter, and the
+/** The GPU every case uses, owned by @c main : one stream whose context the cases enter, and the
  *  kernels they call. Each case allocates its own arena, so a case's allocations die with it. */
 struct device_t {
     gpu_stream_t stream;
@@ -463,7 +463,7 @@ static void test_token_head_finite_differences(device_t& device) {
     }
 }
 
-/** Every text row with bytes carries at least one masked position, over sixteen 64-byte rows
+/** Every text row with bytes has at least one masked position, over sixteen 64-byte rows
  *  and eight epochs. */
 static void test_masked_text_rows(device_t& device) {
     switch_to_gpu_t scope {device.stream};
@@ -493,7 +493,7 @@ static void test_masked_text_rows(device_t& device) {
                 masked += weights[segments.offsets[segment] + column];
             unmasked += masked == 0 ? 1u : 0u;
         }
-        expect_true(unmasked == 0, "epoch {}: {} of {} text rows carry no masked byte", epoch, unmasked,
+        expect_true(unmasked == 0, "epoch {}: {} of {} text rows have no masked byte", epoch, unmasked,
                     segments.lengths.size());
     }
 }
@@ -773,7 +773,7 @@ static void test_adafactor_small_steps(device_t& device) {
         return;
     f64_t const total = nk::reduce_moments<nk::f64_t>(matrix.host_weights).value.sum;
     f64_t const mean_step = 1.0 - total / static_cast<f64_t>(rows * columns);
-    // Each scalar moves by 2^-8 with probability 1/4, so the mean of 16384 carries a
+    // Each scalar moves by 2^-8 with probability 1/4, so the mean of 16384 has a
     // 1.3e-5 standard error.
     expect_true(std::fabs(mean_step - learning_rate) < 0.1 * learning_rate,
                 "the mean step is {:.4g}, the learning rate {:.4g}", mean_step, learning_rate);

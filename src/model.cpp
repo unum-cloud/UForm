@@ -22,14 +22,19 @@ namespace ue = unum::uform::encoder;
 
 uform_model_handle_t::~uform_model_handle_t() noexcept {
     std::visit(
-        [&](auto const* verbs) noexcept {
+        [&]<vendored_residency_t residency_>(encoder_verbs<residency_> const* verbs) noexcept {
             if (!verbs) return;
             if (void* const* const tower = std::get_if<void*>(&towers)) {
                 if (*tower) verbs->destroy(*tower);
                 return;
             }
-            for (uf::vram_replica_t& replica : std::get<uf::per_gpu_array<uf::vram_replica_t>>(towers))
-                if (replica.tower) verbs->destroy(replica.tower);
+            if constexpr (residency_ != vendored_residency_t::ram_k && gpu_vendor_compiled(vendor_of(residency_)))
+                for (uf::vram_replica_t& replica : std::get<uf::per_gpu_array<uf::vram_replica_t>>(towers)) {
+                    if (!replica.tower) continue;
+                    [[maybe_unused]] nk_status_t const selected = entries_kit_of<residency_>::select(
+                        static_cast<std::size_t>(replica.vendor_ordinal));
+                    verbs->destroy(replica.tower);
+                }
         },
         tables);
 }
@@ -50,7 +55,7 @@ static bool propagate_load_failure(status_t status, load_stage_t stage, uform_ou
         case load_stage_t::reading_k:
             return propagate_error(uform_status_malformed_k, outcome, "The checkpoint is not a safetensors file");
         case load_stage_t::measuring_k:
-            return propagate_error(uform_status_malformed_k, outcome, "The checkpoint carries no usable geometry");
+            return propagate_error(uform_status_malformed_k, outcome, "The checkpoint has no usable geometry");
         case load_stage_t::packing_k:
             return propagate_error(uform_status_malformed_k, outcome, "The checkpoint misses or misshapes a tensor");
         }
@@ -190,9 +195,12 @@ static bool load_replicas(uform_model_handle_t& model, checkpoint_to_load_t cons
             return propagate_error(uform_status_config_mismatch_k, outcome, "The devices differ in class");
         verbs = picked;
         model.tables = verbs;
-        void* const tower = pack_tower(model, checkpoint, *verbs, device.stream.get(), outcome);
+        if constexpr (gpu_vendor_compiled(vendor_of(residency_))) // a build without the vendor picks no verbs
+            if (entries_kit_of<residency_>::select(static_cast<std::size_t>(device.vendor_ordinal)) != nk_success_k)
+                return propagate_error(uform_status_device_k, outcome, "A device failed to become current");
+        void* const tower = pack_tower(model, checkpoint, *verbs, device.stream, outcome);
         if (!tower) return false;
-        if (replicas.push_back(vram_replica_t {device.ordinal, tower}) != status_t::success_k)
+        if (replicas.push_back(vram_replica_t {device.ordinal, device.vendor_ordinal, tower}) != status_t::success_k)
             return verbs->destroy(tower),
                    propagate_error(uform_status_out_of_memory_k, outcome, "Failed to list the replicas");
         if (ticks(++placed, devices.devices.size()) == continuation_t::cancel_k)
@@ -235,7 +243,7 @@ static expected<checkpoint_to_load_t> map_checkpoint(uform_bytes_view_t path) no
     return checkpoint_to_load_t::make(text_of(path));
 }
 
-/** Views the checkpoint image @p buffer , borrowed only until the towers are packed. */
+/** Views the checkpoint image @p buffer , which must stay allocated until the towers are packed. */
 static expected<checkpoint_to_load_t> view_checkpoint(uform_bytes_view_t buffer) noexcept {
     return checkpoint_to_load_t::view(std::as_bytes(std::span<u8_t const> {buffer.data, buffer.length}));
 }

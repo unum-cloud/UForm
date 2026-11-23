@@ -126,7 +126,7 @@ struct tokens_loader_parquet_t {
      *      cross-rank sampling conformance.
      *
      *  @p target_segments is the pool target ( @c unroll · segments_per_batch ) a @c fill would
-     *  cover; the returned views borrow the loader's owned paths and pick storage, valid until
+     *  cover; the returned views point into the loader's owned paths and pick storage, valid until
      *  the next draw.
      *
      *  @param[in] gpu_rank The GPU rank the draw is keyed by — different ranks draw
@@ -139,7 +139,8 @@ struct tokens_loader_parquet_t {
 
   private:
 
-    /** The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
+    /** The configured KvikIO / GDS storage session the reader needs, owned by the composition
+     *  root. */
     gpu_direct_storage_session_t* storage_ = nullptr;
 
     /** The run seed keying the random file and row draws. */
@@ -171,7 +172,7 @@ struct tokens_base_loader_jsonl_config_t {
  *  @brief The JSONL sibling of @ref tokens_loader_parquet_t — a @b separate class (no format
  *      punning), same dataset-scoped, rank-agnostic shape.
  *
- *  The one difference is footerless: JSONL carries no row count, so @c make weighs files by @b byte
+ *  The one difference is footerless: JSONL has no row count, so @c make weighs files by @b byte
  *  size and @c fill decodes files one at a time until the reservoir covers the batch, rather than
  *  counting rows from a footer up front.
  *
@@ -209,7 +210,8 @@ struct tokens_loader_jsonl_t {
 
   private:
 
-    /** The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
+    /** The configured KvikIO / GDS storage session the reader needs, owned by the composition
+     *  root. */
     gpu_direct_storage_session_t* storage_ = nullptr;
 
     /** The dataset's JSONL shard paths — owned, expanded from the glob at @c make . */
@@ -286,7 +288,8 @@ struct tokens_loader_csv_t {
 
   private:
 
-    /** The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
+    /** The configured KvikIO / GDS storage session the reader needs, owned by the composition
+     *  root. */
     gpu_direct_storage_session_t* storage_ = nullptr;
 
     /** The dataset's CSV shard paths — owned, expanded from the glob at @c make . */

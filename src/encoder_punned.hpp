@@ -11,7 +11,7 @@
  */
 #pragma once
 
-#include <span>        // `std::span` — the scratch a call borrows
+#include <span>        // `std::span` — the scratch a call writes, owned by its caller
 #include <type_traits> // `std::conditional_t`
 
 #include "uform/encoder/vram_kits.hpp" // `vram_nvidia_entries_kit_t`, `vram_amd_entries_kit_t`, `vram_apple_entries_kit_t`

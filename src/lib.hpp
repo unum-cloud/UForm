@@ -35,12 +35,11 @@
 #include <forkunion/types.hpp>        // `fu::spin_mutex_t`, `fu::wait_capped_k`
 #include <numkong/capabilities.h>     // `nk_capability_t`, `nk_stream_t`
 #include <numkong/memory.h>           // `nk_allocator_t`, `nk_allocator_init_heap`
-#include <numkong/memory.hpp>         // `nk::stream_t` - the stream an executor owns
 
 #include "uform/uform.h" // every argument structure
 
 #include "uform/utilities/array.hpp"      // `per_gpu_array`
-#include "uform/utilities/ram_device.hpp" // `executor_t`, `lent_pool_t`, `pool_view_t`, `topology_t`
+#include "uform/utilities/ram_device.hpp" // `ram_executor_t`, `pool_view_t`, `topology_t`
 #include "uform/utilities/types.hpp"      // `status_t`, the integer aliases, `sz::string_view_t`, `st::basic_vector`
 #include "uform/utilities/vram_apple_device.hpp" // `metal_api_t`, `metal_contexts_t`
 #include "uform/encoder/tower.hpp" // `geometry_t`, `precision_t`, `outputs_t` - what a model's towers take
@@ -58,7 +57,6 @@ using utilities::bytes_view_t;
 using utilities::caller_exclusivity_t;
 using utilities::checkpoint_to_load_t;
 using utilities::divide_round_up;
-using utilities::executor_t;
 using utilities::expected;
 using utilities::expected_t;
 using utilities::f32_t;
@@ -67,7 +65,6 @@ using utilities::f32r2_view_t;
 using utilities::f64_t;
 using utilities::i32_t;
 using utilities::i64_t;
-using utilities::lent_pool_t;
 using utilities::max_gpus_per_host_k;
 using utilities::per_gpu_array;
 using utilities::pixel_t;
@@ -90,7 +87,8 @@ inline constexpr std::size_t default_progress_steps_k = 10;
  *  of the cores. */
 inline constexpr std::size_t idle_cores_denominator_k = 8;
 
-/** A borrowed byte run of the C interface, a path or a spelling, as the engine's string view. */
+/** A byte run of the C interface, a path or a spelling, as a string view valid while the caller
+ *  keeps it. */
 [[nodiscard]] inline sz::string_view_t text_of(uform_bytes_view_t bytes) noexcept {
     return {nk::as_values<char>(std::as_bytes(std::span<u8_t const> {bytes.data, bytes.length})).data(), bytes.length};
 }
@@ -466,7 +464,7 @@ struct atomic_ref_for_cpu_class<cpu_class_t::monoversioned_k> {
 };
 #endif
 
-/** The spin hints every core of an architecture carries - PAUSE, YIELD, Zihintpause and Power's
+/** The spin hints every core of an architecture supports - PAUSE, YIELD, Zihintpause and Power's
  *  priority nops: the runtime confirms nothing about them, and a class that differs from another by
  *  one of them alone earns no rung. */
 inline constexpr fu::capabilities_t baseline_hints_k = fu::capability_x86_pause_k | fu::capability_arm64_yield_k |
@@ -876,7 +874,7 @@ inline bool propagate_error(uform_status_t status, uform_outcome_t* outcome,
 
 #pragma region Progress
 
-/** Whether the call a progress handler watches carries on or unwinds. */
+/** Whether the call a progress handler watches continues or unwinds. */
 enum class continuation_t : u8_t {
     continue_k,
     cancel_k,
@@ -990,9 +988,6 @@ class chunked_arena_t {
         for (bytes_span_t const chunk : chunks_) policy_.free(chunk.data(), chunk.size(), policy_.handle, stream_);
     }
 
-    /** The stream its chunks are allocated and freed on; null for host pages. */
-    [[nodiscard]] nk_stream_t stream() const noexcept { return stream_; }
-
     /** Forgets every allocation, keeping the chunks, which invalidates every view the previous
      *  call handed out. */
     void rewind() noexcept { current_ = 0, used_ = 0; }
@@ -1078,10 +1073,6 @@ struct device_arena_t {
 
 #pragma region Executors
 
-/** A device stream an executor opened and closes, its vendor named by the device it
- *  was opened on. */
-using owned_stream_t = nk::stream_t;
-
 /** Metal's table and Apple's device contexts, which the process builds once, at the first GPU call,
  *  and every Apple listing, allocation and launch reads; empty off Apple platforms, which then list
  *  no Apple devices. NVIDIA and AMD devices list through NumKong, and their entries units keep the
@@ -1101,10 +1092,10 @@ struct gpu_drivers_t {
     return drivers;
 }
 
-/** The host threads of a RAM executor, spawned here or lent by another library, and where its
- *  models place their bytes. */
+/** The host threads of a RAM executor, spawned and deleted here, and where its models place
+ *  their bytes. */
 struct ram_executor_t {
-    std::variant<executor_t, lent_pool_t> pool;
+    utilities::ram_executor_t pool;
 
     /** What the threads may run: the machine's masks under the executor's ceiling class. */
     cpu_ceiling_t ceiling;
@@ -1130,9 +1121,10 @@ struct vram_device_t {
      *  under its ceiling. */
     gpu_class_t gpu_class = gpu_class_t::unknown_k;
 
-    /** Declared before the scratch, so the scratch returns its chunks while the
-     *  stream still lives. */
-    owned_stream_t stream;
+    /** What its work orders on: the caller's stream, which the caller destroys after freeing the
+     *  executor, or the per-thread default stream, Apple's default queue, of the device the
+     *  executor selects before every step. */
+    nk_stream_t stream = nullptr;
 
     /** Activations, grown to a high-water mark under the executor's @c scratch_limit. */
     device_arena_t scratch;
@@ -1146,16 +1138,11 @@ struct vram_device_t {
  *  caller: it stages and feeds the devices and waits on them, while the rest decode for them. */
 struct vram_executor_t {
     per_gpu_array<vram_device_t> devices;
-    executor_t decoders;
+    utilities::ram_executor_t decoders;
 
     /** Host pages for what only the decoders read: the plans and every thread's decode window. */
     host_arena_t staging;
 };
-
-/** The right to dispatch on @p pool , owned or lent. */
-[[nodiscard]] inline pool_view_t view_of(std::variant<executor_t, lent_pool_t> const& pool) noexcept {
-    return std::visit([](auto const& alternative) noexcept { return alternative.view(); }, pool);
-}
 
 #pragma endregion Executors
 
@@ -1190,9 +1177,11 @@ using encoder_residency_tables_t = std::variant<
     encoder_verbs<vendored_residency_t::ram_k> const*, encoder_verbs<vendored_residency_t::vram_nvidia_k> const*,
     encoder_verbs<vendored_residency_t::vram_amd_k> const*, encoder_verbs<vendored_residency_t::vram_apple_k> const*>;
 
-/** One copy of a model's tower on one GPU, matched to an executor's device by its UForm ordinal. */
+/** One copy of a model's tower on one GPU, matched to an executor's device by its UForm ordinal,
+ *  and freed with its vendor's ordinal selected. */
 struct vram_replica_t {
     i32_t ordinal = 0;
+    i32_t vendor_ordinal = 0;
     void* tower = nullptr;
 };
 
@@ -1334,7 +1323,7 @@ bool submitted(arguments_type_* arguments) noexcept {
         verb_(std::get_if<arguments_type_>(&held.delegated_arguments));
     });
     if (delegated != uform_status_success_k)
-        call.recorded = {delegated, "The lent pool runs its lender's dispatch"}, end_call(*executor);
+        call.recorded = {delegated, "The executor's threads run another dispatch"}, end_call(*executor);
     return true;
 }
 
@@ -1434,9 +1423,8 @@ struct uform_arena_handle_t {
     uf::u64_t named_calls = 0;
 };
 
-/** What @c uform_model_t owns: the geometry its checkpoint carried, the precision its blocks run
- *  in, and its packed towers; the variant is the residency, so the checkpoint itself is closed once
- *  the load completes. */
+/** What @c uform_model_t owns: the geometry its checkpoint held, the precision its blocks run in,
+ *  and its packed towers; the variant is the residency, so the checkpoint closes after the load. */
 struct uform_model_handle_t {
     uf::encoder::geometry_t geometry;
     uf::encoder::precision_t precision = uf::encoder::precision_t::bf16_k;

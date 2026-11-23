@@ -30,7 +30,7 @@
  */
 #pragma once
 
-#include <span>    // `std::span` — the sampler's borrowed entries
+#include <span>    // `std::span` — the sampler's view of the entries
 #include <variant> // `std::variant` — one loader per entry, of the entry's kind
 
 #include "uform/loaders/choices_loader.cuh" // `choices_loader_parquet_t`
@@ -110,6 +110,9 @@ struct mixture_t {
     /** Whether any entry is a choices entry. */
     [[nodiscard]] bool chooses() const noexcept;
 
+    /** Whether the entries are pairs, which a mixture never mixes with plain text. */
+    [[nodiscard]] bool pairs() const noexcept;
+
     /** @p shape with the slice of every media modality the entries name lit at the mixture
      *  geometry: RGBA images in 16-pixel patches, RGB video in 2-frame tubes of 16 pixels, and
      *  256-sample audio frames at 16 kHz, and with room for every byte value as a choice when
@@ -131,8 +134,9 @@ struct mixture_t {
 struct mixture_sampler_t {
 
     /**
-     *  @brief Size the counters for @p entries , borrowed, whose shards hold @p rows rows each, for
+     *  @brief Size the counters for @p entries , whose shards hold @p rows rows each, for
      *      @p world_gpus GPUs packing @p batches_per_fill batches of @p segments segments per fill.
+     *      The @p entries must outlive the sampler.
      *
      *  @par Statuses:
      *  - @c status_t::invalid_argument_k An entry caps its passes over shards that count no rows.
@@ -180,19 +184,18 @@ struct mixture_sampler_t {
  *  @brief The datasets of a mixture, loaded per GPU and routed across the mesh by the mixer, with
  *      the relations of every pair under a contrastive objective.
  *
- *  Owns the decode pool, one loader per entry, the nvJPEG and NVDEC sessions of every GPU its media
- *  need, the loaded batches, the mixer and the host scratch the relations are built in; borrows the
- *  process's storage session from the composition root. Placed and never moved, since the loaders
- *  borrow the pool.
+ *  Owns one loader per entry, the nvJPEG and NVDEC sessions of every GPU its media need, the loaded
+ *  batches, the mixer and the host scratch the relations are built in. The composition root owns
+ *  the storage session and the decode pool, and frees them after the source.
  */
 struct dataset_source_t {
 
-    /** Make one loader per entry of @p mixture over @p storage , before the trainer, and charge
-     *  @p config with the device bytes their reservoirs can take outside the arena when one fill
-     *  packs @p batches_per_fill batches. */
+    /** Make one loader per entry of @p mixture over @p storage , its media decoding on @p pool ,
+     *  before the trainer, and charge @p config with the device bytes their reservoirs can take
+     *  outside the arena when one fill packs @p batches_per_fill batches. */
     [[nodiscard]] static expected_t open(dataset_source_t& placed, trainer_config_t& config,
                                          loaders::gpu_direct_storage_session_t& storage, mixture_t mixture,
-                                         std::size_t batches_per_fill) noexcept;
+                                         pool_view_t pool, std::size_t batches_per_fill) noexcept;
 
     /** Make the loaded batches, the decoder sessions and the mixer of an @ref open source from
      *  @p trainer 's arenas, packing @p batches_per_fill batches per GPU per fill. */
@@ -219,9 +222,6 @@ struct dataset_source_t {
 
     /** The entries the loaders and their columns come from. */
     mixture_t mixture_ {};
-
-    /** The host workers the image fallback and the audio and video demux fan across. */
-    executor_t pool_ {};
 
     /** One loader per entry, in entry order. */
     st::basic_vector<loader_t> loaders_ {};

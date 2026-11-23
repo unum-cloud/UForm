@@ -49,7 +49,7 @@ template <typename integer_type_>
 
 /** A JPEG's marker walk over @p window , the blob's bytes from @p window_offset on, for a
  *  start-of-frame (SOFn): after the 2-byte segment length come precision, then height and width as
- *  big-endian UInt16. Only the frame headers carry them ( @c C0..CF except DHT @c C4 , JPG @c C8 ,
+ *  big-endian UInt16. Only the frame headers have them ( @c C0..CF except DHT @c C4 , JPG @c C8 ,
  *  DAC @c CC ). The walk starts past the SOI marker at the blob's head and at the window's first
  *  marker otherwise, and a walk leaving the window returns the offset it resumes at. */
 [[nodiscard]] static expected<image_probe_t> jpeg_probe_(bytes_view_t window, std::size_t window_offset) noexcept {

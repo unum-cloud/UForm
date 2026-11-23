@@ -3,13 +3,13 @@
  *  @author Ash Vardanian
  *  @date October 18, 2026
  *  @brief A training run: @ref unum::uform::train::mesh_t , the transport every trainer of a
- *      process borrows, and @ref unum::uform::train::trainer_t , what one run owns, stepped from a
+ *      process uses, and @ref unum::uform::train::trainer_t , what one run owns, stepped from a
  *      @ref unum::uform::train::batch_source_t .
  *
  *  The mesh owns the bootstrapped topology and the InfiniBand domain joining the NVLink domains.
  *  The trainer owns the multimem domain, sized by the sum of its consumers'
  *  @c payload_scalars_needed() . Both are placed and never moved, since the colocated domain
- *  borrows the topology.
+ *  points at the topology.
  *
  *  Every process builds its collectives and issues its barriers in one order, since rendezvous
  *  IDs and multimem flags count them. The trainer declares its members in that order, so
@@ -62,7 +62,7 @@ struct mesh_options_t {
 
 /** One process's place among the processes of a run: the topology every process agreed on at
  *  bootstrap, and the InfiniBand domain joining its NVLink domains. Placed and never moved, since
- *  @ref colocated borrows @ref topology . */
+ *  @ref colocated points at @ref topology . */
 struct mesh_t {
 
     /** The bootstrapped world. */
@@ -208,8 +208,8 @@ struct batch_source_t {
     void* state = nullptr;
 };
 
-/** The batch source of any type with a matching @c fill member, borrowed for as long as the
- *  result is used. */
+/** The batch source of any type with a matching @c fill member; the source must outlive the
+ *  result. */
 template <typename source_type_>
 [[nodiscard]] batch_source_t batch_source_of(source_type_& source) noexcept {
     return {[](void* state, trainer_t& trainer, data_epoch_t data_epoch, step_report_t& report) noexcept {
@@ -239,8 +239,8 @@ struct item_choices_t {
 };
 
 /** This process's share of one step: every item's modality and bytes, and its optional
- *  bag, temperature group, late-interaction side, choices and relations, all borrowed
- *  until the step returns. */
+ *  bag, temperature group, late-interaction side, choices and relations, all read only
+ *  during the step. */
 struct training_items_t {
     std::span<modality_t const> modalities {};
 
@@ -281,7 +281,7 @@ struct items_source_t {
     [[nodiscard]] expected_t fill(trainer_t& trainer, data_epoch_t data_epoch, step_report_t& report) noexcept;
 
     /** The mesh-wide vertex item @p item landed on in the last step, or @c ~0u when it
-     *  carried no tokens. */
+     *  had no tokens. */
     [[nodiscard]] u32_t destination(std::size_t item) const noexcept { return destinations_[item]; }
 
     /** Download every replica's pooled vertices, @b [gpus·max_segments,hidden]
@@ -299,7 +299,7 @@ struct items_source_t {
     /** Per item: its tokens, its destination vertex and its packing order. */
     st::basic_vector<u32_t> tokens_ {}, destinations_ {}, order_ {};
 
-    /** @b [gpus,segments] per routed segment: its world source, then the item it carries. */
+    /** @b [gpus,segments] per routed segment: its world source, then the item it holds. */
     u32r2_tensor_pinned_t sources_ {};
 
     /** @b [gpus,segments] the item packed into each device segment of the mesh, or @c ~0u . */
@@ -318,13 +318,13 @@ struct items_source_t {
 };
 
 /** Everything one run owns on this process's devices, in wire order, placed and never moved
- *  because its consumers borrow the domain. */
+ *  because its consumers point at the domain. */
 struct trainer_t {
 
     /** The run description every method reads — the single copy. */
     trainer_config_t config {};
 
-    /** The borrowed mesh this run's collectives wire through. */
+    /** The mesh this run's collectives wire through, owned by the caller and outliving the run. */
     mesh_t* mesh = nullptr;
 
     /** The device ordinals this process drives. */

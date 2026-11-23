@@ -35,7 +35,8 @@ inline constexpr std::size_t audio_avio_buffer_bytes_k = 32u * 1024u;
 /** Backing state for the in-memory AVIO read and seek callbacks over one clip's bytes. */
 struct audio_memory_reader_t {
 
-    /** The clip's bytes — borrowed, not owned; their end is the seek's bound. */
+    /** The clip's bytes, owned by the caller and read only during the decode; their end is the
+     *  seek's bound. */
     bytes_view_t bytes {};
 
     /** The read cursor, advanced by every read and moved by every seek. */

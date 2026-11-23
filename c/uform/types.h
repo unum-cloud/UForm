@@ -19,7 +19,7 @@
  *  @c completion. Inputs follow, then outputs and the @c arena they land in, then knobs, and last
  *  @c progress and @c stats.
  *
- *  Structures carry no size or version field, so they grow source-compatibly only: initialize them
+ *  Structures have no size or version field, so they grow source-compatibly only: initialize them
  *  by designator, which zeroes every field left out, and expect the major version to change
  *  whenever one does. The library never logs.
  *
@@ -36,8 +36,8 @@
  *  which runs it there, forks included, and finishes it, so polling alone sees it final. A deferred
  *  call on a caller-inclusive executor, whose threads need their caller, or on a VRAM executor,
  *  whose caller stages and feeds its devices, runs at submission and is final on return. Submission
- *  copies the structure; everything it points to stays borrowed until final, and @c outcome->status
- *  reads @c uform_status_deferred_k until then.
+ *  copies the structure; everything it points to must stay allocated and unchanged until the call
+ *  is final, and @c outcome->status reads @c uform_status_deferred_k until then.
  *
  *  A call lets go of its arena and of the handles it names, then of its executor, and only then
  *  stores the message and the final status with release ordering. A caller that reads the status
@@ -64,8 +64,9 @@
  *
  *  Every byte has one owner, and each owner picks where its bytes live once, when it is created:
  *
- *  - Callers lend memory, never a way to allocate it. No allocator callback crosses the interface,
- *    and every pointer a caller passes is an input, classified through the driver once per call.
+ *  - The caller allocates every buffer a call reads or writes, and frees it after the call is
+ *    final; no allocator callback crosses the interface. Every pointer a caller passes is an
+ *    input, classified through the driver once per call.
  *  - Weights and their packed copies belong to the model, placed by its load's residency, as @c
  *    uform_model_load_vram places them on the named devices. Weights, gradients and optimizer
  *    moments under training belong to the trainer, placed on its executor's devices.
@@ -79,10 +80,10 @@
  *    it. Any verb may reuse any arena of its residency, one call at a time.
  *  - A call holds its arena from its start until final.
  *
- *  Outputs are views the call writes, so none carries a capacity or a stride for the caller to
- *  pick, and an arena keeps its high-water mark, so a steady loop allocates once. On a VRAM
- *  executor the outputs are device memory, which the caller copies out itself when it wants them
- *  elsewhere, or hands to a USearch VRAM index as they are.
+ *  Outputs are views the call writes, so none has a capacity or a stride for the caller to pick,
+ *  and an arena keeps its high-water mark, so a steady loop allocates once. On a VRAM executor the
+ *  outputs are device memory, which the caller copies out itself when it wants them elsewhere, or
+ *  hands to a USearch VRAM index as they are.
  *
  *  @code{.c}
  *  uform_arena_t arena = NULL;
@@ -100,8 +101,8 @@
  *
  *  A verb's @c count is its batch axis and nothing else. Inputs are views, where a zero stride
  *  repeats the first element as BLAS does; outputs are views too, written packed into the arena, so
- *  none carries a capacity. Ragged inputs and outputs are tapes with Apache Arrow offsets: one more
- *  of them than entries, around the elements laid end to end.
+ *  none has a capacity. Ragged inputs and outputs are tapes with Apache Arrow offsets: one more of
+ *  them than entries, around the elements laid end to end.
  */
 #ifndef UNUM_UFORM_TYPES_H
 #define UNUM_UFORM_TYPES_H
@@ -221,8 +222,8 @@ extern "C" {
 #define UFORM_VERSION_MINOR 0
 #define UFORM_VERSION_PATCH 0
 
-/** A borrowed run of bytes and its length, never null-terminated by contract - the shape every
- *  path, checkpoint buffer and name arrives in. */
+/** A run of bytes the caller owns, with its length, never null-terminated by contract - the shape
+ *  every path, checkpoint buffer and name arrives in. */
 typedef struct uform_bytes_view_t {
 
     /** First byte of the run. */
@@ -233,7 +234,7 @@ typedef struct uform_bytes_view_t {
 } uform_bytes_view_t;
 
 /**
- *  @brief What went wrong, numbered as USearch numbers it, so one failure carries one identity
+ *  @brief What went wrong, numbered as USearch numbers it, so one failure has one identity
  *      across the two libraries and every binding that validates before calling them.
  *
  *  Values USearch spends on index states UForm has no counterpart for - a read-only handle and an
@@ -248,7 +249,7 @@ typedef struct uform_bytes_view_t {
  */
 typedef enum uform_status_t {
 
-    /** The call completed; @c message carries nothing. */
+    /** The call completed; @c message holds nothing. */
     uform_status_success_k = 0,
 
     /** The call was submitted deferred and is not final yet; the one non-final status. */
@@ -392,8 +393,8 @@ typedef struct uform_rows_view_t {
 } uform_rows_view_t;
 
 /**
- *  @brief A borrowed ragged batch as Apache Arrow lays one out: elements end to end, and @c count +
- *      1 offsets around them.
+ *  @brief A ragged batch the caller owns as Apache Arrow lays one out: elements end to end, and
+ *      @c count + 1 offsets around them.
  *
  *  Entry @c i spans elements @c offsets[i] up to @c offsets[i+1]. What an element is belongs to the
  *  verb: a byte of an encoded file or of UTF-8 text, a byte of an RGB pixel row, a sample of a
@@ -430,10 +431,10 @@ typedef struct uform_rows_tape_view_t {
     size_t const* offsets;
 } uform_rows_tape_view_t;
 
-/** Whether the call a handler is watching carries on or unwinds. */
+/** Whether the call a handler is watching continues or unwinds. */
 typedef enum uform_continuation_t {
 
-    /** Carry on to the next unit of work. */
+    /** Continue to the next unit of work. */
     uform_continue_k = 0,
 
     /** Stop and report @c uform_status_cancelled_k. */
@@ -706,7 +707,7 @@ UFORM_EXPORT void uform_gpu_devices(uform_gpu_devices_t* arguments);
  *  NUMA node each. */
 typedef struct uform_ram_options_t {
 
-    /** NUMA node IDs, borrowed for the duration of the call; @c NULL derives every node the process
+    /** NUMA node IDs, read only during the call; @c NULL derives every node the process
      *  may allocate on. */
     int32_t const* memory_domains;
 
@@ -724,8 +725,8 @@ typedef struct uform_ram_options_t {
 /** The devices a VRAM-resident model, trainer and executor place their bytes in. */
 typedef struct uform_vram_options_t {
 
-    /** UForm device ordinals, positions in the listing @c uform_gpu_devices reports, borrowed
-     *  for the duration of the call; @c NULL derives one free device. */
+    /** UForm device ordinals, positions in the listing @c uform_gpu_devices reports, read
+     *  only during the call; @c NULL derives one free device. */
     int32_t const* devices;
 
     /** Number of entries in @c devices; zero derives. */
@@ -770,10 +771,11 @@ typedef struct uform_executor_for_ram_t {
     /** Output for the outcome, final once its status leaves @c uform_status_deferred_k. */
     uform_outcome_t* outcome;
 
-    /** The memory domains of the models it will drive; copied, not borrowed. */
+    /** The memory domains of the models it will drive; copied at creation, so the caller may free
+     *  it once the call returns. */
     uform_ram_options_t ram;
 
-    /** Threads to spawn; zero takes 7/8 of the cores those domains carry. */
+    /** Threads to spawn; zero takes 7/8 of the cores those domains span. */
     size_t threads;
 } uform_executor_for_ram_t;
 
@@ -781,27 +783,6 @@ typedef struct uform_executor_for_ram_t {
  *  domains local to the named memory domains; where the build has threads, they run deferred calls
  *  on their own. */
 UFORM_EXPORT void uform_executor_for_ram(uform_executor_for_ram_t* arguments);
-
-/** The arguments of @c uform_executor_on_pool. */
-typedef struct uform_executor_on_pool_t {
-
-    /** Output for the new executor. */
-    uform_executor_t* executor;
-
-    /** Output for the outcome, final once its status leaves @c uform_status_deferred_k. */
-    uform_outcome_t* outcome;
-
-    /** The memory domains of the models it will drive; copied, not borrowed. */
-    uform_ram_options_t ram;
-
-    /** The ForkUnion @c fu_pool_t to borrow; it must outlive the executor, and keeps
-     *  its lender's mood. */
-    void* pool;
-} uform_executor_on_pool_t;
-
-/** Creates a RAM executor over a borrowed ForkUnion pool, so UForm, USearch and UStore in one
- *  process share one set of threads while each keeps its own scratch. */
-UFORM_EXPORT void uform_executor_on_pool(uform_executor_on_pool_t* arguments);
 
 /** The arguments of @c uform_executor_for_vram. */
 typedef struct uform_executor_for_vram_t {
@@ -812,15 +793,18 @@ typedef struct uform_executor_for_vram_t {
     /** Output for the outcome, final once its status leaves @c uform_status_deferred_k. */
     uform_outcome_t* outcome;
 
-    /** The devices of the models it will drive; copied, not borrowed. */
+    /** The devices of the models it will drive; copied at creation, so the caller may free it once
+     *  the call returns. */
     uform_vram_options_t vram;
 
-    /** The memory domains and the CPU class of its host decoders; copied, not borrowed. */
+    /** The memory domains and the CPU class of its host decoders; copied at creation, so the caller
+     *  may free it once the call returns. */
     uform_ram_options_t ram;
 
-    /** The @b optional borrowed CUDA streams, one per device in @c vram order; @c NULL creates its
-     *  own, and the executor drives only streams it creates, so any other value reports
-     *  @c uform_status_unsupported_k. */
+    /** The CUDA or HIP streams, or Metal queues, to order work on, one per device in @c vram order,
+     *  which the caller destroys after freeing the executor; @c NULL, or a @c NULL entry, orders
+     *  work on each device's per-thread default stream, or its default queue on Apple. The executor
+     *  creates and destroys no stream. */
     void* const* streams;
 
     /** The @b optional ceiling on scratch bytes per device; zero lets scratch grow as batches ask.
@@ -829,8 +813,11 @@ typedef struct uform_executor_for_vram_t {
 } uform_executor_for_vram_t;
 
 /**
- *  @brief Opens one submission stream on every named device, all driven by the host thread running
- *      the call; borrowing the caller's streams reports @c uform_status_unsupported_k.
+ *  @brief Drives every named device, all from the host thread running the call, ordering each
+ *      device's work on the caller's stream for it or on its per-thread default stream.
+ *
+ *  Before every step on a device the executor makes that device current on the calling thread,
+ *  and leaves it current.
  *
  *  Text and JPEG images never leave the device; the rest of decoding - container demux, PNG and
  *  WebP, audio, and every modality on AMD - runs on host threads the executor spawns beside its
@@ -869,8 +856,8 @@ typedef struct uform_executor_drain_t {
  *  would wait on. */
 UFORM_EXPORT void uform_executor_drain(uform_executor_drain_t* arguments);
 
-/** Waits until no call holds the executor, releases what it owns, returns what it borrowed, and
- *  frees it; @c NULL is safe, and it cannot fail, so it takes no outcome. */
+/** Waits until no call holds the executor, releases what it owns, and frees it, leaving the
+ *  caller's streams to the caller; @c NULL is safe, and it cannot fail, so it takes no outcome. */
 UFORM_EXPORT void uform_executor_free(uform_executor_t executor);
 
 /**
@@ -891,10 +878,11 @@ UFORM_EXPORT void uform_executor_free(uform_executor_t executor);
  *    deferred one does so at submission.
  *  - A call on another residency or device than the arena's, or a call naming a GPU arena with another
  *    executor than the one that made it, @c NULL included, reports @c uform_status_device_k.
- *  - A blocking call borrows the arena until it returns, and a deferred one holds it until final.
+ *  - A blocking call uses the caller's arena until it returns, and a deferred one until it is
+ *    final.
  *  - A call that fails or is cancelled leaves its outputs @c NULL.
  *
- *  @note A GPU arena grows, fills and frees on the first stream of the executor that made it, so it
+ *  @note A GPU arena grows, fills and frees on the first device of the executor that made it, so it
  *      serves only calls on that executor, and must be freed before that executor is.
  */
 typedef struct uform_arena_handle_t* uform_arena_t;
@@ -983,7 +971,7 @@ UFORM_EXPORT void uform_arena_describe(uform_arena_describe_t* arguments);
  *      the inverse that reads one back.
  *
  *  The names are static storage and are never deallocated. A value no status
- *  carries spells "unrecognized".
+ *  matches spells "unrecognized".
  */
 UFORM_EXPORT char const* uform_status_name(uform_status_t status);
 

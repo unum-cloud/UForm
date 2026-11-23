@@ -29,7 +29,7 @@
  *  multicast-capable codes of the build and embedded as a bundle the domain loads by name when it
  *  picks the switch tier. When the platform lacks multicast (
  *  @c CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED off — pre-Hopper or fabric-disabled boxes), or the
- *  bundle carries no code the device runs, @c multimem_domain_t::make still succeeds in the
+ *  bundle has no code the device runs, @c multimem_domain_t::make still succeeds in the
  *  @b peer-read tier: the symmetric range is device-visible everywhere, and the reduce walks the
  *  members serially — the same fixed fold order on every member, bit-identical across ranks, just
  *  without the switch reduction.
@@ -235,7 +235,7 @@ struct multimem_switch_kernels_t {
  *      retains to unload it, and the kernels resolved from it.
  *
  *  The bundle is a fatbin of @c multimem_switch.cu for the multicast-capable codes this build
- *  lists, empty when it lists none, so a device it carries no code for refuses the load and its
+ *  lists, empty when it lists none, so a device it has no code for refuses the load and its
  *  domain reads peers.
  */
 struct multimem_switch_module_t {
@@ -254,7 +254,7 @@ struct multimem_switch_module_t {
     ~multimem_switch_module_t() noexcept { destroy_(); }
 
     /** Load the switch bundle onto @p device and resolve its kernels; fails when the bundle is
-     *  empty or carries no code @p device runs. */
+     *  empty or has no code @p device runs. */
     [[nodiscard]] static expected<multimem_switch_module_t> load(i32_t device) noexcept;
 
     /** The kernels, valid in @p device 's primary context for the module's lifetime. */
@@ -442,7 +442,7 @@ struct multimem_domain_t {
      *      creates and binds.
      *  @param[in] payload_scalars Float32 payload scalars per replica, sized for
      *      every consumer's window.
-     *  @param[in] local_streams One stream per local device; @c local_streams[0] carries
+     *  @param[in] local_streams One stream per local device; @c local_streams[0] runs
      *      the host staging.
      *  @param[in] timeout_seconds Deadline on the rendezvous and on every later barrier's spin.
      */
@@ -610,7 +610,8 @@ struct multimem_domain_t {
     /** How long a barrier spins for the other members before it traps, from the timeout. */
     u64_t wait_nanoseconds_ = 0;
 
-    /** The mesh's fault records of this process's members, borrowed for the domain's lifetime. */
+    /** The mesh's fault records of this process's members; the mesh owns them and outlives the
+     *  domain. */
     std::span<gpu_fault_t> faults_ {};
 };
 

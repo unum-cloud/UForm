@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date October 17, 2026
  *  @brief A stand-in for the @c uform_mesh_* and @c uform_trainer_* C ABI, where training needs a
- *      GPU this library never carries.
+ *      GPU this library never drives.
  *
  *  The constructors refuse with @c uform_status_device_k, as the engine does on a machine without
  *  NVIDIA devices, so no mesh or trainer handle ever exists here; the verbs taking one refuse a
@@ -111,7 +111,7 @@ void uform_mesh_bootstrap(uform_mesh_bootstrap_t* arguments) {
     if (through_executor<uform_mesh_bootstrap>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     if (arguments->mesh) *arguments->mesh = nullptr;
-    propagate_error(uform_status_device_k, outcome, "This build carries no GPU backends");
+    propagate_error(uform_status_device_k, outcome, "This build has no GPU backends");
 }
 
 void uform_mesh_describe(uform_mesh_describe_t* arguments) {
@@ -130,7 +130,7 @@ void uform_trainer_init_vram(uform_trainer_init_vram_t* arguments) {
     if (through_executor<uform_trainer_init_vram>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     if (arguments->trainer) *arguments->trainer = nullptr;
-    propagate_error(uform_status_device_k, outcome, "This build carries no GPU backends");
+    propagate_error(uform_status_device_k, outcome, "This build has no GPU backends");
 }
 
 void uform_trainer_step(uform_trainer_step_t* arguments) {
@@ -139,14 +139,14 @@ void uform_trainer_step(uform_trainer_step_t* arguments) {
     if (arguments->embeddings) *arguments->embeddings = {};
     if (arguments->stats) *arguments->stats = {};
     if (reject_if(!arguments->trainer, uform_status_uninitialized_k, "The trainer must not be null", outcome)) return;
-    propagate_error(uform_status_device_k, outcome, "This build carries no GPU backends");
+    propagate_error(uform_status_device_k, outcome, "This build has no GPU backends");
 }
 
 void uform_trainer_save(uform_trainer_save_t* arguments) {
     if (through_executor<uform_trainer_save>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     if (reject_if(!arguments->trainer, uform_status_uninitialized_k, "The trainer must not be null", outcome)) return;
-    propagate_error(uform_status_device_k, outcome, "This build carries no GPU backends");
+    propagate_error(uform_status_device_k, outcome, "This build has no GPU backends");
 }
 
 void uform_trainer_free(uform_trainer_t trainer) {

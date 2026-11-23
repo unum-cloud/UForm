@@ -28,8 +28,8 @@
  *      living outside captured graphs. Satisfies @c std::alloc_traits , so it plugs into NumKong's
  *      owning @c nk::tensor<value_type,gpu_alloc<value_type>,rank> directly.
  *    - @ref unum::uform::utilities::gpu_arena_alloc — the same @c std::alloc_traits facade over a
- *      borrowed arena, so model code instantiates owning tensors whose storage is arena allocations
- *      (deallocation is a no-op; reclamation is the arena's cursor rewind).
+ *      caller-owned arena, so model code instantiates owning tensors whose storage is arena
+ *      allocations (deallocation is a no-op; reclamation is the arena's cursor rewind).
  *
  *  There is no in-house memory ledger: the driver already keeps the truth — @c cuMemGetInfo for a
  *  device's totals, the default pool's attributes for the stream-ordered tier's usage and
@@ -98,15 +98,15 @@ enum cuda_device_attribute_t : int {
  */
 struct cuda_api_t {
     cuda_result_t (*init)(unsigned) = nullptr;
+    cuda_result_t (*get_device_count)(int*) = nullptr;
     cuda_result_t (*get_device)(int*, int) = nullptr;
     cuda_result_t (*get_device_attribute)(int*, cuda_device_attribute_t, int) = nullptr;
     cuda_result_t (*get_device_name)(char*, int, int) = nullptr;
     cuda_result_t (*get_device_memory)(std::size_t*, int) = nullptr;
     cuda_result_t (*get_current_context)(cuda_context_handle_t*) = nullptr;
     cuda_result_t (*get_context_device)(int*) = nullptr;
-    cuda_result_t (*push_context)(cuda_context_handle_t) = nullptr;
-    cuda_result_t (*pop_context)(cuda_context_handle_t*) = nullptr;
-    cuda_result_t (*stream_context)(cuda_stream_handle_t, cuda_context_handle_t*) = nullptr;
+    cuda_result_t (*retain_primary_context)(cuda_context_handle_t*, int) = nullptr;
+    cuda_result_t (*set_current_context)(cuda_context_handle_t) = nullptr;
     cuda_result_t (*copy_async)(cuda_device_address_t, cuda_device_address_t, std::size_t,
                                 cuda_stream_handle_t) = nullptr;
     cuda_result_t (*fill_async)(cuda_device_address_t, unsigned char, std::size_t, cuda_stream_handle_t) = nullptr;
@@ -115,6 +115,10 @@ struct cuda_api_t {
                                          char const*) = nullptr; // vendor-boundary: the driver's prototype
     cuda_result_t (*launch_kernel)(cuda_function_handle_t, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned,
                                    unsigned, cuda_stream_handle_t, void**, void**) = nullptr;
+
+    /** Every listed device's primary context by ordinal, retained once as the table loads and never
+     *  released, as the driver stays open; null past the listed devices. */
+    cuda_context_handle_t primary_contexts[max_gpus_per_host_k] = {};
 
     /** Whether the driver loaded and initialized with every entry resolved. */
     explicit operator bool() const noexcept { return launch_kernel != nullptr; }
@@ -125,29 +129,51 @@ struct cuda_api_t {
         shared_library_t const library = shared_library_t::open("libcuda.so.1");
         cuda_api_t api;
         bool const resolved = //
-            library.resolve("cuInit", api.init) && library.resolve("cuDeviceGet", api.get_device) &&
+            library.resolve("cuInit", api.init) && library.resolve("cuDeviceGetCount", api.get_device_count) &&
+            library.resolve("cuDeviceGet", api.get_device) &&
             library.resolve("cuDeviceGetAttribute", api.get_device_attribute) &&
             library.resolve("cuDeviceGetName", api.get_device_name) &&
             library.resolve("cuDeviceTotalMem_v2", api.get_device_memory) &&
             library.resolve("cuCtxGetCurrent", api.get_current_context) &&
             library.resolve("cuCtxGetDevice", api.get_context_device) &&
-            library.resolve("cuCtxPushCurrent_v2", api.push_context) &&
-            library.resolve("cuCtxPopCurrent_v2", api.pop_context) &&
-            library.resolve("cuStreamGetCtx", api.stream_context) && library.resolve("cuMemcpyAsync", api.copy_async) &&
-            library.resolve("cuMemsetD8Async", api.fill_async) &&
+            library.resolve("cuDevicePrimaryCtxRetain", api.retain_primary_context) &&
+            library.resolve("cuCtxSetCurrent", api.set_current_context) &&
+            library.resolve("cuMemcpyAsync", api.copy_async) && library.resolve("cuMemsetD8Async", api.fill_async) &&
             library.resolve("cuModuleLoadData", api.module_load_data) &&
             library.resolve("cuModuleGetFunction", api.module_get_function) &&
             library.resolve("cuLaunchKernel", api.launch_kernel);
-        return resolved && api.init(0) == cuda_success_k ? api : cuda_api_t {};
+        int devices_count = 0;
+        if (!resolved || api.init(0) != cuda_success_k || api.get_device_count(&devices_count) != cuda_success_k)
+            return {};
+        for (int ordinal = 0; ordinal != devices_count && static_cast<std::size_t>(ordinal) != max_gpus_per_host_k;
+             ++ordinal) {
+            // A device with no retained context refuses at its own `cuda_set_device`.
+            int device = 0;
+            cuda_context_handle_t primary = nullptr;
+            if (api.get_device(&device, ordinal) == cuda_success_k &&
+                api.retain_primary_context(&primary, device) == cuda_success_k)
+                api.primary_contexts[ordinal] = primary;
+        }
+        return api;
     }
 };
+
+/** Makes the primary context of device @p ordinal , which @p api retained as it loaded, current on
+ *  the calling thread: the driver twin of selecting a device, which every stream, allocation and
+ *  launch after it runs on. */
+inline cuda_result_t cuda_set_device(cuda_api_t const& api, int ordinal) noexcept {
+    if (!api) return cuda_error_not_initialized_k;
+    if (ordinal < 0 || static_cast<std::size_t>(ordinal) >= max_gpus_per_host_k || !api.primary_contexts[ordinal])
+        return cuda_error_invalid_device_k;
+    return api.set_current_context(api.primary_contexts[ordinal]);
+}
 
 #pragma endregion CUDA Driver
 
 using e4m3_t = __nv_fp8_e4m3;
 using bf16_t = __nv_bfloat16;
 
-/** The CUDA-scalar half of the rank-tagged borrow vocabulary in @c types.hpp . */
+/** The CUDA-scalar half of the rank-tagged view vocabulary in @c types.hpp . */
 using bf16r1_view_t = nk::tensor_view<bf16_t, 1>;
 using bf16r1_span_t = nk::tensor_span<bf16_t, 1>;
 using bf16r2_view_t = nk::tensor_view<bf16_t, 2>;
@@ -525,8 +551,8 @@ struct gpu_arena_t {
 };
 
 /**
- *  @brief Standard-allocator facade over a borrowed @ref unum::uform::utilities::gpu_arena_t , so
- *      owning containers size arena allocations without the bespoke allocation spelling.
+ *  @brief Standard-allocator facade over a caller-owned @ref unum::uform::utilities::gpu_arena_t ,
+ *      so owning containers size arena allocations without the bespoke allocation spelling.
  *
  *  @c nk::tensor<f32_t,gpu_arena_alloc<f32_t>,2>::uninitialized({rows,cols},gpu_arena_alloc<f32_t>{arena})
  *  allocates — and grows the arena — automatically; @c st::basic_vector composes the same way.
@@ -552,7 +578,7 @@ struct gpu_arena_alloc {
         using other = gpu_arena_alloc<other_type_>;
     };
 
-    /** The borrowed arena every allocation comes from. */
+    /** The arena every allocation comes from, owned by the caller and outliving this allocator. */
     gpu_arena_t* arena_ = nullptr;
 
     constexpr gpu_arena_alloc() noexcept = default;
@@ -586,8 +612,8 @@ using gpu_arena_alloc_t = gpu_arena_alloc<b8_t>;
  *  For the symmetric heaps the InfiniBand collectives register with their NICs; everything else
  *  stays on the ordinary arena allocator.
  *
- *  Same contract as @ref unum::uform::utilities::gpu_arena_alloc otherwise: borrowed arena, no-op
- *  deallocate, free rebind.
+ *  Same contract as @ref unum::uform::utilities::gpu_arena_alloc otherwise: caller-owned arena,
+ *  no-op deallocate, free rebind.
  */
 template <typename value_type_ = std::byte>
 struct gpu_registrable_alloc {
@@ -604,7 +630,7 @@ struct gpu_registrable_alloc {
         using other = gpu_registrable_alloc<other_type_>;
     };
 
-    /** The borrowed arena every allocation comes from. */
+    /** The arena every allocation comes from, owned by the caller and outliving this allocator. */
     gpu_arena_t* arena_ = nullptr;
 
     constexpr gpu_registrable_alloc() noexcept = default;
@@ -742,9 +768,9 @@ struct gpu_alloc {
     template <typename other_type_>
     constexpr gpu_alloc(gpu_alloc<other_type_> const& other) noexcept : stream(other.stream) {}
 
-    /** Stream-ordered allocation from the device's default memory pool; @c nullptr on failure —
-     *  matching NumKong's non-throwing allocator contract. The pool's own attributes carry the
-     *  usage and high-water marks (see @ref unum::uform::utilities::gpu_memory_report ). */
+    /** Stream-ordered allocation from the device's default memory pool; @c nullptr on failure, so
+     *  allocation never throws. The pool's own attributes report the usage and high-water marks
+     *  (see @ref unum::uform::utilities::gpu_memory_report ). */
     [[nodiscard]] value_type* allocate(std::size_t count) noexcept {
         CUdeviceptr pointer = 0;
         if (cuMemAllocAsync(&pointer, count * sizeof(value_type), stream) != CUDA_SUCCESS) return nullptr;
@@ -765,7 +791,7 @@ using gpu_alloc_t = gpu_alloc<b8_t>;
 
 /** The rank-tagged owning-tensor vocabulary — @c *_tensor_arena_t owns device memory off a
  *  @ref unum::uform::utilities::gpu_arena_t , @c *_tensor_pinned_t owns page-locked host memory;
- *  the borrowing @c *_view_t / @c *_span_t counterparts live in @c types.hpp , the BFloat16 /
+ *  the non-owning @c *_view_t / @c *_span_t counterparts live in @c types.hpp , the BFloat16 /
  *  E4M3 ones above. */
 using b8r1_tensor_arena_t = nk::tensor<b8_t, gpu_arena_alloc<b8_t>, 1>;
 using b8r1_tensor_registrable_t = nk::tensor<b8_t, gpu_registrable_alloc<b8_t>, 1>;
