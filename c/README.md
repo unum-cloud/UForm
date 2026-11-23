@@ -12,7 +12,7 @@ ctest --test-dir build_library                   # c/test.c and the host suites,
 ```
 
 `cuda_rocm_library` adds the NVIDIA and AMD residencies, the trainer and the mesh; `wasm32_emscripten` and `wasm32_wasi` build for WebAssembly, which takes decoded media only; `stub_library` builds `src_stub/`, a stand-in answering every verb, whose archives carry the engine's names so one `-L` swaps them.
-`find_package(uform)` reads an install as `uform::static`, `uform::shared` and `uform::header`, and `pkg-config --libs uform` names the shared library.
+`find_package(uform)` reads an install as `uform::static`, `uform::shared`, `uform::abi` for the C headers alone and `uform::cpp` for the C++ wrappers, and `pkg-config --libs uform` names the shared library.
 `uform/uform.h` includes `types.h`, `model.h`, `encode.h` and `train.h`, and a caller only encoding may include `encode.h` alone.
 Statuses, scalars, rows, tapes, arenas and the executor contract mirror USearch's `types.h` value for value, so embeddings and failures cross between the two libraries unchanged.
 

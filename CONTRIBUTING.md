@@ -501,7 +501,7 @@ Every CMake option carries the `UFORM_` prefix, and every `UFORM_BUILD_*` switch
 - `UFORM_BUILD_BENCH`: the benchmarks in `bench/`.
 - `UFORM_BUILD_PYTHON` and `UFORM_BUILD_NODE`: the CPython extension and the Node addon, which scikit-build-core and cmake-js set.
 - `UFORM_WERROR`: warnings as errors, which the `check` preset sets.
-- `UFORM_INSTALL`: with `UFORM_BUILD_SHARED`, the C headers, `uform_static`, `uform_shared`, a `uform.pc` and a CMake package under `lib/cmake/uform`, which `find_package(uform)` reads as `uform::static`, `uform::shared` and `uform::header`, on in a top-level build. Its `sdk` component holds the shared library, the C headers, both package files and the license, and `cpack --config build_library/CPackConfig.cmake` packs it alone, stripped, into `uform-<version>-<platform>-sdk.tar.gz`; the `library` and `release` presets remap the source directory out of every binary.
+- `UFORM_INSTALL`: with `UFORM_BUILD_SHARED`, the C headers, `uform_static`, `uform_shared`, a `uform.pc` and a CMake package under `lib/cmake/uform`, which `find_package(uform)` reads as `uform::abi`, `uform::static`, `uform::shared` and `uform::cpp`, the C++ SDK linking the C headers and the archive, on in a top-level build. Its `sdk` component holds both libraries, the C and C++ headers, both package files and the license, and `cpack --config build_library/CPackConfig.cmake` packs it alone, stripped, into `uform-<version>-<platform>-sdk.tar.gz`; the `library` and `release` presets remap the source directory out of every binary.
 - `UFORM_WITH_INFINIBAND`: `AUTO` probes for InfiniBand and enables it when present, `ON` requires it and `OFF` leaves it out.
 - `UFORM_WITH_CODECS`: the host image, video and audio codecs the verbs over files decode with, on by default and off on WebAssembly, Android and Windows presets; CUDA needs it.
 - `UFORM_MARCH`: the `-march` floor of UForm's units and its libraries', an ISA level, `native` or a CPU name like `graniterapids`, and on WebAssembly the module's `serial`, `v128` or `v128relaxed`; empty by default, seeded from the environment.
@@ -538,7 +538,7 @@ Nothing in a binding takes a lock, sends a notification or adds synchronization 
 The object that submitted a deferred call is the only one that polls its outcome, so no other thread ever waits on it, and whatever a second caller asks, the library answers.
 A blocking `wait` calls `uform_outcome_wait`.
 An asynchronous bridge never parks a thread: it reads `uform_outcome_status` and, while the call is deferred, yields to its runtime.
-A runtime with a timer pauses between reads with a backoff growing from about 1 µs to 1 ms, like Python's `asyncio.sleep`, Swift's `Task.sleep`, JavaScript's `setTimeout` and C#'s `Task.Delay`.
+A runtime that can reschedule a task reads again on its next turn with no sleep, like Python's `loop.call_soon`, a C++ scheduler's `post(poll, state)` and Mojo's runtime, while one that resumes only on a timer pauses with a backoff growing from about 1 µs to 1 ms, like Swift's `Task.sleep`, JavaScript's `setTimeout` and C#'s `Task.Delay`.
 A Rust future yields only: `poll` reads the status and, while it is deferred, calls `wake_by_ref` and returns `Poll::Pending`, with no sleep and no timer thread.
 
 A callback never raises into the library.
@@ -554,7 +554,7 @@ Where a binding's own types carry two lengths, like a slice of keys beside a mat
 
 Each verb has one body, which fills the C struct and calls the library with no layers in between.
 What it returns is read from the struct's output slot, a trampoline receives the handler itself as its state with no hub around it, and whether a call blocks or defers follows from the type of the receiver it is called on, never from a flag.
-Verbs are never shared through a base class; a trait whose default methods hold the one body per verb is fine, like Rust's and Mojo's, since each receiver supplies only its handle.
+Verbs are never shared through a base class; a trait whose default methods hold the one body per verb is fine, like Rust's and Mojo's, since each receiver supplies only its handle, and C++ writes each handle and its receivers as one class template over what the receiver holds, so the handle carries the verbs as Rust's `&Handle` does.
 
 A typed binding takes the scalar as a type parameter of each call, like USearch's `search::<f32>`, rather than letting a handle's type fix one.
 A deferred Rust call owns what it lends the library until the call is final, since the borrow checker cannot see the library holding it.

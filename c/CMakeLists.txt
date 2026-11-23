@@ -42,19 +42,20 @@ add_library(
     $<TARGET_OBJECTS:forkunion_static>
 )
 add_library(uform::static ALIAS uform_static)
-add_library(uform_header INTERFACE)
-add_library(uform::header ALIAS uform_header)
+add_library(uform_abi INTERFACE)
+add_library(uform::abi ALIAS uform_abi)
 set_target_properties(uform_static PROPERTIES EXPORT_NAME static)
 set_target_properties(uform_shared PROPERTIES EXPORT_NAME shared)
-set_target_properties(uform_header PROPERTIES EXPORT_NAME header)
+set_target_properties(uform_abi PROPERTIES EXPORT_NAME abi)
 # MSVC reads BOM-less UTF-8 in the system code page, so consumers of these Unicode-commented headers need `/utf-8`.
-target_compile_options(uform_header INTERFACE "$<$<OR:$<COMPILE_LANG_AND_ID:C,MSVC>,$<COMPILE_LANG_AND_ID:CXX,MSVC>>:/utf-8>")
-target_include_directories(
-    uform_header INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
-                           $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+target_compile_options(
+    uform_abi INTERFACE "$<$<OR:$<COMPILE_LANG_AND_ID:C,MSVC>,$<COMPILE_LANG_AND_ID:CXX,MSVC>>:/utf-8>"
 )
-target_link_libraries(uform_shared PUBLIC uform_header)
-target_link_libraries(uform_static PUBLIC uform_header)
+target_include_directories(
+    uform_abi INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}> $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+target_link_libraries(uform_shared PUBLIC uform_abi)
+target_link_libraries(uform_static PUBLIC uform_abi)
 # The system codecs the host decoders call stay shared libraries, which an archive can only name to its consumers.
 if (UFORM_WITH_CODECS)
     target_link_libraries(
@@ -84,6 +85,7 @@ foreach (
           cdna3
           cdna4
           cdna5
+          metal
 )
     if (TARGET numkong_${numkong_unit_}_)
         target_sources(uform_static PRIVATE $<TARGET_OBJECTS:numkong_${numkong_unit_}_>)
@@ -94,6 +96,9 @@ if (TARGET numkong_cuda_)
 endif ()
 if (TARGET numkong_rocm_)
     target_link_libraries(uform_static INTERFACE hip::host)
+endif ()
+if (TARGET numkong_metal_)
+    target_link_libraries(uform_static INTERFACE "-framework Metal" "-framework Foundation")
 endif ()
 # Each GPU vendor's variants join both flavors above and open that vendor's driver at first use, linking none.
 if (TARGET uform_encoder_vram_nvidia_variants OR TARGET uform_encoder_vram_amd_variants)

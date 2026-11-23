@@ -242,6 +242,8 @@ if (UFORM_BUILD_STUB)
     add_subdirectory(src_stub)
 endif ()
 add_subdirectory(c)
+# The header-only C++ SDK over the C headers, with the suites that test it against the engine and the stand-in.
+add_subdirectory(cpp)
 # The C library as SwiftPM links it: an XCFramework on Apple platforms and an SE-0482 artifact bundle elsewhere, packed
 # by NumKong's script beside the C headers and a module map over their umbrella. Each build adds its target to the
 # artifact in UFORM_SWIFT_DIRECTORY, so a release fills one artifact from a build per target. With UFORM_BUILD_STUB the
@@ -296,12 +298,11 @@ if (UFORM_BUILD_NODE)
     add_subdirectory(javascript)
 endif ()
 
-# The header package always installs, and the libraries only where the default build compiles them.
+# The C headers always install, and the libraries only where the default build compiles them, with the C++ SDK that
+# links the archive.
 if (UFORM_BUILD_SHARED)
-    set(uform_install_sdk_targets_ uform_header uform_shared)
-    set(uform_install_static_targets_ uform_static)
+    set(uform_install_sdk_targets_ uform_abi uform_cpp uform_static uform_shared)
 else ()
-    set(uform_install_sdk_targets_ uform_header)
-    set(uform_install_static_targets_ "")
+    set(uform_install_sdk_targets_ uform_abi)
 endif ()
 include(cmake/uform_install.cmake)

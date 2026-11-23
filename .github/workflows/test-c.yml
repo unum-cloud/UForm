@@ -36,7 +36,7 @@ jobs:
           cmake --preset library -D UFORM_BUILD_TEST=ON
           cmake --build --preset library
       - name: Test C
-        run: ctest --test-dir build_library --output-on-failure
+        run: ctest --test-dir build_library --output-on-failure --exclude-regex '^uform_test_cpp(_stub)?$'
 
   test_c_macos:
     name: Test C on macOS
@@ -53,7 +53,7 @@ jobs:
             -D CMAKE_PREFIX_PATH="$(brew --prefix);$(brew --prefix jpeg-turbo)"
           cmake --build --preset library
       - name: Test C
-        run: ctest --test-dir build_library --output-on-failure
+        run: ctest --test-dir build_library --output-on-failure --exclude-regex '^uform_test_cpp(_stub)?$'
 
   test_c_windows:
     name: Test on Windows x64 with Visual Studio 2026
@@ -67,7 +67,7 @@ jobs:
           cmake --preset msvc2026_x64 -D UFORM_BUILD_TEST=ON
           cmake --build --preset msvc2026_x64
       - name: Test C
-        run: ctest --test-dir build_msvc2026_x64 --build-config Release --output-on-failure
+        run: ctest --test-dir build_msvc2026_x64 --build-config Release --output-on-failure --exclude-regex '^uform_test_cpp(_stub)?$'
 
   test_wasm_node:
     name: Test WASM under Node

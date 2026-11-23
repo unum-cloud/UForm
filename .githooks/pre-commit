@@ -5245,10 +5245,10 @@ check_multi_index_subscripts() {
 }
 
 # Rejects a `char const *` parameter in a header, because API boundaries take `sz::string_view_t`; a genuine
-# vendor boundary carries the `vendor-boundary` marker.
+# vendor boundary carries the `vendor-boundary` marker, and a status's static `note` or `detail` crosses to C as is.
 check_string_view_parameters() {
     local parameters
-    parameters=$(printf '%s\n' "$staged_added_text" | grep -v 'vendor-boundary' | grep -nE '[(,] *char const *\*' || true)
+    parameters=$(printf '%s\n' "$staged_added_text" | grep -vE 'vendor-boundary|char const *\* *(note|detail)\b' | grep -nE '[(,] *char const *\*' || true)
     [ -z "$parameters" ] || reject_with_reason "$parameters" \
         "$staged_path adds a \`char const *\` parameter; API boundaries take sz::string_view_t:"
 }
