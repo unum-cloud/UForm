@@ -48,6 +48,7 @@ from uform.types import (
     Verb,
     VramOptions,
     VramOptionsArguments,
+    _anchor,
     _block,
     _cross,
 )
@@ -158,9 +159,7 @@ struct _ModelDescribeCall(Call):
         outcome: Pointer[Outcome, MutUntrackedOrigin],
         outputs: Pointer[ModelDescription, MutUntrackedOrigin],
     ):
-        _cross(
-            ModelDescribeArguments(handle, executor, outcome, completion, outputs), library.symbols().model_describe
-        )
+        _cross(ModelDescribeArguments(handle, executor, outcome, completion, outputs), library.symbols().model_describe)
 
     def conclude(deinit self, outputs: ModelDescription, generation: Int) -> ModelDescription:
         return outputs
@@ -448,7 +447,7 @@ trait ModelVerbs:
         """
         return self._route(
             _EncodeCall[origin_of(arena), texts_origin, stats_origin, "uform_text_encode"](
-                texts, outputs, Pointer(to=arena), config
+                texts, outputs, arena._pointer(), config
             )
         )
 
@@ -476,7 +475,7 @@ trait ModelVerbs:
         """
         return self._route(
             _TextChooseCall[origin_of(arena), texts_origin, choices_origin, groups_origin, stats_origin](
-                texts, choices, Pointer(to=arena), config
+                texts, choices, arena._pointer(), config
             )
         )
 
@@ -496,7 +495,7 @@ trait ModelVerbs:
         """
         return self._route(
             _EncodeCall[origin_of(arena), images_origin, stats_origin, "uform_image_encode"](
-                images, outputs, Pointer(to=arena), config
+                images, outputs, arena._pointer(), config
             )
         )
 
@@ -518,9 +517,9 @@ trait ModelVerbs:
             `Error` with `SHAPE_MISMATCH` when an entry is not `heights[i] × widths[i] × 3` bytes.
         """
         return self._route(
-            _ImageEncodePixelsCall[
-                origin_of(arena), pixels_origin, heights_origin, widths_origin, stats_origin
-            ](pixels, heights, widths, outputs, Pointer(to=arena), config)
+            _ImageEncodePixelsCall[origin_of(arena), pixels_origin, heights_origin, widths_origin, stats_origin](
+                pixels, heights, widths, outputs, arena._pointer(), config
+            )
         )
 
     def video_encode[
@@ -539,7 +538,7 @@ trait ModelVerbs:
         """
         return self._route(
             _EncodeCall[origin_of(arena), videos_origin, stats_origin, "uform_video_encode"](
-                videos, outputs, Pointer(to=arena), config
+                videos, outputs, arena._pointer(), config
             )
         )
 
@@ -559,7 +558,7 @@ trait ModelVerbs:
         """
         return self._route(
             _EncodeCall[origin_of(arena), recordings_origin, stats_origin, "uform_audio_encode"](
-                recordings, outputs, Pointer(to=arena), config
+                recordings, outputs, arena._pointer(), config
             )
         )
 
@@ -581,7 +580,7 @@ trait ModelVerbs:
         """
         return self._route(
             _AudioEncodeSamplesCall[origin_of(arena), samples_origin, stats_origin](
-                samples, sample_rate, outputs, Pointer(to=arena), config
+                samples, sample_rate, outputs, arena._pointer(), config
             )
         )
 
@@ -641,13 +640,14 @@ struct ModelDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         mut arena: Arena,
         config: EncodeConfig[stats_origin] = EncodeConfig(),
     ) -> Deferred[
-        _EncodeCall[origin_of(arena), texts_origin, stats_origin, "uform_text_encode"], Self.origin
+        _EncodeCall[origin_of(arena), texts_origin, stats_origin, "uform_text_encode"],
+        ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[texts_origin]())),
     ]:
         """Submits `ModelVerbs.text_encode`. Calls `uform_text_encode`."""
         return {
             self.model[].library,
             _EncodeCall[origin_of(arena), texts_origin, stats_origin, "uform_text_encode"](
-                texts, outputs, Pointer(to=arena), config
+                texts, outputs, arena._pointer(), config
             ),
             self.model[].address,
             self.executor,
@@ -663,13 +663,20 @@ struct ModelDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         config: TextChooseConfig[groups_origin, stats_origin] = TextChooseConfig(),
     ) -> Deferred[
         _TextChooseCall[origin_of(arena), texts_origin, choices_origin, groups_origin, stats_origin],
-        Self.origin,
+        ImmOrigin(
+            origin_of(
+                _anchor[Self.origin](),
+                _anchor[texts_origin](),
+                _anchor[choices_origin](),
+                _anchor[groups_origin](),
+            )
+        ),
     ]:
         """Submits `ModelVerbs.text_choose`. Calls `uform_text_choose`."""
         return {
             self.model[].library,
             _TextChooseCall[origin_of(arena), texts_origin, choices_origin, groups_origin, stats_origin](
-                texts, choices, Pointer(to=arena), config
+                texts, choices, arena._pointer(), config
             ),
             self.model[].address,
             self.executor,
@@ -684,13 +691,14 @@ struct ModelDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         mut arena: Arena,
         config: EncodeConfig[stats_origin] = EncodeConfig(),
     ) -> Deferred[
-        _EncodeCall[origin_of(arena), images_origin, stats_origin, "uform_image_encode"], Self.origin
+        _EncodeCall[origin_of(arena), images_origin, stats_origin, "uform_image_encode"],
+        ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[images_origin]())),
     ]:
         """Submits `ModelVerbs.image_encode`. Calls `uform_image_encode`."""
         return {
             self.model[].library,
             _EncodeCall[origin_of(arena), images_origin, stats_origin, "uform_image_encode"](
-                images, outputs, Pointer(to=arena), config
+                images, outputs, arena._pointer(), config
             ),
             self.model[].address,
             self.executor,
@@ -707,17 +715,22 @@ struct ModelDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         mut arena: Arena,
         config: EncodeConfig[stats_origin] = EncodeConfig(),
     ) -> Deferred[
-        _ImageEncodePixelsCall[
-            origin_of(arena), pixels_origin, heights_origin, widths_origin, stats_origin
-        ],
-        Self.origin,
+        _ImageEncodePixelsCall[origin_of(arena), pixels_origin, heights_origin, widths_origin, stats_origin],
+        ImmOrigin(
+            origin_of(
+                _anchor[Self.origin](),
+                _anchor[pixels_origin](),
+                _anchor[heights_origin](),
+                _anchor[widths_origin](),
+            )
+        ),
     ]:
         """Submits `ModelVerbs.image_encode_pixels`. Calls `uform_image_encode_pixels`."""
         return {
             self.model[].library,
-            _ImageEncodePixelsCall[
-                origin_of(arena), pixels_origin, heights_origin, widths_origin, stats_origin
-            ](pixels, heights, widths, outputs, Pointer(to=arena), config),
+            _ImageEncodePixelsCall[origin_of(arena), pixels_origin, heights_origin, widths_origin, stats_origin](
+                pixels, heights, widths, outputs, arena._pointer(), config
+            ),
             self.model[].address,
             self.executor,
         }
@@ -731,13 +744,14 @@ struct ModelDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         mut arena: Arena,
         config: EncodeConfig[stats_origin] = EncodeConfig(),
     ) -> Deferred[
-        _EncodeCall[origin_of(arena), videos_origin, stats_origin, "uform_video_encode"], Self.origin
+        _EncodeCall[origin_of(arena), videos_origin, stats_origin, "uform_video_encode"],
+        ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[videos_origin]())),
     ]:
         """Submits `ModelVerbs.video_encode`. Calls `uform_video_encode`."""
         return {
             self.model[].library,
             _EncodeCall[origin_of(arena), videos_origin, stats_origin, "uform_video_encode"](
-                videos, outputs, Pointer(to=arena), config
+                videos, outputs, arena._pointer(), config
             ),
             self.model[].address,
             self.executor,
@@ -753,13 +767,13 @@ struct ModelDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         config: EncodeConfig[stats_origin] = EncodeConfig(),
     ) -> Deferred[
         _EncodeCall[origin_of(arena), recordings_origin, stats_origin, "uform_audio_encode"],
-        Self.origin,
+        ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[recordings_origin]())),
     ]:
         """Submits `ModelVerbs.audio_encode`. Calls `uform_audio_encode`."""
         return {
             self.model[].library,
             _EncodeCall[origin_of(arena), recordings_origin, stats_origin, "uform_audio_encode"](
-                recordings, outputs, Pointer(to=arena), config
+                recordings, outputs, arena._pointer(), config
             ),
             self.model[].address,
             self.executor,
@@ -774,12 +788,15 @@ struct ModelDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         outputs: Outputs,
         mut arena: Arena,
         config: EncodeConfig[stats_origin] = EncodeConfig(),
-    ) -> Deferred[_AudioEncodeSamplesCall[origin_of(arena), samples_origin, stats_origin], Self.origin]:
+    ) -> Deferred[
+        _AudioEncodeSamplesCall[origin_of(arena), samples_origin, stats_origin],
+        ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[samples_origin]())),
+    ]:
         """Submits `ModelVerbs.audio_encode_samples`. Calls `uform_audio_encode_samples`."""
         return {
             self.model[].library,
             _AudioEncodeSamplesCall[origin_of(arena), samples_origin, stats_origin](
-                samples, sample_rate, outputs, Pointer(to=arena), config
+                samples, sample_rate, outputs, arena._pointer(), config
             ),
             self.model[].address,
             self.executor,

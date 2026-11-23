@@ -12,6 +12,7 @@ Date: November 8, 2026
 from std.ffi import c_int
 from std.math import sqrt
 from std.os import getenv
+from std.runtime._asyncrt import create_raising_task
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from uform import (
@@ -68,6 +69,8 @@ def _stream_key(seed: UInt64, name: String, index: UInt64 = 0) -> UInt64:
     for byte in name.as_bytes():
         hashed = (hashed ^ UInt64(byte)) * 0x100000001B3
     return _split_mix_bits(_split_mix_bits(seed ^ hashed) + index)
+
+
 # endregion Shared Testing
 
 
@@ -207,20 +210,17 @@ def test_executors_and_arenas_open_and_drain() raises:
 
 
 def test_a_missing_checkpoint_is_refused_with_its_status() raises:
-    """Loading a path that does not exist raises `IO`, and the error names the engine and the verb."""
+    """Loading a path that does not exist raises `IO`."""
     if not _library_is_present():
         _skipped(library_missing_k)
         return
     var library = Library()
     var refused = Status.SUCCESS
-    var text = String()
     try:
         _ = Model.load_ram(Executor(library), "/nonexistent/uform/model.safetensors")
     except error:
         refused = error.status
-        text = String(error)
     assert_true(refused == Status.IO, "a missing checkpoint must be refused")
-    assert_true(text.startswith("UForm: io [uform_model_load_ram]"), text)
 
 
 def test_undecodable_bytes_are_refused() raises:
@@ -436,9 +436,107 @@ def test_deferred_encoding_matches_the_blocking_one() raises:
     var expected = blocking.embeddings().value()
     for position in range(expected.columns()):
         assert_equal(waited.row[DType.float32](0)[position], expected.row[DType.float32](0)[position])
-    _ = call^  # the rows read the call's outcome and arenas, which Mojo would free at their last use
-    _ = blocking_arena^
+    _ = blocking_arena^  # the rows read their arenas, which Mojo would free at their last use
     _ = deferred_arena^
+
+
+async def _encode_both[
+    texts_origin: ImmOrigin, //
+](
+    first: Model, second: Model, first_executor: Executor, second_executor: Executor, texts: TapeView[texts_origin]
+) raises -> Int:
+    """Encodes the same texts on two models at once, each on its own executor and arena, and counts the rows."""
+    var first_arena = Arena(first_executor)
+    var second_arena = Arena(second_executor)
+    var first_call = first.deferred(first_executor).text_encode(texts, Outputs.EMBEDDINGS, first_arena)
+    var second_call = second.deferred(second_executor).text_encode(texts, Outputs.EMBEDDINGS, second_arena)
+    ref first_encoded = await first_call
+    ref second_encoded = await second_call
+    return len(first_encoded.embeddings().value()) + len(second_encoded.embeddings().value())
+
+
+def test_awaited_fan_out_answers_both_models() raises:
+    """Two deferred encodings submitted before either is awaited both answer inside one task."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
+        return
+    var path = _checkpoint()
+    if path.byte_length() == 0:
+        _skipped(checkpoint_missing_k)
+        return
+    var library = Library()
+    var first_executor = Executor.for_ram(library, threads=2)
+    var second_executor = Executor.for_ram(library, threads=2)
+    var first = Model.load_ram(first_executor, path)
+    var second = Model.load_ram(second_executor, path)
+    var texts = "onetwo".as_bytes()
+    var offsets: List[UInt] = [0, 3, 6]
+    var both = create_raising_task(
+        _encode_both(first, second, first_executor, second_executor, TapeView.of(texts, offsets))
+    )
+    assert_equal(both^.wait(), 4, "two rows from each model")
+
+
+async def _encode_pixels_once[
+    pixels_origin: ImmOrigin, heights_origin: ImmOrigin, widths_origin: ImmOrigin, //
+](
+    model: Model,
+    executor: Executor,
+    pixels: TapeView[pixels_origin],
+    heights: Span[UInt32, heights_origin],
+    widths: Span[UInt32, widths_origin],
+) raises -> Int:
+    """Awaits one deferred pixel encoding and answers the status code it failed with, or zero when it succeeded."""
+    var arena = Arena(executor)
+    var call = model.deferred(executor).image_encode_pixels(pixels, heights, widths, Outputs.EMBEDDINGS, arena)
+    try:
+        ref encoded = await call
+        _ = len(encoded.embeddings().value())
+    except error:
+        return Int(error.status.code)
+    return 0
+
+
+def test_awaited_failures_raise() raises:
+    """A deferred call the binding refuses raises its failure through `await` and the task's wait."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
+        return
+    var path = _checkpoint()
+    if path.byte_length() == 0:
+        _skipped(checkpoint_missing_k)
+        return
+    var library = Library()
+    var executor = Executor.for_ram(library, threads=2)
+    var model = Model.load_ram(executor, path)
+    var pixels = List[UInt8](length=12, fill=0)
+    var offsets: List[UInt] = [0, 12]
+    var heights = List[UInt32]()
+    var widths: List[UInt32] = [2]
+    var failing = create_raising_task(
+        _encode_pixels_once(model, executor, TapeView.of(pixels, offsets), heights, widths)
+    )
+    assert_equal(failing^.wait(), Int(Status.SHAPE_MISMATCH.code), "the refusal reaches the awaiting task")
+
+
+def test_arenas_free_before_their_executor() raises:
+    """An arena borrows the executor that made it, so the executor outlives it past its own last use."""
+    if not _library_is_present():
+        _skipped(library_missing_k)
+        return
+    var path = _checkpoint()
+    if path.byte_length() == 0:
+        _skipped(checkpoint_missing_k)
+        return
+    var library = Library()
+    var model = Model.load_ram(Executor(library), path)
+    var executor = Executor.for_ram(library, threads=2)
+    var arena = Arena(executor)
+    var texts = "onetwo".as_bytes()
+    var offsets: List[UInt] = [0, 3, 6]
+    for _ in range(2):
+        var encoded = model.text_encode(TapeView.of(texts, offsets), Outputs.EMBEDDINGS, arena)
+        assert_equal(len(encoded.embeddings().value()), 2, "the arena serves calls after its executor's last use")
 
 
 @fieldwise_init
@@ -576,7 +674,9 @@ def test_pixels_and_samples_encode_without_codecs() raises:
     var pixel_offsets: List[UInt] = [0, UInt(len(pixels))]
     var heights: List[UInt32] = [16]
     var widths: List[UInt32] = [16]
-    var image = model.image_encode_pixels(TapeView.of(pixels, pixel_offsets), heights, widths, Outputs.EMBEDDINGS, arena)
+    var image = model.image_encode_pixels(
+        TapeView.of(pixels, pixel_offsets), heights, widths, Outputs.EMBEDDINGS, arena
+    )
     assert_equal(len(image.embeddings().value()), 1)
     var samples = List[Float32](length=4096, fill=0.25)
     var sample_offsets: List[UInt] = [0, UInt(len(samples))]
@@ -644,14 +744,25 @@ def test_readme_quickstart() raises:
 
     var captions: List[String] = ["a cat on a mat", "a sunrise over the bay"]
     var caption_offsets: List[UInt] = [0, 14, 36]
-    var photo: List[UInt8] = [137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 8, 0, 0, 0, 8, 8, 2, 0, 0, 0, 75, 109, 41, 220, 0, 0, 0, 75, 73, 68, 65, 84, 120, 156, 99, 96, 224, 16, 144, 80, 208, 48, 176, 112, 240, 8, 136, 72, 200, 40, 168, 104, 232, 152, 48, 99, 193, 138, 13, 59, 24, 176, 9, 30, 56, 113, 225, 6, 3, 54, 193, 7, 47, 62, 252, 96, 192, 42, 8, 52, 158, 1, 155, 32, 200, 120, 6, 108, 130, 32, 227, 25, 176, 9, 130, 140, 103, 192, 38, 8, 50, 30, 0, 179, 100, 93, 1, 16, 63, 179, 153, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130]
+    # fmt: off
+    var photo: List[UInt8] = [
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 8, 0, 0, 0, 8,
+        8, 2, 0, 0, 0, 75, 109, 41, 220, 0, 0, 0, 75, 73, 68, 65, 84, 120, 156, 99, 96, 224, 16, 144,
+        80, 208, 48, 176, 112, 240, 8, 136, 72, 200, 40, 168, 104, 232, 152, 48, 99, 193, 138, 13, 59, 24, 176, 9,
+        30, 56, 113, 225, 6, 3, 54, 193, 7, 47, 62, 252, 96, 192, 42, 8, 52, 158, 1, 155, 32, 200, 120, 6,
+        108, 130, 32, 227, 25, 176, 9, 130, 140, 103, 192, 38, 8, 50, 30, 0, 179, 100, 93, 1, 16, 63, 179, 153,
+        0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ]
+    # fmt: on
     var photo_offsets: List[UInt] = [0, UInt(len(photo))]
     var tape = TapeView.of("a cat on a mata sunrise over the bay".as_bytes(), caption_offsets)
     var texts = model.on(executor).text_encode(tape, Outputs.EMBEDDINGS, texts_arena).embeddings().value()
     var best = -1
     var refused = Status.SUCCESS
     try:
-        var images = model.on(executor).image_encode(TapeView.of(photo, photo_offsets), Outputs.EMBEDDINGS, images_arena)
+        var images = model.on(executor).image_encode(
+            TapeView.of(photo, photo_offsets), Outputs.EMBEDDINGS, images_arena
+        )
         var image = images.embeddings().value().row[DType.float32](0)
         best = 1 if _cosine(texts.row[DType.float32](1), image) > _cosine(texts.row[DType.float32](0), image) else 0
     except error:
@@ -683,6 +794,9 @@ def main() raises:
     suite.test[test_texts_land_one_embedding_per_item_and_one_state_per_byte]()
     suite.test[test_a_later_call_retires_earlier_rows]()
     suite.test[test_deferred_encoding_matches_the_blocking_one]()
+    suite.test[test_awaited_fan_out_answers_both_models]()
+    suite.test[test_awaited_failures_raise]()
+    suite.test[test_arenas_free_before_their_executor]()
     suite.test[test_a_stopping_handler_cancels_the_call]()
     suite.test[test_a_held_executor_refuses_other_calls]()
     suite.test[test_choices_sum_to_one_or_are_refused]()

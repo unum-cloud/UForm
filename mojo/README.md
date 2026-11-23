@@ -1,7 +1,7 @@
 # UForm for Mojo
 
 The Mojo package binds the C ABI in `c/uform/`, opening the engine's shared library with `dlopen` rather than linking it, so a consumer builds with no linker flags of its own.
-It needs Mojo 1.2 through pixi, on Linux x86-64, Linux AArch64 or macOS on Apple silicon.
+It needs the Mojo nightly the workspace pins, through pixi, on Linux x86-64, Linux AArch64 or macOS on Apple silicon.
 It binds every exported verb: the model and its encode verbs, the mesh and the trainer, and the executors and arenas they run on and write into.
 
 ## Installation
@@ -67,17 +67,40 @@ The model runs it on the calling thread, `model.on(executor)` blocks on an execu
 ```mojo
 model.text_encode(texts, Outputs.EMBEDDINGS, arena)                          # the calling thread
 model.on(executor).text_encode(texts, Outputs.EMBEDDINGS, arena)             # blocking; `CONTENDED` while another call holds it
-var call = model.deferred(executor).text_encode(texts, Outputs.EMBEDDINGS, arena)  # Deferred[...]
-print(call.wait().embeddings().value().row[DType.float32](0)[0])
+var call = model.deferred(executor).text_encode(texts, Outputs.EMBEDDINGS, arena)  # running now
+other_work()
+ref encoded = call.wait()                                                    # blocks until final
+print(encoded.embeddings().value().row[DType.float32](0)[0])
 ```
 
 `ModelOn` and `ModelDeferredOn` offer the same verbs with the same arguments, and the blocking verbs are written once, in the `ModelVerbs` trait the model and `ModelOn` conform to.
 A trainer has only the executor receivers, `trainer.on(executor)` and `trainer.deferred(executor)`, since its verbs run on the devices it was made over.
 Loads and `Mesh.bootstrap` address no handle yet, so they are constructors taking the executor they run on.
 
-A `Deferred` owns its outcome and outputs until the call is final, and borrows the model, the executor, the arena and every input it was handed, which Mojo keeps alive for as long as the `Deferred` is.
-Mojo has no runtime of its own to await on, so `wait` is the whole interface: it blocks in `uform_outcome_wait` until the call is final, then answers the result or raises the failure, as many times as it is asked.
+A `Deferred` keeps its outcome and outputs inline and never moves: the receiver builds it in your variable and submits it there, so it allocates nothing.
+It borrows the model, the executor, the arena and every input it was handed, which Mojo keeps alive for as long as the `Deferred` is.
+`wait` blocks in `uform_outcome_wait` until the call is final, then answers the result or raises the failure, as many times as it is asked.
 `status` reads the outcome without blocking, and destroying an unfinished `Deferred` waits for it.
+Inside an `async def`, `await call` answers the same, re-polling the status and yielding to Mojo's runtime while the call is pending; a task re-raises a failure as Mojo's own `Error`, which keeps the message but not the `status`:
+
+```mojo
+from std.runtime._asyncrt import create_raising_task  # Mojo's runtime entry point today
+
+async def encode_both(first: Model, second: Model, first_executor: Executor, second_executor: Executor,
+                      texts: TapeView) raises -> Int:
+    var first_arena = Arena(first_executor)  # borrows first_executor until it is freed
+    var second_arena = Arena(second_executor)
+    var first_call = first.deferred(first_executor).text_encode(texts, Outputs.EMBEDDINGS, first_arena)  # running now
+    var second_call = second.deferred(second_executor).text_encode(texts, Outputs.EMBEDDINGS, second_arena)
+    ref first_encoded = await first_call  # raises the call's failure
+    ref second_encoded = await second_call
+    return len(first_encoded.embeddings().value()) + len(second_encoded.embeddings().value())
+
+var both = create_raising_task(encode_both(first, second, first_executor, second_executor, texts))
+print(both^.wait())  # drives the coroutine on the runtime
+```
+
+Mojo still calls async experimental and reaches its runtime through underscored modules, so `await` and this entry point move to a public runtime once Mojo stabilizes one.
 
 ### Progress
 
@@ -93,7 +116,7 @@ var config = EncodeConfig(progress=Progress.of[stop_halfway](Pointer(to=seen), s
 model.text_encode(texts, Outputs.EMBEDDINGS, arena, config)  # raises Status.CANCELLED halfway
 ```
 
-Handlers returning a value are confirmed on Linux x86-64 with Mojo 1.2; Linux AArch64 and macOS rest on the CI matrix.
+Handlers that return a value run in the CI matrix on Linux x86-64, Linux AArch64 and macOS.
 
 ## Executors
 
@@ -117,7 +140,8 @@ Every output whose length only the call knows, embeddings, states, token vectors
 `Arena(executor)` places it where that executor computes, decided once, and `Arena(library)` makes host pages for the calling thread.
 Each call rewinds its arena, so the previous call's views die and a steady loop allocates once; reading a stale one raises `Status.INVALID_ARGUMENT`.
 To keep a result past the next call, pass that call another arena, and give every deferred call its own.
-An arena from a VRAM executor holds device memory, which host accessors refuse with `Status.DEVICE`, and serves only that executor's calls, keeping the executor alive until the arena goes.
+An arena from a VRAM executor holds device memory, which host accessors refuse with `Status.DEVICE`, and serves only that executor's calls.
+Every arena borrows the executor that made it, so Mojo frees the arena before that executor.
 
 The engine classifies every input pointer through the driver, so `TapeView.of` takes a host span or a host or device pointer, such as `buffer.unsafe_ptr()` of a MAX `DeviceBuffer`, with its offsets in host memory.
 

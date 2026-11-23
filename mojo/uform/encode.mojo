@@ -100,7 +100,7 @@ struct Encoded[origin: MutOrigin](Movable):
         origin: The arena the surfaces live in, which this result borrows.
     """
 
-    var arena: Pointer[Arena, Self.origin]
+    var arena: Pointer[Arena[ImmUntrackedOrigin], Self.origin]
     """The arena holding the surfaces."""
     var generation: Int
     """The arena's call these surfaces came from, so a read after a later call is refused."""
@@ -342,7 +342,7 @@ struct _EncodeCall[
     comptime symbol: StaticString = Self.name
     var inputs: TapeView[Self.inputs_origin]
     var kept: Outputs
-    var arena: Pointer[Arena, Self.origin]
+    var arena: Pointer[Arena[ImmUntrackedOrigin], Self.origin]
     var config: EncodeConfig[Self.stats_origin]
 
     def submit(
@@ -406,7 +406,7 @@ struct _ImageEncodePixelsCall[
     var heights: Span[UInt32, Self.heights_origin]
     var widths: Span[UInt32, Self.widths_origin]
     var kept: Outputs
-    var arena: Pointer[Arena, Self.origin]
+    var arena: Pointer[Arena[ImmUntrackedOrigin], Self.origin]
     var config: EncodeConfig[Self.stats_origin]
 
     def submit(
@@ -460,7 +460,7 @@ struct _AudioEncodeSamplesCall[
     var samples: TapeView[Self.samples_origin]
     var sample_rate: Int
     var kept: Outputs
-    var arena: Pointer[Arena, Self.origin]
+    var arena: Pointer[Arena[ImmUntrackedOrigin], Self.origin]
     var config: EncodeConfig[Self.stats_origin]
 
     def submit(
@@ -514,7 +514,7 @@ struct _TextChooseCall[
     comptime symbol: StaticString = "uform_text_choose"
     var texts: TapeView[Self.texts_origin]
     var choices: TapeView[Self.choices_origin]
-    var arena: Pointer[Arena, Self.origin]
+    var arena: Pointer[Arena[ImmUntrackedOrigin], Self.origin]
     var config: TextChooseConfig[Self.groups_origin, Self.stats_origin]
 
     def submit(

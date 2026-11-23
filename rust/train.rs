@@ -20,14 +20,13 @@ use core::borrow::BorrowMut;
 use core::ffi::{c_char, c_int, c_void};
 use core::fmt;
 use core::marker::PhantomData;
-use core::ops::ControlFlow;
 use core::ptr;
 use core::str::FromStr;
 use std::path::Path;
 
 use crate::types::{
     Accepts, Arena, Calling, Completion, Deferring, Error, Executor, Exported, GPUClass, Gathered, Handles, On,
-    ProgressCallback, Result, Rows, Scalar, Status, TapeView, check, fail, lower_progress, output_slot, path_view,
+    Progress, Result, Rows, Scalar, Status, TapeView, check, fail, lower_progress, output_slot, path_view,
     read_spelling, spelling, uform_arena_t, uform_bytes_view_t, uform_completion_blocking_k, uform_completion_t,
     uform_executor_t, uform_gpu_class_t, uform_outcome_t, uform_progress_t, uform_rows_view_t, uform_scalar_t,
     uform_status_t, uform_tape_view_t,
@@ -753,7 +752,7 @@ pub struct TrainerInitVramConfig<'config, 'mesh> {
     /// The base of every keyed draw: initialization, corruption and the shuffle.
     pub seed: u64,
     /// Reports the tensors placed on a resume and stops wherever it says to.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
 }
@@ -887,7 +886,7 @@ fn lower_choices(
 /// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
 ///
 /// Mirrors `uform_trainer_step_t`.
-pub struct TrainerStepConfig<'config, 'arena, Stats = &'config mut TrainerStepStats> {
+pub struct TrainerStepConfig<'config, 'arena, 'executor, Stats = &'config mut TrainerStepStats> {
     /// The bag of each item, items sharing a bag landing on one device; empty keeps every item
     /// its own bag.
     pub bags: &'config [u32],
@@ -909,14 +908,14 @@ pub struct TrainerStepConfig<'config, 'arena, Stats = &'config mut TrainerStepSt
     pub relations: Relations<'config>,
     /// The arena the pooled embeddings land in, as the contrastive loss scored them before the
     /// update; `None` skips the copy, and the step answers no rows.
-    pub arena: Option<&'arena mut Arena>,
+    pub arena: Option<&'arena mut Arena<'executor>>,
     /// The scalar type the embeddings land as, read only with an arena.
     pub outputs_scalar: Scalar,
     /// Where the losses land, overwritten by the call; `None` skips their readback too.
     pub stats: Option<Stats>,
 }
 
-impl Default for TrainerStepConfig<'_, '_> {
+impl Default for TrainerStepConfig<'_, '_, '_> {
     fn default() -> Self {
         TrainerStepConfig {
             bags: &[],
@@ -932,7 +931,7 @@ impl Default for TrainerStepConfig<'_, '_> {
     }
 }
 
-impl<'config> From<Relations<'config>> for TrainerStepConfig<'config, '_> {
+impl<'config> From<Relations<'config>> for TrainerStepConfig<'config, '_, '_> {
     fn from(relations: Relations<'config>) -> Self {
         TrainerStepConfig { relations, ..TrainerStepConfig::default() }
     }
@@ -941,32 +940,26 @@ impl<'config> From<Relations<'config>> for TrainerStepConfig<'config, '_> {
 /// The path a checkpoint is written to and the handler counting its
 /// tensors; see [`TrainVerbs::save`].
 ///
-/// A blocking call lends its handler; a deferred one owns it, and
-/// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands it back.
+/// A blocking call lends its handler; a deferred one borrows it for `'static`.
 ///
 /// Mirrors `uform_trainer_save_t`.
-pub struct TrainerSaveConfig<Location, Progress> {
+pub struct TrainerSaveConfig<'config, Location> {
     /// Destination of the safetensors checkpoint, written whole and renamed into place.
     pub path: Location,
     /// Reports the tensors written and stops wherever it says to.
-    pub progress: Option<Progress>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
 }
 
-impl<'config, Location: AsRef<Path>> From<Location>
-    for TrainerSaveConfig<Location, &'config mut ProgressCallback<'config>>
-{
+impl<Location: AsRef<Path>> From<Location> for TrainerSaveConfig<'_, Location> {
     fn from(path: Location) -> Self {
         TrainerSaveConfig { path, progress: None, progress_steps: 0 }
     }
 }
 
-impl<Stats: 'static> Accepts<TrainerStepConfig<'static, '_, Stats>> for Deferring {}
-impl<Location, Progress: 'static> Accepts<TrainerSaveConfig<Location, Progress>> for Deferring where
-    Deferring: Accepts<Location>
-{
-}
+impl<Stats: 'static> Accepts<TrainerStepConfig<'static, '_, '_, Stats>> for Deferring {}
+impl<Location> Accepts<TrainerSaveConfig<'static, Location>> for Deferring where Deferring: Accepts<Location> {}
 
 // endregion: Configs
 
@@ -1100,8 +1093,8 @@ impl<'mesh> Trainer<'mesh> {
         executor: &Executor,
         config: impl Into<TrainerInitVramConfig<'config, 'mesh>>,
     ) -> Result<Self> {
-        let mut config = config.into();
-        let progress = lower_progress(&mut config.progress, config.progress_steps);
+        let config = config.into();
+        let progress = lower_progress(&config.progress, config.progress_steps);
         let mut trainer = Trainer { handle: ptr::null_mut(), mesh: PhantomData };
         let mut outcome = uform_outcome_t::default();
         unsafe {
@@ -1146,8 +1139,8 @@ impl<'mesh> Trainer<'mesh> {
 
 /// What a verb answers through `Receiver`: what the call produced,
 /// or a [`Deferred`](crate::Deferred).
-type Answer<'trainer, Receiver, Verb> =
-    <<Receiver as TrainVerbs<'trainer>>::Completion as Completion>::Answer<'trainer, Verb>;
+type Deferrable<'trainer, Receiver, Verb> =
+    <<Receiver as TrainVerbs<'trainer>>::Completion as Completion>::Deferrable<'trainer, Verb>;
 
 /// Every trainer verb, written once for both receivers of [`Trainer::on`] and
 /// [`Trainer::deferred`], which run on the executor the trainer was made on.
@@ -1158,6 +1151,7 @@ pub trait TrainVerbs<'trainer>: Copy {
     type Completion: Completion;
 
     /// The trainer this receiver reaches and the executor its calls run on.
+    #[doc(hidden)]
     fn handles(&self) -> Handles;
 
     /// Applies one optimizer step over this process's items and every peer's: forward, losses,
@@ -1170,6 +1164,7 @@ pub trait TrainVerbs<'trainer>: Copy {
     fn step<
         'config,
         'arena,
+        'executor,
         Modalities: AsRef<[Modality]>,
         Contents: TapeView<u8>,
         Stats: BorrowMut<TrainerStepStats>,
@@ -1177,10 +1172,11 @@ pub trait TrainVerbs<'trainer>: Copy {
         self,
         modalities: Modalities,
         contents: Contents,
-        config: impl Into<TrainerStepConfig<'config, 'arena, Stats>>,
-    ) -> Answer<'trainer, Self, TrainerStep<'config, 'arena, Modalities, Contents, Stats>>
+        config: impl Into<TrainerStepConfig<'config, 'arena, 'executor, Stats>>,
+    ) -> Deferrable<'trainer, Self, TrainerStep<'config, 'arena, 'executor, Modalities, Contents, Stats>>
     where
-        Self::Completion: Accepts<Modalities> + Accepts<Contents> + Accepts<TrainerStepConfig<'config, 'arena, Stats>>,
+        Self::Completion:
+            Accepts<Modalities> + Accepts<Contents> + Accepts<TrainerStepConfig<'config, 'arena, 'executor, Stats>>,
     {
         <Self::Completion as Completion>::answer(TrainerStep {
             handles: self.handles(),
@@ -1197,12 +1193,12 @@ pub trait TrainVerbs<'trainer>: Copy {
     /// resumes; only the process of index zero writes, the rest return at once.
     ///
     /// Calls `uform_trainer_save`.
-    fn save<Location: AsRef<Path>, Progress: FnMut(usize, usize) -> ControlFlow<()> + Send>(
+    fn save<'config, Location: AsRef<Path>>(
         self,
-        config: impl Into<TrainerSaveConfig<Location, Progress>>,
-    ) -> Answer<'trainer, Self, TrainerSave<Location, Progress>>
+        config: impl Into<TrainerSaveConfig<'config, Location>>,
+    ) -> Deferrable<'trainer, Self, TrainerSave<'config, Location>>
     where
-        Self::Completion: Accepts<TrainerSaveConfig<Location, Progress>>,
+        Self::Completion: Accepts<TrainerSaveConfig<'config, Location>>,
     {
         <Self::Completion as Completion>::answer(TrainerSave { handles: self.handles(), config: config.into() })
     }
@@ -1223,22 +1219,28 @@ impl<'trainer, Completion: crate::types::Completion> TrainVerbs<'trainer> for On
 /// One optimizer step; see [`TrainVerbs::step`].
 ///
 /// Calls `uform_trainer_step`.
-pub struct TrainerStep<'config, 'arena, Modalities, Contents, Stats> {
+pub struct TrainerStep<'config, 'arena, 'executor, Modalities, Contents, Stats> {
     handles: Handles,
     modalities: Modalities,
     contents: Contents,
     gathered: Gathered<u8>,
-    config: TrainerStepConfig<'config, 'arena, Stats>,
+    config: TrainerStepConfig<'config, 'arena, 'executor, Stats>,
     embeddings: Exported<uform_rows_view_t>,
     count: usize,
 }
 
-impl<'config, 'arena, Modalities: AsRef<[Modality]>, Contents: TapeView<u8>, Stats: BorrowMut<TrainerStepStats>> Calling
-    for TrainerStep<'config, 'arena, Modalities, Contents, Stats>
+impl<
+    'config,
+    'arena,
+    'executor,
+    Modalities: AsRef<[Modality]>,
+    Contents: TapeView<u8>,
+    Stats: BorrowMut<TrainerStepStats>,
+> Calling for TrainerStep<'config, 'arena, 'executor, Modalities, Contents, Stats>
 {
     type Arguments = uform_trainer_step_t;
     type Output = Option<Rows<'arena>>;
-    type Inputs = (Modalities, Contents, TrainerStepConfig<'config, 'arena, Stats>);
+    type Inputs = (Modalities, Contents, TrainerStepConfig<'config, 'arena, 'executor, Stats>);
 
     fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments> {
         let batch = self.contents.tape(&mut self.gathered)?;
@@ -1310,21 +1312,19 @@ impl<'config, 'arena, Modalities: AsRef<[Modality]>, Contents: TapeView<u8>, Sta
 /// A checkpoint write; see [`TrainVerbs::save`].
 ///
 /// Calls `uform_trainer_save`.
-pub struct TrainerSave<Location, Progress> {
+pub struct TrainerSave<'config, Location> {
     handles: Handles,
-    config: TrainerSaveConfig<Location, Progress>,
+    config: TrainerSaveConfig<'config, Location>,
 }
 
-impl<Location: AsRef<Path>, Progress: FnMut(usize, usize) -> ControlFlow<()> + Send> Calling
-    for TrainerSave<Location, Progress>
-{
+impl<'config, Location: AsRef<Path>> Calling for TrainerSave<'config, Location> {
     type Arguments = uform_trainer_save_t;
     type Output = ();
-    type Inputs = TrainerSaveConfig<Location, Progress>;
+    type Inputs = TrainerSaveConfig<'config, Location>;
 
     fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments> {
         let path = path_view(self.config.path.as_ref())?;
-        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps);
+        let progress = lower_progress(&self.config.progress, self.config.progress_steps);
         Ok(uform_trainer_save_t {
             trainer: self.handles.handle,
             executor: self.handles.executor,

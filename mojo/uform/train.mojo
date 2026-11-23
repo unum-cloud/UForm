@@ -831,7 +831,7 @@ struct _TrainerStepCall[origin: MutOrigin](Call):
     var choices: TapeViewArguments
     var choice_targets: TapeViewArguments
     var relations: RelationsViewArguments
-    var arena: Optional[Pointer[Arena, Self.origin]]
+    var arena: Optional[Pointer[Arena[ImmUntrackedOrigin], Self.origin]]
     var outputs_scalar: ScalarKind
     var stats: Optional[Pointer[TrainerStepStats, MutUntrackedOrigin]]
 
@@ -899,7 +899,7 @@ def _step_call[
 ](
     modalities: Span[Modality, modalities_origin],
     contents: TapeView[contents_origin],
-    arena: Optional[Pointer[Arena, origin]],
+    arena: Optional[Pointer[Arena[ImmUntrackedOrigin], origin]],
     config: TrainerStepConfig[
         bags_origin, groups_origin, sides_origin, choices_origin, targets_origin, relations_origin, stats_origin
     ],
@@ -907,7 +907,7 @@ def _step_call[
     """Lowers a step's borrowed inputs into its crossing, inside the verb that keeps them alive."""
     var count = contents.count
 
-    def optional_length(length: Int) capturing -> Bool:
+    def optional_length(length: Int) {var count} -> Bool:
         return length == 0 or length == count
 
     var refused = len(modalities) != count or not (
@@ -1182,7 +1182,7 @@ trait TrainVerbs:
         """
         _ = self._route(
             _step_call[MutUntrackedOrigin](
-                modalities, contents, Optional[Pointer[Arena, MutUntrackedOrigin]](), config
+                modalities, contents, Optional[Pointer[Arena[ImmUntrackedOrigin], MutUntrackedOrigin]](), config
             )
         )
 
@@ -1209,7 +1209,7 @@ trait TrainVerbs:
         """The same step, also landing the pooled embedding of every item in `arena`, as the contrastive
         loss scored it before the update. Calls `uform_trainer_step`."""
         return self._route(
-            _step_call[origin_of(arena)](modalities, contents, Pointer(to=arena), config)
+            _step_call[origin_of(arena)](modalities, contents, arena._pointer(), config)
         ).value()
 
     def save[path_origin: ImmOrigin, //](self, path: StringSlice[path_origin], progress: Progress = Progress()) raises Error:
@@ -1304,7 +1304,7 @@ struct TrainerDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         Calls `uform_trainer_step`."""
         return {
             self.library,
-            _step_call[origin_of(arena)](modalities, contents, Pointer(to=arena), config),
+            _step_call[origin_of(arena)](modalities, contents, arena._pointer(), config),
             self.trainer,
             self.executor,
         }
@@ -1348,7 +1348,7 @@ struct TrainerDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         return {
             self.library,
             _step_call[MutUntrackedOrigin](
-                modalities, contents, Optional[Pointer[Arena, MutUntrackedOrigin]](), config
+                modalities, contents, Optional[Pointer[Arena[ImmUntrackedOrigin], MutUntrackedOrigin]](), config
             ),
             self.trainer,
             self.executor,
@@ -1357,7 +1357,8 @@ struct TrainerDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
     def save[
         path_origin: ImmOrigin, //
     ](self, path: StringSlice[path_origin], progress: Progress = Progress()) -> Deferred[
-        _TrainerSaveCall, ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[path_origin]()))
+        _TrainerSaveCall,
+        ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[path_origin]())),
     ]:
         """Submits `TrainVerbs.save`; the path stays borrowed until final. Calls `uform_trainer_save`."""
         return {self.library, _TrainerSaveCall(BytesView.of(path).arguments(), progress), self.trainer, self.executor}

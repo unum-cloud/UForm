@@ -27,6 +27,10 @@ version = "4.0.0-rc.1"
 name = "uform"
 path = "rust/lib.rs"
 
+[[test]]
+name = "allocations"
+path = "rust/allocations.rs"
+
 [dependencies]
 # CMake builds each crate's tree in place of downloading the revision the submodule pins.
 forkunion = { version = "4.0.0-rc.1", git = "https://github.com/ashvardanian/ForkUnion", rev = "59662d01e66ee40a87d8f5b28387a29d16c78ddd", default-features = false }

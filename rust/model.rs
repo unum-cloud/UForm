@@ -24,10 +24,10 @@ use core::ptr;
 use std::path::Path;
 
 use crate::types::{
-    Blocking, CPUClass, Calling, Completion, Deferring, Executor, GPUClass, Handles, On, ProgressCallback, Result,
-    Scalar, Status, check, fail, lower_progress, path_view, ram_options, uform_bytes_view_t,
-    uform_completion_blocking_k, uform_completion_t, uform_cpu_class_t, uform_executor_t, uform_gpu_class_t,
-    uform_outcome_t, uform_progress_t, uform_ram_options_t, uform_scalar_t, uform_vram_options_t, vram_options,
+    Blocking, CPUClass, Calling, Completion, Deferring, Executor, GPUClass, Handles, On, Progress, Result, Scalar,
+    Status, check, fail, lower_progress, path_view, ram_options, uform_bytes_view_t, uform_completion_blocking_k,
+    uform_completion_t, uform_cpu_class_t, uform_executor_t, uform_gpu_class_t, uform_outcome_t, uform_progress_t,
+    uform_ram_options_t, uform_scalar_t, uform_vram_options_t, vram_options,
 };
 
 // region: Raw Declarations
@@ -83,6 +83,7 @@ pub struct uform_model_load_vram_buffer_t {
 }
 
 #[repr(C)]
+#[derive(Default)]
 pub struct uform_model_description_t {
     pub dimensions: usize,
     pub context: usize,
@@ -92,21 +93,6 @@ pub struct uform_model_description_t {
     pub gpu_class: uform_gpu_class_t,
     pub token_width: usize,
     pub choice_temperature_groups: usize,
-}
-
-impl Default for uform_model_description_t {
-    fn default() -> Self {
-        uform_model_description_t {
-            dimensions: 0,
-            context: 0,
-            quantization: 0,
-            memory_usage: 0,
-            cpu_class: 0,
-            gpu_class: 0,
-            token_width: 0,
-            choice_temperature_groups: 0,
-        }
-    }
 }
 
 #[repr(C)]
@@ -174,7 +160,7 @@ pub struct ModelLoadRamConfig<'config> {
     /// [`Scalar::E4M3`] quantized at load.
     pub quantization: Scalar,
     /// Reports the tensors placed and stops wherever it says to; a stopped load creates no model.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
 }
@@ -210,7 +196,7 @@ pub struct ModelLoadVramConfig<'config> {
     /// The scalar the transformer blocks run in, as for [`ModelLoadRamConfig::quantization`].
     pub quantization: Scalar,
     /// Reports the tensors placed and stops wherever it says to; a stopped load creates no model.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
 }
@@ -245,7 +231,7 @@ pub struct ModelLoadRamBufferConfig<'config> {
     /// The scalar the transformer blocks run in, as for [`ModelLoadRamConfig::quantization`].
     pub quantization: Scalar,
     /// Reports the tensors placed and stops wherever it says to; a stopped load creates no model.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
 }
@@ -289,7 +275,7 @@ pub struct ModelLoadVramBufferConfig<'config> {
     /// The scalar the transformer blocks run in, as for [`ModelLoadRamConfig::quantization`].
     pub quantization: Scalar,
     /// Reports the tensors placed and stops wherever it says to; a stopped load creates no model.
-    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
 }
@@ -405,8 +391,8 @@ impl Model {
     ///
     /// Calls `uform_model_load_ram`.
     pub fn load_ram<'config>(config: impl Into<ModelLoadRamConfig<'config>>) -> Result<Self> {
-        let mut config = config.into();
-        let progress = lower_progress(&mut config.progress, config.progress_steps);
+        let config = config.into();
+        let progress = lower_progress(&config.progress, config.progress_steps);
         let mut model = Model::null();
         let mut outcome = uform_outcome_t::default();
         unsafe {
@@ -428,8 +414,8 @@ impl Model {
     ///
     /// Calls `uform_model_load_ram_buffer`.
     pub fn load_ram_buffer<'config>(config: impl Into<ModelLoadRamBufferConfig<'config>>) -> Result<Self> {
-        let mut config = config.into();
-        let progress = lower_progress(&mut config.progress, config.progress_steps);
+        let config = config.into();
+        let progress = lower_progress(&config.progress, config.progress_steps);
         let mut model = Model::null();
         let mut outcome = uform_outcome_t::default();
         unsafe {
@@ -451,8 +437,8 @@ impl Model {
     ///
     /// Calls `uform_model_load_vram`.
     pub fn load_vram<'config>(config: impl Into<ModelLoadVramConfig<'config>>) -> Result<Self> {
-        let mut config = config.into();
-        let progress = lower_progress(&mut config.progress, config.progress_steps);
+        let config = config.into();
+        let progress = lower_progress(&config.progress, config.progress_steps);
         let mut model = Model::null();
         let mut outcome = uform_outcome_t::default();
         unsafe {
@@ -474,8 +460,8 @@ impl Model {
     ///
     /// Calls `uform_model_load_vram_buffer`.
     pub fn load_vram_buffer<'config>(config: impl Into<ModelLoadVramBufferConfig<'config>>) -> Result<Self> {
-        let mut config = config.into();
-        let progress = lower_progress(&mut config.progress, config.progress_steps);
+        let config = config.into();
+        let progress = lower_progress(&config.progress, config.progress_steps);
         let mut model = Model::null();
         let mut outcome = uform_outcome_t::default();
         unsafe {
@@ -496,8 +482,8 @@ impl Model {
 
 /// What a verb answers through `Receiver`: what the call produced,
 /// or a [`Deferred`](crate::Deferred).
-pub(crate) type Answer<'model, Receiver, Verb> =
-    <<Receiver as ModelVerbs<'model>>::Completion as Completion>::Answer<'model, Verb>;
+pub(crate) type Deferrable<'model, Receiver, Verb> =
+    <<Receiver as ModelVerbs<'model>>::Completion as Completion>::Deferrable<'model, Verb>;
 
 /// Every verb of the model header, written once for every receiver: `&Model` blocks on the calling
 /// thread, and the [`On`] that [`Model::on`] or [`Model::deferred`] makes runs on an executor.
@@ -512,12 +498,13 @@ pub trait ModelVerbs<'model>: Copy {
     type Completion: Completion;
 
     /// The model this receiver reaches and the executor its calls run on.
+    #[doc(hidden)]
     fn handles(&self) -> Handles;
 
     /// Reports the model's geometry and placement in one call.
     ///
     /// Calls `uform_model_describe`.
-    fn describe(self) -> Answer<'model, Self, ModelDescribe> {
+    fn describe(self) -> Deferrable<'model, Self, ModelDescribe> {
         <Self::Completion as Completion>::answer(ModelDescribe {
             handles: self.handles(),
             description: uform_model_description_t::default(),
@@ -649,7 +636,7 @@ mod tests {
         let checkpoint = testing::checkpoint();
         let mut stop = |_, _| ControlFlow::Break(());
         let config = ModelLoadRamBufferConfig {
-            progress: Some(&mut stop),
+            progress: Some(Progress::new(&mut stop)),
             ..ModelLoadRamBufferConfig::from(checkpoint.as_slice())
         };
         assert_eq!(Model::load_ram_buffer(config).unwrap_err().status, Status::Cancelled);

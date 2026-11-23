@@ -874,123 +874,17 @@ static PyObject* Deferred_wait(Deferred* self, PyObject* unused) {
     return deferred_answer(self);
 }
 
-/** Calls the method @p name of @p self with up to two positional arguments, NULL ones left out. */
-static PyObject* method_call(PyObject* self, char const* name, PyObject* first, PyObject* second) {
-    PyObject* const method = PyUnicode_InternFromString(name);
-    if (!method) return NULL;
-    PyObject* const arguments[3] = {self, first, second};
-    size_t const count = 1 + (first != NULL) + (second != NULL);
-    PyObject* const result = PyObject_VectorcallMethod(method, arguments, count, NULL);
-    Py_DECREF(method);
-    return result;
-}
-
-/** One @c await of a @c Deferred, which its coroutine drives: it polls the outcome between pauses
- *  of the running event loop, so no thread ever waits on the library. */
-typedef struct Awaiting {
-    PyObject ob_base;
-
-    /** The @c Deferred awaited, held. */
-    PyObject* deferred;
-
-    /** @c asyncio.sleep, held. */
-    PyObject* sleep;
-
-    /** The iterator of the pause in progress, or NULL between pauses. */
-    PyObject* pause;
-
-    /** The seconds the next pause sleeps: 0 yields to the loop, then 1 µs doubling to 1 ms. */
-    double backoff;
-} Awaiting;
-
-/** The seconds of the first pause that sleeps, and of the longest. */
-static double const awaiting_backoff_first_k = 1e-6, awaiting_backoff_last_k = 1e-3;
-
-/** Ends the @c await with @p answer as its value, stolen; a tuple travels whole, wrapped in the
- *  @c StopIteration it raises. */
-static PyObject* awaiting_finish(PyObject* answer) {
-    if (!answer) return NULL;
-    PyObject* const stop = PyObject_CallOneArg(PyExc_StopIteration, answer);
-    Py_DECREF(answer);
-    if (stop) {
-        PyErr_SetObject(PyExc_StopIteration, stop);
-        Py_DECREF(stop);
-    }
-    return NULL;
-}
-
-static PyObject* Awaiting_next(Awaiting* self) {
-    for (;;) {
-        if (self->pause) {
-            PyObject* const yielded = PyIter_Next(self->pause);
-            if (yielded) return yielded; // the loop's own future, or None to come back at once
-            Py_CLEAR(self->pause);
-            if (PyErr_Occurred()) return NULL;
-        }
-        Deferred* const deferred = (Deferred*)self->deferred;
-        if (deferred_status(deferred) != uform_status_deferred_k) return awaiting_finish(deferred_answer(deferred));
-        PyObject* const delay = PyFloat_FromDouble(self->backoff);
-        PyObject* const coroutine = delay ? PyObject_CallOneArg(self->sleep, delay) : NULL;
-        Py_XDECREF(delay);
-        self->pause = coroutine ? method_call(coroutine, "__await__", NULL, NULL) : NULL;
-        Py_XDECREF(coroutine);
-        if (!self->pause) return NULL;
-        double const doubled = self->backoff * 2;
-        self->backoff = doubled < awaiting_backoff_first_k  ? awaiting_backoff_first_k
-                        : doubled < awaiting_backoff_last_k ? doubled
-                                                            : awaiting_backoff_last_k;
-    }
-}
-
-static int Awaiting_traverse(Awaiting* self, visitproc visit, void* arg) {
-    Py_VISIT(self->deferred);
-    Py_VISIT(self->sleep);
-    Py_VISIT(self->pause);
-    return 0;
-}
-
-static int Awaiting_clear(Awaiting* self) {
-    Py_CLEAR(self->pause);
-    Py_CLEAR(self->sleep);
-    Py_CLEAR(self->deferred);
-    return 0;
-}
-
-static void Awaiting_dealloc(Awaiting* self) {
-    PyObject_GC_UnTrack(self);
-    Awaiting_clear(self);
-    Py_TYPE(self)->tp_free((PyObject*)self);
-}
-
-PyTypeObject AwaitingType = {
-    PyVarObject_HEAD_INIT(NULL, 0) //
-        .tp_name = "uform.Awaiting",
-    .tp_doc = "The iterator `await` drives over a `Deferred`, polling `uform_outcome_status` between pauses.",
-    .tp_basicsize = sizeof(Awaiting),
-    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
-    .tp_dealloc = (destructor)Awaiting_dealloc,
-    .tp_traverse = (traverseproc)Awaiting_traverse,
-    .tp_clear = (inquiry)Awaiting_clear,
-    .tp_iter = PyObject_SelfIter,
-    .tp_iternext = (iternextfunc)Awaiting_next,
-};
-
-/** Answers the iterator @c await drives, polling the outcome through the running event loop. */
+/** Answers the iterator of <tt>uform._settled(self)</tt>, which re-polls the status once per turn of
+ *  the running loop, so no thread is parked on the call. */
 static PyObject* Deferred_await(PyObject* self) {
-    PyObject* const asyncio = PyImport_ImportModule("asyncio");
-    PyObject* const sleep = asyncio ? PyObject_GetAttrString(asyncio, "sleep") : NULL;
-    Py_XDECREF(asyncio);
-    Awaiting* const awaiting = sleep ? PyObject_GC_New(Awaiting, &AwaitingType) : NULL;
-    if (!awaiting) {
-        Py_XDECREF(sleep);
-        return NULL;
-    }
-    awaiting->deferred = Py_NewRef(self);
-    awaiting->sleep = sleep;
-    awaiting->pause = NULL;
-    awaiting->backoff = 0;
-    PyObject_GC_Track(awaiting);
-    return (PyObject*)awaiting;
+    PyObject* const package = PyImport_ImportModule("uform");
+    PyObject* const settled = package ? PyObject_GetAttrString(package, "_settled") : NULL;
+    Py_XDECREF(package);
+    PyObject* const coroutine = settled ? PyObject_CallOneArg(settled, self) : NULL;
+    Py_XDECREF(settled);
+    PyObject* const awaiting = coroutine ? PyObject_CallMethod(coroutine, "__await__", NULL) : NULL;
+    Py_XDECREF(coroutine);
+    return awaiting;
 }
 
 static void Deferred_dealloc(Deferred* self) {

@@ -12,18 +12,18 @@
 #![allow(non_camel_case_types, non_upper_case_globals)]
 
 use core::borrow::BorrowMut;
+use core::cell::UnsafeCell;
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::fmt;
-use core::future::{Future, IntoFuture};
-use core::marker::PhantomData;
-use core::mem::ManuallyDrop;
+use core::future::Future;
+use core::marker::{PhantomData, PhantomPinned};
+use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ops::ControlFlow;
-use core::pin::Pin;
-use core::ptr::{self, NonNull};
+use core::pin::{Pin, pin};
+use core::ptr;
 use core::str::FromStr;
 use core::task::{Context, Poll};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 // region: Raw Declarations
 
@@ -269,71 +269,16 @@ unsafe extern "C" {
 
 // region: Sealed Traits
 
-/// The handles every call names: the model or trainer it reaches and the executor it runs on.
-#[doc(hidden)]
-#[derive(Debug)]
-pub struct Handles {
-    pub(crate) handle: *mut c_void,
-    pub(crate) executor: uform_executor_t,
-}
-
-// Safety: a model is shared across threads, and an executor goes with the calls submitted to it.
-unsafe impl Send for Handles {}
-
-/// One verb over one `#[repr(C)]` argument struct: where the arguments point, which C entry
-/// point takes them, and what a successful call hands back.
-#[doc(hidden)]
-pub trait Calling: Sized {
-    /// The argument struct of the verb's C entry point.
-    type Arguments;
-    /// What a successful call hands back.
-    type Output;
-    /// The inputs the verb took, in argument order, handed back once the call is final.
-    type Inputs;
-
-    /// The arguments over the inputs and outputs this verb holds, which stays in place until the
-    /// call they feed is final.
-    fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments>;
-
-    /// Passes `arguments` to the verb's C entry point.
-    ///
-    /// # Safety Everything `arguments` points to stays alive and in place until the
-    /// outcome is final.
-    unsafe fn call(arguments: *mut Self::Arguments);
-
-    /// What the verb hands back once its outcome is `status`, beside the inputs it took.
-    fn finish(self, status: Result<()>) -> (Result<Self::Output>, Self::Inputs);
-}
-
-/// How the verbs of a receiver complete, which decides what each of them answers.
-#[doc(hidden)]
-pub trait Completion: Sized {
-    /// `Result<Output>` when blocking, `Result<Deferred<'handle, Verb>>` when deferring.
-    type Answer<'handle, Verb: Calling>;
-
-    /// Runs `verb`, or submits it.
-    fn answer<'handle, Verb: Calling>(verb: Verb) -> Self::Answer<'handle, Verb>;
-}
-
-/// The inputs a completion takes: a blocking receiver takes borrows and owned values alike, while a
-/// deferring one takes only what it owns, since the library reads its inputs after the verb
-/// returns. Both borrow the arena, which no call reads as an input.
-#[doc(hidden)]
-#[diagnostic::on_unimplemented(
-    message = "a deferred receiver needs owned inputs",
-    label = "the library would still read this borrow after the verb returns",
-    note = "pass texts, files and samples in a `Vec` or an array of owned or `'static` items, a tape as \
-            `(Vec<_>, Vec<usize>)`, a `PathBuf`, `String` or `'static` path, and a config owning its handler \
-            and stats"
-)]
-pub trait Accepts<Input> {}
+pub(crate) use crate::sealed::{Accepts, Batch, Calling, Completion, Gathered, Handles, TapeView};
 
 /// A scalar type a tape holds or a run of rows reads as, tied to the [`Scalar`] the C interface
 /// tags its buffers with.
 ///
 /// Rust-only.
 ///
-/// # Safety The associated scalar must describe the type's in-memory encoding exactly; the library
+/// # Safety
+///
+/// The associated scalar must describe the type's in-memory encoding exactly; the library
 /// reads raw buffers under that tag.
 pub unsafe trait Element: Copy + 'static {
     /// The tag the C interface knows this type by.
@@ -360,44 +305,18 @@ unsafe impl Element for u8 {
     const SCALAR: Scalar = Scalar::U8;
 }
 
-/// A borrowed tape and the batch axis it spans.
-#[doc(hidden)]
-pub struct Batch {
-    pub(crate) tape: uform_tape_view_t,
-    pub(crate) count: usize,
-}
-
-/// The tape a verb lays separate items into end to end, kept beside the inputs until the
-/// call is final.
-#[doc(hidden)]
-pub struct Gathered<Value> {
-    data: Vec<Value>,
-    offsets: Vec<usize>,
-}
-
-impl<Value> Default for Gathered<Value> {
-    fn default() -> Self {
-        Gathered { data: Vec::new(), offsets: Vec::new() }
-    }
-}
-
-/// A ragged batch a verb reads its items from: separate items, gathered into `gathered`, or a tape
-/// of data and offsets, borrowed as it is.
-#[doc(hidden)]
-pub trait TapeView<Value: Element> {
-    /// The tape and its count, refused when the offsets do not fit the data.
-    fn tape(&self, gathered: &mut Gathered<Value>) -> Result<Batch>;
-}
-
 impl<Value: Element, Item: AsRef<[Value]>> TapeView<Value> for [Item] {
     fn tape(&self, gathered: &mut Gathered<Value>) -> Result<Batch> {
-        gathered.data.clear();
-        gathered.offsets.clear();
-        gathered.offsets.reserve(self.len() + 1);
-        gathered.offsets.push(0);
-        for item in self {
-            gathered.data.extend_from_slice(item.as_ref());
-            gathered.offsets.push(gathered.data.len());
+        // A deferred call asks twice, at creation and at submission, and gathers once.
+        if gathered.offsets.len() != self.len() + 1 {
+            gathered.data.clear();
+            gathered.offsets.clear();
+            gathered.offsets.reserve(self.len() + 1);
+            gathered.offsets.push(0);
+            for item in self {
+                gathered.data.extend_from_slice(item.as_ref());
+                gathered.offsets.push(gathered.data.len());
+            }
         }
         Ok(Batch {
             tape: uform_tape_view_t {
@@ -457,7 +376,7 @@ impl<Value: Element, Tape: TapeView<Value> + ?Sized> TapeView<Value> for &Tape {
 
 /// Every value the C status word takes besides success, numbered alike.
 ///
-/// An [`Error`] never carries [`Status::Deferred`], which only [`Deferred::status`] reports.
+/// An [`Error`] never carries [`Status::Deferred`], which names a call not yet final.
 ///
 /// Mirrors `uform_status_t`.
 #[repr(i32)]
@@ -1044,7 +963,7 @@ fn exported_slice<'arena, Value>(data: *const Value, length: usize) -> Result<&'
 ///
 /// Mirrors `uform_rows_view_t`.
 pub struct Rows<'arena> {
-    pub(crate) arena: &'arena Arena,
+    pub(crate) arena: &'arena Arena<'arena>,
     pub(crate) view: Exported<uform_rows_view_t>,
     pub(crate) count: usize,
 }
@@ -1094,6 +1013,13 @@ impl<'arena> Rows<'arena> {
         }
         exported_slice(view.data.cast::<Value>(), self.count * view.columns)
     }
+
+    /// Each row's bytes in order, refused with [`Status::Device`] over device memory.
+    pub fn iter(&self) -> Result<impl ExactSizeIterator<Item = &'arena [u8]> + use<'arena>> {
+        let bytes = self.as_bytes()?;
+        let stride = self.view.0.stride;
+        Ok((0..self.count).map(move |row| &bytes[row * stride..(row + 1) * stride]))
+    }
 }
 
 /// Rows a call wrote into the arena it borrows, as many per item as the item had tokens left
@@ -1101,7 +1027,7 @@ impl<'arena> Rows<'arena> {
 ///
 /// Mirrors `uform_rows_tape_view_t`.
 pub struct RowsTape<'arena> {
-    pub(crate) arena: &'arena Arena,
+    pub(crate) arena: &'arena Arena<'arena>,
     pub(crate) view: Exported<uform_rows_tape_view_t>,
     pub(crate) count: usize,
 }
@@ -1149,7 +1075,7 @@ impl<'arena> RowsTape<'arena> {
 ///
 /// Mirrors `uform_tape_view_t`.
 pub struct Tape<'arena> {
-    pub(crate) arena: &'arena Arena,
+    pub(crate) arena: &'arena Arena<'arena>,
     pub(crate) view: Exported<uform_tape_view_t>,
     pub(crate) count: usize,
 }
@@ -1238,42 +1164,51 @@ pub(crate) fn path_view(path: &Path) -> Result<uform_bytes_view_t> {
 
 // region: Callbacks
 
-/// A periodic report of finished and total units; `Break` stops the call at the next slice.
+/// A periodic report of finished and total units, lent as the C struct every reporting verb takes;
+/// `Break` stops the call at the next slice.
 ///
-/// It runs on whichever thread advanced the work, never on two at once, so it owes `Send` and may
-/// be `FnMut`. A panic inside it aborts the process, as it cannot unwind through the library.
+/// The handler runs on whichever thread advanced the work, never on two at once, so it owes `Send`
+/// and may be `FnMut`. A panic inside it aborts the process, as it cannot unwind through C.
 ///
-/// A config's progress slot takes any such handler: a blocking call lends `&mut` one, and a
-/// deferred call owns one, boxed or not, and hands it back from
-/// [`Deferred::wait_with_inputs`].
-///
-/// Mirrors `uform_progress_callback_t`.
-pub type ProgressCallback<'a> = dyn FnMut(usize, usize) -> ControlFlow<()> + Send + 'a;
+/// Mirrors `uform_progress_t`.
+pub struct Progress<'handler> {
+    raw: uform_progress_t,
+    handler: PhantomData<&'handler mut ()>,
+}
 
-/// # Safety `state` must address the `Handler` lent to the call.
+// Safety: it points at a `Send` handler it borrows exclusively.
+unsafe impl Send for Progress<'_> {}
+
+impl<'handler> Progress<'handler> {
+    /// Lends `handler`, called with the units finished so far and the total the call finishes.
+    pub fn new<Handler: FnMut(usize, usize) -> ControlFlow<()> + Send>(handler: &'handler mut Handler) -> Self {
+        let raw = uform_progress_t {
+            callback: Some(progress_trampoline::<Handler>),
+            state: ptr::from_mut(handler).cast(),
+            steps: 0,
+        };
+        Progress { raw, handler: PhantomData }
+    }
+}
+
+/// # Safety
+///
+/// `state` must address the `Handler` a [`Progress`] lent to the call.
 unsafe extern "C" fn progress_trampoline<Handler: FnMut(usize, usize) -> ControlFlow<()>>(
-    completed: usize,
+    finished: usize,
     total: usize,
     state: *mut c_void,
 ) -> c_int {
     unsafe {
         let handler = &mut *state.cast::<Handler>();
-        c_int::from(handler(completed, total).is_break())
+        c_int::from(handler(finished, total).is_break())
     }
 }
 
-/// Lends an optional handler and its step count as the progress every reporting verb takes, the
-/// state pointing at the handler itself; `None` lends nulls.
-pub(crate) fn lower_progress<Handler: FnMut(usize, usize) -> ControlFlow<()>>(
-    handler: &mut Option<Handler>,
-    steps: usize,
-) -> uform_progress_t {
-    match handler {
-        Some(handler) => uform_progress_t {
-            callback: Some(progress_trampoline::<Handler>),
-            state: ptr::from_mut(handler).cast(),
-            steps,
-        },
+/// Lends an optional progress and its step count as reporting verbs take them; `None` lends nulls.
+pub(crate) fn lower_progress(progress: &Option<Progress>, steps: usize) -> uform_progress_t {
+    match progress {
+        Some(progress) => uform_progress_t { steps, ..progress.raw },
         None => uform_progress_t { callback: None, state: ptr::null_mut(), steps },
     }
 }
@@ -1361,15 +1296,23 @@ impl Residency {
 ///
 /// An executor runs one call at a time, so threads wanting to overlap take one apiece; it is `Send`
 /// but not `Sync`. A call finding another one holding it fails with [`Status::Contended`].
-/// [`Arena::new_in`] places an arena where it computes: a host arena may outlive it, while a GPU
-/// arena holds it until the arena drops.
+/// [`Arena::new_in`] places an arena where it computes, and the arena borrows it, so an arena never
+/// outlives the executor that made it:
 ///
-/// Mirrors `uform_executor_t`; dropping its last holder calls `uform_executor_free`.
+/// ```compile_fail,E0505
+/// use uform::*;
+///
+/// let executor = Executor::for_ram(&[], None, 0)?;
+/// let arena = Arena::new_in(&executor)?;
+/// drop(executor);
+/// let _ = arena.describe();
+/// # Ok::<(), uform::Error>(())
+/// ```
+///
+/// Mirrors `uform_executor_t`; dropping it calls `uform_executor_free`.
 #[derive(Debug)]
 pub struct Executor {
     pub(crate) handle: uform_executor_t,
-    /// Frees `handle` once neither this nor a GPU arena it made holds it.
-    share: Arc<ExecutorShare>,
 }
 
 // Safety: nothing in an executor is tied to the thread that created it, so it may move to another;
@@ -1385,7 +1328,7 @@ impl Default for Executor {
 impl Executor {
     /// Owns the handle a constructor filled, which is null for the executor that owns nothing.
     fn adopt(handle: uform_executor_t) -> Self {
-        Executor { handle, share: Arc::new(ExecutorShare(handle)) }
+        Executor { handle }
     }
 
     /// Creates an executor of host threads for RAM-resident models, interleaved across the compute
@@ -1415,7 +1358,9 @@ impl Executor {
     ///
     /// Calls `uform_executor_on_pool`.
     ///
-    /// # Safety `pool` must address a live ForkUnion `fu_pool_t` that outlives the executor.
+    /// # Safety
+    ///
+    /// `pool` must address a live ForkUnion `fu_pool_t` that outlives the executor.
     pub unsafe fn on_pool(
         memory_domains: &[i32],
         cpu_class_ceiling: Option<CPUClass>,
@@ -1447,7 +1392,9 @@ impl Executor {
     ///
     /// Calls `uform_executor_for_vram`.
     ///
-    /// # Safety Every stream must be a live CUDA stream on its device that outlives the executor.
+    /// # Safety
+    ///
+    /// Every stream must be a live CUDA stream on its device that outlives the executor.
     pub unsafe fn for_vram(
         devices: &[i32],
         gpu_class_ceiling: Option<GPUClass>,
@@ -1497,17 +1444,9 @@ impl Executor {
     }
 }
 
-/// The executor every holder shares, freed by the last of them to drop.
-#[derive(Debug)]
-struct ExecutorShare(uform_executor_t);
-
-// Safety: an executor may be freed from any thread, and a share is only ever dropped, never read.
-unsafe impl Send for ExecutorShare {}
-unsafe impl Sync for ExecutorShare {}
-
-impl Drop for ExecutorShare {
+impl Drop for Executor {
     fn drop(&mut self) {
-        unsafe { uform_executor_free(self.0) }
+        unsafe { uform_executor_free(self.handle) }
     }
 }
 
@@ -1524,49 +1463,47 @@ impl Drop for ExecutorShare {
 /// or deferred, borrows it as `&mut Arena` and answers outputs that borrow it in turn. An arena
 /// from a VRAM executor holds device memory, so the host accessors of its outputs refuse with
 /// [`Status::Device`]. It grows, fills and frees on the first stream of the executor that made it,
-/// so it serves only calls on that executor and holds the executor until it drops.
+/// so it serves only calls on that executor, and `'executor` keeps it from outliving that executor.
 ///
 /// Mirrors `uform_arena_t`; dropping it calls `uform_arena_free`, which waits for the calls
 /// still writing into it.
 #[derive(Debug)]
-pub struct Arena {
+pub struct Arena<'executor> {
     pub(crate) handle: uform_arena_t,
-    /// The executor a GPU arena frees on, dropped after the arena; `None` for host pages.
-    _executor: Option<Arc<ExecutorShare>>,
+    executor: PhantomData<&'executor ()>,
 }
 
 // Safety: an arena serves one call at a time, which the `&mut` every verb takes already enforces,
 // and a shared borrow only asks the library where it lives.
-unsafe impl Send for Arena {}
-unsafe impl Sync for Arena {}
+unsafe impl Send for Arena<'_> {}
+unsafe impl Sync for Arena<'_> {}
 
-impl Arena {
+impl Arena<'static> {
     /// Makes an arena of host pages for calls on the calling thread.
     ///
     /// Calls `uform_arena_init`.
     pub fn new() -> Result<Self> {
-        Arena::new_in(&Executor::default())
+        Arena::made_by(ptr::null_mut())
     }
+}
 
+impl<'executor> Arena<'executor> {
     /// Makes an arena where `executor` computes, serving the calls of its residency, or only those
     /// on `executor` itself for a GPU arena.
     ///
     /// Calls `uform_arena_init`.
-    pub fn new_in(executor: &Executor) -> Result<Self> {
-        let mut arena = Arena { handle: ptr::null_mut(), _executor: None };
+    pub fn new_in(executor: &'executor Executor) -> Result<Self> {
+        Arena::made_by(executor.handle)
+    }
+
+    /// The arena `executor` places, where null places it for the calling thread.
+    fn made_by(executor: uform_executor_t) -> Result<Self> {
+        let mut arena = Arena { handle: ptr::null_mut(), executor: PhantomData };
         let mut outcome = uform_outcome_t::default();
         unsafe {
-            uform_arena_init(&mut uform_arena_init_t {
-                arena: &mut arena.handle,
-                executor: executor.handle,
-                outcome: &mut outcome,
-            })
+            uform_arena_init(&mut uform_arena_init_t { arena: &mut arena.handle, executor, outcome: &mut outcome })
         };
-        check(outcome)?;
-        if arena.describe()?.residency == Residency::Vram {
-            arena._executor = Some(Arc::clone(&executor.share));
-        }
-        Ok(arena)
+        check(outcome).map(|()| arena)
     }
 
     /// Where the outputs live, as the executor that made the arena decided.
@@ -1609,7 +1546,7 @@ pub struct ArenaDescription {
     pub device: Option<u32>,
 }
 
-impl Drop for Arena {
+impl Drop for Arena<'_> {
     fn drop(&mut self) {
         unsafe { uform_arena_free(self.handle) }
     }
@@ -1628,7 +1565,7 @@ unsafe impl<View> Send for Exported<View> {}
 
 /// A model or a trainer borrowed with the executor its calls run on and how they complete.
 ///
-/// Neither the receiver nor a [`Deferred`] it submits outlives the handle or the executor.
+/// Neither the receiver nor a [`Deferred`] it makes outlives the handle or the executor.
 ///
 /// Rust-only.
 #[derive(Debug)]
@@ -1654,9 +1591,9 @@ impl<Handle, Completion> Copy for On<'_, Handle, Completion> {}
 pub struct Blocking;
 
 impl Completion for Blocking {
-    type Answer<'handle, Verb: Calling> = Result<Verb::Output>;
+    type Deferrable<'handle, Verb: Calling> = Result<Verb::Output>;
 
-    fn answer<'handle, Verb: Calling>(mut verb: Verb) -> Self::Answer<'handle, Verb> {
+    fn answer<'handle, Verb: Calling>(mut verb: Verb) -> Self::Deferrable<'handle, Verb> {
         let mut outcome = uform_outcome_t::default();
         let mut arguments = verb.arguments(&mut outcome, uform_completion_blocking_k)?;
         // Safety: the arguments point into `verb` and `outcome`, which stay in place until the
@@ -1668,31 +1605,29 @@ impl Completion for Blocking {
 
 impl<Input> Accepts<Input> for Blocking {}
 
-/// The completion of a deferring receiver, whose verbs return once their call is submitted and
-/// answer a [`Deferred`].
+/// The completion of a deferring receiver, whose verbs check their arguments and answer a
+/// [`Deferred`], submitted once first awaited or waited on.
 ///
 /// Rust-only.
 #[derive(Debug)]
 pub struct Deferring;
 
 impl Completion for Deferring {
-    type Answer<'handle, Verb: Calling> = Result<Deferred<'handle, Verb>>;
+    type Deferrable<'handle, Verb: Calling> = Result<Deferred<'handle, Verb>>;
 
-    fn answer<'handle, Verb: Calling>(verb: Verb) -> Self::Answer<'handle, Verb> {
-        let lent = Box::into_raw(Box::new(Lent { outcome: uform_outcome_t::default(), arguments: None, verb }));
-        // Safety: the box is fresh and reached through `lent` alone, and the arguments point into
-        // its fields, where they stay until the box is freed.
-        unsafe {
-            let outcome = ptr::addr_of_mut!((*lent).outcome);
-            match (*lent).verb.arguments(outcome, uform_completion_deferred_k) {
-                Ok(arguments) => Verb::call((*lent).arguments.insert(arguments)),
-                Err(refusal) => {
-                    drop(Box::from_raw(lent));
-                    return Err(refusal);
-                }
-            }
-            Ok(Deferred { lent: NonNull::new_unchecked(lent), receiver: PhantomData })
-        }
+    fn answer<'handle, Verb: Calling>(mut verb: Verb) -> Self::Deferrable<'handle, Verb> {
+        // The arguments are rebuilt where the call is pinned; this pass only surfaces refusals.
+        verb.arguments(&mut uform_outcome_t::default(), uform_completion_deferred_k)?;
+        Ok(Deferred {
+            call: UnsafeCell::new(Call {
+                outcome: uform_outcome_t::default(),
+                arguments: MaybeUninit::uninit(),
+                verb: ManuallyDrop::new(verb),
+            }),
+            stage: Stage::Unsubmitted,
+            borrows: PhantomData,
+            pinned: PhantomPinned,
+        })
     }
 }
 
@@ -1704,118 +1639,156 @@ impl Accepts<String> for Deferring {}
 impl Accepts<&'static str> for Deferring {}
 impl Accepts<&'static Path> for Deferring {}
 
-/// One deferred call and everything it lends the library, at one heap address until it is final.
-struct Lent<Verb: Calling> {
-    /// The outcome the library finishes.
-    outcome: uform_outcome_t,
-    /// The argument struct, pointing into `outcome` and `verb`, filled once the box is in place.
-    arguments: Option<Verb::Arguments>,
-    /// The inputs, the outputs and the arena borrow.
-    verb: Verb,
+/// How far a [`Deferred`] got: built, handed to the library, or answered.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Stage {
+    Unsubmitted,
+    Submitted,
+    Answered,
 }
 
-/// A submitted call, which owns its outcome, argument struct and inputs in one box the library
-/// reads until the call is final, and borrows its arena as a blocking call does.
-///
-/// [`Deferred::status`] polls without blocking, and [`Deferred::wait`] blocks until the call is
-/// final and hands back what it produced, while `.await` polls it from async code. Dropping an
-/// unfinished one waits for it, then frees the box. `'handle` is the borrow of the [`On`] that
-/// submitted it.
-///
-/// Rust-only; waiting and dropping call `uform_outcome_wait`.
-#[must_use = "a deferred call's outcome is seen only through `status` or `wait`"]
-pub struct Deferred<'handle, Verb: Calling> {
-    lent: NonNull<Lent<Verb>>,
-    receiver: PhantomData<&'handle ()>,
+/// What the library reads and writes while a call is in flight, reached only through raw pointers.
+struct Call<Verb: Calling> {
+    outcome: uform_outcome_t,
+    arguments: MaybeUninit<Verb::Arguments>,
+    verb: ManuallyDrop<Verb>,
 }
+
+/// A call submitted on its first poll or on [`Deferred::wait`], at the address it is pinned at, so
+/// its outcome, arguments, inputs and output slots live inline and need no allocation.
+///
+/// It is the [`Future`] itself: `.await` submits it and re-polls `uform_outcome_status` until the
+/// call is final, and [`Deferred::wait`] blocks in `uform_outcome_wait` instead. Dropping a
+/// submitted one waits for it. `'handle` is the borrow of the [`On`] that made it, and the call
+/// borrows its arena as a blocking call does, so no deferred call outlives either, while a handler
+/// it may still call is borrowed for `'static`:
+///
+/// ```compile_fail,E0597
+/// use uform::*;
+///
+/// let model = Model::load_ram("model.safetensors")?;
+/// let executor = Executor::for_ram(&[], None, 0)?;
+/// let mut arena = Arena::new_in(&executor)?;
+/// let mut handler = |_: usize, _: usize| core::ops::ControlFlow::Continue(());
+/// let config = TextEncodeConfig {
+///     progress: Some(Progress::new(&mut handler)),
+///     ..TextEncodeConfig::from(Scalar::F32)
+/// };
+/// let call = model.deferred(&executor).text_encode(vec!["a"], Outputs::EMBEDDINGS, config, &mut arena)?;
+/// let encoded = call.wait()?;
+/// # Ok::<(), uform::Error>(())
+/// ```
+///
+/// Nor does a second call reuse an arena while the first can still write into it:
+///
+/// ```compile_fail,E0499
+/// use uform::*;
+///
+/// let model = Model::load_ram("model.safetensors")?;
+/// let executor = Executor::for_ram(&[], None, 0)?;
+/// let mut arena = Arena::new_in(&executor)?;
+/// let first = model.deferred(&executor).text_encode(vec!["a"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
+/// let second = model.deferred(&executor).text_encode(vec!["b"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
+/// first.wait()?;
+/// second.wait()?;
+/// # Ok::<(), uform::Error>(())
+/// ```
+///
+/// Rust-only; polling calls `uform_outcome_status`, and waiting and dropping a submitted call call
+/// `uform_outcome_wait`.
+#[must_use = "a deferred call runs only once awaited or waited on"]
+pub struct Deferred<'handle, Verb: Calling> {
+    // The library writes here while `stage` is `Submitted`.
+    call: UnsafeCell<Call<Verb>>,
+    stage: Stage,
+    borrows: PhantomData<&'handle ()>,
+    #[allow(dead_code, reason = "only its type matters: it keeps a pinned call from moving")]
+    pinned: PhantomPinned,
+}
+
+// Safety: until submission it is plain data; once submitted it is pinned and only the library
+// reaches it.
+unsafe impl<Verb: Calling + Send> Send for Deferred<'_, Verb> {}
 
 impl<Verb: Calling> Deferred<'_, Verb> {
-    /// `Err(Status::Deferred)` until the call is final, then its final status,
-    /// read without blocking.
-    ///
-    /// Calls `uform_outcome_status`.
-    pub fn status(&self) -> core::result::Result<(), Status> {
-        // Safety: the outcome lives in the box this `Deferred` owns until it is final.
-        Status::from_raw(unsafe { uform_outcome_status(ptr::addr_of_mut!((*self.lent.as_ptr()).outcome)) })
+    fn outcome(&self) -> *mut uform_outcome_t {
+        unsafe { ptr::addr_of_mut!((*self.call.get()).outcome) }
     }
 
-    /// Blocks until the call is final, then hands back what it produced.
+    fn submit(self: Pin<&mut Self>) {
+        // Safety: nothing is moved out, and the pointers taken here stay valid while pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        let call = this.call.get();
+        this.stage = Stage::Submitted;
+        unsafe {
+            let outcome = ptr::addr_of_mut!((*call).outcome);
+            match (*call).verb.arguments(outcome, uform_completion_deferred_k) {
+                Ok(arguments) => Verb::call((*call).arguments.write(arguments)),
+                Err(_) => (*outcome).status = Status::Internal as uform_status_t,
+            }
+        }
+    }
+
+    /// Hands back the output of a final call, beside its inputs; the library touches it no more.
+    fn finish(self: Pin<&mut Self>) -> (Result<Verb::Output>, Verb::Inputs) {
+        let this = unsafe { self.get_unchecked_mut() };
+        this.stage = Stage::Answered;
+        let status = check(unsafe { ptr::read(this.outcome()) });
+        unsafe { ManuallyDrop::take(&mut (*this.call.get()).verb) }.finish(status)
+    }
+
+    /// Submits the call, then blocks until it is final and hands back what it produced.
     ///
     /// Calls `uform_outcome_wait`.
     pub fn wait(self) -> Result<Verb::Output> {
         self.wait_with_inputs().0
     }
 
-    /// Blocks until the call is final, then hands back what it produced beside the inputs it owned,
-    /// such as a config's handler and stats.
+    /// Submits the call, then blocks until it is final and hands back what it produced beside the
+    /// inputs it owned, such as a config's handler and stats.
     ///
     /// Calls `uform_outcome_wait`.
     pub fn wait_with_inputs(self) -> (Result<Verb::Output>, Verb::Inputs) {
-        let lent = ManuallyDrop::new(self).lent.as_ptr();
-        // Safety: once the outcome is final the library touches the box no more, so it
-        // is freed here.
-        let Lent { outcome, verb, .. } = unsafe {
-            uform_outcome_wait(ptr::addr_of_mut!((*lent).outcome));
-            *Box::from_raw(lent)
-        };
-        verb.finish(check(outcome))
+        let mut this = pin!(self);
+        this.as_mut().submit();
+        unsafe { uform_outcome_wait(this.outcome()) };
+        this.finish()
+    }
+}
+
+impl<Verb: Calling> Future for Deferred<'_, Verb> {
+    type Output = Result<Verb::Output>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.stage {
+            Stage::Answered => return Poll::Ready(Err(fail(Status::InvalidArgument, "the call was already awaited"))),
+            Stage::Unsubmitted => self.as_mut().submit(),
+            Stage::Submitted => {}
+        }
+        if unsafe { uform_outcome_status(self.outcome()) } == uform_status_deferred_k {
+            context.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        Poll::Ready(self.finish().0)
     }
 }
 
 impl<Verb: Calling> Drop for Deferred<'_, Verb> {
     fn drop(&mut self) {
-        let lent = self.lent.as_ptr();
-        // Safety: once the outcome is final the library touches the box no more, and this owned it.
-        unsafe {
-            uform_outcome_wait(ptr::addr_of_mut!((*lent).outcome));
-            drop(Box::from_raw(lent));
+        match self.stage {
+            Stage::Answered => return,
+            Stage::Submitted => unsafe {
+                uform_outcome_wait(self.outcome());
+            },
+            Stage::Unsubmitted => {}
         }
+        unsafe { ManuallyDrop::drop(&mut (*self.call.get()).verb) };
     }
 }
 
 impl<Verb: Calling> fmt::Debug for Deferred<'_, Verb> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "Deferred({:?})", self.status())
-    }
-}
-
-// Safety: the box moves with the `Deferred`, and until its call is final only the
-// library reaches it.
-unsafe impl<Verb: Calling + Send> Send for Deferred<'_, Verb> {}
-
-impl<'handle, Verb: Calling> IntoFuture for Deferred<'handle, Verb> {
-    type Output = Result<Verb::Output>;
-    type IntoFuture = Wait<'handle, Verb>;
-
-    fn into_future(self) -> Wait<'handle, Verb> {
-        Wait(Some(self))
-    }
-}
-
-/// A [`Deferred`] being awaited: every poll reads its status through `uform_outcome_status`, and
-/// one not yet final asks to be polled again.
-///
-/// The C library has no wake-up, so an executor re-polls it while other tasks run, yielding
-/// between polls and never sleeping inside one; [`Deferred::wait`] blocks without spinning.
-///
-/// Rust-only; the final poll calls `uform_outcome_wait`, which returns at once.
-#[must_use = "an awaited call does nothing unless polled"]
-pub struct Wait<'handle, Verb: Calling>(Option<Deferred<'handle, Verb>>);
-
-impl<Verb: Calling> Future for Wait<'_, Verb> {
-    type Output = Result<Verb::Output>;
-
-    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        let awaited = &mut self.get_mut().0;
-        match awaited.take() {
-            None => Poll::Ready(Err(fail(Status::InvalidArgument, "the call was already awaited"))),
-            Some(call) if call.status() == Err(Status::Deferred) => {
-                *awaited = Some(call);
-                context.waker().wake_by_ref();
-                Poll::Pending
-            }
-            Some(call) => Poll::Ready(call.wait()),
-        }
+        write!(formatter, "Deferred({:?})", self.stage)
     }
 }
 
@@ -1949,21 +1922,14 @@ mod tests {
 
         let executor = testing::executor();
         let placed = Arena::new_in(&executor).unwrap();
-        drop(executor);
-        assert_eq!(placed.describe().unwrap(), host, "an arena outlives its executor");
+        assert_eq!(placed.describe().unwrap(), host);
 
-        // A GPU arena frees on its executor's first stream, so it keeps the executor past its drop.
         let Ok(gpu) = (unsafe { Executor::for_vram(&[0], None, &[], None, &[], 0) }) else {
             return testing::skipped("no GPU device");
         };
         let device = Arena::new_in(&gpu).unwrap();
         assert_eq!(device.describe().unwrap(), ArenaDescription { residency: Residency::Vram, device: Some(0) });
-        let share = Arc::downgrade(&gpu.share);
-        drop(gpu);
-        assert!(share.upgrade().is_some(), "a GPU arena holds its executor");
         assert_eq!(device.host().unwrap_err().status, Status::Device);
-        drop(device);
-        assert!(share.upgrade().is_none(), "the last GPU arena frees its executor");
     }
 
     /// A pool that lends no threads and streams that do not pair with the devices are refused.

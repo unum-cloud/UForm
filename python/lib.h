@@ -110,7 +110,6 @@ extern PyTypeObject ArenaType;
 extern PyTypeObject ArenaBufferType;
 extern PyTypeObject RowsTapeType;
 extern PyTypeObject DeferredType;
-extern PyTypeObject AwaitingType;
 extern PyTypeObject OnType;
 extern PyTypeObject DeferredOnType;
 

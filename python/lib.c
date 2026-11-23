@@ -101,7 +101,6 @@ PyMODINIT_FUNC PyInit_lib(void) {
         PyStructSequence_Desc* const layout = module_types[type_index].layout;
         if ((layout ? PyStructSequence_InitType2(type, layout) : PyType_Ready(type)) < 0) return NULL;
     }
-    if (PyType_Ready(&AwaitingType) < 0) return NULL; // driven by `await`, never named
     size_t const fields_count = sizeof(module_fields) / sizeof(*module_fields);
     for (size_t fields_index = 0; fields_index != fields_count; ++fields_index)
         if (uform_py_fields_ready(module_fields[fields_index]) < 0) return NULL;

@@ -19,13 +19,13 @@
 
 use core::borrow::BorrowMut;
 use core::fmt;
-use core::ops::{BitOr, BitOrAssign, ControlFlow};
+use core::ops::{BitOr, BitOrAssign};
 use core::ptr;
 
-use crate::model::{Answer, ModelVerbs, uform_model_t};
+use crate::model::{Deferrable, ModelVerbs, uform_model_t};
 use crate::types::{
-    Accepts, Arena, Calling, Completion, Deferring, Exported, Gathered, Handles, ProgressCallback, Result, Rows,
-    RowsTape, Scalar, Status, Tape, TapeView, fail, lower_progress, output_slot, uform_arena_t, uform_completion_t,
+    Accepts, Arena, Calling, Completion, Deferring, Exported, Gathered, Handles, Progress, Result, Rows, RowsTape,
+    Scalar, Status, Tape, TapeView, fail, lower_progress, output_slot, uform_arena_t, uform_completion_t,
     uform_executor_t, uform_outcome_t, uform_progress_t, uform_rows_tape_view_t, uform_rows_view_t, uform_scalar_t,
     uform_tape_view_t,
 };
@@ -285,7 +285,7 @@ impl Surfaces {
         }
     }
 
-    fn finish(self, arena: &Arena) -> Encoded<'_> {
+    fn finish<'arena>(self, arena: &'arena Arena<'arena>) -> Encoded<'arena> {
         Encoded {
             embeddings: self.outputs.contains(Outputs::EMBEDDINGS).then_some(Rows {
                 arena,
@@ -364,23 +364,24 @@ pub struct AudioEncodeStats {
 
 /// The scalar and the knobs of [`EncodeVerbs::text_encode`]; a bare [`Scalar`] is the whole config.
 ///
-/// A blocking call lends its handler and stats; a deferred one owns them, and
-/// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
+/// A blocking call lends its handler and stats; a deferred one borrows its handler for `'static`
+/// and owns its stats, which [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs)
+/// hands back.
 ///
 /// Mirrors `uform_text_encode_t`.
-pub struct TextEncodeConfig<Progress, Stats> {
+pub struct TextEncodeConfig<'config, Stats> {
     /// The scalar type every output lands as.
     pub outputs_scalar: Scalar,
     /// Reports the items encoded and stops wherever it says to; a stopped call reports
     /// [`Status::Cancelled`] and leaves no outputs.
-    pub progress: Option<Progress>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the truncation report lands, overwritten by the call.
     pub stats: Option<Stats>,
 }
 
-impl<'config> From<Scalar> for TextEncodeConfig<&'config mut ProgressCallback<'config>, &'config mut TextEncodeStats> {
+impl<'config> From<Scalar> for TextEncodeConfig<'config, &'config mut TextEncodeStats> {
     fn from(outputs_scalar: Scalar) -> Self {
         TextEncodeConfig { outputs_scalar, progress: None, progress_steps: 0, stats: None }
     }
@@ -389,24 +390,23 @@ impl<'config> From<Scalar> for TextEncodeConfig<&'config mut ProgressCallback<'c
 /// The scalar and the knobs of [`EncodeVerbs::image_encode`]; a bare [`Scalar`] is
 /// the whole config.
 ///
-/// A blocking call lends its handler and stats; a deferred one owns them, and
-/// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
+/// A blocking call lends its handler and stats; a deferred one borrows its handler for `'static`
+/// and owns its stats, which [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs)
+/// hands back.
 ///
 /// Mirrors `uform_image_encode_t`.
-pub struct ImageEncodeConfig<Progress, Stats> {
+pub struct ImageEncodeConfig<'config, Stats> {
     /// The scalar type every output lands as.
     pub outputs_scalar: Scalar,
     /// Reports the items encoded and stops wherever it says to.
-    pub progress: Option<Progress>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the truncation report lands, overwritten by the call.
     pub stats: Option<Stats>,
 }
 
-impl<'config> From<Scalar>
-    for ImageEncodeConfig<&'config mut ProgressCallback<'config>, &'config mut ImageEncodeStats>
-{
+impl<'config> From<Scalar> for ImageEncodeConfig<'config, &'config mut ImageEncodeStats> {
     fn from(outputs_scalar: Scalar) -> Self {
         ImageEncodeConfig { outputs_scalar, progress: None, progress_steps: 0, stats: None }
     }
@@ -415,24 +415,23 @@ impl<'config> From<Scalar>
 /// The scalar and the knobs of [`EncodeVerbs::image_encode_pixels`]; a bare [`Scalar`] is
 /// the whole config.
 ///
-/// A blocking call lends its handler and stats; a deferred one owns them, and
-/// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
+/// A blocking call lends its handler and stats; a deferred one borrows its handler for `'static`
+/// and owns its stats, which [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs)
+/// hands back.
 ///
 /// Mirrors `uform_image_encode_pixels_t`.
-pub struct ImageEncodePixelsConfig<Progress, Stats> {
+pub struct ImageEncodePixelsConfig<'config, Stats> {
     /// The scalar type every output lands as.
     pub outputs_scalar: Scalar,
     /// Reports the items encoded and stops wherever it says to.
-    pub progress: Option<Progress>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the truncation report lands, overwritten by the call.
     pub stats: Option<Stats>,
 }
 
-impl<'config> From<Scalar>
-    for ImageEncodePixelsConfig<&'config mut ProgressCallback<'config>, &'config mut ImageEncodeStats>
-{
+impl<'config> From<Scalar> for ImageEncodePixelsConfig<'config, &'config mut ImageEncodeStats> {
     fn from(outputs_scalar: Scalar) -> Self {
         ImageEncodePixelsConfig { outputs_scalar, progress: None, progress_steps: 0, stats: None }
     }
@@ -441,24 +440,23 @@ impl<'config> From<Scalar>
 /// The scalar and the knobs of [`EncodeVerbs::video_encode`]; a bare [`Scalar`] is
 /// the whole config.
 ///
-/// A blocking call lends its handler and stats; a deferred one owns them, and
-/// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
+/// A blocking call lends its handler and stats; a deferred one borrows its handler for `'static`
+/// and owns its stats, which [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs)
+/// hands back.
 ///
 /// Mirrors `uform_video_encode_t`.
-pub struct VideoEncodeConfig<Progress, Stats> {
+pub struct VideoEncodeConfig<'config, Stats> {
     /// The scalar type every output lands as.
     pub outputs_scalar: Scalar,
     /// Reports the items encoded and stops wherever it says to.
-    pub progress: Option<Progress>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the truncation report lands, overwritten by the call.
     pub stats: Option<Stats>,
 }
 
-impl<'config> From<Scalar>
-    for VideoEncodeConfig<&'config mut ProgressCallback<'config>, &'config mut VideoEncodeStats>
-{
+impl<'config> From<Scalar> for VideoEncodeConfig<'config, &'config mut VideoEncodeStats> {
     fn from(outputs_scalar: Scalar) -> Self {
         VideoEncodeConfig { outputs_scalar, progress: None, progress_steps: 0, stats: None }
     }
@@ -467,24 +465,23 @@ impl<'config> From<Scalar>
 /// The scalar and the knobs of [`EncodeVerbs::audio_encode`]; a bare [`Scalar`] is
 /// the whole config.
 ///
-/// A blocking call lends its handler and stats; a deferred one owns them, and
-/// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
+/// A blocking call lends its handler and stats; a deferred one borrows its handler for `'static`
+/// and owns its stats, which [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs)
+/// hands back.
 ///
 /// Mirrors `uform_audio_encode_t`.
-pub struct AudioEncodeConfig<Progress, Stats> {
+pub struct AudioEncodeConfig<'config, Stats> {
     /// The scalar type every output lands as.
     pub outputs_scalar: Scalar,
     /// Reports the items encoded and stops wherever it says to.
-    pub progress: Option<Progress>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the truncation report lands, overwritten by the call.
     pub stats: Option<Stats>,
 }
 
-impl<'config> From<Scalar>
-    for AudioEncodeConfig<&'config mut ProgressCallback<'config>, &'config mut AudioEncodeStats>
-{
+impl<'config> From<Scalar> for AudioEncodeConfig<'config, &'config mut AudioEncodeStats> {
     fn from(outputs_scalar: Scalar) -> Self {
         AudioEncodeConfig { outputs_scalar, progress: None, progress_steps: 0, stats: None }
     }
@@ -493,24 +490,23 @@ impl<'config> From<Scalar>
 /// The scalar and the knobs of [`EncodeVerbs::audio_encode_samples`]; a bare [`Scalar`] is
 /// the whole config.
 ///
-/// A blocking call lends its handler and stats; a deferred one owns them, and
-/// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
+/// A blocking call lends its handler and stats; a deferred one borrows its handler for `'static`
+/// and owns its stats, which [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs)
+/// hands back.
 ///
 /// Mirrors `uform_audio_encode_samples_t`.
-pub struct AudioEncodeSamplesConfig<Progress, Stats> {
+pub struct AudioEncodeSamplesConfig<'config, Stats> {
     /// The scalar type every output lands as.
     pub outputs_scalar: Scalar,
     /// Reports the items encoded and stops wherever it says to.
-    pub progress: Option<Progress>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the truncation report lands, overwritten by the call.
     pub stats: Option<Stats>,
 }
 
-impl<'config> From<Scalar>
-    for AudioEncodeSamplesConfig<&'config mut ProgressCallback<'config>, &'config mut AudioEncodeStats>
-{
+impl<'config> From<Scalar> for AudioEncodeSamplesConfig<'config, &'config mut AudioEncodeStats> {
     fn from(outputs_scalar: Scalar) -> Self {
         AudioEncodeSamplesConfig { outputs_scalar, progress: None, progress_steps: 0, stats: None }
     }
@@ -519,21 +515,18 @@ impl<'config> From<Scalar>
 /// The question types and the knobs of [`EncodeVerbs::text_choose`]; [`TextChooseConfig::default`]
 /// puts every item in group zero.
 ///
-/// A blocking call lends its handler and stats; a deferred one owns them, and
-/// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
+/// A blocking call lends its handler and stats; a deferred one borrows its handler for `'static`
+/// and owns its stats, which [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs)
+/// hands back.
 ///
 /// Mirrors `uform_text_choose_t`.
-pub struct TextChooseConfig<
-    'config,
-    Progress = &'config mut ProgressCallback<'config>,
-    Stats = &'config mut TextEncodeStats,
-> {
+pub struct TextChooseConfig<'config, Stats = &'config mut TextEncodeStats> {
     /// The question type of each item, below the model's `choice_temperature_groups`; empty puts
     /// every item in group zero.
     pub temperature_groups: &'config [u32],
     /// Reports the items scored and stops wherever it says to; a stopped call reports
     /// [`Status::Cancelled`] and leaves no outputs.
-    pub progress: Option<Progress>,
+    pub progress: Option<Progress<'config>>,
     /// Reports the call makes at most, the last at completion; zero derives to ten.
     pub progress_steps: usize,
     /// Where the truncation report lands, overwritten by the call.
@@ -546,13 +539,13 @@ impl Default for TextChooseConfig<'_> {
     }
 }
 
-impl<Progress: 'static, Stats: 'static> Accepts<TextEncodeConfig<Progress, Stats>> for Deferring {}
-impl<Progress: 'static, Stats: 'static> Accepts<TextChooseConfig<'static, Progress, Stats>> for Deferring {}
-impl<Progress: 'static, Stats: 'static> Accepts<ImageEncodeConfig<Progress, Stats>> for Deferring {}
-impl<Progress: 'static, Stats: 'static> Accepts<ImageEncodePixelsConfig<Progress, Stats>> for Deferring {}
-impl<Progress: 'static, Stats: 'static> Accepts<VideoEncodeConfig<Progress, Stats>> for Deferring {}
-impl<Progress: 'static, Stats: 'static> Accepts<AudioEncodeConfig<Progress, Stats>> for Deferring {}
-impl<Progress: 'static, Stats: 'static> Accepts<AudioEncodeSamplesConfig<Progress, Stats>> for Deferring {}
+impl<Stats: 'static> Accepts<TextEncodeConfig<'static, Stats>> for Deferring {}
+impl<Stats: 'static> Accepts<TextChooseConfig<'static, Stats>> for Deferring {}
+impl<Stats: 'static> Accepts<ImageEncodeConfig<'static, Stats>> for Deferring {}
+impl<Stats: 'static> Accepts<ImageEncodePixelsConfig<'static, Stats>> for Deferring {}
+impl<Stats: 'static> Accepts<VideoEncodeConfig<'static, Stats>> for Deferring {}
+impl<Stats: 'static> Accepts<AudioEncodeConfig<'static, Stats>> for Deferring {}
+impl<Stats: 'static> Accepts<AudioEncodeSamplesConfig<'static, Stats>> for Deferring {}
 
 // endregion: Configs
 
@@ -572,20 +565,15 @@ pub trait EncodeVerbs<'model>: ModelVerbs<'model> {
     /// Encodes UTF-8 texts through one forward, a token per byte.
     ///
     /// Calls `uform_text_encode`.
-    fn text_encode<
-        'arena,
-        Texts: TapeView<u8>,
-        Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
-        Stats: BorrowMut<TextEncodeStats>,
-    >(
+    fn text_encode<'config, 'arena, Texts: TapeView<u8>, Stats: BorrowMut<TextEncodeStats>>(
         self,
         texts: Texts,
         outputs: Outputs,
-        config: impl Into<TextEncodeConfig<Progress, Stats>>,
-        arena: &'arena mut Arena,
-    ) -> Answer<'model, Self, TextEncode<'arena, Texts, Progress, Stats>>
+        config: impl Into<TextEncodeConfig<'config, Stats>>,
+        arena: &'arena mut Arena<'_>,
+    ) -> Deferrable<'model, Self, TextEncode<'config, 'arena, Texts, Stats>>
     where
-        Self::Completion: Accepts<Texts> + Accepts<TextEncodeConfig<Progress, Stats>>,
+        Self::Completion: Accepts<Texts> + Accepts<TextEncodeConfig<'config, Stats>>,
     {
         <Self::Completion as Completion>::answer(TextEncode {
             handles: self.handles(),
@@ -606,22 +594,15 @@ pub trait EncodeVerbs<'model>: ModelVerbs<'model> {
     /// the byte decoder fails the call with [`Status::Unsupported`].
     ///
     /// Calls `uform_text_choose`.
-    fn text_choose<
-        'config,
-        'arena,
-        Texts: TapeView<u8>,
-        Choices: TapeView<u8>,
-        Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
-        Stats: BorrowMut<TextEncodeStats>,
-    >(
+    fn text_choose<'config, 'arena, Texts: TapeView<u8>, Choices: TapeView<u8>, Stats: BorrowMut<TextEncodeStats>>(
         self,
         texts: Texts,
         choices: Choices,
-        config: impl Into<TextChooseConfig<'config, Progress, Stats>>,
-        arena: &'arena mut Arena,
-    ) -> Answer<'model, Self, TextChoose<'config, 'arena, Texts, Choices, Progress, Stats>>
+        config: impl Into<TextChooseConfig<'config, Stats>>,
+        arena: &'arena mut Arena<'_>,
+    ) -> Deferrable<'model, Self, TextChoose<'config, 'arena, Texts, Choices, Stats>>
     where
-        Self::Completion: Accepts<Texts> + Accepts<Choices> + Accepts<TextChooseConfig<'config, Progress, Stats>>,
+        Self::Completion: Accepts<Texts> + Accepts<Choices> + Accepts<TextChooseConfig<'config, Stats>>,
     {
         <Self::Completion as Completion>::answer(TextChoose {
             handles: self.handles(),
@@ -640,20 +621,15 @@ pub trait EncodeVerbs<'model>: ModelVerbs<'model> {
     /// [`Status::Malformed`].
     ///
     /// Calls `uform_image_encode`.
-    fn image_encode<
-        'arena,
-        Images: TapeView<u8>,
-        Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
-        Stats: BorrowMut<ImageEncodeStats>,
-    >(
+    fn image_encode<'config, 'arena, Images: TapeView<u8>, Stats: BorrowMut<ImageEncodeStats>>(
         self,
         images: Images,
         outputs: Outputs,
-        config: impl Into<ImageEncodeConfig<Progress, Stats>>,
-        arena: &'arena mut Arena,
-    ) -> Answer<'model, Self, ImageEncode<'arena, Images, Progress, Stats>>
+        config: impl Into<ImageEncodeConfig<'config, Stats>>,
+        arena: &'arena mut Arena<'_>,
+    ) -> Deferrable<'model, Self, ImageEncode<'config, 'arena, Images, Stats>>
     where
-        Self::Completion: Accepts<Images> + Accepts<ImageEncodeConfig<Progress, Stats>>,
+        Self::Completion: Accepts<Images> + Accepts<ImageEncodeConfig<'config, Stats>>,
     {
         <Self::Completion as Completion>::answer(ImageEncode {
             handles: self.handles(),
@@ -670,11 +646,11 @@ pub trait EncodeVerbs<'model>: ModelVerbs<'model> {
     ///
     /// Calls `uform_image_encode_pixels`.
     fn image_encode_pixels<
+        'config,
         'arena,
         Pixels: TapeView<u8>,
         Heights: AsRef<[u32]>,
         Widths: AsRef<[u32]>,
-        Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
         Stats: BorrowMut<ImageEncodeStats>,
     >(
         self,
@@ -682,12 +658,12 @@ pub trait EncodeVerbs<'model>: ModelVerbs<'model> {
         heights: Heights,
         widths: Widths,
         outputs: Outputs,
-        config: impl Into<ImageEncodePixelsConfig<Progress, Stats>>,
-        arena: &'arena mut Arena,
-    ) -> Answer<'model, Self, ImageEncodePixels<'arena, Pixels, Heights, Widths, Progress, Stats>>
+        config: impl Into<ImageEncodePixelsConfig<'config, Stats>>,
+        arena: &'arena mut Arena<'_>,
+    ) -> Deferrable<'model, Self, ImageEncodePixels<'config, 'arena, Pixels, Heights, Widths, Stats>>
     where
         Self::Completion:
-            Accepts<Pixels> + Accepts<Heights> + Accepts<Widths> + Accepts<ImageEncodePixelsConfig<Progress, Stats>>,
+            Accepts<Pixels> + Accepts<Heights> + Accepts<Widths> + Accepts<ImageEncodePixelsConfig<'config, Stats>>,
     {
         <Self::Completion as Completion>::answer(ImageEncodePixels {
             handles: self.handles(),
@@ -704,20 +680,15 @@ pub trait EncodeVerbs<'model>: ModelVerbs<'model> {
     /// Decodes and encodes MP4 or WebM clips.
     ///
     /// Calls `uform_video_encode`.
-    fn video_encode<
-        'arena,
-        Videos: TapeView<u8>,
-        Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
-        Stats: BorrowMut<VideoEncodeStats>,
-    >(
+    fn video_encode<'config, 'arena, Videos: TapeView<u8>, Stats: BorrowMut<VideoEncodeStats>>(
         self,
         videos: Videos,
         outputs: Outputs,
-        config: impl Into<VideoEncodeConfig<Progress, Stats>>,
-        arena: &'arena mut Arena,
-    ) -> Answer<'model, Self, VideoEncode<'arena, Videos, Progress, Stats>>
+        config: impl Into<VideoEncodeConfig<'config, Stats>>,
+        arena: &'arena mut Arena<'_>,
+    ) -> Deferrable<'model, Self, VideoEncode<'config, 'arena, Videos, Stats>>
     where
-        Self::Completion: Accepts<Videos> + Accepts<VideoEncodeConfig<Progress, Stats>>,
+        Self::Completion: Accepts<Videos> + Accepts<VideoEncodeConfig<'config, Stats>>,
     {
         <Self::Completion as Completion>::answer(VideoEncode {
             handles: self.handles(),
@@ -732,20 +703,15 @@ pub trait EncodeVerbs<'model>: ModelVerbs<'model> {
     /// Decodes and encodes WAV, FLAC, MP3 or Opus recordings, resampled to mono.
     ///
     /// Calls `uform_audio_encode`.
-    fn audio_encode<
-        'arena,
-        Recordings: TapeView<u8>,
-        Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
-        Stats: BorrowMut<AudioEncodeStats>,
-    >(
+    fn audio_encode<'config, 'arena, Recordings: TapeView<u8>, Stats: BorrowMut<AudioEncodeStats>>(
         self,
         recordings: Recordings,
         outputs: Outputs,
-        config: impl Into<AudioEncodeConfig<Progress, Stats>>,
-        arena: &'arena mut Arena,
-    ) -> Answer<'model, Self, AudioEncode<'arena, Recordings, Progress, Stats>>
+        config: impl Into<AudioEncodeConfig<'config, Stats>>,
+        arena: &'arena mut Arena<'_>,
+    ) -> Deferrable<'model, Self, AudioEncode<'config, 'arena, Recordings, Stats>>
     where
-        Self::Completion: Accepts<Recordings> + Accepts<AudioEncodeConfig<Progress, Stats>>,
+        Self::Completion: Accepts<Recordings> + Accepts<AudioEncodeConfig<'config, Stats>>,
     {
         <Self::Completion as Completion>::answer(AudioEncode {
             handles: self.handles(),
@@ -761,21 +727,16 @@ pub trait EncodeVerbs<'model>: ModelVerbs<'model> {
     /// where it differs.
     ///
     /// Calls `uform_audio_encode_samples`.
-    fn audio_encode_samples<
-        'arena,
-        Samples: TapeView<f32>,
-        Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
-        Stats: BorrowMut<AudioEncodeStats>,
-    >(
+    fn audio_encode_samples<'config, 'arena, Samples: TapeView<f32>, Stats: BorrowMut<AudioEncodeStats>>(
         self,
         samples: Samples,
         sample_rate: u32,
         outputs: Outputs,
-        config: impl Into<AudioEncodeSamplesConfig<Progress, Stats>>,
-        arena: &'arena mut Arena,
-    ) -> Answer<'model, Self, AudioEncodeSamples<'arena, Samples, Progress, Stats>>
+        config: impl Into<AudioEncodeSamplesConfig<'config, Stats>>,
+        arena: &'arena mut Arena<'_>,
+    ) -> Deferrable<'model, Self, AudioEncodeSamples<'config, 'arena, Samples, Stats>>
     where
-        Self::Completion: Accepts<Samples> + Accepts<AudioEncodeSamplesConfig<Progress, Stats>>,
+        Self::Completion: Accepts<Samples> + Accepts<AudioEncodeSamplesConfig<'config, Stats>>,
     {
         <Self::Completion as Completion>::answer(AudioEncodeSamples {
             handles: self.handles(),
@@ -798,30 +759,26 @@ impl<'model, Receiver: ModelVerbs<'model>> EncodeVerbs<'model> for Receiver {}
 /// A text forward; see [`EncodeVerbs::text_encode`].
 ///
 /// Calls `uform_text_encode`.
-pub struct TextEncode<'arena, Texts, Progress, Stats> {
+pub struct TextEncode<'config, 'arena, Texts, Stats> {
     handles: Handles,
     texts: Texts,
     gathered: Gathered<u8>,
     surfaces: Surfaces,
-    config: TextEncodeConfig<Progress, Stats>,
-    arena: &'arena mut Arena,
+    config: TextEncodeConfig<'config, Stats>,
+    arena: &'arena Arena<'arena>,
 }
 
-impl<
-    'arena,
-    Texts: TapeView<u8>,
-    Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
-    Stats: BorrowMut<TextEncodeStats>,
-> Calling for TextEncode<'arena, Texts, Progress, Stats>
+impl<'config, 'arena, Texts: TapeView<u8>, Stats: BorrowMut<TextEncodeStats>> Calling
+    for TextEncode<'config, 'arena, Texts, Stats>
 {
     type Arguments = uform_text_encode_t;
     type Output = Encoded<'arena>;
-    type Inputs = (Texts, TextEncodeConfig<Progress, Stats>);
+    type Inputs = (Texts, TextEncodeConfig<'config, Stats>);
 
     fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments> {
         let batch = self.texts.tape(&mut self.gathered)?;
         let lent = self.surfaces.lend(batch.count);
-        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps);
+        let progress = lower_progress(&self.config.progress, self.config.progress_steps);
         Ok(uform_text_encode_t {
             model: self.handles.handle,
             executor: self.handles.executor,
@@ -852,7 +809,7 @@ impl<
 /// A text forward scoring each item's legal choices; see [`EncodeVerbs::text_choose`].
 ///
 /// Calls `uform_text_choose`.
-pub struct TextChoose<'config, 'arena, Texts, Choices, Progress, Stats> {
+pub struct TextChoose<'config, 'arena, Texts, Choices, Stats> {
     handles: Handles,
     texts: Texts,
     choices: Choices,
@@ -860,22 +817,16 @@ pub struct TextChoose<'config, 'arena, Texts, Choices, Progress, Stats> {
     gathered_choices: Gathered<u8>,
     probabilities: Exported<uform_tape_view_t>,
     count: usize,
-    config: TextChooseConfig<'config, Progress, Stats>,
-    arena: &'arena mut Arena,
+    config: TextChooseConfig<'config, Stats>,
+    arena: &'arena Arena<'arena>,
 }
 
-impl<
-    'config,
-    'arena,
-    Texts: TapeView<u8>,
-    Choices: TapeView<u8>,
-    Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
-    Stats: BorrowMut<TextEncodeStats>,
-> Calling for TextChoose<'config, 'arena, Texts, Choices, Progress, Stats>
+impl<'config, 'arena, Texts: TapeView<u8>, Choices: TapeView<u8>, Stats: BorrowMut<TextEncodeStats>> Calling
+    for TextChoose<'config, 'arena, Texts, Choices, Stats>
 {
     type Arguments = uform_text_choose_t;
     type Output = Tape<'arena>;
-    type Inputs = (Texts, Choices, TextChooseConfig<'config, Progress, Stats>);
+    type Inputs = (Texts, Choices, TextChooseConfig<'config, Stats>);
 
     fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments> {
         let texts = self.texts.tape(&mut self.gathered_texts)?;
@@ -885,7 +836,7 @@ impl<
             return Err(fail(Status::ShapeMismatch, "every item needs its choices and, if any, one group"));
         }
         self.count = texts.count;
-        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps);
+        let progress = lower_progress(&self.config.progress, self.config.progress_steps);
         Ok(uform_text_choose_t {
             model: self.handles.handle,
             executor: self.handles.executor,
@@ -919,30 +870,26 @@ impl<
 /// An image forward over encoded files; see [`EncodeVerbs::image_encode`].
 ///
 /// Calls `uform_image_encode`.
-pub struct ImageEncode<'arena, Images, Progress, Stats> {
+pub struct ImageEncode<'config, 'arena, Images, Stats> {
     handles: Handles,
     images: Images,
     gathered: Gathered<u8>,
     surfaces: Surfaces,
-    config: ImageEncodeConfig<Progress, Stats>,
-    arena: &'arena mut Arena,
+    config: ImageEncodeConfig<'config, Stats>,
+    arena: &'arena Arena<'arena>,
 }
 
-impl<
-    'arena,
-    Images: TapeView<u8>,
-    Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
-    Stats: BorrowMut<ImageEncodeStats>,
-> Calling for ImageEncode<'arena, Images, Progress, Stats>
+impl<'config, 'arena, Images: TapeView<u8>, Stats: BorrowMut<ImageEncodeStats>> Calling
+    for ImageEncode<'config, 'arena, Images, Stats>
 {
     type Arguments = uform_image_encode_t;
     type Output = Encoded<'arena>;
-    type Inputs = (Images, ImageEncodeConfig<Progress, Stats>);
+    type Inputs = (Images, ImageEncodeConfig<'config, Stats>);
 
     fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments> {
         let batch = self.images.tape(&mut self.gathered)?;
         let lent = self.surfaces.lend(batch.count);
-        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps);
+        let progress = lower_progress(&self.config.progress, self.config.progress_steps);
         Ok(uform_image_encode_t {
             model: self.handles.handle,
             executor: self.handles.executor,
@@ -973,29 +920,29 @@ impl<
 /// An image forward over decoded pixels; see [`EncodeVerbs::image_encode_pixels`].
 ///
 /// Calls `uform_image_encode_pixels`.
-pub struct ImageEncodePixels<'arena, Pixels, Heights, Widths, Progress, Stats> {
+pub struct ImageEncodePixels<'config, 'arena, Pixels, Heights, Widths, Stats> {
     handles: Handles,
     pixels: Pixels,
     heights: Heights,
     widths: Widths,
     gathered: Gathered<u8>,
     surfaces: Surfaces,
-    config: ImageEncodePixelsConfig<Progress, Stats>,
-    arena: &'arena mut Arena,
+    config: ImageEncodePixelsConfig<'config, Stats>,
+    arena: &'arena Arena<'arena>,
 }
 
 impl<
+    'config,
     'arena,
     Pixels: TapeView<u8>,
     Heights: AsRef<[u32]>,
     Widths: AsRef<[u32]>,
-    Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
     Stats: BorrowMut<ImageEncodeStats>,
-> Calling for ImageEncodePixels<'arena, Pixels, Heights, Widths, Progress, Stats>
+> Calling for ImageEncodePixels<'config, 'arena, Pixels, Heights, Widths, Stats>
 {
     type Arguments = uform_image_encode_pixels_t;
     type Output = Encoded<'arena>;
-    type Inputs = (Pixels, Heights, Widths, ImageEncodePixelsConfig<Progress, Stats>);
+    type Inputs = (Pixels, Heights, Widths, ImageEncodePixelsConfig<'config, Stats>);
 
     fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments> {
         let batch = self.pixels.tape(&mut self.gathered)?;
@@ -1004,7 +951,7 @@ impl<
             return Err(fail(Status::ShapeMismatch, "every item needs one height and one width"));
         }
         let lent = self.surfaces.lend(batch.count);
-        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps);
+        let progress = lower_progress(&self.config.progress, self.config.progress_steps);
         Ok(uform_image_encode_pixels_t {
             model: self.handles.handle,
             executor: self.handles.executor,
@@ -1037,30 +984,26 @@ impl<
 /// A video forward over encoded clips; see [`EncodeVerbs::video_encode`].
 ///
 /// Calls `uform_video_encode`.
-pub struct VideoEncode<'arena, Videos, Progress, Stats> {
+pub struct VideoEncode<'config, 'arena, Videos, Stats> {
     handles: Handles,
     videos: Videos,
     gathered: Gathered<u8>,
     surfaces: Surfaces,
-    config: VideoEncodeConfig<Progress, Stats>,
-    arena: &'arena mut Arena,
+    config: VideoEncodeConfig<'config, Stats>,
+    arena: &'arena Arena<'arena>,
 }
 
-impl<
-    'arena,
-    Videos: TapeView<u8>,
-    Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
-    Stats: BorrowMut<VideoEncodeStats>,
-> Calling for VideoEncode<'arena, Videos, Progress, Stats>
+impl<'config, 'arena, Videos: TapeView<u8>, Stats: BorrowMut<VideoEncodeStats>> Calling
+    for VideoEncode<'config, 'arena, Videos, Stats>
 {
     type Arguments = uform_video_encode_t;
     type Output = Encoded<'arena>;
-    type Inputs = (Videos, VideoEncodeConfig<Progress, Stats>);
+    type Inputs = (Videos, VideoEncodeConfig<'config, Stats>);
 
     fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments> {
         let batch = self.videos.tape(&mut self.gathered)?;
         let lent = self.surfaces.lend(batch.count);
-        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps);
+        let progress = lower_progress(&self.config.progress, self.config.progress_steps);
         Ok(uform_video_encode_t {
             model: self.handles.handle,
             executor: self.handles.executor,
@@ -1091,30 +1034,26 @@ impl<
 /// An audio forward over encoded recordings; see [`EncodeVerbs::audio_encode`].
 ///
 /// Calls `uform_audio_encode`.
-pub struct AudioEncode<'arena, Recordings, Progress, Stats> {
+pub struct AudioEncode<'config, 'arena, Recordings, Stats> {
     handles: Handles,
     recordings: Recordings,
     gathered: Gathered<u8>,
     surfaces: Surfaces,
-    config: AudioEncodeConfig<Progress, Stats>,
-    arena: &'arena mut Arena,
+    config: AudioEncodeConfig<'config, Stats>,
+    arena: &'arena Arena<'arena>,
 }
 
-impl<
-    'arena,
-    Recordings: TapeView<u8>,
-    Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
-    Stats: BorrowMut<AudioEncodeStats>,
-> Calling for AudioEncode<'arena, Recordings, Progress, Stats>
+impl<'config, 'arena, Recordings: TapeView<u8>, Stats: BorrowMut<AudioEncodeStats>> Calling
+    for AudioEncode<'config, 'arena, Recordings, Stats>
 {
     type Arguments = uform_audio_encode_t;
     type Output = Encoded<'arena>;
-    type Inputs = (Recordings, AudioEncodeConfig<Progress, Stats>);
+    type Inputs = (Recordings, AudioEncodeConfig<'config, Stats>);
 
     fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments> {
         let batch = self.recordings.tape(&mut self.gathered)?;
         let lent = self.surfaces.lend(batch.count);
-        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps);
+        let progress = lower_progress(&self.config.progress, self.config.progress_steps);
         Ok(uform_audio_encode_t {
             model: self.handles.handle,
             executor: self.handles.executor,
@@ -1145,31 +1084,27 @@ impl<
 /// An audio forward over decoded samples; see [`EncodeVerbs::audio_encode_samples`].
 ///
 /// Calls `uform_audio_encode_samples`.
-pub struct AudioEncodeSamples<'arena, Samples, Progress, Stats> {
+pub struct AudioEncodeSamples<'config, 'arena, Samples, Stats> {
     handles: Handles,
     samples: Samples,
     sample_rate: u32,
     gathered: Gathered<f32>,
     surfaces: Surfaces,
-    config: AudioEncodeSamplesConfig<Progress, Stats>,
-    arena: &'arena mut Arena,
+    config: AudioEncodeSamplesConfig<'config, Stats>,
+    arena: &'arena Arena<'arena>,
 }
 
-impl<
-    'arena,
-    Samples: TapeView<f32>,
-    Progress: FnMut(usize, usize) -> ControlFlow<()> + Send,
-    Stats: BorrowMut<AudioEncodeStats>,
-> Calling for AudioEncodeSamples<'arena, Samples, Progress, Stats>
+impl<'config, 'arena, Samples: TapeView<f32>, Stats: BorrowMut<AudioEncodeStats>> Calling
+    for AudioEncodeSamples<'config, 'arena, Samples, Stats>
 {
     type Arguments = uform_audio_encode_samples_t;
     type Output = Encoded<'arena>;
-    type Inputs = (Samples, AudioEncodeSamplesConfig<Progress, Stats>);
+    type Inputs = (Samples, AudioEncodeSamplesConfig<'config, Stats>);
 
     fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments> {
         let batch = self.samples.tape(&mut self.gathered)?;
         let lent = self.surfaces.lend(batch.count);
-        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps);
+        let progress = lower_progress(&self.config.progress, self.config.progress_steps);
         Ok(uform_audio_encode_samples_t {
             model: self.handles.handle,
             executor: self.handles.executor,
@@ -1204,7 +1139,7 @@ impl<
 
 #[cfg(test)]
 mod tests {
-    use core::future::{Future, IntoFuture};
+    use core::future::Future;
     use core::ops::ControlFlow;
     use core::pin::pin;
     use core::task::{Context, Poll, Waker};
@@ -1472,7 +1407,8 @@ mod tests {
         let model = model();
         let mut arena = Arena::new().unwrap();
         let mut stop = |_, _| ControlFlow::Break(());
-        let config = TextEncodeConfig { progress: Some(&mut stop as _), ..TextEncodeConfig::from(Scalar::F32) };
+        let config =
+            TextEncodeConfig { progress: Some(Progress::new(&mut stop)), ..TextEncodeConfig::from(Scalar::F32) };
         let stopped = model.text_encode(&["a", "b"], Outputs::EMBEDDINGS, config, &mut arena);
         assert_eq!(stopped.err().map(|error| error.status), Some(Status::Cancelled));
     }
@@ -1486,7 +1422,7 @@ mod tests {
         let mut arena = Arena::new_in(&executor).unwrap();
         let call =
             model.deferred(&executor).text_encode(vec!["uform"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena).unwrap();
-        let mut awaited = pin!(call.into_future());
+        let mut awaited = pin!(call);
         let encoded = testing::block_on(awaited.as_mut());
         let blocking = embeddings_of(
             &model.text_encode(&["uform"], Outputs::EMBEDDINGS, Scalar::F32, &mut Arena::new().unwrap()).unwrap(),
@@ -1497,7 +1433,7 @@ mod tests {
     }
 
     /// While a deferred call holds its executor at a gate in its handler, a blocking call there
-    /// fails `Contended` without running. Where the call ran at submission, it is final on return.
+    /// fails `Contended` without running. Where the call ran at its first poll, it is final then.
     #[test]
     fn a_held_executor_refuses_other_calls() {
         let model = model();
@@ -1505,7 +1441,8 @@ mod tests {
         let mut arena = Arena::new_in(&executor).unwrap();
         let (reached, opened) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
         let submitter = std::thread::current().id();
-        let gate = {
+        // A deferred call borrows its handler for as long as it may run, so the gate is leaked.
+        let gate = Box::leak(Box::new({
             let (reached, opened) = (reached.clone(), opened.clone());
             move |_: usize, _: usize| {
                 // A call run at submission is on the submitter, which could never open it.
@@ -1515,43 +1452,80 @@ mod tests {
                 }
                 ControlFlow::Continue(())
             }
-        };
-        // The deferred call owns its handler and stats, and hands both back once final.
+        }));
         let config = TextEncodeConfig {
             outputs_scalar: Scalar::F32,
-            progress: Some(gate),
+            progress: Some(Progress::new(gate)),
+            progress_steps: 0,
+            stats: None::<TextEncodeStats>,
+        };
+        let call =
+            model.deferred(&executor).text_encode(vec!["uform"], Outputs::EMBEDDINGS, config, &mut arena).unwrap();
+        let mut call = pin!(call);
+        let mut context = Context::from_waker(Waker::noop());
+        let polled = call.as_mut().poll(&mut context);
+        if polled.is_pending() {
+            while !reached.load(Ordering::Acquire) {}
+            let refused = model.on(&executor).describe();
+            assert_eq!(refused.err().map(|error| error.status), Some(Status::Contended));
+            opened.store(true, Ordering::Release);
+            assert!(testing::block_on(call.as_mut()).is_ok());
+        } else {
+            assert!(matches!(polled, Poll::Ready(Ok(_))));
+        }
+        assert!(model.on(&executor).describe().is_ok(), "a final call gives its executor back");
+    }
+
+    /// A deferred call owns its stats and hands them back once final, beside the progress it lent.
+    #[test]
+    fn a_waited_call_hands_its_inputs_back() {
+        let model = model();
+        let executor = testing::executor();
+        let mut arena = Arena::new_in(&executor).unwrap();
+        let config = TextEncodeConfig {
+            outputs_scalar: Scalar::F32,
+            progress: Some(Progress::new(Box::leak(Box::new(|_: usize, _: usize| ControlFlow::Continue(()))))),
             progress_steps: 0,
             stats: Some(TextEncodeStats::default()),
         };
         let call =
             model.deferred(&executor).text_encode(vec!["uform"], Outputs::EMBEDDINGS, config, &mut arena).unwrap();
-        if call.status() == Err(Status::Deferred) {
-            while !reached.load(Ordering::Acquire) {}
-            let refused = model.on(&executor).describe();
-            assert_eq!(refused.err().map(|error| error.status), Some(Status::Contended));
-            opened.store(true, Ordering::Release);
-        }
         let (encoded, (_, config)) = call.wait_with_inputs();
         assert!(encoded.is_ok());
-        assert!(config.progress.is_some(), "the call hands its handler back");
+        assert!(config.progress.is_some(), "the call hands its progress back");
         assert_eq!(config.stats.map(|stats| stats.tokens), Some(5));
-        assert!(model.on(&executor).describe().is_ok(), "a final call gives its executor back");
     }
 
-    /// Dropping an unfinished call waits for it, and a leaked one still ends on the executor's own
+    /// A refusal the binding catches arrives on creation, before anything is submitted.
+    #[test]
+    fn a_deferred_refusal_arrives_on_creation() {
+        let model = model();
+        let executor = testing::executor();
+        let mut arena = Arena::new_in(&executor).unwrap();
+        let tape = (b"ab".to_vec(), vec![0usize, 3]);
+        let refused = model.deferred(&executor).text_encode(tape, Outputs::EMBEDDINGS, Scalar::F32, &mut arena);
+        assert_eq!(refused.err().map(|error| error.status), Some(Status::ShapeMismatch));
+    }
+
+    /// Dropping a submitted call waits for it, and a leaked one still ends on the executor's own
     /// thread, giving its arena back once a drain sees the executor free.
     #[test]
     fn unfinished_calls_drop_by_waiting_and_leaked_ones_keep_their_arena() {
         let model = model();
         let executor = testing::executor();
         let mut arena = Arena::new_in(&executor).unwrap();
+        let mut context = Context::from_waker(Waker::noop());
         let call =
             model.deferred(&executor).text_encode(vec!["a"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena).unwrap();
+        let mut call = Box::pin(call);
+        let _ = call.as_mut().poll(&mut context);
         drop(call);
         assert!(model.text_encode(&["b"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena).is_ok());
 
         let leaked =
             model.deferred(&executor).text_encode(vec!["c"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena).unwrap();
+        let mut leaked = Box::pin(leaked);
+        let _ = leaked.as_mut().poll(&mut context);
         core::mem::forget(leaked);
         executor.drain(Mood::Parked).unwrap();
         assert!(model.text_encode(&["d"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena).is_ok());

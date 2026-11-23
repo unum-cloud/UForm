@@ -56,6 +56,15 @@ encoded = await call  # or: call.wait()
 ```
 
 `call.status` polls without waiting, reading `Status.DEFERRED` until the call is final.
+`await` re-polls it on the next turn of the running loop through `loop.call_soon`, never sleeping and parking no thread, so calls on two executors run together and `asyncio.gather` awaits both:
+
+```python
+async def fan_out(model, left, right, files, texts):
+    images = model.deferred(left).image_encode(files, uform.Arena(left))
+    captions = model.deferred(right).text_encode(texts, uform.Arena(right))
+    return await asyncio.gather(images, captions)  # both submitted before either is awaited
+```
+
 Dropping a `Deferred` waits for its call first, since the library still reads the inputs it holds.
 A trainer runs `step` and `save` blocking on the executor it was created on, and `trainer.on(...)` and `trainer.deferred(...)` choose another completion.
 
@@ -151,13 +160,26 @@ The configuration arrives as keyword-built structures mirroring the C ones field
 
 ```python
 executor = uform.Executor.for_vram(devices=[0, 1])
-mesh = uform.Mesh.bootstrap(executor, uform.MeshOptions(host_domain_index=rank, host_domain_count=nodes,
-                                                        directory="/shared/exchange", job="run-17"))
-trainer = uform.Trainer.init_vram(executor, mesh=mesh, depth=12, hidden=512, objective=uform.Objective.JOINT,
-                                  batch=uform.BatchShape(max_rows_per_device=64, max_segments_per_device=256,
-                                                         max_columns_per_row=1024, max_bags_per_device=128,
-                                                         image=uform.ImageShape(patch_side=16)),
-                                  schedule=uform.Schedule(steps=100_000), seed=42)
+mesh = uform.Mesh.bootstrap(
+    executor,
+    uform.MeshOptions(host_domain_index=rank, host_domain_count=nodes, directory="/shared/exchange", job="run-17"),
+)
+trainer = uform.Trainer.init_vram(
+    executor,
+    mesh=mesh,
+    depth=12,
+    hidden=512,
+    objective=uform.Objective.JOINT,
+    batch=uform.BatchShape(
+        max_rows_per_device=64,
+        max_segments_per_device=256,
+        max_columns_per_row=1024,
+        max_bags_per_device=128,
+        image=uform.ImageShape(patch_side=16),
+    ),
+    schedule=uform.Schedule(steps=100_000),
+    seed=42,
+)
 stats = uform.TrainerStepStats()
 trainer.step(modalities, contents, bags=bags, relations=uform.Relations(attract=(offsets, ids)), stats=stats)
 trainer.save("checkpoint.safetensors")
@@ -211,7 +233,7 @@ Arguments the binding refuses raise at the call, while the library's refusals of
 - __The receiver chooses, the verb stays.__
   The model runs a verb on the calling thread, `on(executor)` blocks on an executor, and `deferred(executor)` submits it, all with the same arguments.
 - __Deferred calls use the language's own idioms.__
-  `status` polls through `uform_outcome_status`, `wait` blocks through `uform_outcome_wait`, and `await` polls `status` between turns of the running event loop, sleeping 1 µs to 1 ms, so no thread waits.
+  `status` polls through `uform_outcome_status`, `wait` blocks through `uform_outcome_wait`, and `await` re-polls `status` once per turn of the running loop through `loop.call_soon`, so no thread waits.
 - __No life of its own.__
   The binding starts no threads and keeps no queues or caches; releasing a `Deferred` rides reference counting, which waits for the call first.
 - __Arenas are lent and reused, never shared.__

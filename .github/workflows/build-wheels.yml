@@ -63,7 +63,7 @@ jobs:
             libavformat-free-devel libavutil-free-devel libswresample-free-devel libswscale-free-devel;
             fi
           # Homebrew bottles target the runner's own macOS, which the wheels then require.
-          CIBW_ENVIRONMENT_MACOS: MACOSX_DEPLOYMENT_TARGET=15.0
+          CIBW_ENVIRONMENT_MACOS: MACOSX_DEPLOYMENT_TARGET=26.0
           CIBW_TEST_COMMAND: python -c "import uform; print(uform.version(), uform.capabilities_compiled())"
       - name: Upload Wheels
         uses: actions/upload-artifact@v7

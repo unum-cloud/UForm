@@ -11,7 +11,8 @@ there, and every out-parameter reads back as zero.
 A struct whose address crosses to C is materialized into a `stack_allocation` slot rather than held
 in a local whose address is taken. An `alloca` is not a value Mojo owns, so nothing destroys it and
 nothing folds its store away, where a local's last tracked use is the address-taking itself. A
-deferred call's slots outlive the verb that submitted them, so they live on the heap instead.
+deferred call's slots outlive the verb that submitted them, so they live inside its `Deferred`,
+which is built in the caller's place and never moves.
 
 File: mojo/uform/types.mojo
 Author: Ash Vardanian
@@ -19,7 +20,9 @@ Date: November 8, 2026
 """
 
 from std.ffi import c_char, c_int, c_size_t
-from std.memory import ArcPointer, OwnedPointer, stack_allocation
+from std.builtin._coroutine import AnyCoroutine, _suspend_async
+from std.memory import stack_allocation
+from std.runtime._asyncrt import _async_execute
 from std.sys.info import size_of
 from std.utils import StaticTuple
 
@@ -721,7 +724,7 @@ struct Rows[origin: MutOrigin](ImplicitlyCopyable, Sized):
         origin: The arena the rows live in, which this result borrows.
     """
 
-    var arena: Pointer[Arena, Self.origin]
+    var arena: Pointer[Arena[ImmUntrackedOrigin], Self.origin]
     """The arena holding the rows."""
     var generation: Int
     """The arena's call these rows came from, so a read after a later call is refused."""
@@ -791,7 +794,7 @@ struct RowsTape[origin: MutOrigin](ImplicitlyCopyable, Sized):
         origin: The arena the rows live in, which this result borrows.
     """
 
-    var arena: Pointer[Arena, Self.origin]
+    var arena: Pointer[Arena[ImmUntrackedOrigin], Self.origin]
     """The arena holding the rows."""
     var generation: Int
     """The arena's call these rows came from, so a read after a later call is refused."""
@@ -848,7 +851,7 @@ struct Tape[origin: MutOrigin](ImplicitlyCopyable, Sized):
         origin: The arena the values live in, which this result borrows.
     """
 
-    var arena: Pointer[Arena, Self.origin]
+    var arena: Pointer[Arena[ImmUntrackedOrigin], Self.origin]
     """The arena holding the values."""
     var generation: Int
     """The arena's call these values came from, so a read after a later call is refused."""
@@ -1073,32 +1076,8 @@ struct ExecutorDrainArguments(ImplicitlyCopyable):
     var mood: Mood
 
 
-struct _ExecutorHandle:
-    """The `uform_executor_t` an `Executor` owns, shared with every device arena it made and freed with
-    the last of them, since such an arena grows, fills and frees on the executor's first stream."""
-
-    var library: Library
-    var address: Address
-
-    def __init__(out self, library: Library, address: Address):
-        """Takes over a spawned handle, or the null one the caller-thread executor names."""
-        self.library = library
-        self.address = address
-
-    def __deinit__(deinit self):
-        """Drains every thread or stream, releases the scratch, and frees the executor.
-        Calls `uform_executor_free`.
-
-        The loader reference is surrendered only after the call: reading the entry point is the
-        last use of `library`, so without the trailing move Mojo would `dlclose` the engine between
-        the load and the branch to it.
-        """
-        self.library.symbols().executor_free(self.address)
-        _ = self.library^
-
-
 struct Executor:
-    """The threads or streams a verb runs on, freed once it and every device arena it made go out of scope.
+    """The threads or streams a verb runs on, freed when it goes out of scope, after every arena it made.
 
     `Executor(library)` owns nothing: every verb handed it runs on the calling thread. The spawning
     constructors fix a kind that must match the residency of every model they drive. An executor
@@ -1109,8 +1088,6 @@ struct Executor:
     """The loaded engine, held so its symbol table outlives every call made through the handle."""
     var address: Address
     """The opaque `uform_executor_t` every verb hands back to the engine; `NULL_ADDRESS` runs inline."""
-    var _handle: ArcPointer[_ExecutorHandle]
-    """The handle's owner, which a device arena shares so the executor outlives it."""
 
     def __init__(out self, library: Library):
         """The caller-thread executor, which every verb accepts whatever the model's residency.
@@ -1124,7 +1101,17 @@ struct Executor:
         """Adopts a handle that is already spawned, which is how the factories hand one back."""
         self.library = library
         self.address = address
-        self._handle = ArcPointer(_ExecutorHandle(library, address))
+
+    def __deinit__(deinit self):
+        """Drains every thread or stream, releases the scratch, and frees the executor.
+        Calls `uform_executor_free`.
+
+        The loader reference is surrendered only after the call: reading the entry point is the
+        last use of `library`, so without the trailing move Mojo would `dlclose` the engine between
+        the load and the branch to it.
+        """
+        self.library.symbols().executor_free(self.address)
+        _ = self.library^
 
     @staticmethod
     def for_ram[
@@ -1283,7 +1270,25 @@ struct ArenaDescribeArguments(ImplicitlyCopyable):
     var description: Optional[Pointer[ArenaDescription, MutUntrackedOrigin]]
 
 
-struct Arena:
+def _arena_init(library: Library, executor: Address) raises Error -> Address:
+    """Makes an arena where `executor` computes, or host pages for a null one. Calls `uform_arena_init`."""
+    var created = stack_allocation[1, Address]()
+    created[unsafe_offset=0] = NULL_ADDRESS
+    var outcome = stack_allocation[1, Outcome]()
+    outcome[unsafe_offset=0] = Outcome()
+    _cross(
+        ArenaInitArguments(
+            created.unsafe_origin_cast[MutUntrackedOrigin](),
+            executor,
+            outcome.unsafe_origin_cast[MutUntrackedOrigin](),
+        ),
+        library.symbols().arena_init,
+    )
+    library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "uform_arena_init")
+    return created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0]
+
+
+struct Arena[origin: ImmOrigin]:
     """The memory every output whose length scales with a call lands in, freed when it goes out of scope.
 
     Made where an executor computes, host pages or the memory of its GPU, decided once; nothing is
@@ -1294,59 +1299,50 @@ struct Arena:
 
     A result refuses every read with `INVALID_ARGUMENT` once a later call rewinds its arena, and a
     result over a device arena refuses every host read with `DEVICE`. A device arena serves only
-    calls on the executor that made it, and keeps that executor alive until it is freed.
+    calls on the executor that made it. An arena never outlives that executor: its origin borrows
+    it, so Mojo frees the arena first.
+
+    Parameters:
+        origin: The executor that made it, untracked for `Arena(library)`, which no executor made.
     """
 
     var _library: Library
     """The loaded engine, held so the release can still reach `uform_arena_free`."""
     var _address: Address
     """The `uform_arena_t`, never null."""
-    var _executor: Optional[ArcPointer[_ExecutorHandle]]
-    """The device executor that made it, held so the arena is freed first, on that executor's stream."""
     var _generation: Int
     """Calls the engine took on it so far, which every result records to know when a later one rewound it."""
 
-    def __init__(out self, library: Library) raises Error:
+    def __init__(out self: Arena[ImmUntrackedOrigin], library: Library) raises Error:
         """Host pages for calls on the calling thread. Calls `uform_arena_init`."""
-        self = Self(Executor(library))
+        var address = _arena_init(library, NULL_ADDRESS)
+        self._library = library
+        self._address = address
+        self._generation = 0
 
-    def __init__(out self, executor: Executor) raises Error:
+    def __init__(out self, ref[Self.origin] executor: Executor) raises Error:
         """Memory where `executor` computes, serving the calls of its residency. Calls `uform_arena_init`.
 
         Args:
-            executor: The executor whose calls it serves; host pages may outlive it, and a device arena
-                keeps it alive.
+            executor: The executor whose calls it serves, borrowed until the arena is freed.
         """
-        var created = stack_allocation[1, Address]()
-        created[unsafe_offset=0] = NULL_ADDRESS
-        var outcome = stack_allocation[1, Outcome]()
-        outcome[unsafe_offset=0] = Outcome()
-        _cross(
-            ArenaInitArguments(
-                created.unsafe_origin_cast[MutUntrackedOrigin](),
-                executor.address,
-                outcome.unsafe_origin_cast[MutUntrackedOrigin](),
-            ),
-            executor.library.symbols().arena_init,
-        )
-        executor.library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "uform_arena_init")
+        var address = _arena_init(executor.library, executor.address)
         self._library = executor.library
-        self._address = created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0]
-        self._executor = None
+        self._address = address
         self._generation = 0
-        if self.describe().residency == Residency.VRAM:
-            self._executor = Optional(executor._handle)
 
     def __deinit__(deinit self):
-        """Frees the arena and every output in it, then lets a device arena's executor go.
-        Calls `uform_arena_free`.
+        """Frees the arena and every output in it. Calls `uform_arena_free`.
 
-        The executor and the loader reference are surrendered only after the call, for the reason
-        `_ExecutorHandle` records.
+        The loader reference is surrendered only after the call, for the reason `Executor` records.
         """
         self._library.symbols().arena_free(self._address)
-        _ = self._executor^
         _ = self._library^
+
+    def _pointer(ref self) -> Pointer[Arena[ImmUntrackedOrigin], origin_of(self)]:
+        """This arena as every call and result holds it, whichever executor made it; its own origin
+        already keeps that executor alive."""
+        return Pointer(to=self).unsafe_bitcast[Arena[ImmUntrackedOrigin]]()
 
     def describe(self) raises Error -> ArenaDescription:
         """Where its outputs live, as the executor that made it decided. Calls `uform_arena_describe`."""
@@ -1366,16 +1362,16 @@ struct Arena:
         return description.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0]
 
 
-def _served[origin: MutOrigin](arena: Pointer[Arena, origin], status: Status) -> Int:
+def _served[origin: MutOrigin](arena: Pointer[Arena[ImmUntrackedOrigin], origin], status: Status) -> Int:
     """Retires every earlier result once the engine took a call naming the arena; a `CONTENDED` refusal
     never touched it. Answers the generation the call's result is stamped with."""
-    var served = Pointer[Arena, MutAnyOrigin](unsafe_from_address=Int(arena))
+    var served = Pointer[Arena[ImmUntrackedOrigin], MutAnyOrigin](unsafe_from_address=Int(arena))
     if status != Status.CONTENDED:
         served[]._generation += 1
     return served[]._generation
 
 
-def _readable[origin: MutOrigin](arena: Pointer[Arena, origin], generation: Int, detail: StaticString) raises Error:
+def _readable[origin: MutOrigin](arena: Pointer[Arena[ImmUntrackedOrigin], origin], generation: Int, detail: StaticString) raises Error:
     """Refuses a host read of a result over device memory, or over an arena a later call rewound."""
     if arena[].describe().residency == Residency.VRAM:
         raise Error(Status.DEVICE, detail)
@@ -1470,13 +1466,15 @@ def _block[C: Call](library: Library, var call: C, handle: Address, executor: Ad
     return result^
 
 
-struct Deferred[C: Call, origin: ImmOrigin](Movable):
-    """A call submitted to an executor, which owns its outcome and outputs until it is final. Binding-only.
+struct Deferred[C: Call, origin: ImmOrigin]:
+    """A call submitted to an executor, which holds its outcome and outputs inline until it is final. Binding-only.
 
-    `status` reads `DEFERRED` until then, without blocking, and `wait` blocks until the call is
-    final and answers its result or raises its failure, as many times as it is asked. The result is
-    the view a blocking call answers, borrowing the same arena. Dropping an unfinished one waits the
-    same way, so nothing the engine still writes is ever freed under it. The origins keep the model,
+    It never moves: a receiver builds it in the caller's place and submits it there, so the engine
+    writes into it directly. `status` reads `DEFERRED` until then, without blocking, and `wait`
+    blocks until the call is final and answers its result or raises its failure, as many times as
+    it is asked. `await` answers the same, yielding to the runtime while the call is pending. The
+    result is the view a blocking call answers, borrowing the same arena. Dropping an unfinished one
+    waits, so nothing the engine still writes is ever freed under it. The origins keep the model,
     the executor, the arena and every borrowed input alive for as long as this is.
 
     Parameters:
@@ -1486,8 +1484,8 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
 
     var library: Library
     """The loaded engine, held so the wait can still reach `uform_outcome_wait`."""
-    var slots: OwnedPointer[CallSlots[Self.C.Outputs]]
-    """The outcome and outputs the engine writes, on the heap since they outlive the verb."""
+    var slots: CallSlots[Self.C.Outputs]
+    """The outcome and outputs the engine writes."""
     var call: Optional[Self.C]
     """What the call lends the engine, until a wait concludes it."""
     var answer: Optional[Self.C.Result]
@@ -1498,9 +1496,9 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
     """The stamp `served` answered at submission, so a result waited on late still reads as stale."""
 
     def __init__(out self, library: Library, var call: Self.C, handle: Address, executor: Address):
-        """Submits `call` deferred, on `executor`, against `handle`."""
+        """Submits `call` deferred, on the receiver's executor."""
         self.library = library
-        self.slots = OwnedPointer(CallSlots[Self.C.Outputs]())
+        self.slots = CallSlots[Self.C.Outputs]()
         self.call = call^
         self.answer = None
         self.failure = None
@@ -1519,16 +1517,14 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
     def __deinit__(deinit self):
         """Waits until the call is final, then frees what it lent. Calls `uform_outcome_wait`."""
         if self.call:
-            var slots = Pointer[CallSlots[Self.C.Outputs], MutAnyOrigin](
-                unsafe_from_address=Int(Pointer(to=self.slots[]))
-            )
+            var slots = Pointer[CallSlots[Self.C.Outputs], MutAnyOrigin](unsafe_from_address=Int(Pointer(to=self.slots)))
             _ = self.library.symbols().outcome_wait(Pointer(to=slots[].outcome))
             _ = self.call.take().conclude(slots[].outputs, self.generation)
         _ = self.library^
 
     def _slots(self) -> Pointer[CallSlots[Self.C.Outputs], MutAnyOrigin]:
-        """The heap slots, through the origin the engine's writes need."""
-        return Pointer[CallSlots[Self.C.Outputs], MutAnyOrigin](unsafe_from_address=Int(Pointer(to=self.slots[])))
+        """The slots, through the origin the engine's writes need."""
+        return Pointer[CallSlots[Self.C.Outputs], MutAnyOrigin](unsafe_from_address=Int(Pointer(to=self.slots)))
 
     def status(self) -> Status:
         """`DEFERRED` until the call is final, then its final status; never blocks. Calls `uform_outcome_status`."""
@@ -1537,6 +1533,9 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
     def wait(mut self) raises Error -> ref[self] Self.C.Result:
         """Blocks until the call is final, then answers its result or raises its failure, every time it
         is asked. Calls `uform_outcome_wait`.
+
+        Returns:
+            The result, owned by this `Deferred` and borrowed for as long as it is.
 
         Raises:
             `Error` carrying the call's failure, whether the engine or the binding refused it.
@@ -1553,6 +1552,26 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
         if self.failure:
             raise self.failure.value()
         return Pointer(to=self.answer.value()).unsafe_origin_cast[origin_of(self)]()[]
+
+    @always_inline
+    def __await__(mut self) raises Error -> ref[self] Self.C.Result:
+        """Yields to the runtime until the call is final, then answers as `wait` does.
+        Calls `uform_outcome_status`.
+
+        Returns:
+            The result, owned by this `Deferred` and borrowed for as long as it is.
+
+        Raises:
+            `Error` carrying the call's failure, whether the engine or the binding refused it.
+        """
+        while self.status() == Status.DEFERRED:
+
+            @always_inline
+            def requeue(handle: AnyCoroutine):
+                _async_execute[NoneType](handle, -1)
+
+            _suspend_async(requeue)
+        return self.wait()
 
 
 # endregion Deferred Calls

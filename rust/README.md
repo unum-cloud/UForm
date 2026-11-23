@@ -68,31 +68,59 @@ The receiver decides where a verb runs and how it completes, while the verb and 
 
 - `model.text_encode(..)` runs on the calling thread, through `&Model`.
 - `model.on(&executor).text_encode(..)` blocks on the executor, failing `Contended` while another call holds it.
-- `model.deferred(&executor).text_encode(..)` submits the call and answers a `Deferred`.
+- `model.deferred(&executor).text_encode(..)` answers a `Deferred`, which runs once awaited or waited on.
 
 `ModelVerbs` and `EncodeVerbs` write every verb once for all three, and `TrainVerbs` does so for a trainer's two receivers.
 A blocking verb returns its `Result` directly, so nothing about asynchrony reaches a caller who never asks for it.
-An `On` borrows the model and the executor, so neither it nor a `Deferred` it submits can outlive them.
+An `On` borrows the model and the executor, so neither it nor a `Deferred` it makes can outlive them.
 
 ```rust
-let texts = vec![String::from("a cat on a mat"), String::from("a dog in the fog")];
-let call = model.deferred(&executor).text_encode(texts, Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
-if call.status() == Err(Status::Deferred) {
-    // other work
+use uform::*;
+
+async fn encode_both(model: &Model, east: &Executor, west: &Executor, texts: Vec<String>) -> Result<(usize, usize)> {
+    let mut east_arena = Arena::new_in(east)?;
+    let mut west_arena = Arena::new_in(west)?;
+    let east_call = model.deferred(east).text_encode(texts.clone(), Outputs::EMBEDDINGS, Scalar::F32, &mut east_arena)?;
+    let west_call = model.deferred(west).text_encode(texts, Outputs::EMBEDDINGS, Scalar::F32, &mut west_arena)?;
+    let (east_encoded, west_encoded) = futures::join!(east_call, west_call); // both pin in place
+    let rows = |encoded: Encoded<'_>| encoded.embeddings.map_or(0, |rows| rows.count());
+    Ok((rows(east_encoded?), rows(west_encoded?)))
 }
-let encoded = call.await?;                                    // or: call.wait()?
+
+fn main() -> Result<()> {
+    let model = Model::load_ram("model.safetensors")?;
+    let executor = Executor::for_ram(&[], None, 0)?;
+    let mut arena = Arena::new_in(&executor)?;                                       // Arena<'_> borrows the executor
+    let texts = vec![String::from("a cat on a mat"), String::from("a dog in the fog")];
+    let local = model.text_encode(&texts, Outputs::EMBEDDINGS, Scalar::F32, &mut Arena::new()?)?; // the calling thread
+    let pooled = model.on(&executor).text_encode(&texts, Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?; // blocks on the executor
+    let call = model.deferred(&executor).text_encode(texts.clone(), Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
+    let encoded = call.wait()?;                                                       // or, inside async: call.await?
+    let (east, west) = (Executor::for_ram(&[], None, 0)?, Executor::for_ram(&[], None, 0)?);
+    let both = futures::executor::block_on(encode_both(&model, &east, &west, texts))?;
+    Ok(())
+}
 ```
 
-A `Deferred` owns the inputs the library reads until the call is final, and borrows the model and the arena, as a blocking call does.
-`status` answers `Ok(())` once the call succeeded, `Err(Status::Deferred)` while it is not final, and its failure otherwise.
-Inside an `async` block, `.await` polls the call's status until it is final, so other tasks run meanwhile, while `wait` blocks the thread without spinning.
-The crate starts no thread, so waiting off-thread goes through a scoped thread, as `std::thread::scope(|scope| scope.spawn(move || call.wait()).join())` does.
-Dropping an unfinished `Deferred` waits for the call, and `wait_with_inputs` hands back the inputs it owned beside what it produced.
+A deferred call starts when it is first polled or waited on, the way Rust futures do.
+Refusals the binding catches, like a tape whose offsets run past its data, arrive through the `?` on creation, and the library's own arrive at `.await` or `wait`.
+A `Deferred` is the `Future` itself: `.await` submits it, then re-polls `uform_outcome_status` until the call is final, so other tasks run meanwhile, while `wait` submits it and blocks in `uform_outcome_wait` without spinning.
+Overlapping work in sync code goes through `block_on(join(..))`, or a scoped thread, as `std::thread::scope(|scope| scope.spawn(move || call.wait()).join())` does, since the crate starts no thread.
+Dropping a submitted `Deferred` waits for the call, and `wait_with_inputs` hands back the inputs it owned beside what it produced.
 
-The library reads a deferred call's inputs after the verb returns, so a deferred receiver takes owned inputs: items in a `Vec` or an array of owned or `'static` values, a tape as `(Vec<_>, Vec<usize>)`, a `PathBuf`, `String` or `'static` path, and a config owning its progress handler, boxed or not, and its stats by value, with `'static` lists.
-Lending `&Vec<String>` fails to compile with "a deferred receiver needs owned inputs", and a config borrowing a local fails as "does not live long enough".
-A deferred call allocates one box holding its outcome, argument struct and inputs until it is final.
+A `Deferred` owns the inputs the library reads until the call is final, and borrows the model, the executor and the arena, as a blocking call does.
+The library may read a deferred call's inputs after it is pinned and polled, so a deferred receiver takes owned inputs: items in a `Vec` or an array of owned or `'static` values, a tape as `(Vec<_>, Vec<usize>)`, a `PathBuf`, `String` or `'static` path, and a config whose `Progress` borrows a `'static` handler and which owns its stats, with `'static` lists.
+Lending `&Vec<String>` fails to compile with "a deferred receiver needs owned inputs", a local handler or an arena dropped before its call fails as "does not live long enough", and a second call on an arena a pending one holds fails as a second mutable borrow.
 An executor without threads of its own may hold a deferred call until its `wait`, its next `drain` or blocking call, or the drop of what it names, so `drain` it before an `.await` there.
+
+| Path                      | Allocations     |
+| ------------------------- | --------------- |
+| Executor or arena made    | 0               |
+| Blocking call             | 0               |
+| Deferred submit and wait  | 0               |
+| Each progress handler     | 0               |
+
+Gathering separate items into one tape fills a `Vec` the call owns; a `(data, offsets)` tape reaches the library as it is.
 A call finding another one holding its executor finishes at once with `Status::Contended`.
 
 ## Executors
@@ -115,7 +143,7 @@ The second argument is a `CPUClass` or `GPUClass` ceiling: calls dispatch as the
 `gpu_devices(&mut devices)` fills a slice of `GPUDevice` and answers how many GPUs the process can drive, and a device's position there is the ordinal `for_vram` and `load_vram` name it by.
 `for_vram` and `on_pool` are `unsafe`, since the streams or the pool they borrow must outlive the executor; `on_pool` mirrors the C verb and answers `Status::Unsupported` until borrowing is designed, as `for_vram` does for borrowed streams.
 An executor runs one call at a time, so two threads that genuinely overlap take one apiece; an executor is `Send` but not `Sync`, while models stay freely shared.
-Dropping an executor drains it, unless a GPU arena it made still holds it, which then does so on its own drop.
+Dropping an executor drains it, and an arena borrows the executor that made it, so every arena drops first.
 
 ## Arenas
 
@@ -134,6 +162,7 @@ for batch in &batches {
 }
 ```
 
+An `Arena<'executor>` borrows the executor that made it, so it never outlives that executor, and `Arena::new()` answers an `Arena<'static>`.
 The library never frees an arena under a call: dropping one waits for the calls writing into it, and a call naming an arena that serves another call finishes with `Status::Contended`, so even a leaked `Deferred` leaves it safe.
 
 ## Encoding
@@ -165,7 +194,7 @@ Every bare `Scalar` converts into the verb's config, the scalar every output lan
 ```rust
 let mut stats = TextEncodeStats::default();
 let mut handler = |completed: usize, total: usize| if completed * 2 < total { ControlFlow::Continue(()) } else { ControlFlow::Break(()) };
-let config = TextEncodeConfig { stats: Some(&mut stats), progress: Some(&mut handler as _), ..TextEncodeConfig::from(Scalar::F32) };
+let config = TextEncodeConfig { stats: Some(&mut stats), progress: Some(Progress::new(&mut handler)), ..TextEncodeConfig::from(Scalar::F32) };
 let encoded = model.text_encode(&texts, Outputs::EMBEDDINGS, config, &mut arena);
 ```
 
@@ -258,7 +287,7 @@ match model.on(&executor).text_encode(&texts, Outputs::EMBEDDINGS, Scalar::F32, 
 }
 ```
 
-`Status` carries the C enumerators' values and leaves success to `Result`, so an `Error` never carries `Status::Deferred`, which only `Deferred::status` reports.
+`Status` carries the C enumerators' values and leaves success to `Result`, so an `Error` never carries `Status::Deferred`, which names a call not yet final.
 `Status`, `Scalar`, `Mood`, `CPUClass`, `GPUClass`, `GPUVendor`, `Modality`, `Objective`, `Negatives`, `MultimemTier`, `PairLossForm` and `LateInteractionSide` print through `Display` and parse through `FromStr` the names the C tables own, such as `"shape-mismatch"` or `"intel-haswell"`.
 A panic inside a progress handler aborts the process, since it cannot unwind through the library.
 
@@ -270,13 +299,13 @@ A panic inside a progress handler aborts the process, since it cannot unwind thr
 - __The receiver chooses, the verb stays.__
   `&Model` runs a verb on the calling thread, `on(&executor)` blocks on an executor, and `deferred(&executor)` submits it, all with the same arguments.
 - __Deferred calls use the language's own idioms.__
-  `status` polls through `uform_outcome_status`, `wait` blocks through `uform_outcome_wait`, and a `Deferred` is `IntoFuture`, so `.await` polls the status word, since the library has no wake-up.
+  A `Deferred` is a `Future` pinned at its first poll, which re-polls `uform_outcome_status` since the library has no wake-up, and `wait` blocks through `uform_outcome_wait`.
 - __No life of its own.__
   The binding starts no threads and keeps no queues or caches; releasing a `Deferred` rides `Drop`, which waits for the call first.
 - __Arenas are lent and reused, never shared.__
   Every output verb takes an arena and answers views borrowing it, so the borrow checker retires stale views at compile time.
 - __Nothing costs anything until it is used.__
-  Blocking calls take no deferred-table entry and allocate no box, a surface `Outputs` leaves out is never computed, and an arena allocates only when a call writes into it.
+  Neither blocking nor deferred calls allocate, a surface `Outputs` leaves out is never computed, and an arena allocates only when a call writes into it.
 - __A deferred receiver refuses borrowed inputs at compile time.__
   The `Accepts` bound admits only owned inputs, so a borrow the library would read after the verb returns never compiles.
 - __Suites run against the stub library__, and against the real one with the tiny checkpoint.
