@@ -871,6 +871,29 @@ static void test_media_shapes(void) {
         expect_(outputs.embeddings.data == NULL && outputs.states.offsets == NULL);
     else check_media(&outputs, 1, &model);
 
+#if !UFORM_TEST_STUB // the stand-in decodes nothing, so it encodes any bytes
+    /* Bytes of no image format fail as malformed, the engine's note in place of the status's own
+     *  name. */
+    uint8_t const unrecognized[] = {'n', 'o', 't', ' ', 'a', 'n', ' ', 'i', 'm', 'a', 'g', 'e'};
+    size_t const unrecognized_offsets[] = {0, sizeof(unrecognized)};
+    memset(&outputs, 0, sizeof(outputs)), memset(&image_stats, 0, sizeof(image_stats));
+    uform_image_encode(&(uform_image_encode_t) {.model = handle,
+                                                .executor = executor,
+                                                .outcome = &outputs.outcome,
+                                                .count = 1,
+                                                .images = {unrecognized, unrecognized_offsets, uform_scalar_u8_k},
+                                                .embeddings = &outputs.embeddings,
+                                                .states = &outputs.states,
+                                                .arena = arena,
+                                                .outputs_scalar = uform_scalar_f32_k,
+                                                .stats = &image_stats});
+    if (decodes_files) {
+        expect_(outputs.outcome.status == uform_status_malformed_k);
+        expect_(outputs.outcome.message &&
+                strcmp(outputs.outcome.message, uform_status_name(outputs.outcome.status)) != 0);
+    }
+#endif
+
     enum { pixel_bytes = 16 * 8 * 3 + 5 * 3 * 3 };
     uint8_t pixels[pixel_bytes];
     for (size_t byte = 0; byte != pixel_bytes; ++byte) pixels[byte] = (uint8_t)(byte * 7);
@@ -1308,11 +1331,6 @@ static uform_outcome_t load_forged(uform_executor_t executor, char const* header
     free(buffer);
     return outcome;
 }
-
-/** Whether @p outcome is a malformed load whose stage spells @p message . */
-static bool refused_as(uform_outcome_t outcome, char const* message) {
-    return outcome.status == uform_status_malformed_k && outcome.message && strcmp(outcome.message, message) == 0;
-}
 #endif
 
 /** Every refusal a caller can provoke: a null arena, a null model, no output named, a tape without
@@ -1378,13 +1396,11 @@ static void test_refusals(void) {
                                         .outputs_scalar = uform_scalar_f32_k});
     expect_(outcome.status == uform_status_shape_mismatch_k);
 
-    char const* const reading = "The checkpoint is not a safetensors file";
-    char const* const measuring = "The checkpoint carries no usable geometry";
-    expect_(refused_as(load_forged(executor,
-                                   "{\"model.embedding\":{\"dtype\":\"BF16\",\"shape\":[1152921504606846976,8]," //
-                                   "\"data_offsets\":[0,0]}}",
-                                   0),
-                       reading));
+    expect_(load_forged(executor,
+                        "{\"model.embedding\":{\"dtype\":\"BF16\",\"shape\":[1152921504606846976,8]," //
+                        "\"data_offsets\":[0,0]}}",
+                        0)
+                .status == uform_status_malformed_k);
     char const geometry[] =
         "{\"__metadata__\":{\"depth\":\"1\",\"hidden\":\"8\",\"ffn_expansion\":\"1\",\"head_width\":\"8\"," //
         "\"rms_epsilon\":\"0.00001\",\"rope_temporal\":\"4\",\"rope_height\":\"2\",\"rope_width\":\"2\","   //
@@ -1400,11 +1416,11 @@ static void test_refusals(void) {
     size_t const short_vocabulary = 200, full_vocabulary = 258;
     snprintf(header, sizeof(header), geometry, "1", short_vocabulary, short_vocabulary * 16, short_vocabulary * 16,
              short_vocabulary * 16 + 256, short_vocabulary * 16 + 256, short_vocabulary * 16 + 288);
-    expect_(refused_as(load_forged(executor, header, short_vocabulary * 16 + 288), measuring));
+    expect_(load_forged(executor, header, short_vocabulary * 16 + 288).status == uform_status_malformed_k);
     // Two-channel tubes of 2^31+1 frames take 2^32+2 scalars, which 32 bits wrap to 2.
     snprintf(header, sizeof(header), geometry, "2147483649", full_vocabulary, full_vocabulary * 16,
              full_vocabulary * 16, full_vocabulary * 16 + 256, full_vocabulary * 16 + 256, full_vocabulary * 16 + 288);
-    expect_(refused_as(load_forged(executor, header, full_vocabulary * 16 + 288), measuring));
+    expect_(load_forged(executor, header, full_vocabulary * 16 + 288).status == uform_status_malformed_k);
 #endif
 
     uform_mesh_t mesh = NULL;

@@ -139,7 +139,7 @@ struct adafactor_t {
      *  The caller drains @p stream before releasing @p checkpoint .
      *
      *  @par Statuses:
-     *  - @c status_t::unsupported_k A saved state of another shape.
+     *  - @c status_code_t::unsupported_k A saved state of another shape.
      */
     [[nodiscard]] expected_t load(checkpoint_to_load_t const& checkpoint, gpu_stream_t& stream) noexcept;
 
@@ -324,7 +324,7 @@ struct adafactor_temperatures_t {
      *      restarts it at zero.
      *
      *  @par Statuses:
-     *  - @c status_t::unsupported_k A saved moment of another group count.
+     *  - @c status_code_t::unsupported_k A saved moment of another group count.
      */
     [[nodiscard]] expected_t load(checkpoint_to_load_t const& checkpoint, gpu_stream_t& stream) noexcept;
 

@@ -505,8 +505,9 @@ struct multimem_domain_t {
     [[nodiscard]] expected<multimem_window_t> reserve(std::size_t scalars) noexcept {
         if (reserved_scalars_ + scalars > payload_scalars_)
             return expected<multimem_window_t>::fail(
-                status_t::bad_alloc_k, "window reservation of {} scalars exceeds the domain's {} ({} reserved)",
-                scalars, payload_scalars_, reserved_scalars_);
+                status_code_t::out_of_memory_k,
+                "window reservation of {} scalars exceeds the domain's {} ({} reserved)", scalars, payload_scalars_,
+                reserved_scalars_);
         multimem_window_t const window {reserved_scalars_, scalars};
         reserved_scalars_ += window_scalars(scalars);
         static_assert(cache_line_bytes_k % sizeof(f32_t) == 0, "windows start on whole cache lines");

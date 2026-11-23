@@ -24,10 +24,10 @@ using namespace ul;
 
 expected<gpu_direct_storage_session_t> gpu_direct_storage_session_t::make() noexcept {
     using result_t = expected<gpu_direct_storage_session_t>;
-    expected<topology_t> topology = topology_t::make();
-    if (!topology) return result_t::fail(std::move(topology));
-    std::size_t const cores = topology->logical_cores_count();
-    if (cores == 0) return result_t::fail(status_t::io_k, "no logical core to run KvikIO's threads on");
+    auto [topology, make_status] = topology_t::make();
+    if (!make_status) return result_t::fail(std::move(make_status));
+    std::size_t const cores = topology.logical_cores_count();
+    if (cores == 0) return result_t::fail(status_code_t::io_k, "No logical core to run KvikIO's threads on");
     try {
         cudf::io::kvikio_integration::set_up_kvikio(static_cast<u32_t>(cores));
         // Pools outlive every buffer they serve, so only the first session installs them.
@@ -40,10 +40,10 @@ expected<gpu_direct_storage_session_t> gpu_direct_storage_session_t::make() noex
         }();
     }
     catch (std::exception const& error) {
-        return result_t::fail(status_t::io_k, "KvikIO setup failed at the firewall: {}", error.what());
+        return result_t::fail(status_code_t::io_k, "KvikIO setup failed at the firewall: {}", error.what());
     }
     catch (...) {
-        return result_t::fail(status_t::io_k, "KvikIO setup raised a non-standard exception");
+        return result_t::fail(status_code_t::io_k, "KvikIO setup raised a non-standard exception");
     }
     gpu_direct_storage_session_t session;
     // GDS engages only when compat mode is explicitly off; unset or "ON" means POSIX. Read for the

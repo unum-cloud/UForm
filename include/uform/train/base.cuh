@@ -454,8 +454,8 @@ struct base_replica_t {
  *  @ref unum::uform::train::seed_weights seeds it, so a run adds the head its base never trained.
  *
  *  @par Statuses:
- *  - @c status_t::invalid_argument_k A matrix the checkpoint misses.
- *  - @c status_t::unsupported_k A matrix of another shape.
+ *  - @c status_code_t::invalid_argument_k A matrix the checkpoint misses.
+ *  - @c status_code_t::unsupported_k A matrix of another shape.
  */
 [[nodiscard]] expected_t load_weights(checkpoint_to_load_t const& checkpoint,
                                       st::basic_vector<differentiable_weights_t> const& weights,

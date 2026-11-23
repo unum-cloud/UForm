@@ -27,7 +27,7 @@ using ue::multimodal_batch_shape_t;
 using ue::pad_choices;
 using ue::segment_role_t;
 using ue::video_batch_shape_t;
-using namespace unum::uform::utilities;
+namespace util = unum::uform::utilities;
 using namespace unum::uform::loaders;
 using namespace unum::uform::train;
 
@@ -44,54 +44,60 @@ using namespace unum::uform::train;
 }
 
 /** Copy the string @p value into @p into , or fail naming @p key . */
-[[nodiscard]] static expected_t read_string_(yyjson_val* value, char const* key, sz::string_t& into) noexcept {
-    if (!yyjson_is_str(value)) return expected_t::fail(status_t::invalid_argument_k, "\"{}\" is not a string", key);
+[[nodiscard]] static util::expected_t read_string_(yyjson_val* value, char const* key, sz::string_t& into) noexcept {
+    if (!yyjson_is_str(value))
+        return util::expected_t::fail(util::status_code_t::invalid_argument_k, "\"{}\" is not a string", key);
     if (sz::failed(into.assign(sz::string_view_t {yyjson_get_str(value), yyjson_get_len(value)})))
-        return expected_t::fail(status_t::bad_alloc_k, "\"{}\" staging failed", key);
+        return util::expected_t::fail(util::status_code_t::out_of_memory_k, "\"{}\" staging failed", key);
     return {};
 }
 
 /** Read a @c query key into @p sides : the named role queries; the bag's others are documents. */
-[[nodiscard]] static expected_t read_query_sides_(yyjson_val* value, role_sides_t& sides) noexcept {
-    if (!yyjson_is_str(value)) return expected_t::fail(status_t::invalid_argument_k, "\"query\" is not a string");
+[[nodiscard]] static util::expected_t read_query_sides_(yyjson_val* value, role_sides_t& sides) noexcept {
+    if (!yyjson_is_str(value))
+        return util::expected_t::fail(util::status_code_t::invalid_argument_k, "\"query\" is not a string");
     sz::string_view_t const query {yyjson_get_str(value), yyjson_get_len(value)};
     using side_t = late_interaction_side_t;
     if (query == "anchor") sides = {side_t::query_k, side_t::document_k, side_t::document_k};
     else if (query == "positives") sides = {side_t::document_k, side_t::query_k, side_t::document_k};
     else if (query == "both") sides = {side_t::query_and_document_k, side_t::query_and_document_k, side_t::document_k};
-    else return expected_t::fail(status_t::invalid_argument_k, "\"query\" is {}, not anchor, positives or both", query);
+    else
+        return util::expected_t::fail(util::status_code_t::invalid_argument_k,
+                                      "\"query\" is {}, not anchor, positives or both", query);
     return {};
 }
 
 /** Read a @c choices object into @p entry 's state, choices, targets and group columns. */
-[[nodiscard]] static expected_t read_choices_(yyjson_val* object, mixture_entry_t& entry) noexcept {
-    if (!yyjson_is_obj(object)) return expected_t::fail(status_t::invalid_argument_k, "\"choices\" is not an object");
+[[nodiscard]] static util::expected_t read_choices_(yyjson_val* object, mixture_entry_t& entry) noexcept {
+    if (!yyjson_is_obj(object))
+        return util::expected_t::fail(util::status_code_t::invalid_argument_k, "\"choices\" is not an object");
     std::size_t index = 0, count = 0;
     yyjson_val *key = nullptr, *value = nullptr;
     yyjson_obj_foreach(object, index, count, key, value) {
         sz::string_view_t const name {yyjson_get_str(key), yyjson_get_len(key)};
-        expected_t read;
+        util::expected_t read;
         if (name == "state") read = read_string_(value, "state", entry.state);
         else if (name == "choices") read = read_string_(value, "choices", entry.choices);
         else if (name == "targets") read = read_string_(value, "targets", entry.targets);
         else if (name == "group") read = read_string_(value, "group", entry.group);
-        else return expected_t::fail(status_t::invalid_argument_k, "unknown choices key \"{}\"", name);
+        else return util::expected_t::fail(util::status_code_t::invalid_argument_k, "unknown choices key \"{}\"", name);
         if (!read) return read;
     }
     if (entry.state.empty() || entry.choices.empty() || entry.targets.empty())
-        return expected_t::fail(status_t::invalid_argument_k,
-                                "\"choices\" needs \"state\", \"choices\" and \"targets\"");
+        return util::expected_t::fail(util::status_code_t::invalid_argument_k,
+                                      "\"choices\" needs \"state\", \"choices\" and \"targets\"");
     return {};
 }
 
 /** Parse one entry of the @c datasets array into @p entry . */
-[[nodiscard]] static expected_t read_entry_(yyjson_val* object, mixture_entry_t& entry) noexcept {
-    if (!yyjson_is_obj(object)) return expected_t::fail(status_t::invalid_argument_k, "a dataset is not an object");
+[[nodiscard]] static util::expected_t read_entry_(yyjson_val* object, mixture_entry_t& entry) noexcept {
+    if (!yyjson_is_obj(object))
+        return util::expected_t::fail(util::status_code_t::invalid_argument_k, "A dataset is not an object");
     std::size_t index = 0, count = 0;
     yyjson_val *key = nullptr, *value = nullptr;
     yyjson_obj_foreach(object, index, count, key, value) {
         sz::string_view_t const name {yyjson_get_str(key), yyjson_get_len(key)};
-        expected_t read;
+        util::expected_t read;
         if (name == "name") read = read_string_(value, "name", entry.name);
         else if (name == "glob") read = read_string_(value, "glob", entry.glob);
         else if (name == "text") read = read_string_(value, "text", entry.text);
@@ -105,74 +111,86 @@ using namespace unum::uform::train;
         else if (name == "choices") read = read_choices_(value, entry);
         else if (name == "weight") {
             if (!yyjson_is_num(value))
-                return expected_t::fail(status_t::invalid_argument_k, "\"weight\" is not a number");
+                return util::expected_t::fail(util::status_code_t::invalid_argument_k, "\"weight\" is not a number");
             entry.weight = yyjson_get_num(value);
         }
         else if (name == "epochs") {
             if (!yyjson_is_uint(value) || yyjson_get_uint(value) == 0)
-                return expected_t::fail(status_t::invalid_argument_k, "\"epochs\" is not a positive integer");
+                return util::expected_t::fail(util::status_code_t::invalid_argument_k,
+                                              "\"epochs\" is not a positive integer");
             entry.epochs = static_cast<std::size_t>(yyjson_get_uint(value));
         }
         // Read by the acquisition and mining scripts, not by the loaders.
         else if (name != "positives_per_caption" && name != "min_epochs")
-            return expected_t::fail(status_t::invalid_argument_k, "unknown key \"{}\"", name);
+            return util::expected_t::fail(util::status_code_t::invalid_argument_k, "unknown key \"{}\"", name);
         if (!read) return read;
     }
     if (entry.name.empty() || entry.glob.empty() || !(entry.weight > 0.0))
-        return expected_t::fail(status_t::invalid_argument_k, "a dataset needs a name, a glob and a positive weight");
+        return util::expected_t::fail(util::status_code_t::invalid_argument_k,
+                                      "A dataset needs name, glob, positive weight");
     if (!entry.text.empty() + !entry.anchor.empty() + !entry.state.empty() != 1)
-        return expected_t::fail(status_t::invalid_argument_k, "{} needs one of \"text\", \"anchor\" or \"choices\"",
-                                entry.name.view());
+        return util::expected_t::fail(util::status_code_t::invalid_argument_k,
+                                      "{} needs one of \"text\", \"anchor\" or \"choices\"", entry.name.view());
     if (!entry.anchor.empty() && entry.positive.empty())
-        return expected_t::fail(status_t::invalid_argument_k, "{} pairs its anchor with no \"positive\"",
-                                entry.name.view());
+        return util::expected_t::fail(util::status_code_t::invalid_argument_k,
+                                      "{} pairs its anchor with no \"positive\"", entry.name.view());
     if (entry.media.empty()) return {};
     if (entry.media != entry.positive)
-        return expected_t::fail(status_t::invalid_argument_k, "{} names media {} other than its positive {}",
-                                entry.name.view(), entry.media.view(), entry.positive.view());
+        return util::expected_t::fail(util::status_code_t::invalid_argument_k,
+                                      "{} names media {} other than its positive {}", entry.name.view(),
+                                      entry.media.view(), entry.positive.view());
     entry.modality = modality_of_(entry.media.view());
     if (entry.modality == modality_t::text_k)
-        return expected_t::fail(status_t::invalid_argument_k, "{} names media {}, which tells no modality",
-                                entry.name.view(), entry.media.view());
+        return util::expected_t::fail(util::status_code_t::invalid_argument_k,
+                                      "{} names media {}, which tells no modality", entry.name.view(),
+                                      entry.media.view());
     return {};
 }
 
-expected<mixture_t> mixture_t::read(sz::string_view_t path) noexcept {
-    using result_t = expected<mixture_t>;
-    if (path.contains('\0')) return result_t::fail(status_t::invalid_argument_k, "the mixture path holds a NUL byte");
+util::expected<mixture_t> mixture_t::read(sz::string_view_t path) noexcept {
+    using result_t = util::expected<mixture_t>;
+    if (path.contains('\0'))
+        return result_t::fail(util::status_code_t::invalid_argument_k, "The mixture path holds a NUL byte");
     sz::string_t terminated;
-    if (sz::failed(terminated.assign(path))) return result_t::fail(status_t::bad_alloc_k, "path staging failed");
+    if (sz::failed(terminated.assign(path)))
+        return result_t::fail(util::status_code_t::out_of_memory_k, "Path staging failed");
     yyjson_read_err error {};
     yyjson_doc* const document = yyjson_read_file(terminated.c_str(), 0, nullptr, &error);
     if (document == nullptr)
-        return result_t::fail(error.code == YYJSON_READ_ERROR_FILE_OPEN ? status_t::io_k : status_t::invalid_argument_k,
+        return result_t::fail(error.code == YYJSON_READ_ERROR_FILE_OPEN ? util::status_code_t::io_k
+                                                                        : util::status_code_t::invalid_argument_k,
                               "{}: {} at byte {}", path, error.msg, error.pos);
     mixture_t mixture;
-    expected_t parsed = [&]() noexcept -> expected_t {
+    util::expected_t parsed = [&]() noexcept -> expected_t {
         yyjson_val* const root = yyjson_doc_get_root(document);
         yyjson_val* const name = yyjson_obj_get(root, "mixture");
         yyjson_val* const datasets = yyjson_obj_get(root, "datasets");
         if (!yyjson_is_arr(datasets) || yyjson_arr_size(datasets) == 0)
-            return expected_t::fail(status_t::invalid_argument_k, "no \"datasets\" array");
-        if (expected_t read = read_string_(name, "mixture", mixture.name); !read) return read;
+            return util::expected_t::fail(util::status_code_t::invalid_argument_k, "No \"datasets\" array");
+        if (util::expected_t read = read_string_(name, "mixture", mixture.name); !read) return read;
         if (yyjson_obj_size(root) != 2)
-            return expected_t::fail(status_t::invalid_argument_k, "keys beside \"mixture\" and \"datasets\"");
+            return util::expected_t::fail(util::status_code_t::invalid_argument_k,
+                                          "Keys beside \"mixture\" and \"datasets\"");
         std::size_t index = 0, count = 0;
         yyjson_val* object = nullptr;
         yyjson_arr_foreach(datasets, index, count, object) {
             mixture_entry_t entry;
-            if (expected_t read = read_entry_(object, entry); !read) return read;
+            if (util::expected_t read = read_entry_(object, entry); !read) return read;
             if (st::failed(mixture.datasets.push_back(std::move(entry))))
-                return expected_t::fail(status_t::bad_alloc_k, "dataset table allocation failed");
+                return util::expected_t::fail(util::status_code_t::out_of_memory_k, "No room for the dataset table");
         }
-        u32_t pairs = 0;
+        util::u32_t pairs = 0;
         for (mixture_entry_t const& entry : mixture.datasets) pairs += !entry.anchor.empty();
         if (pairs != 0 && pairs != mixture.datasets.size())
-            return expected_t::fail(status_t::invalid_argument_k, "pairs share the mixture with plain text or choices");
+            return util::expected_t::fail(util::status_code_t::invalid_argument_k,
+                                          "Paired and unpaired datasets cannot mix");
         return {};
     }();
     yyjson_doc_free(document);
-    if (!parsed) return result_t::fail(status_t::invalid_argument_k, "{}: {}", path, parsed.description_.view());
+    if (!parsed)
+        return result_t::fail(util::status_code_t::invalid_argument_k, "{}: {}", path,
+                              (parsed.description_.empty() ? sz::string_view_t {util::to_string(parsed.status_)}
+                                                           : parsed.description_.view()));
     return result_t {std::move(mixture)};
 }
 
@@ -205,19 +223,19 @@ multimodal_batch_shape_t mixture_t::shape(multimodal_batch_shape_t shape) const 
     return shape;
 }
 
-expected<mixture_sampler_t> mixture_sampler_t::make(std::span<mixture_entry_t const> entries,
-                                                    std::span<std::size_t const> rows, std::size_t world_gpus,
-                                                    std::size_t batches_per_fill, std::size_t segments) noexcept {
-    using result_t = expected<mixture_sampler_t>;
+util::expected<mixture_sampler_t> mixture_sampler_t::make(std::span<mixture_entry_t const> entries,
+                                                          std::span<std::size_t const> rows, std::size_t world_gpus,
+                                                          std::size_t batches_per_fill, std::size_t segments) noexcept {
+    using result_t = util::expected<mixture_sampler_t>;
     mixture_sampler_t sampler;
     sampler.entries_ = entries;
     sampler.world_gpus_ = world_gpus, sampler.batches_per_fill_ = batches_per_fill;
     if (st::failed(sampler.weight_prefix_.push_back(0.0)))
-        return result_t::fail(status_t::bad_alloc_k, "weight table allocation failed");
+        return result_t::fail(util::status_code_t::out_of_memory_k, "No room for the weight table");
     for (std::size_t entry = 0; entry != entries.size(); ++entry) {
         mixture_entry_t const& dataset = entries[entry];
         if (dataset.epochs != 0 && rows[entry] == 0)
-            return result_t::fail(status_t::invalid_argument_k,
+            return result_t::fail(util::status_code_t::invalid_argument_k,
                                   "{} caps its epochs, but only Parquet footers count rows", dataset.name.view());
         // A fill draws as many pairs as its segments hold, or documents for plain text, whether or
         // not its batches admit them all.
@@ -226,12 +244,12 @@ expected<mixture_sampler_t> mixture_sampler_t::make(std::span<mixture_entry_t co
             st::failed(sampler.fill_pairs_.push_back(batches_per_fill * (segments / roles))) ||
             st::failed(sampler.drawn_pairs_.push_back(std::size_t {0})) ||
             st::failed(sampler.weight_prefix_.push_back(sampler.weight_prefix_[entry] + dataset.weight)))
-            return result_t::fail(status_t::bad_alloc_k, "sampler table allocation failed");
+            return result_t::fail(util::status_code_t::out_of_memory_k, "No room for the sampler table");
     }
     return result_t {std::move(sampler)};
 }
 
-std::size_t mixture_sampler_t::draw(u64_t seed, data_epoch_t data_epoch, u32_t gpu_index,
+std::size_t mixture_sampler_t::draw(util::u64_t seed, util::data_epoch_t data_epoch, util::u32_t gpu_index,
                                     void (*report)(sz::string_view_t) noexcept) noexcept {
     auto const capped_live = [&]() noexcept {
         for (std::size_t entry = 0; entry != entries_.size(); ++entry)
@@ -245,15 +263,16 @@ std::size_t mixture_sampler_t::draw(u64_t seed, data_epoch_t data_epoch, u32_t g
         for (std::size_t gpu = 0; gpu != world_gpus_; ++gpu) {
             std::size_t const phase = gpu * batches_per_fill_ / world_gpus_;
             if (replayed_epochs_ != 0 && (replayed_epochs_ + phase) % batches_per_fill_ != 0) continue;
-            std::size_t const entry = search_(seed, replayed_epochs_, static_cast<u32_t>(gpu));
+            std::size_t const entry = search_(seed, replayed_epochs_, static_cast<util::u32_t>(gpu));
             bool const was_live = live_(entry);
             drawn_pairs_[entry] += fill_pairs_[entry];
             if (!was_live || live_(entry)) continue;
             retired = true;
             sz::string_t line;
-            if (report && format_into(line, "uform: {} retired at step {} after {} pairs ({} passes over {} rows)",
-                                      entries_[entry].name.view(), replayed_epochs_, drawn_pairs_[entry],
-                                      entries_[entry].epochs, rows_[entry]))
+            if (report &&
+                util::format_into(line, "uform: {} retired at step {} after {} pairs ({} passes over {} rows)",
+                                  entries_[entry].name.view(), replayed_epochs_, drawn_pairs_[entry],
+                                  entries_[entry].epochs, rows_[entry]))
                 report(line.view());
         }
         if (retired) reweigh_(replayed_epochs_, report);
@@ -266,65 +285,67 @@ bool mixture_sampler_t::live_(std::size_t entry) const noexcept {
     return epochs == 0 || drawn_pairs_[entry] < epochs * rows_[entry];
 }
 
-std::size_t mixture_sampler_t::search_(u64_t seed, u32_t epoch, u32_t gpu_index) const noexcept {
-    constexpr splitmix64_hash_t hash {};
-    f64_t const draw = static_cast<f64_t>(hash(seed, epoch, gpu_index) >> 11) * 0x1.0p-53 *
-                       weight_prefix_[weight_prefix_.size() - 1];
+std::size_t mixture_sampler_t::search_(util::u64_t seed, util::u32_t epoch, util::u32_t gpu_index) const noexcept {
+    constexpr util::splitmix64_hash_t hash {};
+    util::f64_t const draw = static_cast<util::f64_t>(hash(seed, epoch, gpu_index) >> 11) * 0x1.0p-53 *
+                             weight_prefix_[weight_prefix_.size() - 1];
     return fu::min_of<std::size_t>(
         std::upper_bound(weight_prefix_.begin(), weight_prefix_.end(), draw) - weight_prefix_.begin() - 1,
         entries_.size() - 1);
 }
 
-void mixture_sampler_t::reweigh_(u32_t epoch, void (*report)(sz::string_view_t) noexcept) noexcept {
+void mixture_sampler_t::reweigh_(util::u32_t epoch, void (*report)(sz::string_view_t) noexcept) noexcept {
     std::size_t const entries = entries_.size();
     // A modality with no live entry adds nothing; the draw's scale spreads its share over the rest.
     for (std::size_t entry = 0; entry != entries; ++entry) {
-        f64_t modality_weight = 0.0, live_weight = 0.0;
+        util::f64_t modality_weight = 0.0, live_weight = 0.0;
         for (std::size_t peer = 0; peer != entries; ++peer)
             if (entries_[peer].modality == entries_[entry].modality)
                 modality_weight += entries_[peer].weight, live_weight += live_(peer) ? entries_[peer].weight : 0.0;
-        f64_t const weight = live_(entry) ? entries_[entry].weight * modality_weight / live_weight : 0.0;
+        util::f64_t const weight = live_(entry) ? entries_[entry].weight * modality_weight / live_weight : 0.0;
         weight_prefix_[entry + 1] = weight_prefix_[entry] + weight;
     }
     if (weight_prefix_[entries] > 0.0) return;
     for (std::size_t entry = 0; entry != entries; ++entry)
         weight_prefix_[entry + 1] = weight_prefix_[entry] + entries_[entry].weight;
     sz::string_t line;
-    if (report && format_into(line, "uform: every entry retired at step {}, drawing by the mixture's weights", epoch))
+    if (report &&
+        util::format_into(line, "uform: every entry retired at step {}, drawing by the mixture's weights", epoch))
         report(line.view());
 }
 
-expected_t dataset_source_t::open(dataset_source_t& placed, trainer_config_t& config,
-                                  gpu_direct_storage_session_t& session, mixture_t mixture,
-                                  std::size_t batches_per_fill) noexcept {
+util::expected_t dataset_source_t::open(dataset_source_t& placed, trainer_config_t& config,
+                                        gpu_direct_storage_session_t& session, mixture_t mixture,
+                                        std::size_t batches_per_fill) noexcept {
     multimodal_batch_shape_t const& shape = config.batch;
     placed.mixture_ = std::move(mixture);
     std::span<mixture_entry_t const> const entries = placed.mixture_.datasets;
     bool const pairs = !entries.empty() && !entries[0].anchor.empty();
 
     if (pairs) {
-        expected<topology_t> topology = topology_t::make();
-        if (!topology) return expected_t::fail(std::move(topology));
-        expected<executor_t> pool = executor_t::make(*topology, topology->logical_cores_count(),
-                                                     caller_exclusivity_t::caller_inclusive_k);
-        if (!pool) return expected_t::fail(std::move(pool));
-        placed.pool_ = std::move(*pool);
+        auto [topology, make_topology_status] = util::topology_t::make();
+        if (!make_topology_status) return util::expected_t::fail(std::move(make_topology_status));
+        auto [pool, make_pool_status] = util::executor_t::make(topology, topology.logical_cores_count(),
+                                                               util::caller_exclusivity_t::caller_inclusive_k);
+        if (!make_pool_status) return util::expected_t::fail(std::move(make_pool_status));
+        placed.pool_ = std::move(pool);
     }
 
     auto adopt = [&](auto loader) noexcept -> expected_t {
-        if (!loader) return expected_t::fail(std::move(loader));
+        if (!loader) return util::expected_t::fail(std::move(loader));
         if (st::failed(placed.loaders_.push_back(std::move(loader.value_))))
-            return expected_t::fail(status_t::bad_alloc_k, "loader table allocation failed");
+            return util::expected_t::fail(util::status_code_t::out_of_memory_k, "No room for the loader table");
         return {};
     };
     for (mixture_entry_t const& entry : entries) {
         sz::string_view_t const glob = entry.glob.view();
-        expected_t made;
+        util::expected_t made;
         if (!entry.state.empty() && glob.ends_with(".parquet"))
             made = adopt(choices_loader_parquet_t::make(
                 session, glob, config.seed, {entry.state.view(), entry.choices.view(), entry.targets.view()}));
         else if (!entry.state.empty())
-            made = expected_t::fail(status_t::invalid_argument_k, "{} holds no Parquet shards of choices", glob);
+            made = util::expected_t::fail(util::status_code_t::invalid_argument_k,
+                                          "{} holds no Parquet shards of choices", glob);
         else if (!pairs && glob.ends_with(".parquet"))
             made = adopt(tokens_loader_parquet_t::make(session, glob, config.seed));
         else if (!pairs && glob.ends_with(".jsonl"))
@@ -332,22 +353,25 @@ expected_t dataset_source_t::open(dataset_source_t& placed, trainer_config_t& co
         else if (!pairs && (glob.ends_with(".csv") || glob.ends_with(".txt")))
             made = adopt(tokens_loader_csv_t::make(session, glob, config.seed));
         else if (!pairs)
-            made = expected_t::fail(status_t::invalid_argument_k, "{} holds no Parquet, JSONL, CSV or text shards",
-                                    glob);
+            made = util::expected_t::fail(util::status_code_t::invalid_argument_k,
+                                          "{} holds no Parquet, JSONL, CSV or text shards", glob);
         else if (entry.modality == modality_t::video_k && config.nvdec_engines == 0)
-            made = expected_t::fail(status_t::invalid_argument_k,
-                                    "{} holds video: --nvdec-engines names the GPU's NVDEC engine count",
-                                    entry.name.view());
+            made = util::expected_t::fail(util::status_code_t::invalid_argument_k,
+                                          "{} holds video: --nvdec-engines names the GPU's NVDEC engine count",
+                                          entry.name.view());
         else
             made = adopt(
                 paired_loader_parquet_t::make(session, glob, config.seed, placed.pool_.view(),
                                               {entry.anchor.view(), entry.positive.view(), entry.negative.view(),
                                                entry.anchor_prefix.view(), entry.positive_prefix.view(), entry.sides},
                                               entry.modality, shape));
-        if (!made) return expected_t::fail(made.status_, "{}: {}", entry.name.view(), made.description_.view());
+        if (!made)
+            return util::expected_t::fail(made.status_, "{}: {}", entry.name.view(),
+                                          (made.description_.empty() ? sz::string_view_t {util::to_string(made.status_)}
+                                                                     : made.description_.view()));
     }
     reservoir_bound_t reservoir;
-    f64_t row_bytes = 0.0;
+    util::f64_t row_bytes = 0.0;
     for (std::size_t index = 0; index != placed.loaders_.size(); ++index) {
         loader_t const& loader = placed.loaders_[index];
         std::visit([&](auto const& typed) noexcept { reservoir.charge(typed.reservoir()); }, loader);
@@ -357,8 +381,8 @@ expected_t dataset_source_t::open(dataset_source_t& placed, trainer_config_t& co
         std::size_t const item_cells = std::visit(
             [](auto const& typed) noexcept { return typed.reservoir().row_bytes / reservoir_bound_t::copies_k; },
             loader);
-        f64_t const columns = static_cast<f64_t>(shape.max_columns_per_row);
-        f64_t density = 1.0, roles = 1.0;
+        util::f64_t const columns = static_cast<util::f64_t>(shape.max_columns_per_row);
+        util::f64_t density = 1.0, roles = 1.0;
         if (auto const* paired = std::get_if<paired_loader_parquet_t>(&loader)) {
             roles = entries[index].negative.empty() ? 2.0 : 3.0;
             density = roles * paired->pairs_per_row(shape.max_columns_per_row);
@@ -366,67 +390,69 @@ expected_t dataset_source_t::open(dataset_source_t& placed, trainer_config_t& co
         else if ((std::holds_alternative<tokens_loader_parquet_t>(loader) ||
                   std::holds_alternative<choices_loader_parquet_t>(loader)) &&
                  item_cells != 0)
-            density = columns / static_cast<f64_t>(item_cells);
+            density = columns / static_cast<util::f64_t>(item_cells);
         config.segments_per_row = fu::max_of(config.segments_per_row, density);
         // A fill reads one entry, so a batch row costs that entry's own source rows, a pair or a
         // document each.
-        f64_t const entry_row_bytes = static_cast<f64_t>(
+        util::f64_t const entry_row_bytes = static_cast<util::f64_t>(
             std::visit([](auto const& typed) noexcept { return typed.reservoir().row_bytes; }, loader));
         row_bytes = fu::max_of(row_bytes, entry_row_bytes * density / roles);
     }
     // One fill pools the rows of every batch it packs, so the per-row term scales with them.
     config.reservoir_fixed_bytes = reservoir.fixed_bytes;
-    config.reservoir_row_bytes = static_cast<std::size_t>(std::ceil(row_bytes * static_cast<f64_t>(batches_per_fill)));
+    config.reservoir_row_bytes = static_cast<std::size_t>(
+        std::ceil(row_bytes * static_cast<util::f64_t>(batches_per_fill)));
     return {};
 }
 
-expected_t dataset_source_t::make(dataset_source_t& placed, trainer_t& trainer, std::size_t batches_per_fill) noexcept {
+util::expected_t dataset_source_t::make(dataset_source_t& placed, trainer_t& trainer,
+                                        std::size_t batches_per_fill) noexcept {
     trainer_config_t const& config = trainer.config;
     multimodal_batch_shape_t shape = config.batch;
     std::size_t const gpus = trainer.replicas.size(), segments = shape.max_segments_per_gpu;
     std::span<mixture_entry_t const> const entries = placed.mixture_.datasets;
     // A pair spends two segments and a triplet three, each in one bag, so pairs bound the bags.
     if (!entries.empty() && !entries[0].anchor.empty())
-        shape.max_bags_per_gpu = static_cast<u32_t>(shape.max_segments_per_gpu / 2u);
+        shape.max_bags_per_gpu = static_cast<util::u32_t>(shape.max_segments_per_gpu / 2u);
 
     for (std::size_t member = 0; member != gpus; ++member) {
-        switch_to_gpu_t gpu_scope {trainer.streams[member]};
-        if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed");
+        util::switch_to_gpu_t gpu_scope {trainer.streams[member]};
+        if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
         st::basic_vector<multimodal_batch_on_gpu_t> filled;
         for (std::size_t batch_index = 0; batch_index != batches_per_fill; ++batch_index) {
-            expected<multimodal_batch_on_gpu_t> batch = multimodal_batch_on_gpu_t::make(
-                gpu_arena_alloc_t {trainer.arenas[member]}, shape);
-            if (!batch) return expected_t::fail(std::move(batch));
-            if (st::failed(filled.push_back(std::move(batch.value_))))
-                return expected_t::fail(status_t::bad_alloc_k, "batch table allocation failed");
+            auto [batch, status] = multimodal_batch_on_gpu_t::make(util::gpu_arena_alloc_t {trainer.arenas[member]},
+                                                                   shape);
+            if (!status) return util::expected_t::fail(std::move(status));
+            if (st::failed(filled.push_back(std::move(batch))))
+                return util::expected_t::fail(util::status_code_t::out_of_memory_k, "No room for the batch table");
         }
-        if (placed.filled_.push_back(std::move(filled)) != status_t::success_k ||
-            placed.loaded_.push_back(multimodal_batch_on_gpu_t {}) != status_t::success_k)
-            return expected_t::fail(status_t::bad_alloc_k, "batch table full");
+        if (placed.filled_.push_back(std::move(filled)) != util::status_code_t::success_k ||
+            placed.loaded_.push_back(multimodal_batch_on_gpu_t {}) != util::status_code_t::success_k)
+            return util::expected_t::fail(util::status_code_t::out_of_memory_k, "Batch table full");
         if (placed.mixture_.names(modality_t::image_k)) {
-            expected<nvjpeg_session_t> jpeg = nvjpeg_session_t::make();
-            if (!jpeg) return expected_t::fail(std::move(jpeg));
-            if (placed.jpeg_.push_back(std::move(jpeg.value_)) != status_t::success_k)
-                return expected_t::fail(status_t::bad_alloc_k, "nvJPEG session table full");
+            auto [jpeg, status] = nvjpeg_session_t::make();
+            if (!status) return util::expected_t::fail(std::move(status));
+            if (placed.jpeg_.push_back(std::move(jpeg)) != util::status_code_t::success_k)
+                return util::expected_t::fail(util::status_code_t::out_of_memory_k, "nvJPEG session table full");
         }
         if (placed.mixture_.names(modality_t::video_k)) {
-            expected<nvdec_session_t> nvdec = nvdec_session_t::make(
+            auto [nvdec, status] = nvdec_session_t::make(
                 nvdec_config_t {config.nvdec_engines, shape.video.patch_side * shape.max_columns_per_row});
-            if (!nvdec) return expected_t::fail(std::move(nvdec));
-            if (placed.nvdec_.push_back(std::move(nvdec.value_)) != status_t::success_k)
-                return expected_t::fail(status_t::bad_alloc_k, "NVDEC session table full");
+            if (!status) return util::expected_t::fail(std::move(status));
+            if (placed.nvdec_.push_back(std::move(nvdec)) != util::status_code_t::success_k)
+                return util::expected_t::fail(util::status_code_t::out_of_memory_k, "NVDEC session table full");
         }
     }
-    expected<multimodal_batch_mixer_t> mixer = multimodal_batch_mixer_t::make(
-        trainer.domain, trainer.mesh->colocated, trainer.arenas, shape, config.seed, trainer.streams,
-        trainer.mesh->timeout_seconds);
-    if (!mixer) return expected_t::fail(std::move(mixer));
-    placed.mixer_ = std::move(mixer.value_);
+    auto [mixer, make_mixer_status] = multimodal_batch_mixer_t::make(trainer.domain, trainer.mesh->colocated,
+                                                                     trainer.arenas, shape, config.seed,
+                                                                     trainer.streams, trainer.mesh->timeout_seconds);
+    if (!make_mixer_status) return util::expected_t::fail(std::move(make_mixer_status));
+    placed.mixer_ = std::move(mixer);
     std::size_t const world_gpus = trainer.mesh->topology.shape.gpus_per_colocated_domain;
     for (std::size_t member = 0; member != gpus; ++member) {
         std::size_t const world_gpu = trainer.mesh->topology.first_gpu_index() + member;
-        if (placed.phases_.push_back(world_gpu * batches_per_fill / world_gpus) != status_t::success_k)
-            return expected_t::fail(status_t::bad_alloc_k, "fill phase table full");
+        if (placed.phases_.push_back(world_gpu * batches_per_fill / world_gpus) != util::status_code_t::success_k)
+            return util::expected_t::fail(util::status_code_t::out_of_memory_k, "Fill phase table full");
     }
     st::basic_vector<std::size_t> rows;
     for (loader_t const& loader : placed.loaders_) {
@@ -435,32 +461,31 @@ expected_t dataset_source_t::make(dataset_source_t& placed, trainer_t& trainer, 
         else if (auto const* parquet = std::get_if<tokens_loader_parquet_t>(&loader)) counted = parquet->rows();
         else if (auto const* choices = std::get_if<choices_loader_parquet_t>(&loader)) counted = choices->rows();
         if (st::failed(rows.push_back(std::size_t {counted})))
-            return expected_t::fail(status_t::bad_alloc_k, "row count table allocation failed");
+            return util::expected_t::fail(util::status_code_t::out_of_memory_k, "No room for the row count table");
     }
-    expected<mixture_sampler_t> sampler = mixture_sampler_t::make(entries, rows, world_gpus, batches_per_fill,
+    auto [sampler, make_sampler_status] = mixture_sampler_t::make(entries, rows, world_gpus, batches_per_fill,
                                                                   segments);
-    if (!sampler) return expected_t::fail(std::move(sampler));
-    placed.sampler_ = std::move(sampler.value_);
+    if (!make_sampler_status) return util::expected_t::fail(std::move(make_sampler_status));
+    placed.sampler_ = std::move(sampler);
 
     if (!config.contrasts()) return {};
-    u32_t const edges = config.contrastive.max_edges_per_gpu
-                            ? config.contrastive.max_edges_per_gpu
-                            : relation_edges_capacity(static_cast<u32_t>(segments), shape.max_bag_segments);
-    placed.bags_ = u32r2_tensor_pinned_t::uninitialized({gpus, segments}, pinned_alloc<u32_t> {}).value;
-    placed.lengths_ = u32r2_tensor_pinned_t::uninitialized({gpus, segments}, pinned_alloc<u32_t> {}).value;
-    placed.roles_ = nk::tensor<segment_role_t, pinned_alloc<segment_role_t>, 2>::uninitialized(
-                        {gpus, segments}, pinned_alloc<segment_role_t> {})
-                        .value;
-    if (!placed.bags_ || !placed.lengths_ || !placed.roles_)
-        return expected_t::fail(status_t::bad_alloc_k, "relation scratch allocation failed");
-    expected<contrastive_edges_pinned_t> edge_sets = contrastive_edges_pinned_t::make(static_cast<u32_t>(segments),
-                                                                                      edges);
-    if (!edge_sets) return expected_t::fail(std::move(edge_sets));
-    placed.edges_ = std::move(edge_sets.value_);
+    util::u32_t const edges = config.contrastive.max_edges_per_gpu
+                                  ? config.contrastive.max_edges_per_gpu
+                                  : relation_edges_capacity(static_cast<util::u32_t>(segments), shape.max_bag_segments);
+    bool const allocated =
+        util::allocate_uninitialized(placed.bags_, {gpus, segments}, util::pinned_alloc<util::u32_t> {}) &&
+        util::allocate_uninitialized(placed.lengths_, {gpus, segments}, util::pinned_alloc<util::u32_t> {}) &&
+        util::allocate_uninitialized(placed.roles_, {gpus, segments}, util::pinned_alloc<segment_role_t> {});
+    if (!allocated)
+        return util::expected_t::fail(util::status_code_t::out_of_memory_k, "No room for the relation scratch");
+    auto [edge_sets, make_edge_sets_status] = contrastive_edges_pinned_t::make(static_cast<util::u32_t>(segments),
+                                                                               edges);
+    if (!make_edge_sets_status) return util::expected_t::fail(std::move(make_edge_sets_status));
+    placed.edges_ = std::move(edge_sets);
     return {};
 }
 
-expected_t dataset_source_t::fill(trainer_t& trainer, data_epoch_t data_epoch, step_report_t&) noexcept {
+util::expected_t dataset_source_t::fill(trainer_t& trainer, util::data_epoch_t data_epoch, step_report_t&) noexcept {
     std::size_t const gpus = trainer.replicas.size();
     std::size_t const batches_per_fill = filled_[0].size();
     // Each GPU takes its batches in its own phase of the period and refills where that wraps, so a
@@ -470,11 +495,11 @@ expected_t dataset_source_t::fill(trainer_t& trainer, data_epoch_t data_epoch, s
     };
     for (std::size_t member = 0; member != gpus; ++member)
         if (batch_of(member) == 0 || served_steps_ == 0)
-            if (expected_t filled = fill_member_(trainer, member, data_epoch); !filled) return filled;
+            if (util::expected_t filled = fill_member_(trainer, member, data_epoch); !filled) return filled;
     // The mixer reads one batch per GPU side by side, so this step's batches swap in and back out.
     for (std::size_t member = 0; member != gpus; ++member)
         std::swap(loaded_[member], filled_[member][batch_of(member)]);
-    expected_t mixed;
+    util::expected_t mixed;
     for (std::size_t member = 0; member != gpus && mixed; ++member)
         mixed = mixer_(member, data_epoch, loaded_.view(), trainer.replicas[member].batch, trainer.streams[member]);
     for (std::size_t member = 0; member != gpus; ++member)
@@ -485,18 +510,19 @@ expected_t dataset_source_t::fill(trainer_t& trainer, data_epoch_t data_epoch, s
     return relate_(trainer);
 }
 
-expected_t dataset_source_t::fill_member_(trainer_t& trainer, std::size_t member, data_epoch_t data_epoch) noexcept {
+util::expected_t dataset_source_t::fill_member_(trainer_t& trainer, std::size_t member,
+                                                util::data_epoch_t data_epoch) noexcept {
     trainer_config_t const& config = trainer.config;
-    u32_t const gpu_index = trainer.mesh->topology.first_gpu_index() + static_cast<u32_t>(member);
+    util::u32_t const gpu_index = trainer.mesh->topology.first_gpu_index() + static_cast<util::u32_t>(member);
     std::size_t const entry = sampler_.draw(config.seed, data_epoch, gpu_index,
                                             trainer.mesh->topology.is_lead() ? &report_line : nullptr);
     mixture_entry_t const& dataset = mixture_.datasets[entry];
     std::span<multimodal_batch_on_gpu_t> const batches = filled_[member];
-    gpu_stream_t& stream = trainer.streams[member];
-    u32_t const step = data_epoch.ordinal;
-    expected_t filled;
+    util::gpu_stream_t& stream = trainer.streams[member];
+    util::u32_t const step = data_epoch.ordinal;
+    util::expected_t filled;
     for (multimodal_batch_on_gpu_t& batch : batches)
-        if (filled) filled = zero_async(batch.dropped.span(), stream);
+        if (filled) filled = util::zero_async(batch.dropped.span(), stream);
     if (!filled) return filled;
     if (auto* parquet = std::get_if<tokens_loader_parquet_t>(&loaders_[entry]))
         filled = parquet->fill(stream, {dataset.text.view()}, gpu_index, step, batches);
@@ -520,28 +546,29 @@ expected_t dataset_source_t::fill_member_(trainer_t& trainer, std::size_t member
         else filled = paired.fill(stream, gpu_index, step, batches);
     }
     if (!filled)
-        return expected_t::fail(filled.status_, "{} on GPU {}: {}", dataset.name.view(), gpu_index,
-                                filled.description_.view());
+        return util::expected_t::fail(filled.status_, "{} on GPU {}: {}", dataset.name.view(), gpu_index,
+                                      (filled.description_.empty() ? sz::string_view_t {util::to_string(filled.status_)}
+                                                                   : filled.description_.view()));
     // Every other loader names no choice, and a batch reused from a choices fill keeps its rows.
     if (dataset.state.empty())
         for (multimodal_batch_on_gpu_t& batch : batches)
-            if (expected_t padded = pad_choices(batch, stream); !padded) return padded;
+            if (util::expected_t padded = pad_choices(batch, stream); !padded) return padded;
     return {};
 }
 
-expected_t dataset_source_t::relate_(trainer_t& trainer) noexcept {
+util::expected_t dataset_source_t::relate_(trainer_t& trainer) noexcept {
     trainer_config_t const& config = trainer.config;
     std::size_t const gpus = trainer.replicas.size();
-    u32_t const segments = config.batch.max_segments_per_gpu;
+    util::u32_t const segments = config.batch.max_segments_per_gpu;
     std::size_t const world_segments = std::size_t {segments} * trainer.mesh->topology.shape.gpus_per_colocated_domain;
-    u32_t const first = trainer.mesh->topology.first_gpu_index();
+    util::u32_t const first = trainer.mesh->topology.first_gpu_index();
     bool const pairs = !mixture_.datasets[0].anchor.empty();
     if (!pairs) {
         for (std::size_t member = 0; member != gpus; ++member) {
-            switch_to_gpu_t gpu_scope {trainer.streams[member]};
-            if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed");
+            util::switch_to_gpu_t gpu_scope {trainer.streams[member]};
+            if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
             base_replica_t& replica = trainer.replicas[member];
-            if (expected_t related = replica.relations.upload_self_edges(
+            if (util::expected_t related = replica.relations.upload_self_edges(
                     segments, replica.batch.segment_lengths.view(), mixer_.world_lengths(member).flatten<1>(),
                     std::size_t {first + member} * segments, config.contrastive.ambient_repulsion_weight,
                     trainer.streams[member]);
@@ -553,39 +580,41 @@ expected_t dataset_source_t::relate_(trainer_t& trainer) noexcept {
     }
 
     for (std::size_t member = 0; member != gpus; ++member) {
-        switch_to_gpu_t gpu_scope {trainer.streams[member]};
-        if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed");
+        util::switch_to_gpu_t gpu_scope {trainer.streams[member]};
+        if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
         multimodal_batch_on_gpu_t const& mixed = trainer.replicas[member].batch;
-        expected_t copied = copy_device_to_host(mixed.segment_bag.view(), bags_[member, nk::slice],
-                                                trainer.streams[member]);
+        util::expected_t copied = util::copy_device_to_host(mixed.segment_bag.view(), bags_[member, nk::slice],
+                                                            trainer.streams[member]);
         if (copied)
-            copied = copy_device_to_host(mixed.segment_lengths.view(), lengths_[member, nk::slice],
-                                         trainer.streams[member]);
+            copied = util::copy_device_to_host(mixed.segment_lengths.view(), lengths_[member, nk::slice],
+                                               trainer.streams[member]);
         if (copied)
-            copied = copy_device_to_host(mixed.segment_role.view(), roles_[member, nk::slice], trainer.streams[member]);
+            copied = util::copy_device_to_host(mixed.segment_role.view(), roles_[member, nk::slice],
+                                               trainer.streams[member]);
         if (!copied) return copied;
     }
-    if (expected_t drained = trainer.synchronize(); !drained) return drained;
+    if (util::expected_t drained = trainer.synchronize(); !drained) return drained;
 
     for (std::size_t member = 0; member != gpus; ++member) {
-        u32_t const vertex_base = (first + static_cast<u32_t>(member)) * segments;
-        if (expected_t related = relate_roles(bags_[member, nk::slice], roles_[member, nk::slice],
-                                              lengths_[member, nk::slice], f32r1_view_t {}, vertex_base, edges_);
+        util::u32_t const vertex_base = (first + static_cast<util::u32_t>(member)) * segments;
+        if (util::expected_t related = relate_roles(bags_[member, nk::slice], roles_[member, nk::slice],
+                                                    lengths_[member, nk::slice], util::f32r1_view_t {}, vertex_base,
+                                                    edges_);
             !related)
             return related;
 
         base_replica_t& replica = trainer.replicas[member];
-        gpu_stream_t& stream = trainer.streams[member];
-        switch_to_gpu_t gpu_scope {stream};
-        if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed");
-        expected_t staged = replica.relations.upload(
+        util::gpu_stream_t& stream = trainer.streams[member];
+        util::switch_to_gpu_t gpu_scope {stream};
+        if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+        util::expected_t staged = replica.relations.upload(
             edges_.attract(), edges_.repel(), edges_.ignore(), replica.batch.segment_lengths.view(),
             mixer_.world_lengths(member).flatten<1>(), replica.batch.segment_key.view(),
             mixer_.world_keys(member).flatten<1>(), world_segments, vertex_base,
             config.contrastive.ambient_repulsion_weight, stream);
         if (staged) // the host columns are reused for the next GPU, so their copies land first
             if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
-                staged = cuda_failure(result, "relation staging drain failed (member={})", member);
+                staged = util::cuda_failure(result, "relation staging drain failed (member={})", member);
         if (!staged) return staged;
         trainer.contrastive.rebind_relations(member, replica.relations.view());
     }

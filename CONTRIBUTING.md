@@ -233,6 +233,16 @@ Every enum the C interface names, statuses included, has a `uform_*_name` answer
 CPU and GPU class values are ABI: each class keeps the number USearch gives the same hardware, written explicitly, with unused numbers reserved rather than reused.
 `uform_version_name` answers the full version, pre-release suffix included, in the engine and in the stub alike.
 
+### Notes
+
+A failure is `status_t {code, note}`, two words: recovery branches on the code, and the note, a literal or other static text, names the broken invariant, step or resource for logs and regression analysis.
+Codes use the C interface's spellings and numbers, and the SDK in `cpp/` keeps an identical copy of `status_t`, so a status reads the same on both sides of the C layer.
+A note is 2 to 8 words in sentence case with no closing period, never restates the code, and never carries a value that differs per call, such as a path, an error number, a size or an identifier.
+A failure forwards whole, as `if (x.failed()) return x;`, a site that returns its own code writes its own note, and no site hides a callee's more specific failure behind a code of its own.
+A call made once per candidate, neighbor, match or key may answer `expected<value_type_, status_code_t>`, the bare code, and the note is attached once where the loop's failure leaves it.
+An atomic status word holds the code alone, and only the thread whose compare-exchange wins writes the note.
+The C outcome's message is the note, else the rule of the call that was broken, else the status's own `uform_status_name`.
+
 ### Compile-Time Choices
 
 Code picks between alternatives at compile time through three gates, each for one kind of choice.

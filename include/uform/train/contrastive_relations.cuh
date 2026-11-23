@@ -331,8 +331,8 @@ struct contrastive_edges {
         edges.weights_ =
             nk::tensor<f32_t, rebound<f32_t>, 2>::uninitialized({2u, max_edges}, rebound<f32_t> {allocator}).value;
         if (!edges.offsets_ || (max_edges != 0u && (!edges.ids_ || !edges.weights_)))
-            return result_t::fail(status_t::bad_alloc_k, "edge sets of {} rows and {} edges failed to allocate", rows,
-                                  max_edges);
+            return result_t::fail(status_code_t::out_of_memory_k,
+                                  "edge sets of {} rows and {} edges failed to allocate", rows, max_edges);
         return result_t {std::move(edges)};
     }
 
@@ -412,7 +412,7 @@ using contrastive_edges_pinned_t = contrastive_edges<pinned_alloc_t>;
  *  @param[out] edges The three sets, refilled over the @b [segments] rows.
  *
  *  @par Statuses:
- *  - @c status_t::invalid_argument_k Columns of other extents, bags descending more than once,
+ *  - @c status_code_t::invalid_argument_k Columns of other extents, bags descending more than once,
  *    or more edges than a set holds.
  */
 template <typename alloc_type_>
@@ -423,15 +423,15 @@ template <typename alloc_type_>
     u32_t const segments = static_cast<u32_t>(lengths.extent(0));
     if (bags.extent(0) != segments || roles.extent(0) != segments || edges.rows() != segments ||
         (!weights.empty() && weights.extent(0) != segments))
-        return expected_t::fail(status_t::invalid_argument_k,
+        return expected_t::fail(status_code_t::invalid_argument_k,
                                 "{} bags, {} roles, {} lengths, {} weights and {} rows disagree", bags.extent(0),
                                 roles.extent(0), segments, weights.extent(0), edges.rows());
     u32_t band = segments;
     for (u32_t segment = 1; segment < segments; ++segment) {
         if (bags[segment] >= bags[segment - 1u]) continue;
         if (band != segments)
-            return expected_t::fail(status_t::invalid_argument_k, "a GPU's bags descend at {} and again at {}", band,
-                                    segment);
+            return expected_t::fail(status_code_t::invalid_argument_k, "a GPU's bags descend at {} and again at {}",
+                                    band, segment);
         band = segment;
     }
     u32_t written[3] = {};
@@ -455,35 +455,36 @@ template <typename alloc_type_>
         bool const other_first = other_begin != other_end && other_begin < begin;
         u32_t const runs[2][2] = {{other_first ? other_begin : begin, other_first ? other_end : end},
                                   {other_first ? begin : other_begin, other_first ? end : other_end}};
+        u32_t const first_run = runs[0][1] - runs[0][0], partners = live ? first_run + runs[1][1] - runs[1][0] : 0u;
         segment_role_t const role = roles[segment];
-        for (auto const& run : runs)
-            for (u32_t partner_segment = run[0]; live && partner_segment < run[1]; ++partner_segment) {
-                if (partner_segment == segment || lengths[partner_segment] == 0u) continue;
-                set_t set = set_t::attract_k;
-                f32_t weight = 1.0f;
-                u32_t const partner = vertex_base + partner_segment;
-                segment_role_t const partner_role = roles[partner_segment];
-                bool const negative = role == segment_role_t::negative_k;
-                bool const partner_negative = partner_role == segment_role_t::negative_k;
-                if (negative != partner_negative &&
-                    (role == segment_role_t::anchor_k || partner_role == segment_role_t::anchor_k)) {
-                    set = set_t::repel_k;
-                    u32_t const negative_segment = negative ? segment : partner_segment;
-                    weight = weights.empty() ? 1.0f : weights[negative_segment];
-                }
-                else if (negative || partner_negative) set = set_t::ignore_k;
-                u32_t& count = written[static_cast<u32_t>(set)];
-                if (count == edges.capacity())
-                    return expected_t::fail(status_t::invalid_argument_k, "a GPU's bags name over {} edges in one set",
-                                            edges.capacity());
-                u32r1_span_t const ids = edges.ids(set);
-                ids[count] = partner;
-                if (set != set_t::ignore_k) {
-                    f32r1_span_t const weights_of_set = edges.weights(set);
-                    weights_of_set[count] = weight;
-                }
-                ++count;
+        for (u32_t step = 0; step != partners; ++step) {
+            u32_t const partner_segment = step < first_run ? runs[0][0] + step : runs[1][0] + (step - first_run);
+            if (partner_segment == segment || lengths[partner_segment] == 0u) continue;
+            set_t set = set_t::attract_k;
+            f32_t weight = 1.0f;
+            u32_t const partner = vertex_base + partner_segment;
+            segment_role_t const partner_role = roles[partner_segment];
+            bool const negative = role == segment_role_t::negative_k;
+            bool const partner_negative = partner_role == segment_role_t::negative_k;
+            if (negative != partner_negative &&
+                (role == segment_role_t::anchor_k || partner_role == segment_role_t::anchor_k)) {
+                set = set_t::repel_k;
+                u32_t const negative_segment = negative ? segment : partner_segment;
+                weight = weights.empty() ? 1.0f : weights[negative_segment];
             }
+            else if (negative || partner_negative) set = set_t::ignore_k;
+            u32_t& count = written[static_cast<u32_t>(set)];
+            if (count == edges.capacity())
+                return expected_t::fail(status_code_t::invalid_argument_k, "a GPU's bags name over {} edges in one set",
+                                        edges.capacity());
+            u32r1_span_t const ids = edges.ids(set);
+            ids[count] = partner;
+            if (set != set_t::ignore_k) {
+                f32r1_span_t const weights_of_set = edges.weights(set);
+                weights_of_set[count] = weight;
+            }
+            ++count;
+        }
         for (set_t const set : {set_t::attract_k, set_t::repel_k, set_t::ignore_k}) {
             u32r1_span_t const offsets = edges.offsets(set);
             offsets[segment + 1u] = written[static_cast<u32_t>(set)];
@@ -521,8 +522,8 @@ struct contrastive_relations_t {
     [[nodiscard]] static expected<contrastive_relations_t> make(gpu_arena_t& arena, u32_t max_vertices,
                                                                 u32_t max_edges) noexcept {
         if (max_vertices == 0)
-            return expected<contrastive_relations_t>::fail(status_t::invalid_argument_k,
-                                                           "relations need at least one vertex row");
+            return expected<contrastive_relations_t>::fail(status_code_t::invalid_argument_k,
+                                                           "Relations need at least one vertex row");
         contrastive_relations_t relations;
         gpu_arena_alloc<u32_t> index_alloc {arena};
         gpu_arena_alloc<f32_t> score_alloc {arena};
@@ -542,7 +543,7 @@ struct contrastive_relations_t {
         }
         if (!allocated)
             return expected<contrastive_relations_t>::fail(
-                status_t::bad_alloc_k,
+                status_code_t::out_of_memory_k,
                 "relations column allocation failed (max_vertices={} max_edges={} arena_used={})", max_vertices,
                 max_edges, arena.used());
         return expected<contrastive_relations_t> {std::move(relations)};
@@ -588,20 +589,21 @@ struct contrastive_relations_t {
 
         if (attract.offsets.extent(0) < 2 || attract.offsets.extent(0) != repel.offsets.extent(0))
             return expected_t::fail( //
-                status_t::invalid_argument_k,
+                status_code_t::invalid_argument_k,
                 "attract and repel offset rows must both span from_vertices_per_gpu+1 (got {} and {})",
                 attract.offsets.extent(0), repel.offsets.extent(0));
         u32_t const from_vertices_per_gpu = static_cast<u32_t>(attract.offsets.extent(0) - 1u);
         if (from_vertex_key.empty() != to_vertex_key.empty() ||
             (!from_vertex_key.empty() &&
              (from_vertex_key.extent(0) != from_vertices_per_gpu || to_vertex_key.extent(0) != to_vertices_per_mesh)))
-            return expected_t::fail(
-                status_t::invalid_argument_k, "keys span {} rows and {} vertices, expected both empty or {} and {}",
-                from_vertex_key.extent(0), to_vertex_key.extent(0), from_vertices_per_gpu, to_vertices_per_mesh);
+            return expected_t::fail(status_code_t::invalid_argument_k,
+                                    "keys span {} rows and {} vertices, expected both empty or {} and {}",
+                                    from_vertex_key.extent(0), to_vertex_key.extent(0), from_vertices_per_gpu,
+                                    to_vertices_per_mesh);
         bool const has_ignores = !ignore.offsets.empty();
         if (has_ignores && ignore.offsets.extent(0) != attract.offsets.extent(0))
             return expected_t::fail( //
-                status_t::invalid_argument_k,
+                status_code_t::invalid_argument_k,
                 "ignore offsets must span from_vertices_per_gpu+1 like the others (got {}, expected {})",
                 ignore.offsets.extent(0), attract.offsets.extent(0));
 
@@ -628,7 +630,7 @@ struct contrastive_relations_t {
         resized = resized && nk::succeeded(ignore_ids_.resize({has_ignores ? ignore.ids.extent(0) : 0u}));
         if (!resized)
             return expected_t::fail( //
-                status_t::unsupported_k,
+                status_code_t::unsupported_k,
                 "relations exceed the reserved capacities (vertices={}/{} attract={}/{} repel={}/{} ignore={}/{})",
                 from_vertices_per_gpu + 1u, attract_offsets_.capacity(), attract.ids.extent(0), attract_ids_.capacity(),
                 repel.ids.extent(0), repel_ids_.capacity(), has_ignores ? ignore.ids.extent(0) : 0u,
@@ -666,7 +668,7 @@ struct contrastive_relations_t {
         resized = resized && nk::succeeded(repel_ids_.resize({0})) && nk::succeeded(repel_scores_.resize({0}));
         resized = resized && nk::succeeded(ignore_offsets_.resize({0})) && nk::succeeded(ignore_ids_.resize({0}));
         if (!resized)
-            return expected_t::fail(status_t::unsupported_k,
+            return expected_t::fail(status_code_t::unsupported_k,
                                     "self-edge relations for {} vertices exceed the column capacity of {}",
                                     from_vertices_per_gpu, attract_offsets_.capacity());
         if (expected_t reset = zero_async(attract_offsets_.span(), stream); !reset) return reset;
@@ -710,32 +712,33 @@ struct contrastive_relations_t {
         std::size_t const rows = offsets.extent(0) - 1u;
         std::size_t const edge_count = ids.extent(0);
         if (!scores.empty() && scores.extent(0) != edge_count)
-            return expected_t::fail(status_t::invalid_argument_k, "{} scores ({}) must match the ids ({})", edge_kind,
-                                    scores.extent(0), edge_count);
+            return expected_t::fail(status_code_t::invalid_argument_k, "{} scores ({}) must match the ids ({})",
+                                    edge_kind, scores.extent(0), edge_count);
         if (offsets[0] != 0u)
-            return expected_t::fail(status_t::invalid_argument_k, "{} offsets must start at 0 (got {})", edge_kind,
+            return expected_t::fail(status_code_t::invalid_argument_k, "{} offsets must start at 0 (got {})", edge_kind,
                                     offsets[0]);
         if (offsets[rows] != edge_count)
-            return expected_t::fail(status_t::invalid_argument_k, "{} offsets must end at the edge count {} (got {})",
-                                    edge_kind, edge_count, offsets[rows]);
+            return expected_t::fail(status_code_t::invalid_argument_k,
+                                    "{} offsets must end at the edge count {} (got {})", edge_kind, edge_count,
+                                    offsets[rows]);
         for (std::size_t row = 0; row != rows; ++row) {
             if (offsets[row] > offsets[row + 1])
-                return expected_t::fail(status_t::invalid_argument_k, "{} offsets decrease at row {} ({} > {})",
+                return expected_t::fail(status_code_t::invalid_argument_k, "{} offsets decrease at row {} ({} > {})",
                                         edge_kind, row, offsets[row], offsets[row + 1]);
             for (u32_t edge = offsets[row]; edge < offsets[row + 1]; ++edge) {
                 u32_t const id = ids[edge];
                 if (id >= to_vertices_per_mesh)
-                    return expected_t::fail(status_t::invalid_argument_k,
+                    return expected_t::fail(status_code_t::invalid_argument_k,
                                             "{} id {} at row {} is outside [0,{}) — ids are global", edge_kind, id, row,
                                             to_vertices_per_mesh);
                 if (edge > offsets[row] && ids[edge - 1] >= id)
                     return expected_t::fail( //
-                        status_t::invalid_argument_k,
+                        status_code_t::invalid_argument_k,
                         "{} run of row {} is not strictly ascending ({} then {}) — the kernel's binary search " //
                         "would silently mis-score",
                         edge_kind, row, ids[edge - 1], id);
                 if (!scores.empty() && scores[edge] < 0.0f)
-                    return expected_t::fail(status_t::invalid_argument_k, "{} score {} at row {} is negative",
+                    return expected_t::fail(status_code_t::invalid_argument_k, "{} score {} at row {} is negative",
                                             edge_kind, scores[edge], row);
             }
         }

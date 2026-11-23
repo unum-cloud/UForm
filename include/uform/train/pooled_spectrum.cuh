@@ -141,7 +141,7 @@ struct distributed_pooled_spectrum_t {
      *  no further exchange. Drains @p stream , so never call it inside a capture.
      *
      *  @par Statuses:
-     *  - @c status_t::internal_k The step's gradient spiked; the optimizer must not apply it.
+     *  - @c status_code_t::internal_k The step's gradient spiked; the optimizer must not apply it.
      */
     [[nodiscard]] expected_t admit_gradients(gpu_stream_t& stream) noexcept;
 

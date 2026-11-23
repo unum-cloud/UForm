@@ -188,13 +188,13 @@ struct infiniband_coordinates_t {
                                                                 f64_t timeout_seconds) noexcept {
     sz::string_t local_text;
     if (!local.to_text(local_text))
-        return expected_t::fail(status_t::bad_alloc_k, "coordinate payload assembly failed (key={})", key);
+        return expected_t::fail(status_code_t::out_of_memory_k, "coordinate payload assembly failed (key={})", key);
     if (expected_t published = topology.publish_text(key, local_text.view()); !published) return published;
     sz::string_t peer_text;
     if (expected_t awaited = topology.await_text(peer_host_domain, key, peer_text, timeout_seconds); !awaited)
         return awaited;
     if (!infiniband_coordinates_t::from_text(peer_text.view(), peer))
-        return expected_t::fail(status_t::io_k, "malformed coordinates from host_domain {} (key={}): \"{}\"",
+        return expected_t::fail(status_code_t::io_k, "malformed coordinates from host_domain {} (key={}): \"{}\"",
                                 peer_host_domain, key, peer_text);
     return {};
 }
@@ -405,10 +405,10 @@ struct host_page_registry_t {
                 return cuda_failure(registered, "host page registration failed ({} memory, page={})",
                                     memory == host_memory_t::mmio_k ? "NIC MMIO" : "DMA", entry.page);
             }
-            if (status_t inserted = insert_(entry); inserted != status_t::success_k) {
+            if (status_t inserted = insert_(entry); inserted != status_code_t::success_k) {
                 if (entry.owned) cuMemHostUnregister(entry.page);
                 release({first, page});
-                return expected_t::fail(inserted, "page-registration table allocation failed");
+                return expected_t::fail(inserted.code, "No room for the page-registration table");
             }
         }
         if (CUresult result = cuMemHostGetDevicePointer(&device_address, host.data(), 0); result != CUDA_SUCCESS) {
@@ -450,9 +450,10 @@ struct host_page_registry_t {
         for (host_page_registration_t& free_entry : pages_)
             if (free_entry.page == nullptr) {
                 free_entry = entry;
-                return status_t::success_k;
+                return status_code_t::success_k;
             }
-        return st::failed(pages_.push_back(std::move(entry))) ? status_t::bad_alloc_k : status_t::success_k;
+        return st::failed(pages_.push_back(std::move(entry))) ? status_code_t::out_of_memory_k
+                                                              : status_code_t::success_k;
     }
 
     /** The page table — a handful of entries, walked linearly. */
@@ -662,7 +663,7 @@ struct infiniband_endpoint_t {
     [[nodiscard]] expected_t post_write(std::size_t local_offset, std::size_t remote_offset, std::size_t length,
                                         infiniband_signal_t signal = infiniband_signal_t::plain_signaled_k) noexcept {
         if (length == 0 || local_offset + length > gpu_buffer_.extent(0))
-            return expected_t::fail(status_t::invalid_argument_k,
+            return expected_t::fail(status_code_t::invalid_argument_k,
                                     "write of {} bytes at local offset {} exceeds the registered {} bytes", length,
                                     local_offset, gpu_buffer_.extent(0));
         ibv_sge scatter_gather {};
@@ -680,7 +681,7 @@ struct infiniband_endpoint_t {
         work_request.wr.rdma.rkey = peer_coordinates_.remote_key;
         ibv_send_wr* rejected = nullptr;
         if (ibv_post_send(queue_pair_, &work_request, &rejected) != 0)
-            return expected_t::fail(status_t::io_k, "posting the RDMA write failed ({} bytes)", length);
+            return expected_t::fail(status_code_t::io_k, "posting the RDMA write failed ({} bytes)", length);
         return {};
     }
 
@@ -689,7 +690,7 @@ struct infiniband_endpoint_t {
         ibv_recv_wr work_request {};
         ibv_recv_wr* rejected = nullptr;
         if (ibv_post_recv(queue_pair_, &work_request, &rejected) != 0)
-            return expected_t::fail(status_t::io_k, "posting the receive failed");
+            return expected_t::fail(status_code_t::io_k, "Posting the receive failed");
         return {};
     }
 
@@ -702,15 +703,15 @@ struct infiniband_endpoint_t {
         while (true) {
             ibv_wc completion {};
             int const reaped = ibv_poll_cq(completion_queue_, 1, &completion);
-            if (reaped < 0) return expected_t::fail(status_t::io_k, "polling the completion queue failed");
+            if (reaped < 0) return expected_t::fail(status_code_t::io_k, "Polling the completion queue failed");
             if (reaped > 0) {
                 if (completion.status != IBV_WC_SUCCESS)
-                    return expected_t::fail(status_t::io_k, "completion failed (status={} vendor={})",
+                    return expected_t::fail(status_code_t::io_k, "completion failed (status={} vendor={})",
                                             static_cast<int>(completion.status), completion.vendor_err);
                 return {};
             }
             if (std::chrono::steady_clock::now() >= deadline)
-                return expected_t::fail(status_t::io_k, "no completion within {}s", timeout_seconds);
+                return expected_t::fail(status_code_t::io_k, "no completion within {}s", timeout_seconds);
             waiter(&unwatched, u32_t {0}, std::size_t {0});
         }
     }
@@ -1366,10 +1367,10 @@ struct infiniband_all_reduce {
         infiniband_reach_t::heap_layout_t layout;
         layout.payload_bytes = scalars * sizeof(value_type_);
         layout.landing_bytes = layout.payload_bytes;
-        auto wired = domain.reach_(member_index, arena, stream, layout, timeout_seconds);
-        if (!wired) return result_t::fail(std::move(wired));
+        auto [reach, status] = domain.reach_(member_index, arena, stream, layout, timeout_seconds);
+        if (!status) return result_t::fail(std::move(status));
         infiniband_all_reduce handle;
-        handle.reach_ = std::move(wired.value_);
+        handle.reach_ = std::move(reach);
         return result_t {std::move(handle)};
     }
 
@@ -1412,10 +1413,10 @@ struct infiniband_all_gather {
         layout.payload_bytes = static_cast<std::size_t>(domain.multimem_domain_count()) * block_scalars *
                                sizeof(value_type_);
         layout.landing_bytes = 0;
-        auto wired = domain.reach_(member_index, arena, stream, layout, timeout_seconds);
-        if (!wired) return result_t::fail(std::move(wired));
+        auto [reach, status] = domain.reach_(member_index, arena, stream, layout, timeout_seconds);
+        if (!status) return result_t::fail(std::move(status));
         infiniband_all_gather handle;
-        handle.reach_ = std::move(wired.value_);
+        handle.reach_ = std::move(reach);
         return result_t {std::move(handle)};
     }
 
@@ -1458,15 +1459,15 @@ struct infiniband_all_to_all {
         using result_t = expected<infiniband_all_to_all>;
         u32_t const domains = domain.multimem_domain_count();
         if (domains > 2u)
-            return result_t::fail(status_t::unsupported_k,
+            return result_t::fail(status_code_t::unsupported_k,
                                   "all-to-all is wired for two domains; {} needs the multi-hop schedule", domains);
         infiniband_reach_t::heap_layout_t layout;
         layout.payload_bytes = static_cast<std::size_t>(domains) * block_scalars * sizeof(value_type_);
         layout.landing_bytes = block_scalars * sizeof(value_type_);
-        auto wired = domain.reach_(member_index, arena, stream, layout, timeout_seconds);
-        if (!wired) return result_t::fail(std::move(wired));
+        auto [reach, status] = domain.reach_(member_index, arena, stream, layout, timeout_seconds);
+        if (!status) return result_t::fail(std::move(status));
         infiniband_all_to_all handle;
-        handle.reach_ = std::move(wired.value_);
+        handle.reach_ = std::move(reach);
         return result_t {std::move(handle)};
     }
 
@@ -1529,7 +1530,7 @@ struct colocated_domain_t {
     [[nodiscard]] static expected<colocated_domain_t> make(mesh_topology_t& topology) noexcept {
         if (topology.shape.multimem_domain_count() != 1)
             return expected<colocated_domain_t>::fail(
-                status_t::internal_k,
+                status_code_t::internal_k,
                 "built without UFORM_WITH_INFINIBAND — rebuild with libibverbs + libmlx5 for " //
                 "cross-domain collectives");
         colocated_domain_t domain;

@@ -75,11 +75,11 @@ using path_character_t = wchar_t;
 [[nodiscard]] inline status_t native_file_status(DWORD reason) noexcept {
     switch (reason) {
     case ERROR_NOT_ENOUGH_MEMORY:
-    case ERROR_OUTOFMEMORY: return status_t::bad_alloc_k;
+    case ERROR_OUTOFMEMORY: return status_code_t::out_of_memory_k;
     case ERROR_INVALID_PARAMETER:
     case ERROR_INVALID_HANDLE:
-    case ERROR_INVALID_NAME: return status_t::invalid_argument_k;
-    default: return status_t::io_k;
+    case ERROR_INVALID_NAME: return status_code_t::invalid_argument_k;
+    default: return status_code_t::io_k;
     }
 }
 
@@ -88,14 +88,14 @@ using path_character_t = wchar_t;
 [[nodiscard]] inline expected_t terminate_path_(sz::string_view_t path,
                                                 std::span<path_character_t, path_capacity_k> terminated) noexcept {
     if (path.size() >= terminated.size() || path.contains('\0'))
-        return expected_t::fail(status_t::invalid_argument_k, "the path holds a NUL or outgrows {} bytes: {}",
+        return expected_t::fail(status_code_t::invalid_argument_k, "the path holds a NUL or outgrows {} bytes: {}",
                                 path_capacity_k, path);
     int const length = path.empty() ? 0
                                     : ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.data(),
                                                             static_cast<int>(path.size()), terminated.data(),
                                                             static_cast<int>(terminated.size() - 1));
     if (length == 0 && !path.empty())
-        return expected_t::fail(status_t::invalid_argument_k, "the path is not UTF-8: {}", path);
+        return expected_t::fail(status_code_t::invalid_argument_k, "the path is not UTF-8: {}", path);
     terminated[static_cast<std::size_t>(length)] = L'\0';
     return {};
 }
@@ -192,11 +192,11 @@ using path_character_t = char;
 /** The status a failure the platform reports as @p reason surfaces as. */
 [[nodiscard]] inline status_t native_file_status(int reason) noexcept {
     switch (reason) {
-    case ENOMEM: return status_t::bad_alloc_k;
+    case ENOMEM: return status_code_t::out_of_memory_k;
     case EINVAL:
     case EBADF:
-    case ENAMETOOLONG: return status_t::invalid_argument_k;
-    default: return status_t::io_k;
+    case ENAMETOOLONG: return status_code_t::invalid_argument_k;
+    default: return status_code_t::io_k;
     }
 }
 
@@ -205,7 +205,7 @@ using path_character_t = char;
 [[nodiscard]] inline expected_t terminate_path_(sz::string_view_t path,
                                                 std::span<path_character_t, path_capacity_k> terminated) noexcept {
     if (path.size() >= terminated.size() || path.contains('\0'))
-        return expected_t::fail(status_t::invalid_argument_k, "the path holds a NUL or outgrows {} bytes: {}",
+        return expected_t::fail(status_code_t::invalid_argument_k, "the path holds a NUL or outgrows {} bytes: {}",
                                 path_capacity_k, path);
     std::memcpy(terminated.data(), path.data(), path.size());
     terminated[path.size()] = '\0';
@@ -356,23 +356,23 @@ inline mapped_file_t::~mapped_file_t() noexcept {
 
 inline expected<mapped_file_t> mapped_file_t::map(sz::string_view_t path) noexcept {
     using mapped_t = expected<mapped_file_t>;
-    expected<native_file_t> file = open_native_file(path, file_access_t::read_only_k);
-    if (!file) return mapped_t::fail(std::move(file));
-    expected<u64_t> capacity = native_file_capacity(*file);
+    auto [file, open_status] = open_native_file(path, file_access_t::read_only_k);
+    if (!open_status) return mapped_t::fail(std::move(open_status));
+    auto [capacity, measure_status] = native_file_capacity(file);
     mapped_file_t mapped;
     // A view keeps its section and its file alive, so both handles close on return.
-    HANDLE const section = capacity && *capacity != 0
-                               ? ::CreateFileMappingW(*file, nullptr, PAGE_READONLY, 0, 0, nullptr)
+    HANDLE const section = measure_status && capacity != 0
+                               ? ::CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr)
                                : nullptr;
     void* const begin = section != nullptr ? ::MapViewOfFile(section, FILE_MAP_READ, 0, 0, 0) : nullptr;
     DWORD const reason = begin == nullptr ? ::GetLastError() : ERROR_SUCCESS;
     if (section != nullptr) { [[maybe_unused]] BOOL const closed_section = ::CloseHandle(section); }
-    [[maybe_unused]] expected_t closed = close_native_file(*file);
-    if (!capacity) return mapped_t::fail(std::move(capacity));
-    if (*capacity == 0) return mapped;
+    [[maybe_unused]] expected_t closed = close_native_file(file);
+    if (!measure_status) return mapped_t::fail(std::move(measure_status));
+    if (capacity == 0) return mapped;
     if (begin == nullptr)
         return mapped_t::fail(native_file_status(reason), "mapping {} failed (error={})", path, reason);
-    mapped.bytes_ = {static_cast<b8_t*>(begin), static_cast<std::size_t>(*capacity)};
+    mapped.bytes_ = {static_cast<b8_t*>(begin), static_cast<std::size_t>(capacity)};
     return mapped;
 }
 
@@ -384,23 +384,24 @@ inline mapped_file_t::~mapped_file_t() noexcept {
 
 inline expected<mapped_file_t> mapped_file_t::map(sz::string_view_t path) noexcept {
     using mapped_t = expected<mapped_file_t>;
-    expected<native_file_t> file = open_native_file(path, file_access_t::read_only_k);
-    if (!file) return mapped_t::fail(std::move(file));
-    expected<u64_t> capacity = native_file_capacity(*file);
+    auto [file, open_status] = open_native_file(path, file_access_t::read_only_k);
+    if (!open_status) return mapped_t::fail(std::move(open_status));
+    auto [capacity, measure_status] = native_file_capacity(file);
     mapped_file_t mapped;
-    if (capacity && *capacity != 0) {
-        void* const copy = std::malloc(static_cast<std::size_t>(*capacity));
-        if (copy != nullptr) mapped.bytes_ = {static_cast<b8_t*>(copy), static_cast<std::size_t>(*capacity)};
+    if (measure_status && capacity != 0) {
+        void* const copy = std::malloc(static_cast<std::size_t>(capacity));
+        if (copy != nullptr) mapped.bytes_ = {static_cast<b8_t*>(copy), static_cast<std::size_t>(capacity)};
     }
-    expected<std::size_t> arrived = mapped.bytes_.empty() ? expected<std::size_t> {0}
-                                                          : read_native_file(*file, 0, mapped.bytes_);
-    [[maybe_unused]] expected_t closed = close_native_file(*file);
-    if (!capacity) return mapped_t::fail(std::move(capacity));
-    if (*capacity != 0 && mapped.bytes_.empty())
-        return mapped_t::fail(status_t::bad_alloc_k, "{} needs {} bytes", path, *capacity);
-    if (!arrived) return mapped_t::fail(std::move(arrived));
-    if (*arrived != mapped.bytes_.size())
-        return mapped_t::fail(status_t::io_k, "{} shrank to {} bytes while read", path, *arrived);
+    auto [length, read_status] = mapped.bytes_.empty() ? expected<std::size_t> {0}
+                                                       : read_native_file(file, 0, mapped.bytes_);
+    [[maybe_unused]] expected_t closed = close_native_file(file);
+    if (!measure_status) return mapped_t::fail(std::move(measure_status));
+    if (capacity != 0 && mapped.bytes_.empty())
+        return mapped_t::fail(status_code_t::out_of_memory_k, "{} needs {} bytes", path, capacity);
+    if (!read_status) return mapped_t::fail(std::move(read_status));
+    if (length != mapped.bytes_.size())
+        return mapped_t::fail({status_code_t::io_k, "File shrank during read"}, "{} shrank to {} bytes while read",
+                              path, length);
     return mapped;
 }
 
@@ -412,21 +413,21 @@ inline mapped_file_t::~mapped_file_t() noexcept {
 
 inline expected<mapped_file_t> mapped_file_t::map(sz::string_view_t path) noexcept {
     using mapped_t = expected<mapped_file_t>;
-    expected<native_file_t> file = open_native_file(path, file_access_t::read_only_k);
-    if (!file) return mapped_t::fail(std::move(file));
-    expected<u64_t> capacity = native_file_capacity(*file);
+    auto [file, open_status] = open_native_file(path, file_access_t::read_only_k);
+    if (!open_status) return mapped_t::fail(std::move(open_status));
+    auto [capacity, measure_status] = native_file_capacity(file);
     mapped_file_t mapped;
     // A mapping outlives the descriptor it came from, which closes on return.
-    void* const begin = capacity && *capacity != 0
-                            ? ::mmap(nullptr, static_cast<std::size_t>(*capacity), PROT_READ, MAP_PRIVATE, *file, 0)
+    void* const begin = measure_status && capacity != 0
+                            ? ::mmap(nullptr, static_cast<std::size_t>(capacity), PROT_READ, MAP_PRIVATE, file, 0)
                             : MAP_FAILED;
     int const reason = begin == MAP_FAILED ? errno : 0;
-    [[maybe_unused]] expected_t closed = close_native_file(*file);
-    if (!capacity) return mapped_t::fail(std::move(capacity));
-    if (*capacity == 0) return mapped;
+    [[maybe_unused]] expected_t closed = close_native_file(file);
+    if (!measure_status) return mapped_t::fail(std::move(measure_status));
+    if (capacity == 0) return mapped;
     if (begin == MAP_FAILED)
         return mapped_t::fail(native_file_status(reason), "mapping {} failed (error={})", path, reason);
-    mapped.bytes_ = {static_cast<b8_t*>(begin), static_cast<std::size_t>(*capacity)};
+    mapped.bytes_ = {static_cast<b8_t*>(begin), static_cast<std::size_t>(capacity)};
     return mapped;
 }
 
@@ -553,11 +554,11 @@ class file_appender_t {
 
     /** Writes @p bytes after everything appended before, failing on a full volume too. */
     [[nodiscard]] expected_t append(bytes_view_t bytes) noexcept {
-        expected<std::size_t> landed = write_native_file(file_, offset_, bytes);
-        if (!landed) return expected_t::fail(std::move(landed));
-        offset_ += *landed;
-        if (*landed != bytes.size())
-            return expected_t::fail(status_t::io_k, "the volume filled up after {} bytes", offset_);
+        auto [length, status] = write_native_file(file_, offset_, bytes);
+        if (!status) return expected_t::fail(std::move(status));
+        offset_ += length;
+        if (length != bytes.size())
+            return expected_t::fail(status_code_t::io_k, "the volume filled up after {} bytes", offset_);
         return {};
     }
 
@@ -586,17 +587,18 @@ template <typename writer_type_>
     constexpr std::size_t suffix_length = sizeof(suffix) - 1;
     char temporary_text[path_capacity_k];
     if (path.size() + suffix_length >= path_capacity_k)
-        return expected_t::fail(status_t::invalid_argument_k, "the path outgrows {} bytes: {}", path_capacity_k, path);
+        return expected_t::fail(status_code_t::invalid_argument_k, "the path outgrows {} bytes: {}", path_capacity_k,
+                                path);
     std::memcpy(temporary_text, path.data(), path.size());
     std::memcpy(temporary_text + path.size(), suffix, suffix_length);
     sz::string_view_t const temporary {temporary_text, path.size() + suffix_length};
 
-    expected<native_file_t> file = open_native_file(temporary, file_access_t::truncate_read_write_k);
-    if (!file) return expected_t::fail(std::move(file));
-    file_appender_t appender {*file};
+    auto [file, status] = open_native_file(temporary, file_access_t::truncate_read_write_k);
+    if (!status) return expected_t::fail(std::move(status));
+    file_appender_t appender {file};
     expected_t written = writer(appender);
-    if (written) written = flush_native_file(*file);
-    expected_t closed = close_native_file(*file);
+    if (written) written = flush_native_file(file);
+    expected_t closed = close_native_file(file);
     if (written) written = std::move(closed);
     if (written) written = rename_file(temporary, path);
     if (!written) {

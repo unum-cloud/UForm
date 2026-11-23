@@ -26,18 +26,18 @@
 
 namespace fu = ashvardanian::forkunion;
 namespace ue = unum::uform::encoder;
-namespace uu = unum::uform::utilities;
+namespace util = unum::uform::utilities;
 using namespace ue;
-using uu::b8_t;
-using uu::bytes_span_t;
-using uu::bytes_view_t;
-using uu::divide_round_up;
-using uu::i64_t;
-using uu::metal_buffer_t;
-using uu::metal_context_t;
-using uu::metal_launch_t;
-using uu::metal_send;
-using uu::metal_size_t;
+using util::b8_t;
+using util::bytes_span_t;
+using util::bytes_view_t;
+using util::divide_round_up;
+using util::i64_t;
+using util::metal_buffer_t;
+using util::metal_context_t;
+using util::metal_launch_t;
+using util::metal_send;
+using util::metal_size_t;
 
 #pragma region Sources
 
@@ -337,7 +337,7 @@ template <typename view_type_>
 /** The context of the Apple GPU @p stream submits to, the first listed for a null stream, or null
  *  for a stream on no listed device. */
 [[nodiscard]] static metal_context_t* context_of_(nk_stream_t stream) noexcept {
-    uu::metal_contexts_t& contexts = uf::gpu_drivers().metal_contexts;
+    util::metal_contexts_t& contexts = uf::gpu_drivers().metal_contexts;
     if (!contexts.count) return nullptr;
     if (!stream) return &contexts.contexts[0];
     void* const device = metal_send(*contexts.contexts[0].api, static_cast<void*>(stream), "device");
@@ -353,7 +353,7 @@ template <typename view_type_>
 
 /** Waits for the work committed to @p stream on @p context 's device. */
 [[nodiscard]] static nk_status_t drain_(metal_context_t const& context, nk_stream_t stream) noexcept {
-    return uu::metal_synchronize(*context.api, queue_of_(context, stream)) ? nk_success_k : nk_device_code_mismatch_k;
+    return util::metal_synchronize(*context.api, queue_of_(context, stream)) ? nk_success_k : nk_device_code_mismatch_k;
 }
 
 /**
@@ -382,7 +382,7 @@ template <typename view_type_>
         // The command buffer retains the buffer before the lock lets a free release it
         if (launch && *launch)
             metal_send<void>(*launch->api, launch->encoder, "useResource:usage:", buffer.handle,
-                             uu::metal_usage_read_write_k);
+                             util::metal_usage_read_write_k);
         return true;
     }
     return false;
@@ -392,7 +392,7 @@ template <typename view_type_>
  *  host address of the same byte, and any other pointer is host memory already. */
 template <typename byte_type_>
 [[nodiscard]] static byte_type_* host_of_(byte_type_* pointer) noexcept {
-    uu::metal_contexts_t& contexts = uf::gpu_drivers().metal_contexts;
+    util::metal_contexts_t& contexts = uf::gpu_drivers().metal_contexts;
     for (std::size_t index = 0; index != contexts.count; ++index) {
         u64_t address = 0;
         std::size_t bytes = 0;
@@ -421,9 +421,9 @@ struct metal_call_t {
                                    std::size_t language) noexcept {
         context = context_of_(stream);
         if (!context) return nk_missing_gpu_k;
-        expected<uu::metal_pipeline_state_t> const state = context->pipeline(source, name, language);
-        if (!state) return nk_device_code_mismatch_k;
-        launch = metal_launch_t {*context->api, queue_of_(*context, stream), state->pipeline};
+        auto [state, status] = context->pipeline(source, name, language);
+        if (!status) return nk_device_code_mismatch_k;
+        launch = metal_launch_t {*context->api, queue_of_(*context, stream), state.pipeline};
         return launch ? nk_success_k : nk_device_code_mismatch_k;
     }
 
@@ -452,9 +452,9 @@ struct metal_call_t {
     /** Switches the encoder to kernel @p name of @p source under @p language . */
     [[nodiscard]] nk_status_t select(char const* source, char const* name,
                                      std::size_t language) noexcept { // vendor-boundary: NumKong's C signature
-        expected<uu::metal_pipeline_state_t> const state = context->pipeline(source, name, language);
-        if (!state) return nk_device_code_mismatch_k;
-        metal_send<void>(*launch.api, launch.encoder, "setComputePipelineState:", state->pipeline);
+        auto [state, status] = context->pipeline(source, name, language);
+        if (!status) return nk_device_code_mismatch_k;
+        metal_send<void>(*launch.api, launch.encoder, "setComputePipelineState:", state.pipeline);
         return nk_success_k;
     }
 
@@ -466,7 +466,8 @@ struct metal_call_t {
 
     /** Dispatches @p groups of @p threads and commits the call. */
     [[nodiscard]] nk_status_t submit(metal_size_t groups, metal_size_t threads) noexcept {
-        return launch.submit(groups, threads) == uu::status_t::success_k ? nk_success_k : nk_device_code_mismatch_k;
+        return launch.submit(groups, threads) == util::status_code_t::success_k ? nk_success_k
+                                                                                : nk_device_code_mismatch_k;
     }
 };
 
@@ -1306,7 +1307,7 @@ nk_allocator_t ue::vram_apple_entries_kit_t::policy(nk_stream_t stream, uform_re
     if (!policy.handle) return {};
     static constexpr auto allocate = [](nk_size_t bytes, void* handle, uform_residency_t residency) noexcept -> void* {
         metal_context_t& context = *static_cast<metal_context_t*>(handle);
-        metal_buffer_t buffer = uu::metal_allocate(context, bytes);
+        metal_buffer_t buffer = util::metal_allocate(context, bytes);
         if (!buffer) return nullptr;
         void* const address = residency == uform_residency_ram_k ? static_cast<void*>(buffer.host)
                                                                  : reinterpret_cast<void*>(metal_send<u64_t>(
@@ -1352,7 +1353,7 @@ nk_status_t ue::vram_apple_entries_kit_t::describe(std::size_t vendor_ordinal,
                                                    device_description_t& description) noexcept {
     metal_context_t const* const context = uf::gpu_drivers().metal_contexts.context(static_cast<int>(vendor_ordinal));
     if (!context) return nk_missing_gpu_k;
-    uu::metal_api_t const& api = *context->api;
+    util::metal_api_t const& api = *context->api;
     void* const pool = api.autorelease_pool_push();
     char const* const name = metal_send<char const*>(api, metal_send(api, context->device, "name"), "UTF8String");
     if (name) std::strncpy(description.name, name, sizeof(description.name) - 1);

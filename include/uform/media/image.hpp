@@ -30,6 +30,7 @@ using uu::bytes_view_t;
 using uu::expected;
 using uu::expected_t;
 using uu::pixel_t;
+using uu::status_code_t;
 using uu::status_t;
 using uu::u8_t;
 
@@ -94,7 +95,7 @@ struct image_plan_t {
  *  window starting there with that @p window_offset continues the walk.
  *
  *  @par Statuses:
- *  - @c status_t::invalid_argument_k Unrecognized magic, a truncated header or a zero extent.
+ *  - @c status_code_t::invalid_argument_k Unrecognized magic, a truncated header or a zero extent.
  */
 [[nodiscard]] expected<image_probe_t> probe_image(bytes_view_t encoded, std::size_t window_offset = 0) noexcept;
 
@@ -119,7 +120,7 @@ struct image_plan_t {
  *  @param[out] out The @b [height,width,4] destination.
  *
  *  @par Statuses:
- *  - @c status_t::invalid_argument_k A corrupt bitstream or an extent no scale reaches.
+ *  - @c status_code_t::invalid_argument_k A corrupt bitstream or an extent no scale reaches.
  */
 [[nodiscard]] expected_t decode_image_rgba(bytes_view_t encoded, image_format_t format,
                                            pixel_image_span_t out) noexcept;
@@ -133,7 +134,7 @@ struct image_plan_t {
  *  @param[out] out The image's @b [rows,columns,P,P,4] cells.
  *
  *  @par Statuses:
- *  - @c status_t::unsupported_k Channel counts other than 4, or an empty grid or source.
+ *  - @c status_code_t::unsupported_k Channel counts other than 4, or an empty grid or source.
  */
 [[nodiscard]] expected_t resize_image(pixel_image_view_t source, pixel_patches_span_t out) noexcept;
 

@@ -33,6 +33,7 @@
 
 #include <algorithm>  // `std::equal`
 #include <filesystem> // `std::filesystem::exists`, `std::filesystem::remove` — the round trip's files
+#include <span>       // `std::span` — the Rust dumps' destination
 #include <string>     // `std::string` — the round trip's path
 #include <vector>     // `std::vector`
 
@@ -84,14 +85,16 @@ static agreement_t compare(f32r2_view_t tower, f32r2_view_t reference) {
     return agreement;
 }
 
-static std::vector<float> read_floats(char const* path) {
-    std::vector<float> values;
+/** Reads the Float32 values at @p path into @p values , as many as fit, answering how many the
+ *  file holds, none when it is missing. */
+static std::size_t read_floats(char const* path, std::span<float> values) {
     std::FILE* file = std::fopen(path, "rb");
-    if (!file) return values;
-    float value;
-    while (std::fread(&value, sizeof(value), 1, file) == 1) values.push_back(value);
+    if (!file) return 0;
+    std::size_t count = 0;
+    for (float value; std::fread(&value, sizeof(value), 1, file) == 1; ++count)
+        if (count < values.size()) values[count] = value;
     std::fclose(file);
-    return values;
+    return count;
 }
 
 /** Encodes the texts through @p verbs in @p precision into @p encoded : on @p executor , a pool
@@ -103,11 +106,10 @@ static case_result_t encode(encoder_verbs<residency_> const& verbs, checkpoint_t
                             geometry_t const& geometry, precision_t precision,
                             typename vendored_residency_executor<residency_>::type executor, nk_stream_t stream,
                             encoded_t& encoded) {
-    expected<void*> made = verbs.create(checkpoint, geometry, precision, stream);
-    if (!made && made.status_ == status_t::unsupported_k && precision == precision_t::e4m3_k)
+    auto [tower, create_status] = verbs.create(checkpoint, geometry, precision, stream);
+    if (!create_status && create_status.status_ == status_code_t::unsupported_k && precision == precision_t::e4m3_k)
         return case_result_t::skipped("needs uform_scalar_e4m3_k products in the class");
-    if (!expect_true(made, "tower: {}", made.description_)) return {};
-    void* const tower = *made;
+    if (!expect_true(create_status, "tower: {}", create_status.description_)) return {};
 
     // A device variant takes its vendor's pinned pages for what both sides address, as its kernels
     // read the batch's segments in place and the host reads the outputs there
@@ -125,12 +127,12 @@ static case_result_t encode(encoder_verbs<residency_> const& verbs, checkpoint_t
     encoder::multimodal_batch_shape_t shape;
     shape.max_rows_per_gpu = items_k, shape.max_segments_per_gpu = items_k,
     shape.max_columns_per_row = geometry.context;
-    expected<batch_t> batch = batch_t::make(allocator, shape);
-    if (!expect_true(batch, "batch: {}", batch.description_)) return verbs.destroy(tower), case_result_t {};
-    auto offsets = batch->segment_offsets.span();
-    auto lengths = batch->segment_lengths.span();
-    auto modalities = batch->segment_modality.span();
-    auto grid = batch->tokens.span();
+    auto [batch, make_status] = batch_t::make(allocator, shape);
+    if (!expect_true(make_status, "batch: {}", make_status.description_)) return verbs.destroy(tower), case_result_t {};
+    auto offsets = batch.segment_offsets.span();
+    auto lengths = batch.segment_lengths.span();
+    auto modalities = batch.segment_modality.span();
+    auto grid = batch.tokens.span();
     std::size_t tokens = 0;
     for (std::size_t item = 0; item != items_k; ++item) {
         std::size_t const length = std::strlen(texts_k[item]);
@@ -143,13 +145,14 @@ static case_result_t encode(encoder_verbs<residency_> const& verbs, checkpoint_t
     }
     offsets[items_k] = static_cast<u32_t>(items_k * geometry.context);
 
-    expected<std::size_t> bytes = verbs.scratch_bytes(tower, tokens, items_k, executor);
-    if (!expect_true(bytes, "scratch: {}", bytes.description_)) return verbs.destroy(tower), case_result_t {};
+    auto [bytes, measure_status] = verbs.scratch_bytes(tower, tokens, items_k, executor);
+    if (!expect_true(measure_status, "scratch: {}", measure_status.description_))
+        return verbs.destroy(tower), case_result_t {};
     st::basic_vector<b8_t, nk::allocator<b8_t>> scratch {nk::allocator<b8_t> {scratch_policy, stream}};
     using shared_floats_t = st::basic_vector<float, nk::allocator<float>>;
     shared_floats_t states {nk::allocator<float> {allocator}}, embeddings {nk::allocator<float> {allocator}},
         token_vectors {nk::allocator<float> {allocator}}, masked_logits {nk::allocator<float> {allocator}};
-    bool const allocated = !st::failed(scratch.resize(st::assume_uninitialized, *bytes)) &&
+    bool const allocated = !st::failed(scratch.resize(st::assume_uninitialized, bytes)) &&
                            !st::failed(states.resize(st::assume_uninitialized, tokens * geometry.hidden)) &&
                            !st::failed(embeddings.resize(st::assume_uninitialized, items_k * geometry.hidden)) &&
                            !st::failed(token_vectors.resize(st::assume_uninitialized, tokens * geometry.token_width)) &&
@@ -160,7 +163,7 @@ static case_result_t encode(encoder_verbs<residency_> const& verbs, checkpoint_t
                              {f32r2_span_t {states.data(), tokens, geometry.hidden}, nk_f32_k},
                              {f32r2_span_t {token_vectors.data(), tokens, geometry.token_width}, nk_f32_k},
                              {masked_logits.data(), items_k, geometry.masked_vocabulary}};
-    expected_t ran = verbs.encode(tower, batch->view(), outputs, scratch, executor);
+    expected_t ran = verbs.encode(tower, batch.view(), outputs, scratch, executor);
     nk_status_t finished = nk_success_k;
     if constexpr (residency_ != vendored_residency_t::ram_k && gpu_vendor_compiled(vendor_of(residency_)))
         finished = entries_kit_of<residency_>::synchronize(stream);
@@ -318,17 +321,17 @@ static case_result_t test_device_parity(checkpoint_to_load_t const& checkpoint, 
     nk::device_kind_t kind = nk::device_kind_t::cuda_k;
     if (device.vendor == uform_gpu_vendor_amd_k) kind = nk::device_kind_t::rocm_k;
     if (device.vendor == uform_gpu_vendor_apple_k) kind = nk::device_kind_t::metal_k;
-    nk::expected<nk::device_t> const opened = nk::device_t::make(kind, device.vendor_ordinal);
-    if (!expect_true(opened, "device: {}", nk::status_name(opened.status))) return {};
-    nk::expected<nk_capability_t> const capabilities = opened.value.capabilities_enabled();
-    if (!capabilities || !capabilities.value) return case_result_t::skipped("needs kernels for the device");
-    nk::expected<nk::stream_t> const stream = nk::stream_t::make(opened.value);
-    if (!expect_true(stream, "device stream: {}", nk::status_name(stream.status))) return {};
+    auto const [opened, open_status] = nk::device_t::make(kind, device.vendor_ordinal);
+    if (!expect_true(nk::succeeded(open_status), "device: {}", nk::status_name(open_status))) return {};
+    auto const [capabilities, query_status] = opened.capabilities_enabled();
+    if (nk::failed(query_status) || !capabilities) return case_result_t::skipped("needs kernels for the device");
+    auto const [stream, create_status] = nk::stream_t::make(opened);
+    if (!expect_true(nk::succeeded(create_status), "device stream: {}", nk::status_name(create_status))) return {};
     case_result_t result {};
-    visit_vram_residency(capabilities.value, [&]<vendored_residency_t residency_, typename ladder_type_>() {
+    visit_vram_residency(capabilities, [&]<vendored_residency_t residency_, typename ladder_type_>() {
         result = device_variant_parity(
-            pick_gpu_variant<residency_>(ladder_type_ {}, uform_gpu_class_unknown_k, capabilities.value), checkpoint,
-            geometry, precision, stream.value.get(), reference, tolerance);
+            pick_gpu_variant<residency_>(ladder_type_ {}, uform_gpu_class_unknown_k, capabilities), checkpoint,
+            geometry, precision, stream.get(), reference, tolerance);
         return true;
     });
     return result;
@@ -340,11 +343,13 @@ static case_result_t test_rust_parity(char const* states_path, char const* embed
                                       std::size_t hidden) {
     if (states_path == nullptr || embeddings_path == nullptr)
         return case_result_t::skipped("needs the states and embeddings dumps in argv");
-    encoded_t rust {read_floats(states_path), read_floats(embeddings_path)};
-    if (!expect_true(
-            rust.states.size() == reference.states.size() && rust.embeddings.size() == reference.embeddings.size(),
-            "rust dumps hold {} and {} floats, expected {} and {}", rust.states.size(), rust.embeddings.size(),
-            reference.states.size(), reference.embeddings.size()))
+    encoded_t rust;
+    rust.states.resize(reference.states.size()), rust.embeddings.resize(reference.embeddings.size());
+    std::size_t const states_count = read_floats(states_path, rust.states);
+    std::size_t const embeddings_count = read_floats(embeddings_path, rust.embeddings);
+    if (!expect_true(states_count == reference.states.size() && embeddings_count == reference.embeddings.size(),
+                     "rust dumps hold {} and {} floats, expected {} and {}", states_count, embeddings_count,
+                     reference.states.size(), reference.embeddings.size()))
         return {};
     check_agreement("the Rust crate", rust, reference, hidden, 5e-2);
     return {};
@@ -387,19 +392,21 @@ static void test_checkpoint_round_trip(checkpoint_to_load_t const& checkpoint, s
     }
     expect_true(!std::filesystem::exists(path + ".tmp"), "{}.tmp outlived the save", path);
 
-    expected<checkpoint_to_load_t> loaded = checkpoint_to_load_t::make(sz::string_view_t {path});
-    if (expect_true(loaded, "load: {}", loaded.description_)) {
-        expect_equal(loaded->size(), checkpoint.size(), "tensors");
-        expect_equal(loaded->metadata().size(), checkpoint.metadata().size(), "metadata pairs");
+    auto [checkpoint_loaded, status] = checkpoint_to_load_t::make(sz::string_view_t {path});
+    if (expect_true(status, "load: {}", status.description_)) {
+        expect_equal(checkpoint_loaded.size(), checkpoint.size(), "tensors");
+        expect_equal(checkpoint_loaded.metadata().size(), checkpoint.metadata().size(), "metadata pairs");
         for (checkpoint_entry_t const& entry : checkpoint.entries()) {
             sz::string_view_t const name = entry.name.view();
-            bytes_view_t const original = entry.dtype == checkpoint_dtype_t::f32_k
-                                              ? nk::as_bytes(checkpoint.float32(name)).values().value
-                                              : nk::as_bytes(checkpoint[name]).values().value;
-            bytes_view_t const reread = entry.dtype == checkpoint_dtype_t::f32_k
-                                            ? nk::as_bytes(loaded->float32(name)).values().value
-                                            : nk::as_bytes((*loaded)[name]).values().value;
-            expect_true(std::equal(original.begin(), original.end(), reread.begin(), reread.end()), "{} differs", name);
+            auto const [original, read_status] = entry.dtype == checkpoint_dtype_t::f32_k
+                                                     ? nk::as_bytes(checkpoint.float32(name)).values()
+                                                     : nk::as_bytes(checkpoint[name]).values();
+            auto const [reread, reread_status] = entry.dtype == checkpoint_dtype_t::f32_k
+                                                     ? nk::as_bytes(checkpoint_loaded.float32(name)).values()
+                                                     : nk::as_bytes(checkpoint_loaded[name]).values();
+            expect_true(nk::succeeded(read_status) && nk::succeeded(reread_status) &&
+                            std::equal(original.begin(), original.end(), reread.begin(), reread.end()),
+                        "{} differs", name);
         }
     }
     std::error_code ignored;
@@ -428,37 +435,38 @@ int main(int argc, char** argv) {
     if (argc != 2 && argc != 4)
         return fmt::println(stderr, "Usage: {} <tiny.safetensors> [<states.f32> <embeddings.f32>]", argv[0]), 1;
     start_test_run(argc, argv);
-    expected<checkpoint_to_load_t> checkpoint = checkpoint_to_load_t::make({argv[1], std::strlen(argv[1])});
-    if (!expect_true(checkpoint, "checkpoint: {}", checkpoint.description_)) return finish_test_run();
-    run_test_case("test_checkpoint_round_trip", test_checkpoint_round_trip, *checkpoint,
+    auto [checkpoint, make_checkpoint_status] = checkpoint_to_load_t::make({argv[1], std::strlen(argv[1])});
+    if (!expect_true(make_checkpoint_status, "checkpoint: {}", make_checkpoint_status.description_))
+        return finish_test_run();
+    run_test_case("test_checkpoint_round_trip", test_checkpoint_round_trip, checkpoint,
                   std::string {argv[1]} + ".round_trip");
-    expected<geometry_t> geometry = geometry_t::from(*checkpoint);
-    if (!expect_true(geometry, "geometry: {}", geometry.description_)) return finish_test_run();
+    auto [geometry, read_status] = geometry_t::from(checkpoint);
+    if (!expect_true(read_status, "geometry: {}", read_status.description_)) return finish_test_run();
 
-    expected<executor_t> pool = executor_t::make(4, caller_exclusivity_t::caller_inclusive_k);
-    if (!expect_true(pool, "pool: {}", pool.description_)) return finish_test_run();
+    auto [pool, make_pool_status] = executor_t::make(4, caller_exclusivity_t::caller_inclusive_k);
+    if (!expect_true(make_pool_status, "pool: {}", make_pool_status.description_)) return finish_test_run();
 
     encoder_verbs<vendored_residency_t::ram_k> const& reference =
         *encoder_class_tables<vendored_residency_t::ram_k, cpu_ladder_floor_k>::find();
     encoded_t bf16_reference, e4m3_reference;
-    encode(reference, *checkpoint, *geometry, precision_t::bf16_k, pool->view(), nullptr, bf16_reference);
-    encode(reference, *checkpoint, *geometry, precision_t::e4m3_k, pool->view(), nullptr, e4m3_reference);
+    encode(reference, checkpoint, geometry, precision_t::bf16_k, pool.view(), nullptr, bf16_reference);
+    encode(reference, checkpoint, geometry, precision_t::e4m3_k, pool.view(), nullptr, e4m3_reference);
     if (!expect_true(!bf16_reference.states.empty() && !e4m3_reference.states.empty(),
                      "the serial floor encodes in both precisions"))
         return finish_test_run();
     run_test_case("test_token_vectors_unit_length", test_token_vectors_unit_length, bf16_reference,
-                  geometry->token_width);
+                  geometry.token_width);
     run_class_parity(cpu_ladder_t {}, argv[1], bf16_reference, e4m3_reference);
     per_gpu_array<uform_gpu_device_t> const listed = listed_gpu_devices();
     for (i32_t const device : test_run.settings.devices) {
         run_test_case(fmt::format("test_device_parity({}, precision_t::bf16_k)", device).c_str(), test_device_parity,
-                      *checkpoint, *geometry, listed[device], precision_t::bf16_k, bf16_reference, 5e-2);
+                      checkpoint, geometry, listed[device], precision_t::bf16_k, bf16_reference, 5e-2);
         run_test_case(fmt::format("test_device_parity({}, precision_t::e4m3_k)", device).c_str(), test_device_parity,
-                      *checkpoint, *geometry, listed[device], precision_t::e4m3_k, e4m3_reference, 1e-1);
+                      checkpoint, geometry, listed[device], precision_t::e4m3_k, e4m3_reference, 1e-1);
     }
     if (test_run.settings.devices.size() == 0)
         run_test_case("test_device_parity", [] { return case_result_t::skipped(no_gpu_device_k); });
     run_test_case("test_rust_parity", test_rust_parity, argc == 4 ? argv[2] : nullptr, argc == 4 ? argv[3] : nullptr,
-                  bf16_reference, geometry->hidden);
+                  bf16_reference, geometry.hidden);
     return finish_test_run();
 }

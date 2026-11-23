@@ -99,7 +99,7 @@ struct mixture_t {
      *  @brief Parse the mixture JSON at @p path .
      *
      *  @par Statuses:
-     *  - @c status_t::invalid_argument_k Malformed JSON, an unknown key, a missing field, or a
+     *  - @c status_code_t::invalid_argument_k Malformed JSON, an unknown key, a missing field, or a
      *    media column whose name tells no modality.
      */
     [[nodiscard]] static expected<mixture_t> read(sz::string_view_t path) noexcept;
@@ -135,7 +135,7 @@ struct mixture_sampler_t {
      *      @p world_gpus GPUs packing @p batches_per_fill batches of @p segments segments per fill.
      *
      *  @par Statuses:
-     *  - @c status_t::invalid_argument_k An entry caps its passes over shards that count no rows.
+     *  - @c status_code_t::invalid_argument_k An entry caps passes over shards that count no rows.
      */
     [[nodiscard]] static expected<mixture_sampler_t> make(std::span<mixture_entry_t const> entries,
                                                           std::span<std::size_t const> rows, std::size_t world_gpus,

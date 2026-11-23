@@ -13,7 +13,7 @@
 
 namespace unum::uform::train {
 
-using utilities::gpu_numerics_t;
+using util::gpu_numerics_t;
 
 /** The NumKong kernels a run over GPUs of @p capabilities calls: those of the newest GPU class
  *  the mask holds. */

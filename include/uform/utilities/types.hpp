@@ -18,10 +18,10 @@
 
 #include <concepts>        // `std::unsigned_integral`
 #include <limits>          // `std::numeric_limits`
-#include <utility>         // `std::move`
+#include <utility>         // `std::move`, `std::tuple_size`, `std::tuple_element`, `std::initializer_list`
 #include <span>            // `std::span` — byte runs and tape offsets
 #include <new>             // placement `new` — the value an `expected` holds
-#include <type_traits>     // `std::type_identity_t`
+#include <type_traits>     // `std::type_identity_t`, `std::is_trivially_copyable_v`
 #include <format>          // `std::vformat_to`, `std::make_format_args`, `std::formatter`
 #include <source_location> // `std::source_location`
 
@@ -30,7 +30,7 @@
 #include <stringzilla/stringzilla.hpp> // `sz::string_t` — the exception-free diagnostics carrier
 #include <smashtable/basic_vector.hpp> // `st::basic_vector` — the exception-free growable array
 
-#include "uform/types.h" // `uform_status_t`, whose values `status_t` takes
+#include "uform/types.h" // `uform_status_t`, whose values `status_code_t` takes
 
 /** @c std::format support for StringZilla slices, so diagnostics interpolate them directly —
  *  no conversion shims at call sites. */
@@ -261,21 +261,20 @@ struct splitmix64_hash_t {
     return value;
 }
 
-/** Outcome of any fallible operation. Every enumerator takes its value from @c uform_status_t , so
- *  crossing the C ABI is a cast.
+/**
+ *  @brief Code of any fallible operation. Every enumerator takes its spelling and value from
+ *      @c uform_status_t , so crossing the C ABI is a cast.
  *
- *  Statuses fall into the categories of @c uform_status_t . Resources: @c bad_alloc_k,
- *  @c device_error_k and @c io_k. Input: @c invalid_argument_k. State: @c unsupported_k and
- *  @c contended_k. Defects: @c internal_k. Any verb that allocates, binds a device or
- *  touches a file may also return a Resources status. A verb's own block lists only what
- *  its contract adds. */
-enum class status_t : i32_t {
+ *  Any verb that allocates, binds a device or touches a file may also return a resource status.
+ *  A verb's own block lists only what its contract adds.
+ */
+enum class status_code_t : i32_t {
 
     /** The operation completed; outputs are valid. */
     success_k = uform_status_success_k,
 
-    /** A caller-provided buffer was too small or a device allocation failed. */
-    bad_alloc_k = uform_status_out_of_memory_k,
+    /** A resource status: a caller-provided buffer was too small or a device allocation failed. */
+    out_of_memory_k = uform_status_out_of_memory_k,
 
     /** A caller argument was null, empty, or otherwise invalid. */
     invalid_argument_k = uform_status_invalid_argument_k,
@@ -283,10 +282,10 @@ enum class status_t : i32_t {
     /** The requested geometry / dtype / extents are unsupported by the dispatched kernel. */
     unsupported_k = uform_status_unsupported_k,
 
-    /** A CUDA Runtime call failed. */
-    device_error_k = uform_status_device_k,
+    /** A resource status: a device runtime call failed. */
+    device_k = uform_status_device_k,
 
-    /** A host I/O / file operation failed (read / write / rename / timeout on a peer's file). */
+    /** A resource status: a host file read, write or rename failed, or a peer's file timed out. */
     io_k = uform_status_io_k,
 
     /** A shared resource, such as a thread pool, was busy with another caller's work. */
@@ -296,19 +295,42 @@ enum class status_t : i32_t {
     internal_k = uform_status_internal_k,
 };
 
-/** Static-string name for a @ref status_t value (the single name table; no allocation). */
-[[nodiscard]] inline char const* to_string(status_t status) noexcept {
-    switch (status) {
-    case status_t::success_k: return "success";
-    case status_t::bad_alloc_k: return "bad_alloc";
-    case status_t::invalid_argument_k: return "invalid_argument";
-    case status_t::unsupported_k: return "unsupported";
-    case status_t::device_error_k: return "device_error";
-    case status_t::io_k: return "io";
-    case status_t::contended_k: return "contended";
-    case status_t::internal_k: return "internal";
+/** Why a call failed: a code recovery branches on, and an optional static note naming the broken
+ *  invariant, step or resource, for logs and regression analysis. */
+struct [[nodiscard]] status_t {
+    status_code_t code = status_code_t::success_k;
+    char const* note = nullptr;
+
+    constexpr status_t() noexcept = default;
+    constexpr status_t(status_code_t reason, char const* detail = nullptr) noexcept : code(reason), note(detail) {}
+    constexpr bool succeeded() const noexcept { return code == status_code_t::success_k; }
+    constexpr bool failed() const noexcept { return code != status_code_t::success_k; }
+    friend constexpr bool operator==(status_t const& status, status_code_t code) noexcept {
+        return status.code == code;
+    }
+};
+
+static_assert(sizeof(status_t) == 2 * sizeof(void*) && std::is_trivially_copyable_v<status_t>,
+              "a status is a code and a note pointer, returned in two registers");
+
+/** Static-string name for a @ref status_code_t value (the single name table; no allocation). */
+[[nodiscard]] inline char const* to_string(status_code_t code) noexcept {
+    switch (code) {
+    case status_code_t::success_k: return "success";
+    case status_code_t::out_of_memory_k: return "out_of_memory";
+    case status_code_t::invalid_argument_k: return "invalid_argument";
+    case status_code_t::unsupported_k: return "unsupported";
+    case status_code_t::device_k: return "device";
+    case status_code_t::io_k: return "io";
+    case status_code_t::contended_k: return "contended";
+    case status_code_t::internal_k: return "internal";
     }
     return "unknown";
+}
+
+/** The note of @p status , else its code's name. */
+[[nodiscard]] inline char const* to_string(status_t status) noexcept {
+    return status.note ? status.note : to_string(status.code);
 }
 
 /** An output iterator @c std::vformat_to writes through, appending straight into an exception-free
@@ -341,6 +363,16 @@ template <typename... arg_types_>
     return !failed;
 }
 
+/** Allocate @p tensor as @c tensor_type_::uninitialized builds it from @p extents and
+ *  @p allocator , reporting whether NumKong succeeded; on failure @p tensor is left empty. */
+template <typename tensor_type_>
+[[nodiscard]] bool allocate_uninitialized(tensor_type_& tensor, std::initializer_list<std::size_t> extents,
+                                          typename tensor_type_::allocator_type allocator) noexcept {
+    auto [allocated, allocate_status] = tensor_type_::uninitialized(extents, allocator);
+    tensor = std::move(allocated);
+    return nk::succeeded(allocate_status);
+}
+
 /** A format string bundled with the @c std::source_location of the call site that spelled
  *  it. The implicit conversion from a string literal lets @ref expected::fail capture the
  *  failure site behind its variadic pack, where a defaulted trailing argument cannot go —
@@ -353,6 +385,64 @@ struct format_at_t {
                 std::source_location location = std::source_location::current()) noexcept
         : format(format), location(location) {}
 };
+
+template <typename value_type_>
+struct expected;
+
+/** The value-less @ref expected — the return type of fallible actions that produce no result
+ *  (publish, await, barrier), carrying the same status / driver-error / description / location
+ *  channel. Default-constructed means success: @c return @c {} . */
+template <>
+struct expected<void> {
+    status_t status_ {};
+    i32_t cu_error_ = 0; // The CUDA Driver `CUresult` code, zero (`CUDA_SUCCESS`) unless set by `cuda_failure`.
+    sz::string_t description_ {};
+    std::source_location location_ {};
+
+    expected() noexcept = default;
+    expected(expected const&) noexcept = delete;
+    expected& operator=(expected const&) noexcept = delete;
+
+    expected(expected&&) noexcept = default;
+    expected& operator=(expected&&) noexcept = default;
+
+    /** @c true iff the action succeeded. */
+    [[nodiscard]] explicit operator bool() const noexcept { return status_.succeeded(); }
+
+    /** Failure tagged with a @ref status_t : materializes @p format + @p args into the description
+     *  and records the failure site @ref format_at_t captured. */
+    template <typename... arg_types_>
+    [[nodiscard]] static expected fail(status_t status, format_at_t format, arg_types_&&... args) noexcept {
+        expected result;
+        result.status_ = status;
+        result.location_ = format.location;
+        std::vformat_to(format_into_t {&result.description_}, format.format, std::make_format_args(args...));
+        return result;
+    }
+
+    /** Failure tagged with @p code and its static @p note , with nothing to format. */
+    [[nodiscard]] static expected fail(status_code_t code, char const* note,
+                                       std::source_location location = std::source_location::current()) noexcept {
+        expected failure;
+        failure.status_ = {code, note};
+        failure.location_ = location;
+        return failure;
+    }
+
+    /** Failure adopted from another @ref expected 's error channel, unchanged. */
+    template <typename other_type_>
+    [[nodiscard]] static expected fail(expected<other_type_>&& other) noexcept {
+        expected result;
+        result.status_ = other.status_;
+        result.cu_error_ = other.cu_error_;
+        result.description_ = std::move(other.description_);
+        result.location_ = other.location_;
+        return result;
+    }
+};
+
+/** The everyday spelling of the value-less @ref expected . */
+using expected_t = expected<void>;
 
 /**
  *  @brief Minimal host-side value-or-error carrier — the return type of every fallible host
@@ -370,7 +460,7 @@ struct expected {
     union {
         value_type_ value_; // Live only on the success path (status_ == success_k); managed by hand below.
     };
-    status_t status_ = status_t::success_k;
+    status_t status_ {};
     i32_t cu_error_ = 0; // The CUDA Driver `CUresult` code, zero (`CUDA_SUCCESS`) unless set by `cuda_failure`.
     sz::string_t description_ {};
     std::source_location location_ {};
@@ -388,27 +478,27 @@ struct expected {
     expected(expected&& other) noexcept
         : status_(other.status_), cu_error_(other.cu_error_), description_(std::move(other.description_)),
           location_(other.location_) {
-        if (status_ == status_t::success_k)
+        if (status_ == status_code_t::success_k)
             ::new (static_cast<void*>(&value_)) value_type_(std::move(other.value_)); // vendor-boundary
     }
     expected& operator=(expected&& other) noexcept {
         if (this != &other) {
-            if (status_ == status_t::success_k) value_.~value_type_();
+            if (status_ == status_code_t::success_k) value_.~value_type_();
             status_ = other.status_;
             cu_error_ = other.cu_error_;
             description_ = std::move(other.description_);
             location_ = other.location_;
-            if (status_ == status_t::success_k)
+            if (status_ == status_code_t::success_k)
                 ::new (static_cast<void*>(&value_)) value_type_(std::move(other.value_)); // vendor-boundary
         }
         return *this;
     }
     ~expected() noexcept {
-        if (status_ == status_t::success_k) value_.~value_type_();
+        if (status_ == status_code_t::success_k) value_.~value_type_();
     }
 
     /** @c true iff the operation succeeded and the value is readable. */
-    [[nodiscard]] explicit operator bool() const noexcept { return status_ == status_t::success_k; }
+    [[nodiscard]] explicit operator bool() const noexcept { return status_.succeeded(); }
 
     /** Reach the held value on the success path, so a consumer writes @c result->field or
      *  @c *result instead of @c result.value_ . Reading it on a failed @ref expected is a logic
@@ -418,6 +508,26 @@ struct expected {
     [[nodiscard]] value_type_& operator*() noexcept { return value_; }
     [[nodiscard]] value_type_ const& operator*() const noexcept { return value_; }
 
+    /** The tuple protocol behind <tt>auto [value, status] = ...</tt>: the value by value, built
+     *  empty on failure so no name binds storage that was never constructed, then the status
+     *  record, which reads as @c true on success. */
+    template <std::size_t index_>
+        requires std::is_nothrow_default_constructible_v<value_type_>
+    [[nodiscard]] auto get() && noexcept {
+        if constexpr (index_ == 0) {
+            if (status_ != status_code_t::success_k) return value_type_();
+            return value_type_(std::move(value_));
+        }
+        else {
+            expected_t status;
+            status.status_ = status_;
+            status.cu_error_ = cu_error_;
+            status.description_ = std::move(description_);
+            status.location_ = location_;
+            return status;
+        }
+    }
+
     /** Failure tagged with a @ref status_t : materializes @p format + @p args into the description
      *  and records the failure site @ref format_at_t captured. */
     template <typename... arg_types_>
@@ -426,6 +536,14 @@ struct expected {
         result.location_ = format.location;
         std::vformat_to(format_into_t {&result.description_}, format.format, std::make_format_args(args...));
         return result;
+    }
+
+    /** Failure tagged with @p code and its static @p note , with nothing to format. */
+    [[nodiscard]] static expected fail(status_code_t code, char const* note,
+                                       std::source_location location = std::source_location::current()) noexcept {
+        expected failure {failure_t {}, {code, note}};
+        failure.location_ = location;
+        return failure;
     }
 
     /** Failure adopted from another @ref expected 's error channel: the status, driver error,
@@ -448,55 +566,28 @@ struct expected {
     expected(failure_t, status_t status) noexcept : status_(status) {}
 };
 
-/** The value-less @ref expected — the return type of fallible actions that produce no result
- *  (publish, await, barrier), carrying the same status / driver-error / description / location
- *  channel. Default-constructed means success: @c return @c {} . */
-template <>
-struct expected<void> {
-    status_t status_ = status_t::success_k;
-    i32_t cu_error_ = 0; // The CUDA Driver `CUresult` code, zero (`CUDA_SUCCESS`) unless set by `cuda_failure`.
-    sz::string_t description_ {};
-    std::source_location location_ {};
-
-    expected() noexcept = default;
-    expected(expected const&) noexcept = delete;
-    expected& operator=(expected const&) noexcept = delete;
-
-    expected(expected&&) noexcept = default;
-    expected& operator=(expected&&) noexcept = default;
-
-    /** @c true iff the action succeeded. */
-    [[nodiscard]] explicit operator bool() const noexcept { return status_ == status_t::success_k; }
-
-    /** Failure tagged with a @ref status_t : materializes @p format + @p args into the description
-     *  and records the failure site @ref format_at_t captured. */
-    template <typename... arg_types_>
-    [[nodiscard]] static expected fail(status_t status, format_at_t format, arg_types_&&... args) noexcept {
-        expected result;
-        result.status_ = status;
-        result.location_ = format.location;
-        std::vformat_to(format_into_t {&result.description_}, format.format, std::make_format_args(args...));
-        return result;
-    }
-
-    /** Failure adopted from another @ref expected 's error channel, unchanged. */
-    template <typename other_type_>
-    [[nodiscard]] static expected fail(expected<other_type_>&& other) noexcept {
-        expected result;
-        result.status_ = other.status_;
-        result.cu_error_ = other.cu_error_;
-        result.description_ = std::move(other.description_);
-        result.location_ = other.location_;
-        return result;
-    }
-};
-
-/** The everyday spelling of the value-less @ref expected . */
-using expected_t = expected<void>;
-
 } // namespace unum::uform::utilities
 
-/** @c std::format support for statuses, printing the name @c to_string gives. */
+namespace unum::uform {
+namespace util = utilities;
+} // namespace unum::uform
+
+/** What <tt>auto [value, status] = ...</tt> looks up: the value lives in a @c union , so the tuple
+ *  protocol is the only route. */
+template <typename value_type_>
+struct std::tuple_size<unum::uform::utilities::expected<value_type_>> : std::integral_constant<std::size_t, 2> {};
+
+template <typename value_type_>
+struct std::tuple_element<0, unum::uform::utilities::expected<value_type_>> {
+    using type = value_type_;
+};
+
+template <typename value_type_>
+struct std::tuple_element<1, unum::uform::utilities::expected<value_type_>> {
+    using type = typename unum::uform::utilities::expected_t;
+};
+
+/** @c std::format support for statuses, printing the note or the code name @c to_string gives. */
 template <>
 struct std::formatter<unum::uform::utilities::status_t> : std::formatter<std::string_view> {
     auto format(auto status, std::format_context& context) const noexcept {

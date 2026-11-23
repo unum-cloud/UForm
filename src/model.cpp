@@ -28,42 +28,44 @@ uform_model_handle_t::~uform_model_handle_t() noexcept {
                 if (*tower) verbs->destroy(*tower);
                 return;
             }
-            for (uf::vram_replica_t& replica : std::get<uf::per_gpu_array<uf::vram_replica_t>>(towers))
+            for (uf::vram_replica_t& replica : std::get<util::per_gpu_array<uf::vram_replica_t>>(towers))
                 if (replica.tower) verbs->destroy(replica.tower);
         },
         tables);
 }
 
 /** What a load was doing when the engine failed, which picks the message a malformed file gets. */
-enum class load_stage_t : u8_t {
+enum class load_stage_t : util::u8_t {
     reading_k,
     measuring_k,
     packing_k,
 };
 
-/** Records a failed checkpoint read, geometry read or tower pack at @p stage with a static
- *  message per engine @p status : what the file holds is malformed, not an invalid argument. */
-static bool propagate_load_failure(status_t status, load_stage_t stage, uform_outcome_t* outcome) noexcept {
-    switch (status) {
-    case status_t::invalid_argument_k:
+/** Records a failed checkpoint read, geometry read or tower pack at @p stage with the engine's
+ *  note, else a static message per engine @p status , reporting a bad file as malformed rather
+ *  than as an invalid argument. */
+static bool propagate_load_failure(util::status_t status, load_stage_t stage, uform_outcome_t* outcome) noexcept {
+    auto const fail = [&](uform_status_t code, char const* message) noexcept {
+        return propagate_error(code, outcome, status.note ? status.note : message);
+    };
+    switch (status.code) {
+    case util::status_code_t::invalid_argument_k:
         switch (stage) {
-        case load_stage_t::reading_k:
-            return propagate_error(uform_status_malformed_k, outcome, "The checkpoint is not a safetensors file");
+        case load_stage_t::reading_k: return fail(uform_status_malformed_k, "The checkpoint is not a safetensors file");
         case load_stage_t::measuring_k:
-            return propagate_error(uform_status_malformed_k, outcome, "The checkpoint carries no usable geometry");
+            return fail(uform_status_malformed_k, "The checkpoint carries no usable geometry");
         case load_stage_t::packing_k:
-            return propagate_error(uform_status_malformed_k, outcome, "The checkpoint misses or misshapes a tensor");
+            return fail(uform_status_malformed_k, "The checkpoint misses or misshapes a tensor");
         }
         break;
-    case status_t::bad_alloc_k:
-        return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the model's weights");
-    case status_t::io_k:
-        return propagate_error(uform_status_io_k, outcome, "The checkpoint file could not be opened or mapped");
-    case status_t::unsupported_k:
-        return propagate_error(uform_status_unsupported_k, outcome, "No kernel of the picked class packs a tensor");
+    case util::status_code_t::out_of_memory_k:
+        return fail(uform_status_out_of_memory_k, "Failed to allocate the model's weights");
+    case util::status_code_t::io_k: return fail(uform_status_io_k, "The checkpoint could not be opened or mapped");
+    case util::status_code_t::unsupported_k:
+        return fail(uform_status_unsupported_k, "The picked class has no packing kernel");
     default: break;
     }
-    return propagate_error(uform_status_internal_k, outcome, "The model or its device failed to load");
+    return fail(uform_status_internal_k, "The model or its device failed to load");
 }
 
 /** The precision @p quantization names, false once @p outcome records that the blocks
@@ -98,18 +100,18 @@ static std::size_t tower_bytes(ue::geometry_t const& geometry, ue::precision_t p
 
 /** Parses the checkpoint @p loaded holds into a model handle in @p precision , its towers still to
  *  be packed; null once @p outcome records why not. */
-static std::unique_ptr<uform_model_handle_t> start_model(expected<checkpoint_to_load_t> const& loaded,
+static std::unique_ptr<uform_model_handle_t> start_model(util::expected<util::checkpoint_to_load_t> const& loaded,
                                                          ue::precision_t precision, uform_outcome_t* outcome) noexcept {
     if (!loaded) return propagate_load_failure(loaded.status_, load_stage_t::reading_k, outcome), nullptr;
-    expected<ue::geometry_t> geometry = ue::geometry_t::from(*loaded);
-    if (!geometry) return propagate_load_failure(geometry.status_, load_stage_t::measuring_k, outcome), nullptr;
+    auto [geometry, status] = ue::geometry_t::from(*loaded);
+    if (!status) return propagate_load_failure(status.status_, load_stage_t::measuring_k, outcome), nullptr;
     std::unique_ptr<uform_model_handle_t> model {new (std::nothrow) uform_model_handle_t {}};
     if (!model) return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the model"), nullptr;
-    model->geometry = *geometry;
+    model->geometry = geometry;
     model->precision = precision;
-    std::size_t const groups = geometry->choice_temperature_groups;
-    nk::tensor_view<f32_t, 2> const stored = loaded->float32("choices.inverse_temperatures");
-    f32_t const* const calibrated = stored.empty() ? nullptr : stored.data();
+    std::size_t const groups = geometry.choice_temperature_groups;
+    nk::tensor_view<util::f32_t, 2> const stored = loaded->float32("choices.inverse_temperatures");
+    util::f32_t const* const calibrated = stored.empty() ? nullptr : stored.data();
     if (st::failed(model->choice_inverse_temperatures.resize(st::assume_uninitialized, groups)))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the model"), nullptr;
     for (std::size_t group = 0; group != groups; ++group)
@@ -120,12 +122,12 @@ static std::unique_ptr<uform_model_handle_t> start_model(expected<checkpoint_to_
 /** Packs one tower of @p model from @p checkpoint through @p verbs on @p stream , null on the host;
  *  null once @p outcome records why not. */
 template <vendored_residency_t residency_>
-static void* pack_tower(uform_model_handle_t& model, checkpoint_to_load_t const& checkpoint,
+static void* pack_tower(uform_model_handle_t& model, util::checkpoint_to_load_t const& checkpoint,
                         encoder_verbs<residency_> const& verbs, nk_stream_t stream, uform_outcome_t* outcome) noexcept {
-    expected<void*> packed = verbs.create(checkpoint, model.geometry, model.precision, stream);
-    if (!packed) return propagate_load_failure(packed.status_, load_stage_t::packing_k, outcome), nullptr;
+    auto [tower, status] = verbs.create(checkpoint, model.geometry, model.precision, stream);
+    if (!status) return propagate_load_failure(status.status_, load_stage_t::packing_k, outcome), nullptr;
     model.memory_usage += tower_bytes(model.geometry, model.precision);
-    return *packed;
+    return tower;
 }
 
 /** The ceiling a RAM load picks its class under: the machine's masks intersected with the class
@@ -136,9 +138,9 @@ static bool host_ceiling(uform_executor_t executor, uform_cpu_class_t ceiling_cl
     if (executor && !ram)
         return propagate_error(uform_status_device_k, outcome, "A RAM load needs a RAM executor or none");
     if (ram && ceiling_class == uform_cpu_class_unknown_k) return ceiling = ram->ceiling, true;
-    expected<cpu_ceiling_t> picked = pick_cpu_ceiling(ceiling_class);
-    if (!picked) return propagate_error(status_of(picked.status_), outcome, "No compiled class fits the ceiling");
-    ceiling = *picked;
+    auto [class_ceiling, status] = pick_cpu_ceiling(ceiling_class);
+    if (!status) return propagate_error(status_of(status.status_), outcome, "No compiled class fits the ceiling");
+    ceiling = class_ceiling;
     if (ram) {
         ceiling.compute &= ram->ceiling.compute;
         ceiling.sync = static_cast<fu::capabilities_t>(ceiling.sync & ram->ceiling.sync);
@@ -149,8 +151,8 @@ static bool host_ceiling(uform_executor_t executor, uform_cpu_class_t ceiling_cl
 /** Packs a RAM model from @p loaded for the newest class under the ceiling @p ram_options sets,
  *  and publishes it into @p output once the handler lets the load finish. */
 static void load_ram(uform_model_t* output, uform_executor_t executor, uform_ram_options_t const& ram_options,
-                     expected<checkpoint_to_load_t> loaded, ue::precision_t precision, uform_progress_t progress,
-                     uform_outcome_t* outcome) noexcept {
+                     util::expected<util::checkpoint_to_load_t> loaded, ue::precision_t precision,
+                     uform_progress_t progress, uform_outcome_t* outcome) noexcept {
     cpu_ceiling_t ceiling;
     if (!host_ceiling(executor, ram_options.cpu_class_ceiling, ceiling, outcome)) return;
     encoder_verbs<vendored_residency_t::ram_k> const* const verbs = pick_cpu_variant(cpu_ladder_t {}, ceiling);
@@ -171,10 +173,10 @@ static void load_ram(uform_model_t* output, uform_executor_t executor, uform_ram
 /** Packs one replica per device of @p devices that @p vram names through the newest class of
  *  @p ladder_type_ every one of them runs; false once @p outcome records why not. */
 template <vendored_residency_t residency_, typename ladder_type_>
-static bool load_replicas(uform_model_handle_t& model, checkpoint_to_load_t const& checkpoint, vram_executor_t& devices,
-                          uform_vram_options_t const& vram, progress_ticks_t& ticks,
+static bool load_replicas(uform_model_handle_t& model, util::checkpoint_to_load_t const& checkpoint,
+                          vram_executor_t& devices, uform_vram_options_t const& vram, progress_ticks_t& ticks,
                           uform_outcome_t* outcome) noexcept {
-    per_gpu_array<vram_replica_t>& replicas = std::get<per_gpu_array<vram_replica_t>>(model.towers);
+    util::per_gpu_array<vram_replica_t>& replicas = std::get<util::per_gpu_array<vram_replica_t>>(model.towers);
     encoder_verbs<residency_> const* verbs = nullptr;
     std::size_t placed = 0;
     for (vram_device_t& device : devices.devices) {
@@ -193,7 +195,7 @@ static bool load_replicas(uform_model_handle_t& model, checkpoint_to_load_t cons
         model.tables = verbs;
         void* const tower = pack_tower(model, checkpoint, *verbs, device.stream.get(), outcome);
         if (!tower) return false;
-        if (replicas.push_back(vram_replica_t {device.ordinal, tower}) != status_t::success_k)
+        if (replicas.push_back(vram_replica_t {device.ordinal, tower}) != util::status_code_t::success_k)
             return verbs->destroy(tower),
                    propagate_error(uform_status_out_of_memory_k, outcome, "Failed to list the replicas");
         if (ticks(++placed, devices.devices.size()) == continuation_t::cancel_k)
@@ -205,8 +207,8 @@ static bool load_replicas(uform_model_handle_t& model, checkpoint_to_load_t cons
 /** Packs a VRAM model from @p loaded on every device of @p executor that @p vram names, all of them
  *  when it names none, and publishes it into @p output . */
 static void load_vram(uform_model_t* output, uform_executor_t executor, uform_vram_options_t const& vram,
-                      expected<checkpoint_to_load_t> loaded, ue::precision_t precision, uform_progress_t progress,
-                      uform_outcome_t* outcome) noexcept {
+                      util::expected<util::checkpoint_to_load_t> loaded, ue::precision_t precision,
+                      uform_progress_t progress, uform_outcome_t* outcome) noexcept {
     vram_executor_t* const devices = executor ? std::get_if<vram_executor_t>(&executor->executor) : nullptr;
     if (!devices) return propagate_error(uform_status_device_k, outcome, "A VRAM load needs a VRAM executor"), void();
     if (vram.devices_count && !vram.devices)
@@ -220,7 +222,7 @@ static void load_vram(uform_model_t* output, uform_executor_t executor, uform_vr
     }
     std::unique_ptr<uform_model_handle_t> model = start_model(loaded, precision, outcome);
     if (!model) return;
-    model->towers.emplace<per_gpu_array<vram_replica_t>>();
+    model->towers.emplace<util::per_gpu_array<vram_replica_t>>();
     progress_ticks_t ticks {progress, devices->devices.size()};
     bool const packed = visit_vram_residency(
         devices->devices[0].capabilities, [&]<vendored_residency_t residency_, typename ladder_type_>() noexcept {
@@ -232,13 +234,13 @@ static void load_vram(uform_model_t* output, uform_executor_t executor, uform_vr
 }
 
 /** Maps the checkpoint file @p path , which the load closes before completing. */
-static expected<checkpoint_to_load_t> map_checkpoint(uform_bytes_view_t path) noexcept {
-    return checkpoint_to_load_t::make(text_of(path));
+static util::expected<util::checkpoint_to_load_t> map_checkpoint(uform_bytes_view_t path) noexcept {
+    return util::checkpoint_to_load_t::make(text_of(path));
 }
 
 /** Views the checkpoint image @p buffer , borrowed only until the towers are packed. */
-static expected<checkpoint_to_load_t> view_checkpoint(uform_bytes_view_t buffer) noexcept {
-    return checkpoint_to_load_t::view(std::as_bytes(std::span<u8_t const> {buffer.data, buffer.length}));
+static util::expected<util::checkpoint_to_load_t> view_checkpoint(uform_bytes_view_t buffer) noexcept {
+    return util::checkpoint_to_load_t::view(std::as_bytes(std::span<util::u8_t const> {buffer.data, buffer.length}));
 }
 
 /** A load naming its checkpoint by path, which a C string ends at its first NUL. */

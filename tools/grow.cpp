@@ -65,7 +65,7 @@ namespace st = ashvardanian::smashtable;
 namespace sz = ashvardanian::stringzilla;
 namespace ue = unum::uform::encoder;
 
-using namespace unum::uform::utilities;
+namespace util = unum::uform::utilities;
 using namespace unum::uform::tools;
 
 /** The cosine every grown embedding's prefix must reach against the source's. */
@@ -130,19 +130,19 @@ static constexpr char const* kept_metadata_k[] = {
 
 /** Insert @p source as @p name , widened by @p row_bands and @p columns through @p staging ; zero
  *  bands and kept columns copy it as it is. */
-[[nodiscard]] static expected_t insert_grown_(checkpoint_to_save_t& grown, sz::string_view_t name,
-                                              nk::tensor_view<nk_bf16_t, 2> source, std::size_t row_bands,
-                                              columns_t columns, st::basic_vector<nk_bf16_t>& staging) noexcept {
+[[nodiscard]] static util::expected_t insert_grown_(util::checkpoint_to_save_t& grown, sz::string_view_t name,
+                                                    nk::tensor_view<nk_bf16_t, 2> source, std::size_t row_bands,
+                                                    columns_t columns, st::basic_vector<nk_bf16_t>& staging) noexcept {
     std::size_t const rows = source.extent(0), cols = source.extent(1);
     std::size_t const band = row_bands ? rows / row_bands : rows;
     std::size_t const grown_rows = row_bands ? 2 * rows : rows;
     std::size_t const grown_cols = columns == columns_t::kept_k ? cols : 2 * cols;
     if (st::failed(staging.resize(st::assume_uninitialized, grown_rows * grown_cols)))
-        return expected_t::fail(status_t::bad_alloc_k, "{} staging failed", name);
+        return util::expected_t::fail(util::status_code_t::out_of_memory_k, "{} staging failed", name);
     nk::tensor_span<nk_bf16_t, 2> const target {staging.data(), grown_rows, grown_cols};
     nk_capability_t capabilities = 0;
     if (columns == columns_t::halved_k && nk_capabilities_enabled_cpu(&capabilities) != nk_success_k)
-        return expected_t::fail(status_t::unsupported_k, "{} found no CPU capabilities", name);
+        return util::expected_t::fail(util::status_code_t::unsupported_k, "{} found no CPU capabilities", name);
     nk_f32_t const half = 0.5f, zero = 0.0f;
     for (std::size_t row = 0; row != grown_rows; ++row) {
         std::size_t const source_row = row_bands ? row / (2 * band) * band + row % band : row;
@@ -151,19 +151,19 @@ static constexpr char const* kept_metadata_k[] = {
             nk_bf16_t* const to = &target[row, first];
             if (columns != columns_t::halved_k) std::memcpy(to, from, cols * sizeof(nk_bf16_t));
             else if (nk_each_scale_bf16_best(from, cols, &half, &zero, to, capabilities, nullptr) != nk_success_k)
-                return expected_t::fail(status_t::unsupported_k, "{} halving failed", name);
+                return util::expected_t::fail(util::status_code_t::unsupported_k, "{} halving failed", name);
         }
     }
     return grown.insert(name, nk::tensor_view<nk_bf16_t, 2> {staging.data(), grown_rows, grown_cols});
 }
 
 /** Insert the zero matrix shaped like @p source as @p name through @p staging . */
-[[nodiscard]] static expected_t insert_zeros_(checkpoint_to_save_t& grown, sz::string_view_t name,
-                                              nk::tensor_view<nk_bf16_t, 2> source,
-                                              st::basic_vector<nk_bf16_t>& staging) noexcept {
+[[nodiscard]] static util::expected_t insert_zeros_(util::checkpoint_to_save_t& grown, sz::string_view_t name,
+                                                    nk::tensor_view<nk_bf16_t, 2> source,
+                                                    st::basic_vector<nk_bf16_t>& staging) noexcept {
     std::size_t const rows = source.extent(0), cols = source.extent(1);
     if (st::failed(staging.resize(st::assume_uninitialized, rows * cols)))
-        return expected_t::fail(status_t::bad_alloc_k, "{} staging failed", name);
+        return util::expected_t::fail(util::status_code_t::out_of_memory_k, "{} staging failed", name);
     std::memset(staging.data(), 0, rows * cols * sizeof(nk_bf16_t)); // BFloat16 +0 is all zero bits
     return grown.insert(name, nk::tensor_view<nk_bf16_t, 2> {staging.data(), rows, cols});
 }
@@ -171,16 +171,17 @@ static constexpr char const* kept_metadata_k[] = {
 /** Fill @p grown with the weights and geometry of @p source taken one @p step up, refusing a
  *  source tensor this neither grows, carries nor leaves behind, and reporting each block into
  *  @p phase . */
-[[nodiscard]] static expected_t grow_(checkpoint_to_load_t const& source, ue::geometry_t const& geometry, step_t step,
-                                      verb_phase_t& phase, checkpoint_to_save_t& grown) noexcept {
+[[nodiscard]] static util::expected_t grow_(util::checkpoint_to_load_t const& source, ue::geometry_t const& geometry,
+                                            step_t step, verb_phase_t& phase,
+                                            util::checkpoint_to_save_t& grown) noexcept {
     std::size_t accounted = 0;
     // The Float32 state goes first, as the payload packs it ahead of the BFloat16 weights.
     for (char const* carried : {"contrastive.inverse_temperatures", "contrastive.biases",
                                 "late_interaction.inverse_temperatures", "late_interaction.biases"}) {
-        f32r2_view_t const values = source.float32(carried);
+        util::f32r2_view_t const values = source.float32(carried);
         if (values.empty()) continue;
         ++accounted;
-        if (expected_t inserted = grown.insert(carried, values); !inserted) return inserted;
+        if (util::expected_t inserted = grown.insert(carried, values); !inserted) return inserted;
     }
     for (char const* moments : {"contrastive.temperature_moments", "late_interaction.temperature_moments"})
         accounted += !source.float32(moments).empty();
@@ -190,12 +191,12 @@ static constexpr char const* kept_metadata_k[] = {
     auto find = [&]() noexcept {
         name.clear();
         nk::tensor_view<nk_bf16_t, 2> found {};
-        if (format_into(name, "model.{}", suffix.view())) found = source[name.view()];
+        if (util::format_into(name, "model.{}", suffix.view())) found = source[name.view()];
         if (found.empty()) return found;
         ++accounted;
         for (char const* part : {"row_moments", "column_moments", "master", "first_moment"}) {
             sz::string_t moment;
-            if (format_into(moment, "optimizer.{}.{}", suffix.view(), part))
+            if (util::format_into(moment, "optimizer.{}.{}", suffix.view(), part))
                 accounted += !source.float32(moment.view()).empty();
         }
         return found;
@@ -204,56 +205,58 @@ static constexpr char const* kept_metadata_k[] = {
     bool const widened = step == step_t::widen_k;
     for (growth_t const& growth : tower_growths_k) {
         if (sz::failed(suffix.assign(growth.name)))
-            return expected_t::fail(status_t::bad_alloc_k, "name staging failed");
+            return util::expected_t::fail(util::status_code_t::out_of_memory_k, "name staging failed");
         nk::tensor_view<nk_bf16_t, 2> const weights = find();
         if (weights.empty()) continue;
-        if (expected_t inserted = insert_grown_(grown, name.view(), weights, widened ? growth.row_bands : 0,
-                                                widened ? growth.columns : columns_t::kept_k, staging);
+        if (util::expected_t inserted = insert_grown_(grown, name.view(), weights, widened ? growth.row_bands : 0,
+                                                      widened ? growth.columns : columns_t::kept_k, staging);
             !inserted)
             return inserted;
     }
     sz::string_t grown_name;
     for (std::size_t block = 0; block != geometry.depth; ++block) {
         if (verb_progress(block, geometry.depth, &phase) == uform_cancel_k)
-            return expected_t::fail(status_t::internal_k, "stopped at block {}", block);
+            return util::expected_t::fail(util::status_code_t::internal_k, "stopped at block {}", block);
         for (growth_t const& growth : block_growths_k) {
             suffix.clear();
-            if (!format_into(suffix, "blocks.{}.{}", block, growth.name))
-                return expected_t::fail(status_t::bad_alloc_k, "name staging failed");
+            if (!util::format_into(suffix, "blocks.{}.{}", block, growth.name))
+                return util::expected_t::fail(util::status_code_t::out_of_memory_k, "name staging failed");
             nk::tensor_view<nk_bf16_t, 2> const weights = find();
             if (weights.empty())
-                return expected_t::fail(status_t::invalid_argument_k, "the source misses model.{}", suffix.view());
+                return util::expected_t::fail(util::status_code_t::invalid_argument_k, "the source misses model.{}",
+                                              suffix.view());
             if (widened) {
-                if (expected_t inserted = insert_grown_(grown, name.view(), weights, growth.row_bands, growth.columns,
-                                                        staging);
+                if (util::expected_t inserted = insert_grown_(grown, name.view(), weights, growth.row_bands,
+                                                              growth.columns, staging);
                     !inserted)
                     return inserted;
                 continue;
             }
             for (std::size_t instance = 0; instance != 2; ++instance) {
                 grown_name.clear();
-                if (!format_into(grown_name, "model.blocks.{}.{}", 2 * block + instance, growth.name))
-                    return expected_t::fail(status_t::bad_alloc_k, "name staging failed");
-                expected_t inserted = instance != 0 && growth.copy == copy_t::zeroed_k
-                                          ? insert_zeros_(grown, grown_name.view(), weights, staging)
-                                          : insert_grown_(grown, grown_name.view(), weights, 0, columns_t::kept_k,
-                                                          staging);
+                if (!util::format_into(grown_name, "model.blocks.{}.{}", 2 * block + instance, growth.name))
+                    return util::expected_t::fail(util::status_code_t::out_of_memory_k, "name staging failed");
+                util::expected_t inserted = instance != 0 && growth.copy == copy_t::zeroed_k
+                                                ? insert_zeros_(grown, grown_name.view(), weights, staging)
+                                                : insert_grown_(grown, grown_name.view(), weights, 0, columns_t::kept_k,
+                                                                staging);
                 if (!inserted) return inserted;
             }
         }
     }
     if (accounted != source.size())
-        return expected_t::fail(status_t::invalid_argument_k, "{} of the source's {} tensors have no growth rule",
-                                source.size() - accounted, source.size());
+        return util::expected_t::fail(util::status_code_t::invalid_argument_k,
+                                      "{} of the source's {} tensors have no growth rule", source.size() - accounted,
+                                      source.size());
 
     for (char const* key : kept_metadata_k)
         if (sz::string_view_t const value = source.metadata(key); !value.empty())
-            if (expected_t recorded = grown.metadata(key, value); !recorded) return recorded;
+            if (util::expected_t recorded = grown.metadata(key, value); !recorded) return recorded;
     sz::string_t depth, hidden;
-    if (!format_into(depth, "{}", geometry.depth * (widened ? 1u : 2u)) ||
-        !format_into(hidden, "{}", geometry.hidden * (widened ? 2u : 1u)))
-        return expected_t::fail(status_t::bad_alloc_k, "metadata staging failed");
-    expected_t recorded = grown.metadata("step", "0");
+    if (!util::format_into(depth, "{}", geometry.depth * (widened ? 1u : 2u)) ||
+        !util::format_into(hidden, "{}", geometry.hidden * (widened ? 2u : 1u)))
+        return util::expected_t::fail(util::status_code_t::out_of_memory_k, "metadata staging failed");
+    util::expected_t recorded = grown.metadata("step", "0");
     if (recorded) recorded = grown.metadata("depth", depth.view());
     if (recorded) recorded = grown.metadata("hidden", hidden.view());
     return recorded;
@@ -479,17 +482,17 @@ int main(int argc, char** argv) {
     verb_phase_t phase {.name = "grow", .unit = "blocks"};
     std::size_t hidden = 0, depth = 0;
     {
-        expected<checkpoint_to_load_t> source = checkpoint_to_load_t::make(source_path);
-        expected<ue::geometry_t> geometry = source ? ue::geometry_t::from(*source)
-                                                   : expected<ue::geometry_t>::fail(std::move(source));
-        checkpoint_to_save_t grown;
-        expected_t written = geometry ? grow_(*source, *geometry, step, phase, grown)
-                                      : expected_t::fail(std::move(geometry));
+        auto [source, make_status] = util::checkpoint_to_load_t::make(source_path);
+        auto [geometry, read_status] = make_status ? ue::geometry_t::from(source)
+                                                   : util::expected<ue::geometry_t>::fail(std::move(make_status));
+        util::checkpoint_to_save_t grown;
+        util::expected_t written = read_status ? grow_(source, geometry, step, phase, grown)
+                                               : util::expected_t::fail(std::move(read_status));
         // A stop between blocks leaves the output unwritten.
         if (stop_requested) return verb_stopped(phase), exit_stopped_k;
         if (written) written = grown.save(grown_path);
         if (!written) return fmt::println(stderr, "uform_grow: {}", std::string_view {written.description_}), 1;
-        hidden = geometry->hidden, depth = geometry->depth;
+        hidden = geometry.hidden, depth = geometry.depth;
     } // the source unmaps and the grown payload frees before the check loads both again
 
     strings_t captions, images, image_names;

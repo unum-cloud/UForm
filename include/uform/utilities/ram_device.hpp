@@ -24,14 +24,14 @@ namespace unum::uform::utilities {
 
 #pragma region Executor
 
-/** Translates a ForkUnion failure into the status every UForm call reports. */
-constexpr status_t status_from_(fu_status_t status) noexcept {
+/** Translates a ForkUnion failure into the code every UForm call reports. */
+constexpr status_code_t status_from_(fu_status_t status) noexcept {
     switch (status) {
-    case fu_success_k: return status_t::success_k;
-    case fu_bad_alloc_k: return status_t::bad_alloc_k;
-    case fu_invalid_argument_k: return status_t::invalid_argument_k;
-    case fu_contended_k: return status_t::contended_k;
-    default: return status_t::internal_k;
+    case fu_success_k: return status_code_t::success_k;
+    case fu_bad_alloc_k: return status_code_t::out_of_memory_k;
+    case fu_invalid_argument_k: return status_code_t::invalid_argument_k;
+    case fu_contended_k: return status_code_t::contended_k;
+    default: return status_code_t::internal_k;
     }
 }
 
@@ -56,7 +56,7 @@ enum class caller_exclusivity_t : std::uint8_t {
  *      never the pool.
  *
  *  A dispatch claims the pool itself, so one finding the pool running another dispatch, its own or
- *  another caller's, runs nothing and answers @c status_t::contended_k .
+ *  another caller's, runs nothing and answers @c status_code_t::contended_k .
  */
 class pool_view_t {
   public:
@@ -102,6 +102,9 @@ class pool_view_t {
  *  and deleted here. */
 class topology_t {
   public:
+    /** A topology holding nothing, as a moved-from one does, until @ref make harvests one. */
+    constexpr topology_t() noexcept = default;
+
     topology_t(topology_t&& other) noexcept : topology_(std::exchange(other.topology_, nullptr)) {}
 
     topology_t& operator=(topology_t&& other) noexcept {
@@ -118,7 +121,7 @@ class topology_t {
     [[nodiscard]] static expected<topology_t> make() noexcept {
         topology_t topology;
         if (fu_status_t const status = fu_topology_new(&topology.topology_); status != fu_success_k)
-            return expected<topology_t>::fail(status_from_(status), "topology discovery failed");
+            return expected<topology_t>::fail(status_from_(status), "Topology discovery failed");
         return topology;
     }
 
@@ -164,8 +167,6 @@ class topology_t {
     [[nodiscard]] fu_topology_t get() const noexcept { return topology_; }
 
   private:
-    constexpr topology_t() noexcept = default;
-
     /** The harvested topology, owned and deleted here. */
     fu_topology_t topology_ = nullptr;
 };
@@ -217,9 +218,9 @@ class executor_t {
      *  @param[in] exclusivity Whether the caller is one of the @p threads or only coordinates them.
      */
     [[nodiscard]] static expected<executor_t> make(std::size_t threads, caller_exclusivity_t exclusivity) noexcept {
-        expected<topology_t> topology = topology_t::make();
-        if (!topology) return expected<executor_t>::fail(std::move(topology));
-        return make(*topology, threads, exclusivity);
+        auto [topology, status] = topology_t::make();
+        if (!status) return expected<executor_t>::fail(std::move(status));
+        return make(topology, threads, exclusivity);
     }
 
     /** Spawns @p threads threads interleaved across every compute domain of @p topology , or only
@@ -230,7 +231,7 @@ class executor_t {
         executor_t executor;
         if (fu_status_t const status = fu_pool_new(pool_name_k, fu_capabilities_all_k, &executor.pool_);
             status != fu_success_k)
-            return expected<executor_t>::fail(status_from_(status), "pool creation failed");
+            return expected<executor_t>::fail(status_from_(status), "Pool creation failed");
         if (fu_status_t const status = fu_pool_spawn(topology.get(), executor.pool_, threads, spawned_(exclusivity));
             status != fu_success_k)
             return expected<executor_t>::fail(status_from_(status), "spawning {} threads failed", threads);
@@ -259,10 +260,13 @@ class executor_t {
 class lent_pool_t {
   public:
 
+    /** Holds no pool. */
+    constexpr lent_pool_t() noexcept = default;
+
     /** Borrows @p pool , refusing a null pool or one holding no threads. */
     [[nodiscard]] static expected<lent_pool_t> borrow(fu_pool_t pool) noexcept {
         if (!pool || pool_view_t {pool}.threads_count() == 0)
-            return expected<lent_pool_t>::fail(status_t::invalid_argument_k, "the lent pool holds no threads");
+            return expected<lent_pool_t>::fail(status_code_t::invalid_argument_k, "The lent pool holds no threads");
         return lent_pool_t {pool};
     }
 
@@ -273,7 +277,7 @@ class lent_pool_t {
     explicit constexpr lent_pool_t(fu_pool_t pool) noexcept : pool_(pool) {}
 
     /** The pool every dispatch runs on, which its lender deletes. */
-    fu_pool_t pool_;
+    fu_pool_t pool_ = nullptr;
 };
 
 #pragma endregion Executor

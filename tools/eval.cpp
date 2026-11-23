@@ -70,12 +70,12 @@
 
 namespace fu = ashvardanian::forkunion;
 namespace st = ashvardanian::smashtable;
-namespace uu = unum::uform::utilities;
-using uu::caller_exclusivity_t;
-using uu::executor_t;
-using uu::expected;
-using uu::pool_view_t;
-using uu::topology_t;
+namespace util = unum::uform::utilities;
+using util::caller_exclusivity_t;
+using util::executor_t;
+using util::expected;
+using util::pool_view_t;
+using util::topology_t;
 using namespace unum::uform::tools;
 
 /** Append @p count trivially copyable @p items onto @p values , or report the refusal. */
@@ -428,8 +428,8 @@ static constexpr std::size_t score_block_rows_k = 64;
                               items_count, capabilities, nullptr) != nk_success_k)
         return false;
     bool scored = true;
-    std::size_t const blocks_count = uu::divide_round_up(queries_count, score_block_rows_k);
-    uu::status_t const dispatched = pool.for_n_dynamic(
+    std::size_t const blocks_count = util::divide_round_up(queries_count, score_block_rows_k);
+    util::status_t const dispatched = pool.for_n_dynamic(
         blocks_count, [&](std::size_t block, std::size_t thread) noexcept {
             std::size_t const first = block * score_block_rows_k;
             std::size_t const count = fu::min_of(score_block_rows_k, queries_count - first);
@@ -451,7 +451,7 @@ static constexpr std::size_t score_block_rows_k = 64;
             for (std::size_t k = 0; k != 3; ++k)
                 fu::standard_atomic_ref<std::size_t> {hits[k]}.fetch_add(block_hits[k], std::memory_order_relaxed);
         });
-    return dispatched == uu::status_t::success_k && scored; // `for_n_dynamic` joined every thread
+    return dispatched == util::status_code_t::success_k && scored; // `for_n_dynamic` joined every thread
 }
 
 /** Score every caption against every medium on @p encoder 's thread count, report both directions,
@@ -478,16 +478,16 @@ static constexpr std::size_t score_block_rows_k = 64;
     for (std::size_t query = 0; query <= queries; ++query) owner_offsets[query] = query;
     nk_capability_t capabilities = 0;
     if (nk_capabilities_enabled_cpu(&capabilities) != nk_success_k) return false;
-    expected<topology_t> topology = topology_t::make();
-    if (!topology) return false;
-    expected<executor_t> pool = executor_t::make(*topology,
-                                                 encoder.threads ? encoder.threads : topology->logical_cores_count(),
-                                                 caller_exclusivity_t::caller_inclusive_k);
-    if (!pool) return false;
+    auto [topology, make_topology_status] = topology_t::make();
+    if (!make_topology_status) return false;
+    auto [pool, make_pool_status] = executor_t::make(topology,
+                                                     encoder.threads ? encoder.threads : topology.logical_cores_count(),
+                                                     caller_exclusivity_t::caller_inclusive_k);
+    if (!make_pool_status) return false;
     std::size_t text_hits[3] = {}, media_hits[3] = {};
-    if (!count_hits_(pool->view(), capabilities, captions, media, encoder.dimensions, owner_offsets.data(),
+    if (!count_hits_(pool.view(), capabilities, captions, media, encoder.dimensions, owner_offsets.data(),
                      split.owners.data(), text_hits) ||
-        !count_hits_(pool->view(), capabilities, media, captions, encoder.dimensions, caption_offsets.data(),
+        !count_hits_(pool.view(), capabilities, media, captions, encoder.dimensions, caption_offsets.data(),
                      captions_by_item.data(), media_hits))
         return false;
     for (std::size_t k = 0; k != 3; ++k) {
@@ -661,9 +661,9 @@ struct choices_t {
     std::size_t const items = held_out.states.count(), offered = held_out.targets.size();
     std::uint32_t groups = 1;
     for (std::uint32_t const group : held_out.groups) groups = fu::max_of(groups, group + 1);
-    uu::expected<uu::checkpoint_to_load_t> source = uu::checkpoint_to_load_t::make(checkpoint_path);
-    if (!source) return fmt::println(stderr, "uform_eval: {}", std::string_view {source.description_}), false;
-    uu::f32r2_view_t const stored = source->float32("choices.inverse_temperatures");
+    auto [source, status] = util::checkpoint_to_load_t::make(checkpoint_path);
+    if (!status) return fmt::println(stderr, "uform_eval: {}", std::string_view {status.description_}), false;
+    util::f32r2_view_t const stored = source.float32("choices.inverse_temperatures");
     double const scoring_beta = stored.empty() ? 1.0 : double(stored[0, 0]);
 
     st::basic_vector<double> logits, betas;
@@ -733,18 +733,18 @@ struct choices_t {
     if (st::failed(fitted.resize(st::assume_uninitialized, groups)))
         return fmt::println(stderr, "uform_eval: calibration staging failed"), false;
     for (std::uint32_t group = 0; group != groups; ++group) fitted[group] = float(betas[group]);
-    uu::checkpoint_to_save_t calibrated; // Float32 entries go first, packed ahead of the BFloat16 weights
-    uu::expected_t written = calibrated.insert("choices.inverse_temperatures",
-                                               uu::f32r2_view_t {fitted.data(), 1, groups});
-    for (uu::checkpoint_entry_t const& entry : source->entries())
-        if (written && entry.dtype == uu::checkpoint_dtype_t::f32_k &&
+    util::checkpoint_to_save_t calibrated; // Float32 entries go first, packed ahead of the BFloat16 weights
+    util::expected_t written = calibrated.insert("choices.inverse_temperatures",
+                                                 util::f32r2_view_t {fitted.data(), 1, groups});
+    for (util::checkpoint_entry_t const& entry : source.entries())
+        if (written && entry.dtype == util::checkpoint_dtype_t::f32_k &&
             entry.name.view() != "choices.inverse_temperatures")
-            written = calibrated.insert(entry.name.view(), source->float32(entry.name.view()));
-    uu::checkpoint_to_load_t const& weights = *source;
-    for (uu::checkpoint_entry_t const& entry : weights.entries())
-        if (written && entry.dtype == uu::checkpoint_dtype_t::bf16_k)
+            written = calibrated.insert(entry.name.view(), source.float32(entry.name.view()));
+    util::checkpoint_to_load_t const& weights = source;
+    for (util::checkpoint_entry_t const& entry : weights.entries())
+        if (written && entry.dtype == util::checkpoint_dtype_t::bf16_k)
             written = calibrated.insert(entry.name.view(), weights[entry.name.view()]);
-    for (uu::checkpoint_metadata_t const& pair : weights.metadata())
+    for (util::checkpoint_metadata_t const& pair : weights.metadata())
         if (written) written = calibrated.metadata(pair.key.view(), pair.value.view());
     // A stop arriving while the temperatures fit still writes nothing.
     if (stop_requested) return false;

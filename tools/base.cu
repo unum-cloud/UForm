@@ -93,9 +93,9 @@ using namespace unum::uform::train;
         if (config.eval_every && completed % config.eval_every == 0u) {
             // Held-out draws key past the training steps, so a synthetic source never repeats
             // a step's batch.
-            expected<retrieval_t> evaluated = trainer.evaluate(held_out, data_epoch_t {config.steps + ordinal});
-            if (!evaluated) return fail_out_(evaluated.description_.view());
-            evaluated.value_.report();
+            auto [evaluation, status] = trainer.evaluate(held_out, data_epoch_t {config.steps + ordinal});
+            if (!status) return fail_out_(status.description_.view());
+            evaluation.report();
         }
         if (!config.checkpoint.empty() && config.checkpoint_every && completed % config.checkpoint_every == 0u &&
             completed != config.steps)
@@ -137,23 +137,23 @@ using namespace unum::uform::train;
                  options.host_domain_count);
 
     // The loaders open before the trainer, so the envelope leaves room for their reservoirs.
-    expected<ul::gpu_direct_storage_session_t> storage = ul::gpu_direct_storage_session_t::make();
-    if (!storage) return fail_out_(storage.description_.view());
+    auto [storage, make_status] = ul::gpu_direct_storage_session_t::make();
+    if (!make_status) return fail_out_(make_status.description_.view());
     dataset_source_t datasets, held_out;
     if (!config.mixture.empty())
-        if (expected_t opened = dataset_source_t::open(datasets, config, *storage, std::move(mixture),
+        if (expected_t opened = dataset_source_t::open(datasets, config, storage, std::move(mixture),
                                                        config.batches_per_fill);
             !opened)
             return fail_out_(opened.description_.view());
     if (config.eval_every && config.eval_mixture.empty() && !config.mixture.empty())
         return fail_out_("--eval-every over a mixture needs --eval-mixture, whose shards training never draws");
     if (config.eval_every && !config.eval_mixture.empty()) {
-        expected<mixture_t> read = mixture_t::read(config.eval_mixture);
-        if (!read) return fail_out_(read.description_.view());
+        auto [eval_mixture, read_status] = mixture_t::read(config.eval_mixture);
+        if (!read_status) return fail_out_(read_status.description_.view());
         // Each source charges its own reservoir, so the envelope makes room for both.
         std::size_t const training_fixed = config.reservoir_fixed_bytes, training_row = config.reservoir_row_bytes;
         // Every evaluation refills, so each scores fresh entries rather than a fill 16 evals old.
-        if (expected_t opened = dataset_source_t::open(held_out, config, *storage, std::move(read.value_), 1); !opened)
+        if (expected_t opened = dataset_source_t::open(held_out, config, storage, std::move(eval_mixture), 1); !opened)
             return fail_out_(opened.description_.view());
         config.reservoir_fixed_bytes += training_fixed, config.reservoir_row_bytes += training_row;
     }
@@ -366,9 +366,9 @@ int main(int argc, char** argv) {
     trainer_config_t config = parse_config_(argc, argv);
     mixture_t mixture;
     if (!config.mixture.empty()) {
-        expected<mixture_t> read = mixture_t::read(config.mixture);
-        if (!read) return fail_out_(read.description_.view());
-        mixture = std::move(read.value_);
+        auto [training_mixture, status] = mixture_t::read(config.mixture);
+        if (!status) return fail_out_(status.description_.view());
+        mixture = std::move(training_mixture);
         bool queried = false;
         for (mixture_entry_t const& entry : mixture.datasets)
             for (late_interaction_side_t const side : {entry.sides.anchor, entry.sides.positive, entry.sides.negative})

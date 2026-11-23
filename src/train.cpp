@@ -21,22 +21,24 @@
 #include "lib.hpp"
 #include "train/numerics.hpp" // `gpu_numerics_of`
 
+namespace util = unum::uform::utilities;
+
 using namespace unum::uform;
 namespace ut = unum::uform::train;
 
 using encoder::modality_t;
-using utilities::bf16_t;
-using utilities::bf16r2_view_t;
-using utilities::device_address;
-using utilities::f32_t;
-using utilities::gpu_fault_code_t;
-using utilities::gpu_fault_t;
-using utilities::mesh_shape_t;
-using utilities::mesh_topology_t;
-using utilities::multimem_tier_choice_t;
-using utilities::optimizer_step_t;
-using utilities::switch_to_gpu_t;
-using utilities::u32_t;
+using util::bf16_t;
+using util::bf16r2_view_t;
+using util::device_address;
+using util::f32_t;
+using util::gpu_fault_code_t;
+using util::gpu_fault_t;
+using util::mesh_shape_t;
+using util::mesh_topology_t;
+using util::multimem_tier_choice_t;
+using util::optimizer_step_t;
+using util::switch_to_gpu_t;
+using util::u32_t;
 
 /** What @c uform_mesh_t owns: the bootstrapped mesh over its executor's devices, and how many
  *  trainers borrow it. */
@@ -179,14 +181,15 @@ static constexpr failure_messages_t save_failures_k {
     "The checkpoint file could not be written or renamed into place",
 };
 
-/** The message of @p messages naming @p failure 's status. */
+/** The engine's note on @p failure , else the message of @p messages naming its status. */
 [[nodiscard]] static char const* message_of(expected_t const& failure, failure_messages_t const& messages) noexcept {
-    switch (failure.status_) {
-    case status_t::bad_alloc_k: return messages.out_of_memory;
-    case status_t::invalid_argument_k: return messages.invalid;
-    case status_t::unsupported_k: return messages.unsupported;
-    case status_t::device_error_k: return messages.device;
-    case status_t::io_k: return messages.io;
+    if (failure.status_.note) return failure.status_.note;
+    switch (failure.status_.code) {
+    case status_code_t::out_of_memory_k: return messages.out_of_memory;
+    case status_code_t::invalid_argument_k: return messages.invalid;
+    case status_code_t::unsupported_k: return messages.unsupported;
+    case status_code_t::device_k: return messages.device;
+    case status_code_t::io_k: return messages.io;
     default: return messages.other;
     }
 }
@@ -200,7 +203,7 @@ static constexpr failure_messages_t save_failures_k {
 static bool propagate_train_error(expected_t const& failure, uform_mesh_handle_t* mesh, uform_outcome_t* outcome,
                                   failure_messages_t const& messages) noexcept {
     char const* message = message_of(failure, messages);
-    if (failure.status_ == status_t::device_error_k && mesh)
+    if (failure.status_ == status_code_t::device_k && mesh)
         for (gpu_fault_t const& fault : mesh->mesh->topology.faults())
             if (char const* const recorded = fault_message(fault.code)) {
                 message = recorded;
@@ -233,8 +236,8 @@ static bool propagate_train_error(expected_t const& failure, uform_mesh_handle_t
     engine.capabilities = capabilities_of(executor);
     if (expected_t const joined = ut::mesh_t::make(*handle->mesh, engine, devices); !joined) {
         // The engine refuses a world its processes disagree on, as unsupported.
-        uform_status_t const status = joined.status_ == status_t::unsupported_k ? uform_status_config_mismatch_k
-                                                                                : train_status_of(joined);
+        uform_status_t const status = joined.status_ == status_code_t::unsupported_k ? uform_status_config_mismatch_k
+                                                                                     : train_status_of(joined);
         return propagate_error(status, outcome, message_of(joined, bootstrap_failures_k)), nullptr;
     }
     handle->executor = executor;
@@ -349,9 +352,9 @@ static bool propagate_train_error(expected_t const& failure, uform_mesh_handle_t
 
 /** The C status a resume failure crosses into: a checkpoint of another geometry is a mismatch. */
 [[nodiscard]] static uform_status_t resume_status_of(expected_t const& failure) noexcept {
-    switch (failure.status_) {
-    case status_t::invalid_argument_k:
-    case status_t::unsupported_k: return uform_status_config_mismatch_k;
+    switch (failure.status_.code) {
+    case status_code_t::invalid_argument_k:
+    case status_code_t::unsupported_k: return uform_status_config_mismatch_k;
     default: return status_of(failure.status_);
     }
 }
@@ -371,9 +374,8 @@ static bool propagate_train_error(expected_t const& failure, uform_mesh_handle_t
     std::size_t const bytes_per_value = scalar == uform_scalar_f32_k ? 4 : 2;
     if (scalar != uform_scalar_f32_k && scalar != uform_scalar_f16_k && scalar != uform_scalar_bf16_k)
         return propagate_error(uform_status_unsupported_layout_k, outcome, "Embeddings land as f32, f16 or bf16");
-    expected<bf16r2_view_t> pooled = handle.items->pooled(*handle.trainer);
-    if (!pooled) return propagate_error(status_of(pooled.status_), outcome, "The pooled vertices could not be read");
-    bf16r2_view_t const vertices = *pooled;
+    auto [vertices, status] = handle.items->pooled(*handle.trainer);
+    if (!status) return propagate_error(status_of(status.status_), outcome, "The pooled vertices could not be read");
     std::size_t const hidden = vertices.extent(1), bytes = count * hidden * bytes_per_value;
     b8_t* const staging = handle.embeddings.data();
     bytes_span_t const landing {staging, bytes};
@@ -424,16 +426,16 @@ UFORM_EXPORT void uform_mesh_describe(uform_mesh_describe_t* arguments) {
     st::basic_vector<i32_t> devices;
     if (!devices_of(arguments->mesh->executor, devices))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to list the devices"), void();
-    expected<multimem_tier_choice_t> tier = multimem_tier_choice_t::make(shape.gpus_per_multimem_domain, devices);
-    if (!tier)
-        return propagate_error(status_of(tier.status_), outcome, "The multimem tier could not be probed"), void();
+    auto [tier, status] = multimem_tier_choice_t::make(shape.gpus_per_multimem_domain, devices);
+    if (!status)
+        return propagate_error(status_of(status.status_), outcome, "The multimem tier could not be probed"), void();
     uform_mesh_description_t& description = *arguments->description;
     description.gpus_per_host_domain = shape.gpus_per_host_domain;
     description.gpus_per_multimem_domain = shape.gpus_per_multimem_domain;
     description.gpus_per_colocated_domain = shape.gpus_per_colocated_domain;
     description.host_domain_index = topology.host_domain_index;
     description.first_gpu_index = topology.first_gpu_index();
-    description.multimem_tier = static_cast<uform_multimem_tier_t>(tier.value_.tier);
+    description.multimem_tier = static_cast<uform_multimem_tier_t>(tier.tier);
     description.gpu_class = static_cast<uform_gpu_class_t>(
         std::get<vram_executor_t>(arguments->mesh->executor->executor).devices[0].gpu_class);
     propagate_error(uform_status_success_k, outcome, nullptr);

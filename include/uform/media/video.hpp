@@ -31,6 +31,7 @@ using uu::bytes_view_t;
 using uu::expected;
 using uu::expected_t;
 using uu::pixel_t;
+using uu::status_code_t;
 using uu::status_t;
 using uu::u8_t;
 
@@ -80,7 +81,7 @@ struct demuxed_t {
  *  @param[in] container The clip's container or raw elementary-stream bytes.
  *
  *  @par Statuses:
- *  - @c status_t::invalid_argument_k No video stream, an unsupported codec, or a stream that
+ *  - @c status_code_t::invalid_argument_k No video stream, an unsupported codec, or a stream that
  *    yielded no bytes.
  */
 [[nodiscard]] expected<demuxed_t> demux_video(bytes_view_t container) noexcept;
@@ -98,8 +99,8 @@ struct demuxed_t {
  *  @param[out] out The segment's cells, shaped as @ref unum::uform::media::pixel_tubes_span_t says.
  *
  *  @par Statuses:
- *  - @c status_t::unsupported_k @p out disagrees with @p grid and @p shape .
- *  - @c status_t::invalid_argument_k The stream does not decode, or decodes no frame.
+ *  - @c status_code_t::unsupported_k @p out disagrees with @p grid and @p shape .
+ *  - @c status_code_t::invalid_argument_k The stream does not decode, or decodes no frame.
  */
 [[nodiscard]] expected_t decode_video_frames(demuxed_t const& clip, video_grid_t grid, video_batch_shape_t const& shape,
                                              pixel_tubes_span_t out) noexcept;

@@ -14,12 +14,12 @@
 #include "uform/encoder/entries.hpp" // `rope_angles_t`
 #include "uform/encoder/geometry.hpp"
 
-namespace uu = unum::uform::utilities;
+namespace util = unum::uform::utilities;
 using namespace unum::uform::encoder;
-using uu::checkpoint_to_load_t;
-using uu::expected_t;
-using uu::f64_t;
-using uu::status_t;
+using util::checkpoint_to_load_t;
+using util::expected_t;
+using util::f64_t;
+using util::status_code_t;
 
 /** Parse @p text whole into @p value , integral or floating. */
 template <typename value_type_>
@@ -34,9 +34,10 @@ template <typename value_type_>
 [[nodiscard]] static expected_t read_(checkpoint_to_load_t const& checkpoint, sz::string_view_t key,
                                       value_type_& value) noexcept {
     sz::string_view_t const text = checkpoint.metadata(key);
-    if (text.empty()) return expected_t::fail(status_t::invalid_argument_k, "the checkpoint misses the {} key", key);
+    if (text.empty())
+        return expected_t::fail(status_code_t::invalid_argument_k, "the checkpoint misses the {} key", key);
     if (!parse_(text, value))
-        return expected_t::fail(status_t::invalid_argument_k, "the {} key holds an unparsable {}", key, text);
+        return expected_t::fail(status_code_t::invalid_argument_k, "the {} key holds an unparsable {}", key, text);
     return {};
 }
 
@@ -46,17 +47,17 @@ template <typename value_type_>
                                            std::span<f32_t> values) noexcept {
     sz::string_view_t remaining = checkpoint.metadata(key);
     if (remaining.empty())
-        return expected_t::fail(status_t::invalid_argument_k, "the checkpoint misses the {} key", key);
+        return expected_t::fail(status_code_t::invalid_argument_k, "the checkpoint misses the {} key", key);
     std::size_t const count = values.size();
     std::size_t parsed = 0;
     for (sz::string_view_t separator = ","; parsed != count && !separator.empty(); ++parsed) {
         auto [item, match, after] = remaining.partition(',');
         if (!parse_(item, values[parsed]))
-            return expected_t::fail(status_t::invalid_argument_k, "the {} key holds an unparsable {}", key, item);
+            return expected_t::fail(status_code_t::invalid_argument_k, "the {} key holds an unparsable {}", key, item);
         separator = match, remaining = after;
     }
     if (parsed != count || !remaining.empty())
-        return expected_t::fail(status_t::invalid_argument_k, "the {} key must list {} values", key, count);
+        return expected_t::fail(status_code_t::invalid_argument_k, "the {} key must list {} values", key, count);
     return {};
 }
 
@@ -87,8 +88,9 @@ expected<geometry_t> geometry_t::from(checkpoint_to_load_t const& checkpoint) no
     if (read) read = read_(checkpoint, "audio_sample_rate", geometry.audio_sample_rate);
     if (!read) return result_t::fail(std::move(read));
     if (geometry.image_channels > pixel_channels_max_k || geometry.video_channels > pixel_channels_max_k)
-        return result_t::fail(status_t::invalid_argument_k, "pixels carry at most {} channels (image {}, video {})",
-                              pixel_channels_max_k, geometry.image_channels, geometry.video_channels);
+        return result_t::fail(status_code_t::invalid_argument_k,
+                              "pixels carry at most {} channels (image {}, video {})", pixel_channels_max_k,
+                              geometry.image_channels, geometry.video_channels);
     std::span<f32_t> const image_mean = std::span {geometry.image_pixel_mean}.first(geometry.image_channels);
     std::span<f32_t> const image_std = std::span {geometry.image_pixel_std}.first(geometry.image_channels);
     std::span<f32_t> const video_mean = std::span {geometry.video_pixel_mean}.first(geometry.video_channels);
@@ -101,48 +103,51 @@ expected<geometry_t> geometry_t::from(checkpoint_to_load_t const& checkpoint) no
 
     if (geometry.depth == 0 || geometry.head_width == 0 || geometry.hidden % geometry.head_width != 0 ||
         geometry.context == 0 || geometry.columns == 0)
-        return result_t::fail(status_t::invalid_argument_k,
+        return result_t::fail(status_code_t::invalid_argument_k,
                               "depth {} hidden {} head_width {} context {} build no tower", geometry.depth,
                               geometry.hidden, geometry.head_width, geometry.context);
     if (geometry.rope_temporal + geometry.rope_height + geometry.rope_width != geometry.head_width ||
         geometry.rope_temporal % 2 != 0 || geometry.rope_height % 2 != 0 || geometry.rope_width % 2 != 0)
-        return result_t::fail(status_t::invalid_argument_k,
+        return result_t::fail(status_code_t::invalid_argument_k,
                               "the rotary split {}+{}+{} must pair up to the head width {}", geometry.rope_temporal,
                               geometry.rope_height, geometry.rope_width, geometry.head_width);
 
     nk::tensor_view<nk_bf16_t, 2> const embedding = checkpoint["model.embedding"];
     nk::tensor_view<nk_bf16_t, 2> const gate_up = checkpoint["model.blocks.0.gate_up"];
     if (embedding.empty() || embedding.extent(1) != geometry.hidden)
-        return result_t::fail(status_t::invalid_argument_k, "the embedding must be [vocabulary,{}]", geometry.hidden);
+        return result_t::fail(status_code_t::invalid_argument_k, "the embedding must be [vocabulary,{}]",
+                              geometry.hidden);
     if (gate_up.empty() || gate_up.extent(0) != 2u * geometry.ffn())
-        return result_t::fail(status_t::invalid_argument_k, "the first gate_up must have {} rows", 2u * geometry.ffn());
+        return result_t::fail(status_code_t::invalid_argument_k, "the first gate_up must have {} rows",
+                              2u * geometry.ffn());
     if (embedding.extent(0) <= byte_mask_k)
-        return result_t::fail(status_t::invalid_argument_k, "the embedding must cover every byte and the mask");
+        return result_t::fail(status_code_t::invalid_argument_k, "The embedding must cover bytes and the mask");
     geometry.vocabulary = static_cast<u32_t>(embedding.extent(0));
     nk::tensor_view<nk_bf16_t, 2> const image_projection = checkpoint["model.image_projection"];
     std::size_t const image_columns = image_projection.empty() ? 0 : image_projection.extent(1);
     if (geometry.image_patch_side && (!geometry.image_channels || image_columns % geometry.image_channels != 0 ||
                                       image_columns / geometry.image_channels !=
                                           std::size_t {geometry.image_patch_side} * geometry.image_patch_side))
-        return result_t::fail(status_t::invalid_argument_k, "the image projection must take one patch of scalars");
+        return result_t::fail(status_code_t::invalid_argument_k, "Image projection must take one patch");
     nk::tensor_view<nk_bf16_t, 2> const video_projection = checkpoint["model.video_projection"];
     std::size_t const video_columns = video_projection.empty() ? 0 : video_projection.extent(1);
     std::size_t const video_tube = std::size_t {geometry.video_tube_frames} * geometry.video_channels;
     if (geometry.video_patch_side &&
         (!video_tube || video_columns % video_tube != 0 ||
          video_columns / video_tube != std::size_t {geometry.video_patch_side} * geometry.video_patch_side))
-        return result_t::fail(status_t::invalid_argument_k, "the video projection must take one tube of scalars");
+        return result_t::fail(status_code_t::invalid_argument_k, "Video projection must take one tube");
 
     nk::tensor_view<nk_bf16_t, 2> const projection = checkpoint["model.token_head.projection"];
     if (!projection.empty() && projection.extent(1) != geometry.hidden)
-        return result_t::fail(status_t::invalid_argument_k, "the token head must project [width,{}]", geometry.hidden);
+        return result_t::fail(status_code_t::invalid_argument_k, "the token head must project [width,{}]",
+                              geometry.hidden);
     geometry.token_width = static_cast<u32_t>(projection.empty() ? 0 : projection.extent(0));
     nk::tensor_view<nk_bf16_t, 2> const decoder = checkpoint["model.masked_tokens"];
     if (!decoder.empty() && decoder.extent(1) != geometry.hidden)
-        return result_t::fail(status_t::invalid_argument_k, "the byte decoder must be [vocabulary,{}]",
+        return result_t::fail(status_code_t::invalid_argument_k, "the byte decoder must be [vocabulary,{}]",
                               geometry.hidden);
     if (!decoder.empty() && decoder.extent(0) <= (std::numeric_limits<u8_t>::max)())
-        return result_t::fail(status_t::invalid_argument_k, "the byte decoder must score every byte");
+        return result_t::fail(status_code_t::invalid_argument_k, "The byte decoder must score every byte");
     geometry.masked_vocabulary = static_cast<u32_t>(decoder.empty() ? 0 : decoder.extent(0));
     nk::tensor_view<f32_t, 2> const temperatures = checkpoint.float32("choices.inverse_temperatures");
     geometry.choice_temperature_groups = static_cast<u32_t>(decoder.empty()        ? 0
@@ -160,7 +165,7 @@ expected<rope_angles_t> rope_angles_t::make(u32_t positions, u32_t temporal, u32
     u32_t const denominators[3] = {temporal + height + width, height, width};
     std::size_t const pairs = angles.pairs_[0] + angles.pairs_[1] + angles.pairs_[2];
     if (st::failed(angles.angles_.resize(static_cast<std::size_t>(positions) * pairs)))
-        return result_t::fail(status_t::bad_alloc_k, "angle grid allocation failed ({} positions)", positions);
+        return result_t::fail(status_code_t::out_of_memory_k, "angle grid allocation failed ({} positions)", positions);
     std::size_t offset = 0;
     for (u32_t axis = 0; axis != 3; ++axis)
         for (u32_t position = 0; position != positions; ++position)

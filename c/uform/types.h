@@ -305,8 +305,9 @@ typedef enum uform_status_t {
     uform_status_invalid_argument_k = 17,
 } uform_status_t;
 
-/** Outcome of one call: a status every binding can branch on, and a static message carrying the
- *  detail the status cannot. Messages are static and @b don't need to be deallocated, and are
+/** Outcome of one call: the status word a deferred call completes through and every binding
+ *  branches on, and a static message naming what broke, a library invariant or a rule of this
+ *  call, else the status's own @ref uform_status_name. Messages are never freed, and are
  *  @c NULL exactly when the status is @c uform_status_success_k. */
 typedef struct uform_outcome_t {
 
@@ -870,7 +871,8 @@ typedef struct uform_executor_drain_t {
 UFORM_EXPORT void uform_executor_drain(uform_executor_drain_t* arguments);
 
 /** Waits until no call holds the executor, releases what it owns, returns what it borrowed, and
- *  frees it; @c NULL is safe, and it cannot fail, so it takes no outcome. */
+ *  frees it; @c NULL is safe, and it cannot fail, so it takes no outcome. Every arena it made must
+ *  be freed first. */
 UFORM_EXPORT void uform_executor_free(uform_executor_t executor);
 
 /**
@@ -895,7 +897,7 @@ UFORM_EXPORT void uform_executor_free(uform_executor_t executor);
  *  - A call that fails or is cancelled leaves its outputs @c NULL.
  *
  *  @note A GPU arena grows, fills and frees on the first stream of the executor that made it, so it
- *      serves only calls on that executor, and must be freed before that executor is.
+ *      serves only calls on that executor.
  */
 typedef struct uform_arena_handle_t* uform_arena_t;
 
@@ -917,9 +919,9 @@ typedef struct uform_arena_init_t {
  *  @brief Creates an empty arena where @c executor computes, so its placement is decided once and
  *      GPU code keeps its outputs on the device without asking.
  *
- *  Nothing is allocated until a call writes into it. An arena of host pages may outlive the
- *  executor that made it, keeping its own memory until it is freed; a GPU arena keeps the rule
- *  @ref uform_arena_t notes.
+ *  Nothing is allocated until a call writes into it. An arena must not outlive the executor that
+ *  made it: free every arena before its executor. An arena made with a @c NULL executor has none,
+ *  and lives until it is freed.
  */
 UFORM_EXPORT void uform_arena_init(uform_arena_init_t* arguments);
 

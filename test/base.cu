@@ -63,9 +63,12 @@ using ue::image_batch_shape_t;
 using ue::modality_t;
 using ue::multimodal_batch_shape_t;
 using ue::video_batch_shape_t;
-using namespace unum::uform::utilities;
+namespace util = unum::uform::utilities;
 using namespace unum::uform::train;
 using namespace unum::uform::test;
+
+/** The data a test geometry batches: text tokens alone, or every media slice as well. */
+enum class test_mixture_t : bool { tokens_k, omni_k };
 
 /**
  *  @brief The tiny shared geometry — @c depth=2 , @c hidden=256 , @c 16 steps, and a two-step
@@ -78,11 +81,11 @@ using namespace unum::uform::test;
  *  and the eight-step horizon left the token head's early-vs-late comparison genuinely marginal (a
  *  ~0.7% rise on the world mean) while every machinery invariant held.
  */
-[[nodiscard]] static trainer_config_t test_geometry_(bool omni, u64_t seed) noexcept {
+[[nodiscard]] static trainer_config_t test_geometry_(test_mixture_t mixture, util::u64_t seed) noexcept {
     trainer_config_t config;
     config.seed = seed;
     config.batch = multimodal_batch_shape_t {2u, 2u, 64u};
-    if (omni) {
+    if (mixture == test_mixture_t::omni_k) {
         config.batch = multimodal_batch_shape_t {4u, 4u, 64u};
         config.batch.image = image_batch_shape_t {8u, 3u};
         config.batch.video = video_batch_shape_t {8u, 3u, 2u, 1u};
@@ -103,8 +106,8 @@ using namespace unum::uform::test;
  *  and the kernels they call. */
 struct tier_t {
     mesh_t& mesh;
-    std::span<i32_t const> devices;
-    gpu_numerics_t numerics;
+    std::span<util::i32_t const> devices;
+    util::gpu_numerics_t numerics;
 };
 
 /**
@@ -115,19 +118,21 @@ struct tier_t {
  *  Safe because a single-host topology carries no rendezvous state; the one cross-field invariant
  *  is that @c host_domains sizes to @c shape.host_domain_count() .
  */
-[[nodiscard]] static expected_t narrow_mesh_(mesh_t& placed, mesh_topology_t const& world, u32_t gpus) noexcept {
+[[nodiscard]] static util::expected_t narrow_mesh_(mesh_t& placed, util::mesh_topology_t const& world,
+                                                   util::u32_t gpus) noexcept {
     placed.topology.shape.gpus_per_host_domain = gpus;
     placed.topology.shape.gpus_per_multimem_domain = gpus;
     placed.topology.shape.gpus_per_colocated_domain = gpus;
     placed.topology.host_domain_index = 0;
     if (st::failed(placed.topology.host_domains.resize(1)))
-        return expected_t::fail(status_t::bad_alloc_k, "narrowed host-domain table allocation failed");
+        return util::expected_t::fail(util::status_code_t::out_of_memory_k,
+                                      "narrowed host-domain table allocation failed");
     placed.topology.host_domains[0] = world.host_domains[world.host_domain_index];
     placed.topology.host_domains[0].host_domain_index = 0;
     placed.topology.host_domains[0].device_count = gpus;
-    expected<colocated_domain_t> colocated = colocated_domain_t::make(placed.topology);
-    if (!colocated) return expected_t::fail(std::move(colocated));
-    placed.colocated = std::move(colocated.value_);
+    auto [colocated, status] = util::colocated_domain_t::make(placed.topology);
+    if (!status) return util::expected_t::fail(std::move(status));
+    placed.colocated = std::move(colocated);
     return {};
 }
 
@@ -143,7 +148,7 @@ struct world_health_t {
 
     /** Consecutive trainer bring-up failures — a healthy world never fails one, so two in a row
      *  mean the peer domain is gone. */
-    u32_t consecutive_setup_failures = 0;
+    util::u32_t consecutive_setup_failures = 0;
 };
 
 /** The reason every case after the first unhealthy detection skips with. */
@@ -161,61 +166,62 @@ inline constexpr char const* world_unhealthy_k = "needs a healthy world";
         expect_true(false, "peer domain unresponsive — aborting the remaining cases");
         return false;
     }
-    expected<gpu_stream_t> probe = gpu_stream_t::make(0);
-    if (probe) return true;
+    auto [probe, status] = util::gpu_stream_t::make(0);
+    if (status) return true;
     health.alive = false;
-    expect_true(false, "device context poisoned — aborting the remaining cases: {}", probe.description_);
+    expect_true(false, "device context poisoned — aborting the remaining cases: {}", status.description_);
     return false;
 }
 
 /** Build @p placed over @p tier for @p config , tallying bring-up failures into @p health . */
-[[nodiscard]] static expected_t make_trainer_(trainer_t& placed, tier_t tier, trainer_config_t const& config,
-                                              world_health_t& health) noexcept {
-    expected_t built = trainer_t::make(placed, tier.mesh, config, tier.devices, tier.numerics);
+[[nodiscard]] static util::expected_t make_trainer_(trainer_t& placed, tier_t tier, trainer_config_t const& config,
+                                                    world_health_t& health) noexcept {
+    util::expected_t built = trainer_t::make(placed, tier.mesh, config, tier.devices, tier.numerics);
     health.consecutive_setup_failures = built ? 0u : health.consecutive_setup_failures + 1u;
     return built;
 }
 
 /** Enqueue steps @b [begin,end) of the synthetic loop. */
-[[nodiscard]] static expected_t run_steps_(trainer_t& trainer, u32_t begin, u32_t end) noexcept {
+[[nodiscard]] static util::expected_t run_steps_(trainer_t& trainer, util::u32_t begin, util::u32_t end) noexcept {
     synthetic_source_t source;
     step_report_t report;
-    for (u32_t ordinal = begin; ordinal != end; ++ordinal)
-        if (expected_t stepped = trainer.step(batch_source_of(source), optimizer_step_t {ordinal}, report); !stepped)
+    for (util::u32_t ordinal = begin; ordinal != end; ++ordinal)
+        if (util::expected_t stepped = trainer.step(batch_source_of(source), util::optimizer_step_t {ordinal}, report);
+            !stepped)
             return stepped;
     return {};
 }
 
 /** DtoH one replica's whole registration list into a byte-comparable host array — the snapshot
  *  behind assertions A, C, and the gradient-propagation check. */
-[[nodiscard]] static expected<st::basic_vector<bf16_t>> snapshot_weights_(
-    st::basic_vector<differentiable_weights_t> const& weights, gpu_stream_t& stream) noexcept {
-    using result_t = expected<st::basic_vector<bf16_t>>;
-    switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "context entry failed");
-    std::span<differentiable_weights_t const> const list = weights;
+[[nodiscard]] static util::expected<st::basic_vector<util::bf16_t>> snapshot_weights_(
+    st::basic_vector<util::differentiable_weights_t> const& weights, util::gpu_stream_t& stream) noexcept {
+    using result_t = util::expected<st::basic_vector<util::bf16_t>>;
+    util::switch_to_gpu_t gpu_scope {stream};
+    if (!gpu_scope.ok()) return result_t::fail(util::status_code_t::device_k, "context entry failed");
+    std::span<util::differentiable_weights_t const> const list = weights;
     std::size_t total = 0, largest = 0;
-    for (differentiable_weights_t const& matrix : list) {
+    for (util::differentiable_weights_t const& matrix : list) {
         std::size_t const scalars = matrix.weights.numel();
         total += scalars;
         largest = fu::max_of(largest, scalars);
     }
-    st::basic_vector<bf16_t> host;
+    st::basic_vector<util::bf16_t> host;
     if (st::failed(host.resize(st::assume_uninitialized, total)))
-        return result_t::fail(status_t::bad_alloc_k, "snapshot allocation failed");
-    nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1> staging =
-        nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1>::uninitialized({largest}, pinned_alloc<bf16_t> {}).value;
-    if (!staging) return result_t::fail(status_t::bad_alloc_k, "pinned staging allocation failed");
+        return result_t::fail(util::status_code_t::out_of_memory_k, "snapshot allocation failed");
+    nk::tensor<util::bf16_t, util::pinned_alloc<util::bf16_t>, 1> staging =
+        make_uninitialized<nk::tensor<util::bf16_t, util::pinned_alloc<util::bf16_t>, 1>>({largest});
+    if (!staging) return result_t::fail(util::status_code_t::out_of_memory_k, "pinned staging allocation failed");
     std::size_t cursor = 0;
-    for (differentiable_weights_t const& matrix : list) {
+    for (util::differentiable_weights_t const& matrix : list) {
         std::size_t const scalars = matrix.weights.numel();
         if (nk::failed(staging.resize({scalars})))
-            return result_t::fail(status_t::bad_alloc_k, "staging resize failed");
-        nk::tensor_view<bf16_t, 1> const source = matrix.weights.flatten<1>();
-        if (expected_t copied = copy_device_to_host(source, staging.span(), stream); !copied)
+            return result_t::fail(util::status_code_t::out_of_memory_k, "staging resize failed");
+        nk::tensor_view<util::bf16_t, 1> const source = matrix.weights.flatten<1>();
+        if (util::expected_t copied = util::copy_device_to_host(source, staging.span(), stream); !copied)
             return result_t::fail(std::move(copied));
         cuStreamSynchronize(stream.get());
-        std::memcpy(host.data() + cursor, staging.data(), scalars * sizeof(bf16_t));
+        std::memcpy(host.data() + cursor, staging.data(), scalars * sizeof(util::bf16_t));
         cursor += scalars;
     }
     return result_t {std::move(host)};
@@ -223,40 +229,41 @@ inline constexpr char const* world_unhealthy_k = "needs a healthy world";
 
 /** DtoH the lead replica's shared @c d(normalized) - the score output whose two captured
  *  replays must agree. */
-[[nodiscard]] static expected<st::basic_vector<bf16_t>> snapshot_grad_(base_replica_t& replica,
-                                                                       gpu_stream_t& stream) noexcept {
-    using result_t = expected<st::basic_vector<bf16_t>>;
-    switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "context entry failed");
-    bf16r2_view_t const view = replica.normalized_grad.view();
+[[nodiscard]] static util::expected<st::basic_vector<util::bf16_t>> snapshot_grad_(
+    base_replica_t& replica, util::gpu_stream_t& stream) noexcept {
+    using result_t = util::expected<st::basic_vector<util::bf16_t>>;
+    util::switch_to_gpu_t gpu_scope {stream};
+    if (!gpu_scope.ok()) return result_t::fail(util::status_code_t::device_k, "context entry failed");
+    util::bf16r2_view_t const view = replica.normalized_grad.view();
     std::size_t const scalars = static_cast<std::size_t>(view.extent(0)) * view.extent(1);
-    nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1> staging =
-        nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1>::uninitialized({scalars}, pinned_alloc<bf16_t> {}).value;
-    if (!staging) return result_t::fail(status_t::bad_alloc_k, "pinned staging allocation failed");
-    if (expected_t copied = copy_device_to_host(view.flatten<1>(), staging.span(), stream); !copied)
+    nk::tensor<util::bf16_t, util::pinned_alloc<util::bf16_t>, 1> staging =
+        make_uninitialized<nk::tensor<util::bf16_t, util::pinned_alloc<util::bf16_t>, 1>>({scalars});
+    if (!staging) return result_t::fail(util::status_code_t::out_of_memory_k, "pinned staging allocation failed");
+    if (util::expected_t copied = util::copy_device_to_host(view.flatten<1>(), staging.span(), stream); !copied)
         return result_t::fail(std::move(copied));
     cuStreamSynchronize(stream.get());
-    st::basic_vector<bf16_t> host;
+    st::basic_vector<util::bf16_t> host;
     if (st::failed(host.resize(st::assume_uninitialized, scalars)))
-        return result_t::fail(status_t::bad_alloc_k, "snapshot allocation failed");
-    std::memcpy(host.data(), staging.data(), scalars * sizeof(bf16_t));
+        return result_t::fail(util::status_code_t::out_of_memory_k, "snapshot allocation failed");
+    std::memcpy(host.data(), staging.data(), scalars * sizeof(util::bf16_t));
     return result_t {std::move(host)};
 }
 
 /** Bytewise-equal two snapshots, as replicas fed one all-reduced gradient must agree exactly. */
-[[nodiscard]] static bool snapshots_match_(st::basic_vector<bf16_t> const& left,
-                                           st::basic_vector<bf16_t> const& right) noexcept {
-    return left.size() == right.size() && std::memcmp(left.data(), right.data(), left.size() * sizeof(bf16_t)) == 0;
+[[nodiscard]] static bool snapshots_match_(st::basic_vector<util::bf16_t> const& left,
+                                           st::basic_vector<util::bf16_t> const& right) noexcept {
+    return left.size() == right.size() &&
+           std::memcmp(left.data(), right.data(), left.size() * sizeof(util::bf16_t)) == 0;
 }
 
 /** Two snapshots agree within 1% of the first's peak, for runs whose reductions may add
  *  in any order. */
-[[nodiscard]] static bool snapshots_near_(st::basic_vector<bf16_t> const& left,
-                                          st::basic_vector<bf16_t> const& right) noexcept {
+[[nodiscard]] static bool snapshots_near_(st::basic_vector<util::bf16_t> const& left,
+                                          st::basic_vector<util::bf16_t> const& right) noexcept {
     if (left.size() != right.size()) return false;
-    f32_t largest = 0.0f, worst = 0.0f;
+    util::f32_t largest = 0.0f, worst = 0.0f;
     for (std::size_t index = 0; index != left.size(); ++index) {
-        f32_t const expected_value = __bfloat162float(left[index]);
+        util::f32_t const expected_value = __bfloat162float(left[index]);
         largest = fu::max_of(largest, std::fabs(expected_value));
         worst = fu::max_of(worst, std::fabs(expected_value - __bfloat162float(right[index])));
     }
@@ -275,25 +282,25 @@ static void test_learning_rate_schedule() {
     config.steps = 100;
 
     bool ramp_monotone = true;
-    for (u32_t ordinal = 1; ordinal < config.warmup_steps; ++ordinal)
-        ramp_monotone = ramp_monotone && config.learning_rate_for(optimizer_step_t {ordinal}) >
-                                             config.learning_rate_for(optimizer_step_t {ordinal - 1u});
+    for (util::u32_t ordinal = 1; ordinal < config.warmup_steps; ++ordinal)
+        ramp_monotone = ramp_monotone && config.learning_rate_for(util::optimizer_step_t {ordinal}) >
+                                             config.learning_rate_for(util::optimizer_step_t {ordinal - 1u});
     expect_true(ramp_monotone, "the warmup ramp is strictly monotone");
-    f32_t const peak = config.learning_rate_for(optimizer_step_t {config.warmup_steps - 1u});
+    util::f32_t const peak = config.learning_rate_for(util::optimizer_step_t {config.warmup_steps - 1u});
     expect_true(peak == config.learning_rate, "the ramp tops out exactly at the peak: got {} want {}", peak,
                 config.learning_rate);
 
     bool decay_monotone = true, bounded = true;
-    f32_t previous = peak;
-    for (u32_t ordinal = config.warmup_steps; ordinal < config.steps; ++ordinal) {
-        f32_t const rate = config.learning_rate_for(optimizer_step_t {ordinal});
+    util::f32_t previous = peak;
+    for (util::u32_t ordinal = config.warmup_steps; ordinal < config.steps; ++ordinal) {
+        util::f32_t const rate = config.learning_rate_for(util::optimizer_step_t {ordinal});
         decay_monotone = decay_monotone && rate <= previous;
         bounded = bounded && rate >= config.min_learning_rate && rate <= config.learning_rate;
         previous = rate;
     }
     expect_true(decay_monotone, "the cosine decay never rises");
     expect_true(bounded, "every decay rate stays within the floor-to-peak band");
-    f32_t const tail = config.learning_rate_for(optimizer_step_t {config.steps - 1u});
+    util::f32_t const tail = config.learning_rate_for(util::optimizer_step_t {config.steps - 1u});
     expect_true(tail <= config.min_learning_rate * 1.1f, "the tail settles onto the floor: got {} want <= {}", tail,
                 config.min_learning_rate * 1.1f);
 }
@@ -304,7 +311,7 @@ static void test_learning_rate_schedule() {
  *  loudly here before it silently re-keys a checkpoint. Piggybacks on an already-built trainer, so
  *  it costs no bring-up of its own. */
 static void check_weight_naming_(char const* label, trainer_config_t const& config,
-                                 std::span<differentiable_weights_t const> weights) {
+                                 std::span<util::differentiable_weights_t const> weights) {
     std::size_t index = 0;
     auto expect = [&](sz::string_view_t want) {
         if (index >= weights.size()) {
@@ -320,11 +327,11 @@ static void check_weight_naming_(char const* label, trainer_config_t const& conf
     if (config.batch.contains(modality_t::video_k)) expect("video_projection");
     if (config.batch.contains(modality_t::audio_k)) expect("audio_projection");
     sz::string_t name;
-    for (u32_t layer_index = 0; layer_index != config.depth; ++layer_index)
+    for (util::u32_t layer_index = 0; layer_index != config.depth; ++layer_index)
         for (sz::string_view_t part : {"qkv", "out", "gate_up", "down", "pre_norm", "post_norm"}) {
             name.clear();
-            if (!expect_true(format_into(name, "blocks.{}.{}", layer_index, part), "[{}] weight name format failed",
-                             label))
+            if (!expect_true(util::format_into(name, "blocks.{}.{}", layer_index, part),
+                             "[{}] weight name format failed", label))
                 return;
             expect(name.view());
         }
@@ -347,21 +354,23 @@ static void check_weight_naming_(char const* label, trainer_config_t const& conf
 static case_result_t test_base_conformance(world_health_t& health, char const* label, trainer_config_t const& config,
                                            tier_t tier) {
     if (!world_still_healthy_(health)) return case_result_t::skipped(world_unhealthy_k);
-    mesh_topology_t const& topology = tier.mesh.topology;
-    st::basic_vector<bf16_t> captured_lead;
+    util::mesh_topology_t const& topology = tier.mesh.topology;
+    st::basic_vector<util::bf16_t> captured_lead;
     {
         trainer_t trainer;
-        if (expected_t built = make_trainer_(trainer, tier, config, health);
+        if (util::expected_t built = make_trainer_(trainer, tier, config, health);
             !expect_true(built, "[{}] trainer bring-up: {}", label, built.description_))
             return {};
-        u32_t const gpus = static_cast<u32_t>(trainer.replicas.size());
+        util::u32_t const gpus = static_cast<util::u32_t>(trainer.replicas.size());
         check_weight_naming_(label, config, trainer.replicas[0].weights);
 
         // Assertion F's reference: the lead replica's freshly seeded weights, untouched
         // by the capture.
-        expected<st::basic_vector<bf16_t>> seed_lead = snapshot_weights_(trainer.replicas[0].weights,
-                                                                         trainer.streams[0]);
-        if (!expect_true(seed_lead, "[{}] seed snapshot: {}", label, seed_lead.description_)) return {};
+        auto [seed_lead, snapshot_seed_lead_status] = snapshot_weights_(trainer.replicas[0].weights,
+                                                                        trainer.streams[0]);
+        if (!expect_true(snapshot_seed_lead_status, "[{}] seed snapshot: {}", label,
+                         snapshot_seed_lead_status.description_))
+            return {};
 
         // The captured run, telemetry every step. A midpoint snapshot splits the run into two
         // halves; assertion D compares their sample-weighted means, so a head scored on only some
@@ -371,94 +380,97 @@ static case_result_t test_base_conformance(world_health_t& health, char const* l
         telemetry_loss_stats_t mid_stats[4] {};
         synthetic_source_t source;
         step_report_t report;
-        for (u32_t ordinal = 0; ordinal != config.steps; ++ordinal) {
-            if (expected_t ran = trainer.step(batch_source_of(source), optimizer_step_t {ordinal}, report);
+        for (util::u32_t ordinal = 0; ordinal != config.steps; ++ordinal) {
+            if (util::expected_t ran = trainer.step(batch_source_of(source), util::optimizer_step_t {ordinal}, report);
                 !expect_true(ran, "[{}] captured step {}: {}", label, ordinal, ran.description_))
                 return {};
-            (void)trainer.telemetry(optimizer_step_t {ordinal});
+            [[maybe_unused]] telemetry_t const drained = trainer.telemetry(util::optimizer_step_t {ordinal});
             if (ordinal + 1u == config.steps / 2u)
-                for (u32_t head = 0; head != 4u; ++head) mid_stats[head] = trainer.ledger.losses(head_probes[head]);
+                for (util::u32_t head = 0; head != 4u; ++head)
+                    mid_stats[head] = trainer.ledger.losses(head_probes[head]);
         }
         telemetry_loss_stats_t end_stats[4] {};
-        for (u32_t head = 0; head != 4u; ++head) end_stats[head] = trainer.ledger.losses(head_probes[head]);
+        for (util::u32_t head = 0; head != 4u; ++head) end_stats[head] = trainer.ledger.losses(head_probes[head]);
 
         // At multi-domain worlds a node's telemetry sees only its slice of the objective the
         // optimizer minimizes — a local half can rise while the world mean falls, and that is
         // descent, not a defect. Fold every host_domain's summands through the mesh exchange, so D
         // judges the world mean and every node reaches the same verdict.
-        u32_t const host_domains = static_cast<u32_t>(topology.host_domains.size());
+        util::u32_t const host_domains = static_cast<util::u32_t>(topology.host_domains.size());
         if (host_domains > 1u) {
             sz::string_t mine;
             bool formatted = true;
-            for (u32_t head = 0; head != 4u; ++head)
-                formatted = formatted &&
-                            format_into(mine, "{:.17e} {:.17e} {:.17e} {:.17e} {}\n", mid_stats[head].weighted_sum,
-                                        mid_stats[head].weight, end_stats[head].weighted_sum, end_stats[head].weight,
-                                        end_stats[head].scored_steps);
+            for (util::u32_t head = 0; head != 4u; ++head)
+                formatted = formatted && util::format_into(mine, "{:.17e} {:.17e} {:.17e} {:.17e} {}\n",
+                                                           mid_stats[head].weighted_sum, mid_stats[head].weight,
+                                                           end_stats[head].weighted_sum, end_stats[head].weight,
+                                                           end_stats[head].scored_steps);
             sz::string_t key;
-            formatted = formatted && static_cast<bool>(format_into(key, "conformance.{}.loss_summands", label));
+            formatted = formatted && static_cast<bool>(util::format_into(key, "conformance.{}.loss_summands", label));
             if (!expect_true(formatted, "[{}] loss-summand exchange formatting failed", label)) return {};
-            if (expected_t published = topology.publish_text(key.view(), mine.view());
+            if (util::expected_t published = topology.publish_text(key.view(), mine.view());
                 !expect_true(published, "[{}] loss-summand publish: {}", label, published.description_))
                 return {};
             telemetry_loss_stats_t world_mid[4] {}, world_end[4] {};
-            for (u32_t domain_index = 0; domain_index != host_domains; ++domain_index) {
+            for (util::u32_t domain_index = 0; domain_index != host_domains; ++domain_index) {
                 sz::string_t text;
                 if (domain_index == topology.host_domain_index) {
                     if (!expect_true(!sz::failed(text.assign(mine.view())), "[{}] loss-summand staging failed", label))
                         return {};
                 }
-                else if (expected_t arrived = topology.await_text(domain_index, key.view(), text, wait_limit_k.count());
+                else if (util::expected_t arrived = topology.await_text(domain_index, key.view(), text,
+                                                                        wait_limit_k.count());
                          !expect_true(arrived, "[{}] loss-summand exchange: {}", label, arrived.description_))
                     return {};
                 char const* cursor = text.c_str();
-                for (u32_t head = 0; head != 4u; ++head) {
+                for (util::u32_t head = 0; head != 4u; ++head) {
                     char* next = nullptr;
                     world_mid[head].weighted_sum += std::strtod(cursor, &next); // vendor-boundary: libc parse
                     world_mid[head].weight += std::strtod(next, &next);         // vendor-boundary
                     world_end[head].weighted_sum += std::strtod(next, &next);   // vendor-boundary
                     world_end[head].weight += std::strtod(next, &next);         // vendor-boundary
-                    world_end[head].scored_steps += static_cast<u64_t>(std::strtod(next, &next)); // vendor-boundary
+                    world_end[head].scored_steps += static_cast<util::u64_t>(
+                        std::strtod(next, &next)); // vendor-boundary
                     cursor = next;
                 }
             }
-            for (u32_t head = 0; head != 4u; ++head) {
+            for (util::u32_t head = 0; head != 4u; ++head) {
                 mid_stats[head] = world_mid[head];
                 end_stats[head] = world_end[head];
             }
         }
-        if (expected_t drained = trainer.synchronize();
+        if (util::expected_t drained = trainer.synchronize();
             !expect_true(drained, "[{}] drain: {}", label, drained.description_))
             return {};
-        expected<st::basic_vector<bf16_t>> lead = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
-        if (!expect_true(lead, "[{}] lead snapshot: {}", label, lead.description_)) return {};
-        captured_lead = std::move(lead.value_);
+        auto [lead, snapshot_lead_status] = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
+        if (!expect_true(snapshot_lead_status, "[{}] lead snapshot: {}", label, snapshot_lead_status.description_))
+            return {};
+        captured_lead = std::move(lead);
 
         // A — every replica byte-matches the lead. Vacuous at one GPU (the peer loop is empty), but
         // the run stands.
         bool replicas_identical = true;
-        for (u32_t member_index = 1; member_index < gpus; ++member_index) {
-            expected<st::basic_vector<bf16_t>> peer = snapshot_weights_(trainer.replicas[member_index].weights,
-                                                                        trainer.streams[member_index]);
-            replicas_identical = replicas_identical && peer && snapshots_match_(peer.value_, captured_lead);
+        for (util::u32_t member_index = 1; member_index < gpus; ++member_index) {
+            auto [peer, snapshot_peer_status] = snapshot_weights_(trainer.replicas[member_index].weights,
+                                                                  trainer.streams[member_index]);
+            replicas_identical = replicas_identical && snapshot_peer_status && snapshots_match_(peer, captured_lead);
         }
         expect_true(replicas_identical, "[{}] every replica matches the lead bitwise (A)", label);
 
         // B — every member's own barrier round advanced off zero, never moved backwards, and they all agree:
         //     the ledger's monotone round rows carry all three (each member's scalar counts its own barriers).
-        expected<telemetry_row_t> lead_round = trainer.ledger.row(trainer.probes.rounds[0], trainer.streams[0]);
-        bool rounds_read = static_cast<bool>(lead_round), round_uniform = true, round_monotone = true;
-        for (u32_t member_index = 0; member_index < gpus; ++member_index) {
-            expected<telemetry_row_t> member_round = trainer.ledger.row(trainer.probes.rounds[member_index],
-                                                                        trainer.streams[member_index]);
-            rounds_read = rounds_read && member_round;
-            round_uniform = round_uniform && member_round && lead_round &&
-                            member_round.value_.last_scalar == lead_round.value_.last_scalar;
-            round_monotone = round_monotone && member_round && member_round.value_.violations == 0u;
+        auto [lead_round, read_lead_round_status] = trainer.ledger.row(trainer.probes.rounds[0], trainer.streams[0]);
+        bool rounds_read = static_cast<bool>(read_lead_round_status), round_uniform = true, round_monotone = true;
+        for (util::u32_t member_index = 0; member_index < gpus; ++member_index) {
+            auto [member_round, read_member_round_status] = trainer.ledger.row(trainer.probes.rounds[member_index],
+                                                                               trainer.streams[member_index]);
+            rounds_read = rounds_read && read_member_round_status;
+            round_uniform = round_uniform && read_member_round_status && read_lead_round_status &&
+                            member_round.last_scalar == lead_round.last_scalar;
+            round_monotone = round_monotone && read_member_round_status && member_round.violations == 0u;
         }
-        expect_true(rounds_read && lead_round.value_.last_scalar > 0.0f,
-                    "[{}] barrier round advanced off zero: got {} (B)", label,
-                    rounds_read ? lead_round.value_.last_scalar : 0.0f);
+        expect_true(rounds_read && lead_round.last_scalar > 0.0f, "[{}] barrier round advanced off zero: got {} (B)",
+                    label, rounds_read ? lead_round.last_scalar : 0.0f);
         expect_true(round_uniform, "[{}] barrier round reads identically through every member (B)", label);
         expect_true(round_monotone, "[{}] no member's barrier round ever moved backwards (B)", label);
 
@@ -466,11 +478,11 @@ static case_result_t test_base_conformance(world_health_t& health, char const* l
         // the early half's;
         //     the late half is a subtraction of two monotone snapshots. A head both halves scored votes;
         //     the sums of voting heads decide. Loose by design — one deterministic descent, not convergence.
-        f64_t early_mean_sum = 0.0, late_mean_sum = 0.0;
-        u32_t voting_heads = 0;
-        for (u32_t head = 0; head != 4u; ++head) {
-            f64_t const early_weight = mid_stats[head].weight;
-            f64_t const late_weight = end_stats[head].weight - mid_stats[head].weight;
+        util::f64_t early_mean_sum = 0.0, late_mean_sum = 0.0;
+        util::u32_t voting_heads = 0;
+        for (util::u32_t head = 0; head != 4u; ++head) {
+            util::f64_t const early_weight = mid_stats[head].weight;
+            util::f64_t const late_weight = end_stats[head].weight - mid_stats[head].weight;
             if (early_weight == 0.0 || late_weight == 0.0) continue; // unscored half — E guards coverage
             early_mean_sum += mid_stats[head].weighted_sum / early_weight;
             late_mean_sum += (end_stats[head].weighted_sum - mid_stats[head].weighted_sum) / late_weight;
@@ -494,7 +506,7 @@ static case_result_t test_base_conformance(world_health_t& health, char const* l
         // F — the captured window moved the weights off their seed: gradients propagated
         // through the whole
         //     backbone and the optimizer applied them.
-        expect_true(!snapshots_match_(seed_lead.value_, captured_lead),
+        expect_true(!snapshots_match_(seed_lead, captured_lead),
                     "[{}] the captured window moved the weights off their seed (F)", label);
     }
 
@@ -502,20 +514,20 @@ static case_result_t test_base_conformance(world_health_t& health, char const* l
     // fresh moments, runs
     //     the same steps eagerly, and lands on the captured run's weights. The strongest single check.
     trainer_config_t eager_config = config;
-    eager_config.capture = eager_k;
+    eager_config.capture = util::eager_k;
     trainer_t eager;
-    if (expected_t built = make_trainer_(eager, tier, eager_config, health);
+    if (util::expected_t built = make_trainer_(eager, tier, eager_config, health);
         !expect_true(built, "[{}] eager trainer bring-up: {}", label, built.description_))
         return {};
-    if (expected_t ran = run_steps_(eager, 0u, config.steps);
+    if (util::expected_t ran = run_steps_(eager, 0u, config.steps);
         !expect_true(ran, "[{}] eager run: {}", label, ran.description_))
         return {};
-    if (expected_t drained = eager.synchronize();
+    if (util::expected_t drained = eager.synchronize();
         !expect_true(drained, "[{}] eager drain: {}", label, drained.description_))
         return {};
-    expected<st::basic_vector<bf16_t>> eager_lead = snapshot_weights_(eager.replicas[0].weights, eager.streams[0]);
-    expect_true(eager_lead && snapshots_near_(eager_lead.value_, captured_lead),
-                "[{}] captured replay lands on the eager run (C)", label);
+    auto [eager_lead, status] = snapshot_weights_(eager.replicas[0].weights, eager.streams[0]);
+    expect_true(status && snapshots_near_(eager_lead, captured_lead), "[{}] captured replay lands on the eager run (C)",
+                label);
     return {};
 }
 
@@ -525,44 +537,45 @@ static case_result_t test_base_conformance(world_health_t& health, char const* l
 static case_result_t test_sweep_cell(world_health_t& health, tier_t tier, sz::string_view_t label,
                                      trainer_config_t config) {
     if (!world_still_healthy_(health)) return case_result_t::skipped(world_unhealthy_k);
-    config.capture = eager_k;
+    config.capture = util::eager_k;
     trainer_t trainer;
-    if (expected_t built = make_trainer_(trainer, tier, config, health);
+    if (util::expected_t built = make_trainer_(trainer, tier, config, health);
         !expect_true(built, "[{}] trainer bring-up: {}", label, built.description_))
         return {};
 
     // The eager state first, then the captured one over the same trainer — capture must also hold
     // after the optimizer has stepped (the capture-stable addresses survive weight updates).
-    if (expected_t ran = run_steps_(trainer, 0u, 2u);
+    if (util::expected_t ran = run_steps_(trainer, 0u, 2u);
         !expect_true(ran, "[{}] eager steps: {}", label, ran.description_))
         return {};
-    f32_t const eager_loss = trainer.telemetry(optimizer_step_t {1u}).composite();
-    if (expected_t captured = trainer.capture();
+    util::f32_t const eager_loss = trainer.telemetry(util::optimizer_step_t {1u}).composite();
+    if (util::expected_t captured = trainer.capture();
         !expect_true(captured, "[{}] capture: {}", label, captured.description_))
         return {};
-    if (expected_t ran = run_steps_(trainer, 2u, 4u);
+    if (util::expected_t ran = run_steps_(trainer, 2u, 4u);
         !expect_true(ran, "[{}] replayed steps: {}", label, ran.description_))
         return {};
-    f32_t const replayed_loss = trainer.telemetry(optimizer_step_t {3u}).composite();
+    util::f32_t const replayed_loss = trainer.telemetry(util::optimizer_step_t {3u}).composite();
 
     expect_true(std::isfinite(eager_loss) && std::isfinite(replayed_loss),
                 "[{}] losses finite through both modes: eager {} replayed {}", label, eager_loss, replayed_loss);
     std::size_t const max_tokens = static_cast<std::size_t>(config.batch.max_rows_per_gpu) *
                                    config.batch.max_columns_per_row;
-    bf16r2_view_t const normalized = trainer.replicas[0].tower.normalized();
+    util::bf16r2_view_t const normalized = trainer.replicas[0].tower.normalized();
     expect_true(normalized.extent(0) == max_tokens && normalized.extent(1) == config.hidden,
                 "[{}] normalized carries [max_tokens, hidden]: got [{}, {}] want [{}, {}]", label, normalized.extent(0),
                 normalized.extent(1), max_tokens, config.hidden);
 
-    if (expected_t drained = trainer.synchronize(); !drained)
+    if (util::expected_t drained = trainer.synchronize(); !drained)
         expect_true(false, "[{}] end-of-case drain: {}", label, drained.description_);
     return {};
 }
 
 /** One sweep cell's config: @p subset 's media bits over @p rows full-width rows of
  *  @p columns cells. */
-[[nodiscard]] static trainer_config_t sweep_config_(u32_t subset, u32_t rows, u32_t columns, u64_t seed) noexcept {
-    trainer_config_t config = test_geometry_(false, seed);
+[[nodiscard]] static trainer_config_t sweep_config_(util::u32_t subset, util::u32_t rows, util::u32_t columns,
+                                                    util::u64_t seed) noexcept {
+    trainer_config_t config = test_geometry_(test_mixture_t::tokens_k, seed);
     config.batch = multimodal_batch_shape_t {rows, rows, columns};
     config.steps = 4;
     if (subset & 1u) config.batch.image = image_batch_shape_t {8u, 3u};
@@ -583,10 +596,10 @@ static case_result_t test_sweep_cell(world_health_t& health, tier_t tier, sz::st
  *  and widens to the multi-node world automatically under the sbatch launcher.
  */
 static void mixture_sweep(world_health_t& health, tier_t wide, tier_t cheap) {
-    for (u32_t subset = 0; subset != 8u; ++subset)
-        for (u32_t rows = 1; rows != 3u; ++rows) {
+    for (util::u32_t subset = 0; subset != 8u; ++subset)
+        for (util::u32_t rows = 1; rows != 3u; ++rows) {
             sz::string_t label;
-            if (!expect_true(format_into(label, "test_sweep_cell(cheap, {}, {}, 64)", subset, rows),
+            if (!expect_true(util::format_into(label, "test_sweep_cell(cheap, {}, {}, 64)", subset, rows),
                              "sweep label format failed"))
                 return;
             run_test_case(label.c_str(), test_sweep_cell, health, cheap, label.view(),
@@ -596,9 +609,10 @@ static void mixture_sweep(world_health_t& health, tier_t wide, tier_t cheap) {
                   "test_sweep_cell(cheap, 7, 5, 64)", sweep_config_(7u, 5u, 64u, test_run.settings.seed));
     run_test_case("test_sweep_cell(cheap, 7, 2, 96)", test_sweep_cell, health, cheap,
                   "test_sweep_cell(cheap, 7, 2, 96)", sweep_config_(7u, 2u, 96u, test_run.settings.seed));
-    for (u32_t subset = 0; subset != 8u; ++subset) {
+    for (util::u32_t subset = 0; subset != 8u; ++subset) {
         sz::string_t label;
-        if (!expect_true(format_into(label, "test_sweep_cell(wide, {}, 2, 64)", subset), "sweep label format failed"))
+        if (!expect_true(util::format_into(label, "test_sweep_cell(wide, {}, 2, 64)", subset),
+                         "sweep label format failed"))
             return;
         run_test_case(label.c_str(), test_sweep_cell, health, wide, label.view(),
                       sweep_config_(subset, 2u, 64u, test_run.settings.seed));
@@ -621,28 +635,29 @@ static void test_segment_budget() {
  *  segments cover it exactly once and in order, and the step still trains finitely. */
 static case_result_t test_packed_rows(world_health_t& health, tier_t tier) {
     if (!world_still_healthy_(health)) return case_result_t::skipped(world_unhealthy_k);
-    trainer_config_t config = test_geometry_(false, test_run.settings.seed);
+    trainer_config_t config = test_geometry_(test_mixture_t::tokens_k, test_run.settings.seed);
     config.batch = batch_capacity(config.batch, 2u, 3.0);
-    config.capture = eager_k;
+    config.capture = util::eager_k;
     trainer_t trainer;
-    if (expected_t built = make_trainer_(trainer, tier, config, health);
+    if (util::expected_t built = make_trainer_(trainer, tier, config, health);
         !expect_true(built, "packed trainer bring-up: {}", built.description_))
         return {};
-    switch_to_gpu_t gpu_scope {trainer.streams[0]};
+    util::switch_to_gpu_t gpu_scope {trainer.streams[0]};
     if (!expect_true(gpu_scope.ok(), "packed context entry")) return {};
     base_replica_t& lead = trainer.replicas[0];
-    if (expected_t drawn = lead.draw(config, 0u, data_epoch_t {0u}, trainer.streams[0]);
+    if (util::expected_t drawn = lead.draw(config, 0u, util::data_epoch_t {0u}, trainer.streams[0]);
         !expect_true(drawn, "packed draw: {}", drawn.description_))
         return {};
     std::size_t const rows = config.batch.max_rows_per_gpu, columns = config.batch.max_columns_per_row;
     std::size_t const segments = config.batch.max_segments_per_gpu;
-    u32r1_tensor_pinned_t offsets = u32r1_tensor_pinned_t::uninitialized({segments + 1}, pinned_alloc<u32_t> {}).value;
-    u32r1_tensor_pinned_t lengths = u32r1_tensor_pinned_t::uninitialized({segments}, pinned_alloc<u32_t> {}).value;
-    if (!expect_true(offsets && lengths &&
-                         copy_device_to_host(lead.batch.segment_offsets.view(), offsets.span(), trainer.streams[0]) &&
-                         copy_device_to_host(lead.batch.segment_lengths.view(), lengths.span(), trainer.streams[0]) &&
-                         cuStreamSynchronize(trainer.streams[0].get()) == CUDA_SUCCESS,
-                     "packed readback"))
+    util::u32r1_tensor_pinned_t offsets = make_uninitialized<util::u32r1_tensor_pinned_t>({segments + 1});
+    util::u32r1_tensor_pinned_t lengths = make_uninitialized<util::u32r1_tensor_pinned_t>({segments});
+    if (!expect_true(
+            offsets && lengths &&
+                util::copy_device_to_host(lead.batch.segment_offsets.view(), offsets.span(), trainer.streams[0]) &&
+                util::copy_device_to_host(lead.batch.segment_lengths.view(), lengths.span(), trainer.streams[0]) &&
+                cuStreamSynchronize(trainer.streams[0].get()) == CUDA_SUCCESS,
+            "packed readback"))
         return {};
     bool covered = segments == 3u * rows && offsets[segments] == rows * columns;
     for (std::size_t row = 0; covered && row != rows; ++row) {
@@ -654,11 +669,11 @@ static case_result_t test_packed_rows(world_health_t& health, tier_t tier) {
         covered = covered && cursor == (row + 1u) * columns;
     }
     expect_true(covered, "{} rows of {} columns cut into three segments each, in order", rows, columns);
-    if (expected_t ran = run_steps_(trainer, 0u, 2u); !expect_true(ran, "packed steps: {}", ran.description_))
+    if (util::expected_t ran = run_steps_(trainer, 0u, 2u); !expect_true(ran, "packed steps: {}", ran.description_))
         return {};
-    f32_t const loss = trainer.telemetry(optimizer_step_t {1u}).composite();
+    util::f32_t const loss = trainer.telemetry(util::optimizer_step_t {1u}).composite();
     expect_true(std::isfinite(loss), "packed rows train finitely: loss {}", loss);
-    if (expected_t drained = trainer.synchronize(); !drained)
+    if (util::expected_t drained = trainer.synchronize(); !drained)
         expect_true(false, "packed end-of-case drain: {}", drained.description_);
     return {};
 }
@@ -668,9 +683,9 @@ static case_result_t test_packed_rows(world_health_t& health, tier_t tier) {
  *  to reduction order. */
 static case_result_t test_graph_capture(world_health_t& health, tier_t tier) {
     if (!world_still_healthy_(health)) return case_result_t::skipped(world_unhealthy_k);
-    trainer_config_t const config = test_geometry_(false, test_run.settings.seed);
+    trainer_config_t const config = test_geometry_(test_mixture_t::tokens_k, test_run.settings.seed);
     trainer_t trainer;
-    if (expected_t built = make_trainer_(trainer, tier, config, health);
+    if (util::expected_t built = make_trainer_(trainer, tier, config, health);
         !expect_true(built, "capture trainer bring-up: {}", built.description_))
         return {};
     std::size_t const gpus = trainer.replicas.size();
@@ -679,39 +694,40 @@ static case_result_t test_graph_capture(world_health_t& health, tier_t tier) {
                 trainer.forward_graphs.size(), trainer.backward_graphs.size(), gpus);
     if (trainer.forward_graphs.size() != gpus) return {};
 
-    switch_to_gpu_t gpu_scope {trainer.streams[0]};
+    util::switch_to_gpu_t gpu_scope {trainer.streams[0]};
     if (!expect_true(gpu_scope.ok(), "capture context entry")) return {};
     base_replica_t& lead = trainer.replicas[0];
-    expected_t prepared = lead.draw(config, 0u, data_epoch_t {0u}, trainer.streams[0]);
-    if (prepared) prepared = lead.prepare(config, data_epoch_t {0u}, trainer.streams[0]);
+    util::expected_t prepared = lead.draw(config, 0u, util::data_epoch_t {0u}, trainer.streams[0]);
+    if (prepared) prepared = lead.prepare(config, util::data_epoch_t {0u}, trainer.streams[0]);
     if (!expect_true(prepared, "capture preamble: {}", prepared.description_)) return {};
-    if (expected_t first = trainer.forward_graphs[0].launch(trainer.streams[0].get());
+    if (util::expected_t first = trainer.forward_graphs[0].launch(trainer.streams[0].get());
         !expect_true(first, "first replay: {}", first.description_))
         return {};
-    expected<st::basic_vector<bf16_t>> first_grad = snapshot_grad_(lead, trainer.streams[0]);
-    if (expected_t second = trainer.forward_graphs[0].launch(trainer.streams[0].get());
+    auto [first_grad, snapshot_first_grad_status] = snapshot_grad_(lead, trainer.streams[0]);
+    if (util::expected_t second = trainer.forward_graphs[0].launch(trainer.streams[0].get());
         !expect_true(second, "second replay: {}", second.description_))
         return {};
-    expected<st::basic_vector<bf16_t>> second_grad = snapshot_grad_(lead, trainer.streams[0]);
-    expect_true(first_grad && second_grad && snapshots_near_(first_grad.value_, second_grad.value_),
+    auto [second_grad, snapshot_second_grad_status] = snapshot_grad_(lead, trainer.streams[0]);
+    expect_true(snapshot_first_grad_status && snapshot_second_grad_status && snapshots_near_(first_grad, second_grad),
                 "two captured replays agree");
     return {};
 }
 
 /** Download one replica's @b [groups] Float32 temperatures, β then bias, into @p host . */
-[[nodiscard]] static bool read_temperatures_(base_replica_t& replica, gpu_stream_t& stream,
-                                             st::basic_vector<f32_t>& host) noexcept {
+[[nodiscard]] static bool read_temperatures_(base_replica_t& replica, util::gpu_stream_t& stream,
+                                             st::basic_vector<util::f32_t>& host) noexcept {
     std::size_t const groups = replica.token_inverse_temperatures.numel();
     if (st::failed(host.resize(st::assume_uninitialized, 2u * groups))) return false;
-    f32r1_tensor_pinned_t staging = f32r1_tensor_pinned_t::uninitialized({2u * groups}, pinned_alloc<f32_t> {}).value;
+    util::f32r1_tensor_pinned_t staging = make_uninitialized<util::f32r1_tensor_pinned_t>({2u * groups});
     if (!staging) return false;
-    f32r1_span_t const halves = staging.span();
-    if (!copy_device_to_host(replica.token_inverse_temperatures.view(), halves[nk::range(0, groups), nk::slice],
-                             stream) ||
-        !copy_device_to_host(replica.token_biases.view(), halves[nk::range(groups, 2u * groups), nk::slice], stream))
+    util::f32r1_span_t const halves = staging.span();
+    if (!util::copy_device_to_host(replica.token_inverse_temperatures.view(), halves[nk::range(0, groups), nk::slice],
+                                   stream) ||
+        !util::copy_device_to_host(replica.token_biases.view(), halves[nk::range(groups, 2u * groups), nk::slice],
+                                   stream))
         return false;
     cuStreamSynchronize(stream.get());
-    std::memcpy(host.data(), staging.data(), 2u * groups * sizeof(f32_t));
+    std::memcpy(host.data(), staging.data(), 2u * groups * sizeof(util::f32_t));
     return true;
 }
 
@@ -720,26 +736,27 @@ static case_result_t test_graph_capture(world_health_t& health, tier_t tier) {
  *  moments would not. */
 static case_result_t test_late_interaction_resume(world_health_t& health, tier_t tier) {
     if (!world_still_healthy_(health)) return case_result_t::skipped(world_unhealthy_k);
-    trainer_config_t config = test_geometry_(false, test_run.settings.seed);
+    trainer_config_t config = test_geometry_(test_mixture_t::tokens_k, test_run.settings.seed);
     config.objective = objective_t::contrastive_k;
     config.late_interaction.weight = 1.0f;
     config.late_interaction.width = 32;
-    config.capture = eager_k;
+    config.capture = util::eager_k;
     scratch_directory_t const scratch;
     sz::string_t path;
-    if (!expect_true(format_into(path, "{}/late_interaction.safetensors", scratch.path.c_str()),
+    if (!expect_true(util::format_into(path, "{}/late_interaction.safetensors", scratch.path.c_str()),
                      "checkpoint path formatting failed"))
         return {};
-    st::basic_vector<f32_t> started, continued, resumed;
+    st::basic_vector<util::f32_t> started, continued, resumed;
     {
         trainer_t trainer;
-        if (expected_t built = make_trainer_(trainer, tier, config, health);
+        if (util::expected_t built = make_trainer_(trainer, tier, config, health);
             !expect_true(built, "late-interaction trainer bring-up: {}", built.description_))
             return {};
-        switch_to_gpu_t gpu_scope {trainer.streams[0]};
-        expected_t stepped = read_temperatures_(trainer.replicas[0], trainer.streams[0], started)
-                                 ? run_steps_(trainer, 0, 3)
-                                 : expected_t::fail(status_t::device_error_k, "temperature download failed");
+        util::switch_to_gpu_t gpu_scope {trainer.streams[0]};
+        util::expected_t stepped = read_temperatures_(trainer.replicas[0], trainer.streams[0], started)
+                                       ? run_steps_(trainer, 0, 3)
+                                       : util::expected_t::fail(util::status_code_t::device_k,
+                                                                "temperature download failed");
         if (stepped) stepped = trainer.synchronize();
         if (stepped) stepped = trainer.save(path.view());
         if (stepped) stepped = run_steps_(trainer, 3, 4);
@@ -749,19 +766,19 @@ static case_result_t test_late_interaction_resume(world_health_t& health, tier_t
             return {};
     }
     trainer_t trainer;
-    if (expected_t built = make_trainer_(trainer, tier, config, health);
+    if (util::expected_t built = make_trainer_(trainer, tier, config, health);
         !expect_true(built, "resumed trainer bring-up: {}", built.description_))
         return {};
-    switch_to_gpu_t gpu_scope {trainer.streams[0]};
-    expected_t stepped = trainer.resume(path.view());
+    util::switch_to_gpu_t gpu_scope {trainer.streams[0]};
+    util::expected_t stepped = trainer.resume(path.view());
     if (stepped) stepped = run_steps_(trainer, 3, 4);
     if (stepped) stepped = trainer.synchronize();
     if (!expect_true(stepped && read_temperatures_(trainer.replicas[0], trainer.streams[0], resumed),
                      "resumed step: {}", stepped.description_))
         return {};
-    expect_true(std::memcmp(started.data(), continued.data(), started.size() * sizeof(f32_t)) != 0,
+    expect_true(std::memcmp(started.data(), continued.data(), started.size() * sizeof(util::f32_t)) != 0,
                 "four late-interaction steps move the temperatures");
-    expect_true(std::memcmp(continued.data(), resumed.data(), continued.size() * sizeof(f32_t)) == 0,
+    expect_true(std::memcmp(continued.data(), resumed.data(), continued.size() * sizeof(util::f32_t)) == 0,
                 "the resumed trainer takes the identical temperature step: β {} vs {}, bias {} vs {}", continued[0],
                 resumed[0], continued[continued.size() / 2], resumed[resumed.size() / 2]);
     return {};
@@ -773,7 +790,7 @@ static case_result_t test_late_interaction_resume(world_health_t& health, tier_t
  *  first, falls by the last step, and the token term stays zero throughout. */
 static case_result_t test_choices_replay(world_health_t& health, tier_t tier) {
     if (!world_still_healthy_(health)) return case_result_t::skipped(world_unhealthy_k);
-    trainer_config_t config = test_geometry_(false, test_run.settings.seed);
+    trainer_config_t config = test_geometry_(test_mixture_t::tokens_k, test_run.settings.seed);
     // Rows as wide as the model: the envelope's one-row probe reads choices off its tokens.
     config.batch = multimodal_batch_shape_t {2u, 4u, 256u};
     config.batch.max_choices_per_segment = 4u;
@@ -781,11 +798,11 @@ static case_result_t test_choices_replay(world_health_t& health, tier_t tier) {
     config.text_weight = 0.0f;
     config.choices.weight = 1.0f;
     trainer_t trainer;
-    if (expected_t built = make_trainer_(trainer, tier, config, health);
+    if (util::expected_t built = make_trainer_(trainer, tier, config, health);
         !expect_true(built, "choices trainer bring-up: {}", built.description_))
         return {};
     items_source_t source;
-    if (expected_t made = items_source_t::make(source, trainer);
+    if (util::expected_t made = items_source_t::make(source, trainer);
         !expect_true(made, "choices items source: {}", made.description_))
         return {};
 
@@ -796,19 +813,19 @@ static case_result_t test_choices_replay(world_health_t& health, tier_t tier) {
     std::size_t const offsets[] = {0, 4, 17, 31, sizeof(text) - 1};
     modality_t const modalities[] = {modality_t::text_k, modality_t::text_k, modality_t::text_k, modality_t::text_k};
     std::size_t const choice_offsets[] = {0, 3, 5, 8, 10};
-    u8_t const choice_bytes[] = {'3', '4', '5', 'Y', 'N', 'a', 'e', 'x', 'Y', 'N'};
-    f32_t const targets[] = {0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.5f, 0.5f, 0.0f, 0.0f, 1.0f};
+    util::u8_t const choice_bytes[] = {'3', '4', '5', 'Y', 'N', 'a', 'e', 'x', 'Y', 'N'};
+    util::f32_t const targets[] = {0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.5f, 0.5f, 0.0f, 0.0f, 1.0f};
     source.items.modalities = modalities;
     source.items.contents = {std::as_bytes(std::span {text}), offsets};
     source.items.choices = {{choice_bytes, choice_offsets}, {targets, choice_offsets}};
 
-    f32_t first = 0.0f, last = 0.0f, token = 0.0f;
+    util::f32_t first = 0.0f, last = 0.0f, token = 0.0f;
     step_report_t report;
-    for (u32_t ordinal = 0; ordinal != config.steps; ++ordinal) {
-        if (expected_t stepped = trainer.step(batch_source_of(source), optimizer_step_t {ordinal}, report);
+    for (util::u32_t ordinal = 0; ordinal != config.steps; ++ordinal) {
+        if (util::expected_t stepped = trainer.step(batch_source_of(source), util::optimizer_step_t {ordinal}, report);
             !expect_true(stepped, "choices step {}: {}", ordinal, stepped.description_))
             return {};
-        telemetry_t const telemetry = trainer.telemetry(optimizer_step_t {ordinal});
+        telemetry_t const telemetry = trainer.telemetry(util::optimizer_step_t {ordinal});
         if (ordinal == 0u) first = telemetry.choices;
         last = telemetry.choices;
         token = fu::max_of(token, std::fabs(telemetry.token_ce));
@@ -817,7 +834,7 @@ static case_result_t test_choices_replay(world_health_t& health, tier_t tier) {
     // Seed 42 settles from 1.17 onto the soft target's entropy floor, ln2/4 ≈ 0.17: a wide margin.
     expect_true(std::isfinite(last) && last < 0.5f * first, "the choices term halves: first {} last {}", first, last);
     expect_true(token == 0.0f, "the weighted-out token term reads zero: peak {}", token);
-    if (expected_t drained = trainer.synchronize(); !drained)
+    if (util::expected_t drained = trainer.synchronize(); !drained)
         expect_true(false, "choices end-of-case drain: {}", drained.description_);
     return {};
 }
@@ -826,35 +843,38 @@ static case_result_t test_choices_replay(world_health_t& health, tier_t tier) {
  *  the optimizer moves a weight: a threshold far below one makes every second gradient a spike. */
 static case_result_t test_spectrum_spike(world_health_t& health, tier_t tier) {
     if (!world_still_healthy_(health)) return case_result_t::skipped(world_unhealthy_k);
-    trainer_config_t config = test_geometry_(false, test_run.settings.seed);
+    trainer_config_t config = test_geometry_(test_mixture_t::tokens_k, test_run.settings.seed);
     config.objective = objective_t::contrastive_k;
     config.tcr_lambda = 0.1f;
     config.lipschitz_lambda = 1.0e-3f;
     config.grad_spike_threshold = 1.0e-6f;
     trainer_t trainer;
-    if (expected_t built = make_trainer_(trainer, tier, config, health);
+    if (util::expected_t built = make_trainer_(trainer, tier, config, health);
         !expect_true(built, "spectrum trainer bring-up: {}", built.description_))
         return {};
-    if (expected_t first = run_steps_(trainer, 0u, 1u);
+    if (util::expected_t first = run_steps_(trainer, 0u, 1u);
         !expect_true(first, "the first step, with nothing to spike against: {}", first.description_))
         return {};
-    switch_to_gpu_t gpu_scope {trainer.streams[0]};
-    f32_t terms[2] = {};
-    if (expected_t copied = copy_device_to_host(trainer.spectrum.terms(0), std::span<f32_t> {terms},
-                                                trainer.streams[0]);
+    util::switch_to_gpu_t gpu_scope {trainer.streams[0]};
+    util::f32_t terms[2] = {};
+    if (util::expected_t copied = util::copy_device_to_host(trainer.spectrum.terms(0), std::span<util::f32_t> {terms},
+                                                            trainer.streams[0]);
         !expect_true(copied, "terms download: {}", copied.description_))
         return {};
     cuStreamSynchronize(trainer.streams[0].get());
     expect_true(std::isfinite(terms[0]) && terms[0] > 0.0f && std::isfinite(terms[1]) && terms[1] > 0.0f,
                 "the coding rate {} and the top eigenvalue {} read finite and positive", terms[0], terms[1]);
-    expected<st::basic_vector<bf16_t>> before = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
-    expected_t const spiked = run_steps_(trainer, 1u, 2u);
-    expected<st::basic_vector<bf16_t>> after = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
-    expect_true(!spiked && spiked.status_ == status_t::internal_k, "a threshold of {} refuses the second step",
-                config.grad_spike_threshold);
-    expect_true(before && after && snapshots_match_(before.value_, after.value_),
+    auto [weights_before, snapshot_weights_before_status] = snapshot_weights_(trainer.replicas[0].weights,
+                                                                              trainer.streams[0]);
+    util::expected_t const spiked = run_steps_(trainer, 1u, 2u);
+    auto [weights_after, snapshot_weights_after_status] = snapshot_weights_(trainer.replicas[0].weights,
+                                                                            trainer.streams[0]);
+    expect_true(!spiked && spiked.status_ == util::status_code_t::internal_k,
+                "a threshold of {} refuses the second step", config.grad_spike_threshold);
+    expect_true(snapshot_weights_before_status && snapshot_weights_after_status &&
+                    snapshots_match_(weights_before, weights_after),
                 "the refused step leaves the weights untouched");
-    if (expected_t drained = trainer.synchronize(); !drained)
+    if (util::expected_t drained = trainer.synchronize(); !drained)
         expect_true(false, "spectrum end-of-case drain: {}", drained.description_);
     return {};
 }
@@ -863,90 +883,90 @@ static case_result_t test_spectrum_spike(world_health_t& health, tier_t tier) {
  *  matches one GPU holding every row of the world. */
 static case_result_t test_spectrum_world(world_health_t& health, tier_t wide, tier_t cheap) {
     if (!world_still_healthy_(health)) return case_result_t::skipped(world_unhealthy_k);
-    mesh_topology_t& topology = wide.mesh.topology;
+    util::mesh_topology_t& topology = wide.mesh.topology;
     std::size_t const gpus = wide.devices.size(), world_gpus = topology.shape.gpus_per_colocated_domain;
     if (world_gpus < 2u) return case_result_t::skipped("needs two GPUs in the world");
     std::size_t const rows = 24, hidden = 64, world_rows = rows * world_gpus;
     // A shared offset gives the rows the anisotropy pooled codes carry.
-    std::vector<f64_t> world_values(world_rows * hidden);
+    std::vector<util::f64_t> world_values(world_rows * hidden);
     std::vector<nk_bf16_t> world_pooled(world_rows * hidden);
     for (std::size_t index = 0; index != world_values.size(); ++index)
-        world_values[index] = 0.3 + f64_t(splitmix64_hash_t {}(test_run.settings.seed, 13u, index) >> 40) * 0x1.0p-23 -
-                              1.0;
+        world_values[index] =
+            0.3 + util::f64_t(util::splitmix64_hash_t {}(test_run.settings.seed, 13u, index) >> 40) * 0x1.0p-23 - 1.0;
     if (!expect_true(narrow_to_bf16(world_values, world_pooled), "host rounding failed")) return {};
 
     // The coding rate over `devices`, each holding its slice of the world rows from `first_row`,
     // read back from every rank.
-    auto coding_rates = [&](mesh_t& mesh, std::span<i32_t const> devices, gpu_numerics_t const& numerics,
+    auto coding_rates = [&](mesh_t& mesh, std::span<util::i32_t const> devices, util::gpu_numerics_t const& numerics,
                             std::size_t rows_per_gpu, std::size_t first_row,
-                            std::vector<f32_t>& rates) noexcept -> expected_t {
+                            std::vector<util::f32_t>& rates) noexcept -> expected_t {
         pooled_spectrum_config_t config;
-        config.rows_per_gpu = static_cast<u32_t>(rows_per_gpu);
-        config.hidden = static_cast<u32_t>(hidden);
-        config.rows_per_world = static_cast<u32_t>(world_rows);
+        config.rows_per_gpu = static_cast<util::u32_t>(rows_per_gpu);
+        config.hidden = static_cast<util::u32_t>(hidden);
+        config.rows_per_world = static_cast<util::u32_t>(world_rows);
         config.coding_rate_weight = 1.0f;
-        per_gpu_array<gpu_stream_t> streams;
-        per_gpu_array<gpu_arena_t> arenas;
-        per_gpu_array<bf16r2_tensor_arena_t> pooled, pooled_grad;
+        util::per_gpu_array<util::gpu_stream_t> streams;
+        util::per_gpu_array<util::gpu_arena_t> arenas;
+        util::per_gpu_array<util::bf16r2_tensor_arena_t> pooled, pooled_grad;
         for (std::size_t rank = 0; rank != devices.size(); ++rank) {
-            expected<gpu_stream_t> stream = gpu_stream_t::make(devices[rank]);
-            if (!stream) return expected_t::fail(std::move(stream));
-            if (streams.push_back(std::move(stream.value_)) != status_t::success_k)
-                return expected_t::fail(status_t::bad_alloc_k, "stream table full");
-            switch_to_gpu_t gpu_scope {streams[rank]};
-            expected<gpu_arena_t> arena = gpu_arena_t::make(devices[rank], 1ull << 28, devices);
-            if (!arena) return expected_t::fail(std::move(arena));
-            if (arenas.push_back(std::move(arena.value_)) != status_t::success_k)
-                return expected_t::fail(status_t::bad_alloc_k, "arena table full");
-            gpu_arena_alloc<bf16_t> bf16_alloc {arenas[rank]};
-            if (pooled.push_back(bf16r2_tensor_arena_t::uninitialized({rows_per_gpu, hidden}, bf16_alloc).value) !=
-                    status_t::success_k ||
-                pooled_grad.push_back(bf16r2_tensor_arena_t::uninitialized({rows_per_gpu, hidden}, bf16_alloc).value) !=
-                    status_t::success_k ||
+            auto [stream, make_stream_status] = util::gpu_stream_t::make(devices[rank]);
+            if (!make_stream_status) return util::expected_t::fail(std::move(make_stream_status));
+            if (streams.push_back(std::move(stream)) != util::status_code_t::success_k)
+                return util::expected_t::fail(util::status_code_t::out_of_memory_k, "stream table full");
+            util::switch_to_gpu_t gpu_scope {streams[rank]};
+            auto [arena, make_arena_status] = util::gpu_arena_t::make(devices[rank], 1ull << 28, devices);
+            if (!make_arena_status) return util::expected_t::fail(std::move(make_arena_status));
+            if (arenas.push_back(std::move(arena)) != util::status_code_t::success_k)
+                return util::expected_t::fail(util::status_code_t::out_of_memory_k, "arena table full");
+            util::gpu_arena_alloc<util::bf16_t> bf16_alloc {arenas[rank]};
+            if (pooled.push_back(make_uninitialized<util::bf16r2_tensor_arena_t>({rows_per_gpu, hidden}, bf16_alloc)) !=
+                    util::status_code_t::success_k ||
+                pooled_grad.push_back(make_uninitialized<util::bf16r2_tensor_arena_t>(
+                    {rows_per_gpu, hidden}, bf16_alloc)) != util::status_code_t::success_k ||
                 !pooled[rank] || !pooled_grad[rank])
-                return expected_t::fail(status_t::bad_alloc_k, "pooled rows allocation failed");
+                return util::expected_t::fail(util::status_code_t::out_of_memory_k, "pooled rows allocation failed");
             std::size_t const begin = (first_row + rank * rows_per_gpu) * hidden;
-            cuMemcpyHtoD(device_address(pooled[rank].data()), world_pooled.data() + begin,
+            cuMemcpyHtoD(util::device_address(pooled[rank].data()), world_pooled.data() + begin,
                          rows_per_gpu * hidden * sizeof(nk_bf16_t));
-            if (expected_t zeroed = zero_async(pooled_grad[rank].span(), streams[rank]); !zeroed) return zeroed;
+            if (util::expected_t zeroed = util::zero_async(pooled_grad[rank].span(), streams[rank]); !zeroed)
+                return zeroed;
         }
-        expected<multimem_domain_t> domain = multimem_domain_t::make(
+        auto [domain, make_domain_status] = util::multimem_domain_t::make(
             mesh.topology, devices, distributed_pooled_spectrum_t::payload_scalars_needed(config), streams.span(),
             wait_limit_k.count());
-        if (!domain) return expected_t::fail(std::move(domain));
-        expected<distributed_pooled_spectrum_t> spectrum = distributed_pooled_spectrum_t::make(
-            domain.value_, mesh.colocated, arenas.span(), streams.span(), {}, 0, config, numerics,
-            wait_limit_k.count());
-        if (!spectrum) return expected_t::fail(std::move(spectrum));
+        if (!make_domain_status) return util::expected_t::fail(std::move(make_domain_status));
+        auto [spectrum, make_spectrum_status] = distributed_pooled_spectrum_t::make(
+            domain, mesh.colocated, arenas.span(), streams.span(), {}, 0, config, numerics, wait_limit_k.count());
+        if (!make_spectrum_status) return util::expected_t::fail(std::move(make_spectrum_status));
         for (std::size_t rank = 0; rank != devices.size(); ++rank)
-            if (expected_t shaped = spectrum.value_(rank, pooled[rank].view(), pooled_grad[rank].span(), streams[rank]);
+            if (util::expected_t shaped = spectrum(rank, pooled[rank].view(), pooled_grad[rank].span(), streams[rank]);
                 !shaped)
                 return shaped;
         rates.assign(devices.size(), 0.0f);
         for (std::size_t rank = 0; rank != devices.size(); ++rank) {
-            switch_to_gpu_t gpu_scope {streams[rank]};
-            f32_t terms[2] = {};
-            if (expected_t copied = copy_device_to_host(spectrum.value_.terms(rank), std::span<f32_t> {terms},
-                                                        streams[rank]);
+            util::switch_to_gpu_t gpu_scope {streams[rank]};
+            util::f32_t terms[2] = {};
+            if (util::expected_t copied = util::copy_device_to_host(spectrum.terms(rank),
+                                                                    std::span<util::f32_t> {terms}, streams[rank]);
                 !copied)
                 return copied;
             if (CUresult result = cuStreamSynchronize(streams[rank].get()); result != CUDA_SUCCESS)
-                return cuda_failure(result, "rank {} drain failed", rank);
+                return util::cuda_failure(result, "rank {} drain failed", rank);
             rates[rank] = terms[0];
         }
         return {};
     };
 
-    std::vector<f32_t> world_rates, single_rate;
+    std::vector<util::f32_t> world_rates, single_rate;
     std::size_t const first_row = topology.first_gpu_index() * rows;
-    if (expected_t ran = coding_rates(wide.mesh, wide.devices, wide.numerics, rows, first_row, world_rates);
+    if (util::expected_t ran = coding_rates(wide.mesh, wide.devices, wide.numerics, rows, first_row, world_rates);
         !expect_true(ran, "world coding rate: {}", ran.description_))
         return {};
-    if (expected_t ran = coding_rates(cheap.mesh, cheap.devices, cheap.numerics, world_rows, 0, single_rate);
+    if (util::expected_t ran = coding_rates(cheap.mesh, cheap.devices, cheap.numerics, world_rows, 0, single_rate);
         !expect_true(ran, "single-GPU coding rate: {}", ran.description_))
         return {};
     for (std::size_t rank = 1; rank != gpus; ++rank)
-        expect_true(std::memcmp(&world_rates[rank], &world_rates[0], sizeof(f32_t)) == 0,
+        expect_true(std::memcmp(&world_rates[rank], &world_rates[0], sizeof(util::f32_t)) == 0,
                     "rank {} reads the coding rate {} where rank 0 reads {}", rank, world_rates[rank], world_rates[0]);
     // The world sums Float32 Grams in another order than one GPU's NumKong product does.
     expect_true(std::fabs(world_rates[0] - single_rate[0]) <= 1.0e-4f * single_rate[0],
@@ -976,17 +996,18 @@ int main(int argc, char** argv) {
             run_test_case(label, [] { return case_result_t::skipped(no_gpu_device_k); });
         return finish_test_run();
     }
-    st::basic_vector<i32_t> devices;
+    st::basic_vector<util::i32_t> devices;
     for (int device = 0; device != device_count; ++device)
-        if (!expect_true(!st::failed(devices.push_back(static_cast<i32_t>(device))), "device table allocation failed"))
+        if (!expect_true(!st::failed(devices.push_back(static_cast<util::i32_t>(device))),
+                         "device table allocation failed"))
             return finish_test_run();
 
     // One process per host_domain; the sbatch launcher raises UFORM_HOST_DOMAIN_COUNT for the
     // two-node tier and names the exchange, which this main maps onto the mesh options, as the
     // library reads no environment.
     mesh_options_t options;
-    options.host_domain_index = host_domain_index_from_environment();
-    options.host_domain_count = host_domain_count_from_environment();
+    options.host_domain_index = util::host_domain_index_from_environment();
+    options.host_domain_count = util::host_domain_count_from_environment();
     options.timeout_seconds = wait_limit_k.count();
     if (char const* directory = std::getenv("UFORM_EXCHANGE_DIR"); directory != nullptr)
         options.directory = sz::string_view_t {directory, std::strlen(directory)};
@@ -996,16 +1017,16 @@ int main(int argc, char** argv) {
                      "NumKong cannot query device 0"))
         return finish_test_run();
     mesh_t wide_mesh;
-    if (expected_t joined = mesh_t::make(wide_mesh, options, devices);
+    if (util::expected_t joined = mesh_t::make(wide_mesh, options, devices);
         !expect_true(joined, "mesh bootstrap: {}", joined.description_))
         return finish_test_run();
     mesh_t cheap_mesh;
-    if (expected_t narrowed = narrow_mesh_(cheap_mesh, wide_mesh.topology, 1u);
+    if (util::expected_t narrowed = narrow_mesh_(cheap_mesh, wide_mesh.topology, 1u);
         !expect_true(narrowed, "narrowed mesh: {}", narrowed.description_))
         return finish_test_run();
-    gpu_numerics_t const numerics = gpu_numerics_of(options.capabilities);
+    util::gpu_numerics_t const numerics = gpu_numerics_of(options.capabilities);
     tier_t const wide {wide_mesh, devices, numerics};
-    tier_t const cheap {cheap_mesh, std::span<i32_t const> {devices}.first(1), numerics};
+    tier_t const cheap {cheap_mesh, std::span<util::i32_t const> {devices}.first(1), numerics};
 
     world_health_t health;
     run_test_case("test_packed_rows", test_packed_rows, health, cheap);
@@ -1015,9 +1036,9 @@ int main(int argc, char** argv) {
     run_test_case("test_spectrum_spike", test_spectrum_spike, health, cheap);
     run_test_case("test_spectrum_world", test_spectrum_world, health, wide, cheap);
     run_test_case(R"(test_base_conformance("tokens"))", test_base_conformance, health, "tokens",
-                  test_geometry_(false, test_run.settings.seed), wide);
+                  test_geometry_(test_mixture_t::tokens_k, test_run.settings.seed), wide);
     run_test_case(R"(test_base_conformance("omni"))", test_base_conformance, health, "omni",
-                  test_geometry_(true, test_run.settings.seed), wide);
+                  test_geometry_(test_mixture_t::omni_k, test_run.settings.seed), wide);
     mixture_sweep(health, wide, cheap);
     return finish_test_run();
 }

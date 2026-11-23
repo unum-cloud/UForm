@@ -20,19 +20,19 @@
 
 namespace fu = ashvardanian::forkunion;
 namespace ue = unum::uform::encoder;
-namespace uu = unum::uform::utilities;
+namespace util = unum::uform::utilities;
 using namespace ue;
-using uu::b8_t;
-using uu::bytes_span_t;
-using uu::bytes_view_t;
-using uu::divide_round_up;
-using uu::hip_api_t;
-using uu::hip_function_handle_t;
-using uu::hip_module_handle_t;
-using uu::hip_result_t;
-using uu::hip_stream_handle_t;
-using uu::max_gpus_per_host_k;
-using uu::u8_t;
+using util::b8_t;
+using util::bytes_span_t;
+using util::bytes_view_t;
+using util::divide_round_up;
+using util::hip_api_t;
+using util::hip_function_handle_t;
+using util::hip_module_handle_t;
+using util::hip_result_t;
+using util::hip_stream_handle_t;
+using util::max_gpus_per_host_k;
+using util::u8_t;
 
 /** The bundle's bytes, linked in by the assembler stub @c uform_gpu_bundle writes. */
 extern "C" b8_t const uform_encoder_amd_bundle_start[], uform_encoder_amd_bundle_end[];
@@ -71,7 +71,7 @@ enum class load_stage_t : u8_t {
  *  standard reference, since the entries name no CPU class. */
 struct device_module_t {
     load_stage_t stage = load_stage_t::unloaded_k;
-    hip_result_t status = uu::hip_error_not_initialized_k;
+    hip_result_t status = util::hip_error_not_initialized_k;
     hip_function_handle_t functions[std::size_t(kernel_t::count_k)] = {};
 };
 
@@ -93,31 +93,31 @@ template <typename enqueue_type_>
 [[nodiscard]] static nk_status_t on_device_(nk_stream_t stream, enqueue_type_ const& enqueue) noexcept {
     hip_api_t const& runtime = runtime_();
     int caller = 0, device = 0;
-    if (!runtime || runtime.get_device(&caller) != uu::hip_success_k) return nk_device_code_mismatch_k;
+    if (!runtime || runtime.get_device(&caller) != util::hip_success_k) return nk_device_code_mismatch_k;
     device = caller;
-    if (stream && runtime.stream_device(native_(stream), &device) != uu::hip_success_k)
+    if (stream && runtime.stream_device(native_(stream), &device) != util::hip_success_k)
         return nk_device_code_mismatch_k;
-    if (device != caller && runtime.set_device(device) != uu::hip_success_k) return nk_device_code_mismatch_k;
+    if (device != caller && runtime.set_device(device) != util::hip_success_k) return nk_device_code_mismatch_k;
     hip_result_t const result = enqueue(runtime, native_(stream), device);
     if (device != caller) (void)runtime.set_device(caller);
-    return result == uu::hip_success_k ? nk_success_k : nk_device_code_mismatch_k;
+    return result == util::hip_success_k ? nk_success_k : nk_device_code_mismatch_k;
 }
 
 /** The function of @p kernel on @p device , the current one, loading the bundle there on first
  *  use. */
 [[nodiscard]] static hip_result_t function_of_(hip_api_t const& runtime, kernel_t kernel, int device,
                                                hip_function_handle_t& function) noexcept {
-    if (device < 0 || std::size_t(device) >= max_gpus_per_host_k) return uu::hip_error_invalid_device_k;
+    if (device < 0 || std::size_t(device) >= max_gpus_per_host_k) return util::hip_error_invalid_device_k;
     device_module_t& module = device_modules_[device];
     fu::standard_atomic_ref<load_stage_t> const stage_ref {module.stage};
     load_stage_t stage = load_stage_t::unloaded_k;
     if (stage_ref.compare_exchange_strong(stage, load_stage_t::loading_k, std::memory_order_acquire)) {
         if (uform_encoder_amd_bundle_end - uform_encoder_amd_bundle_start == 0)
-            module.status = uu::hip_error_no_binary_for_gpu_k;
+            module.status = util::hip_error_no_binary_for_gpu_k;
         else {
             hip_module_handle_t loaded = nullptr;
             module.status = runtime.module_load_data(&loaded, uform_encoder_amd_bundle_start);
-            for (std::size_t index = 0; module.status == uu::hip_success_k && index != std::size_t(kernel_t::count_k);
+            for (std::size_t index = 0; module.status == util::hip_success_k && index != std::size_t(kernel_t::count_k);
                  ++index)
                 module.status = runtime.module_get_function(&module.functions[index], loaded, kernel_names_k[index]);
         }
@@ -125,9 +125,9 @@ template <typename enqueue_type_>
     }
     while (stage_ref.load(std::memory_order_acquire) != load_stage_t::loaded_k)
         fu::standard_yield_t {}(&module.stage, load_stage_t::loading_k, std::size_t {0}, fu::wait_capped_k);
-    if (module.status != uu::hip_success_k) return module.status;
+    if (module.status != util::hip_success_k) return module.status;
     function = module.functions[std::size_t(kernel)];
-    return uu::hip_success_k;
+    return util::hip_success_k;
 }
 
 /** Launch @p kernel over @p blocks blocks of @p threads on @p stream ; each argument is passed as
@@ -138,7 +138,7 @@ template <typename... argument_types_>
     void* addresses[] = {static_cast<void*>(&arguments)...}; // vendor-boundary: the launch takes argument addresses
     return on_device_(stream, [&](hip_api_t const& runtime, hip_stream_handle_t native, int device) {
         hip_function_handle_t function = nullptr;
-        if (hip_result_t const result = function_of_(runtime, kernel, device, function); result != uu::hip_success_k)
+        if (hip_result_t const result = function_of_(runtime, kernel, device, function); result != util::hip_success_k)
             return result;
         return runtime.module_launch_kernel(function, blocks, 1, 1, threads, 1, 1, 0, native, addresses, nullptr);
     });
@@ -170,14 +170,15 @@ nk_status_t ue::vram_amd_entries_kit_t::describe(std::size_t vendor_ordinal,
     int const device = static_cast<int>(vendor_ordinal);
     int compute_units = 0, architecture_major = 0, architecture_minor = 0;
     std::size_t memory_bytes = 0;
-    if (!runtime || runtime.get_device_name(description.name, sizeof(description.name), device) != uu::hip_success_k ||
-        runtime.get_device_attribute(&compute_units, uu::hip_attribute_multiprocessor_count_k, device) !=
-            uu::hip_success_k ||
-        runtime.get_device_attribute(&architecture_major, uu::hip_attribute_compute_capability_major_k, device) !=
-            uu::hip_success_k ||
-        runtime.get_device_attribute(&architecture_minor, uu::hip_attribute_compute_capability_minor_k, device) !=
-            uu::hip_success_k ||
-        runtime.get_device_memory(&memory_bytes, device) != uu::hip_success_k)
+    if (!runtime ||
+        runtime.get_device_name(description.name, sizeof(description.name), device) != util::hip_success_k ||
+        runtime.get_device_attribute(&compute_units, util::hip_attribute_multiprocessor_count_k, device) !=
+            util::hip_success_k ||
+        runtime.get_device_attribute(&architecture_major, util::hip_attribute_compute_capability_major_k, device) !=
+            util::hip_success_k ||
+        runtime.get_device_attribute(&architecture_minor, util::hip_attribute_compute_capability_minor_k, device) !=
+            util::hip_success_k ||
+        runtime.get_device_memory(&memory_bytes, device) != util::hip_success_k)
         return nk_device_code_mismatch_k;
     description.compute_units = static_cast<u32_t>(compute_units);
     description.memory_bytes = memory_bytes;
@@ -188,21 +189,21 @@ nk_status_t ue::vram_amd_entries_kit_t::describe(std::size_t vendor_ordinal,
 
 nk_capability_t ue::vram_amd_entries_kit_t::capabilities_detected(std::size_t vendor_ordinal,
                                                                   device_description_t const&) noexcept {
-    nk::expected<nk::device_t> const device = nk::device_t::make(nk::device_kind_t::rocm_k, vendor_ordinal);
-    if (!device) return 0;
-    nk::expected<nk_capability_t> const detected = device.value.capabilities_detected();
-    return detected ? detected.value : 0;
+    auto const [device, open_status] = nk::device_t::make(nk::device_kind_t::rocm_k, vendor_ordinal);
+    if (nk::failed(open_status)) return 0;
+    auto const [detected, detect_status] = device.capabilities_detected();
+    return nk::succeeded(detect_status) ? detected : 0;
 }
 
 nk_capability_t ue::vram_amd_entries_kit_t::capabilities_compiled(std::size_t vendor_ordinal,
                                                                   device_description_t const&) noexcept {
-    nk::expected<nk::device_t> const device = nk::device_t::make(nk::device_kind_t::rocm_k, vendor_ordinal);
-    return device ? device.value.capabilities_compiled() : 0;
+    auto const [device, status] = nk::device_t::make(nk::device_kind_t::rocm_k, vendor_ordinal);
+    return nk::succeeded(status) ? device.capabilities_compiled() : 0;
 }
 
 nk_status_t ue::vram_amd_entries_kit_t::copy(bytes_span_t target, bytes_view_t source, nk_stream_t stream) noexcept {
     return on_device_(stream, [&](hip_api_t const& runtime, hip_stream_handle_t native, int) {
-        return runtime.copy_async(target.data(), source.data(), source.size(), uu::hip_copy_default_k, native);
+        return runtime.copy_async(target.data(), source.data(), source.size(), util::hip_copy_default_k, native);
     });
 }
 

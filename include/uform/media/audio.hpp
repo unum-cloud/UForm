@@ -25,6 +25,7 @@ using uu::bytes_view_t;
 using uu::expected_t;
 using uu::f32_t;
 using uu::f32r1_span_t;
+using uu::status_code_t;
 using uu::status_t;
 using uu::u32_t;
 
@@ -41,8 +42,8 @@ using uu::u32_t;
  *  @param[out] out The clip's samples, exactly @c out.extent(0) of them.
  *
  *  @par Statuses:
- *  - @c status_t::invalid_argument_k An empty clip or one without an audio stream.
- *  - @c status_t::unsupported_k No decoder for the stream's codec.
+ *  - @c status_code_t::invalid_argument_k An empty clip or one without an audio stream.
+ *  - @c status_code_t::unsupported_k No decoder for the stream's codec.
  */
 [[nodiscard]] expected_t decode_audio(bytes_view_t encoded, u32_t sample_rate, f32r1_span_t out) noexcept;
 
@@ -59,7 +60,7 @@ using uu::u32_t;
  *  @param[out] out The resampled samples, exactly @c out.extent(0) of them.
  *
  *  @par Statuses:
- *  - @c status_t::invalid_argument_k A zero rate.
+ *  - @c status_code_t::invalid_argument_k A zero rate.
  */
 [[nodiscard]] expected_t resample_mono(std::span<f32_t const> samples, u32_t from_rate, u32_t to_rate,
                                        f32r1_span_t out) noexcept;

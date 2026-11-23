@@ -14,10 +14,10 @@
 #include "uform/media/image.hpp"
 
 namespace um = unum::uform::media;
-namespace uu = unum::uform::utilities;
+namespace util = unum::uform::utilities;
 using namespace um;
-using uu::f32_t;
-using uu::i64_t;
+using util::f32_t;
+using util::i64_t;
 
 /** The lobes of the Lanczos window, and the taps one output pixel reads along an axis. */
 inline constexpr i64_t lanczos_lobes_k = 3;
@@ -47,7 +47,8 @@ struct lanczos_tap_t {
  *  and the window keeps its six-tap support whatever the scale. */
 [[nodiscard]] static status_t lanczos_taps_(u32_t source_length, u32_t target_length,
                                             st::basic_vector<lanczos_tap_t>& taps) noexcept {
-    if (st::failed(taps.resize(target_length))) return status_t::bad_alloc_k;
+    if (st::failed(taps.resize(target_length)))
+        return {status_code_t::out_of_memory_k, "No room for the resample taps"};
     f64_t const scale = static_cast<f64_t>(source_length) / static_cast<f64_t>(target_length);
     i64_t const last = static_cast<i64_t>(source_length) - 1;
     for (u32_t target = 0; target != target_length; ++target) {
@@ -63,7 +64,7 @@ struct lanczos_tap_t {
         }
         for (u32_t k = 0; k != lanczos_taps_k; ++k) tap.weight[k] = static_cast<f32_t>(weights[k] / total);
     }
-    return status_t::success_k;
+    return status_code_t::success_k;
 }
 
 using staged_rows_t = nk::tensor_span<f32_t, 3>;
@@ -99,24 +100,26 @@ expected_t um::resize_image(pixel_image_view_t source, pixel_patches_span_t out)
     u32_t const rows = static_cast<u32_t>(out.extent(0)), columns = static_cast<u32_t>(out.extent(1));
     u32_t const patch_side = static_cast<u32_t>(out.extent(2));
     if (source.extent(2) != image_channels_k || out.extent(4) != image_channels_k || out.extent(3) != patch_side)
-        return expected_t::fail(status_t::unsupported_k, "resize takes RGBA into square RGBA patches");
+        return expected_t::fail(status_code_t::unsupported_k, "Resize takes RGBA into square RGBA patches");
     if (width == 0 || height == 0 || rows == 0 || columns == 0 || patch_side == 0)
-        return expected_t::fail(status_t::unsupported_k, "resize from {}x{} into {}x{} patches of {}", width, height,
-                                columns, rows, patch_side);
+        return expected_t::fail(status_code_t::unsupported_k, "resize from {}x{} into {}x{} patches of {}", width,
+                                height, columns, rows, patch_side);
     image_extent_t const target {columns * patch_side, rows * patch_side};
     crop_t const crop = image_center_crop(image_extent_t {width, height}, target);
     if (crop.width == 0 || crop.height == 0)
-        return expected_t::fail(status_t::unsupported_k, "a {}x{} image has no {}x{} crop", width, height, target.width,
-                                target.height);
+        return expected_t::fail(status_code_t::unsupported_k, "a {}x{} image has no {}x{} crop", width, height,
+                                target.width, target.height);
 
     st::basic_vector<lanczos_tap_t> horizontal, vertical;
     st::basic_vector<f32_t> staged; // the crop's rows resampled to the target width, before the vertical pass
-    if (lanczos_taps_(crop.width, target.width, horizontal) != status_t::success_k ||
-        lanczos_taps_(crop.height, target.height, vertical) != status_t::success_k ||
+    status_t scratch = lanczos_taps_(crop.width, target.width, horizontal);
+    if (scratch == status_code_t::success_k) scratch = lanczos_taps_(crop.height, target.height, vertical);
+    if (scratch == status_code_t::success_k &&
         st::failed(staged.resize(st::assume_uninitialized,
                                  static_cast<std::size_t>(crop.height) * target.width * image_channels_k)))
-        return expected_t::fail(status_t::bad_alloc_k, "resize scratch allocation failed ({}x{})", target.width,
-                                crop.height);
+        scratch = {status_code_t::out_of_memory_k, "No room for the staged rows"};
+    if (scratch != status_code_t::success_k)
+        return expected_t::fail(scratch, "resize scratch allocation failed ({}x{})", target.width, crop.height);
 
     staged_rows_t const staged_rows {staged.data(), {crop.height, target.width, image_channels_k}};
     for (u32_t y = 0; y != crop.height; ++y) resample_row_(source, crop, y, horizontal.data(), staged_rows);

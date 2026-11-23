@@ -81,7 +81,7 @@ Every call stores its status in the `uform_outcome_t` it names, `uform_status_su
 
 ## Receivers & Deferred Calls
 
-Every call stores its result in the `uform_outcome_t` it names: a status, and a static message that is `NULL` exactly on success.
+Every call stores its result in the `uform_outcome_t` it names: a status, and a static message naming what broke, else the status's own name, `NULL` exactly on success.
 `uform_completion_blocking_k`, the default, returns with the status final and every output readable.
 `uform_completion_deferred_k` returns once the executor's own thread took the call, and the status reads `uform_status_deferred_k` until the call is final.
 `uform_outcome_status` polls with acquire ordering and `uform_outcome_wait` blocks until final, and these are the only ways to read a status another thread may still store.

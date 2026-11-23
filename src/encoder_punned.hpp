@@ -37,13 +37,13 @@ struct encoder_verbs {
     /** The GPU class a device variant's kits compile for; unknown on the host. */
     gpu_class_t gpu_class;
 
-    expected<void*> (*create)(checkpoint_to_load_t const& checkpoint, encoder::geometry_t const& geometry,
-                              encoder::precision_t precision, nk_stream_t stream) noexcept;
+    util::expected<void*> (*create)(util::checkpoint_to_load_t const& checkpoint, encoder::geometry_t const& geometry,
+                                    encoder::precision_t precision, nk_stream_t stream) noexcept;
     void (*destroy)(void* tower) noexcept;
-    expected<std::size_t> (*scratch_bytes)(void const* tower, std::size_t tokens, std::size_t segments,
-                                           executor_t executor) noexcept;
-    expected_t (*encode)(void const* tower, encoder::multimodal_batch_view_t batch, encoder::outputs_t outputs,
-                         bytes_span_t scratch, executor_t executor) noexcept;
+    util::expected<std::size_t> (*scratch_bytes)(void const* tower, std::size_t tokens, std::size_t segments,
+                                                 executor_t executor) noexcept;
+    util::expected_t (*encode)(void const* tower, encoder::multimodal_batch_view_t batch, encoder::outputs_t outputs,
+                               util::bytes_span_t scratch, executor_t executor) noexcept;
 };
 
 /** The variant one class unit compiles for one residency: @c find answers its verb table, or null

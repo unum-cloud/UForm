@@ -82,7 +82,7 @@ struct geometry_t {
      *      its tensor shapes.
      *
      *  @par Statuses:
-     *  - @c status_t::invalid_argument_k A key is missing or unparsable, or a shape disagrees;
+     *  - @c status_code_t::invalid_argument_k A key is missing or unparsable, or a shape disagrees;
      *    the C layer reports it as @c uform_status_malformed_k .
      */
     [[nodiscard]] static expected<geometry_t> from(uu::checkpoint_to_load_t const& checkpoint) noexcept;

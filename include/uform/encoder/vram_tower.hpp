@@ -34,7 +34,7 @@ struct vram_placer {
         target = placed_array<value_type_> {nk::allocator<value_type_> {allocator}};
         if (values.empty()) return {};
         if (st::failed(target.resize(st::assume_uninitialized, values.size())))
-            return expected_t::fail(uu::status_t::bad_alloc_k, "{} allocation failed ({} bytes)", what,
+            return expected_t::fail(uu::status_code_t::out_of_memory_k, "{} allocation failed ({} bytes)", what,
                                     values.size_bytes());
         return checked(entries_kit_type_::copy(std::as_writable_bytes(std::span<value_type_> {target}),
                                                std::as_bytes(values), stream),
@@ -136,17 +136,17 @@ struct vram_tower {
      *      synchronizes @p stream before the first encode, and frees the tower on the same stream.
      *
      *  @par Statuses:
-     *  - @c status_t::invalid_argument_k A tensor is missing or misshapen.
+     *  - @c status_code_t::invalid_argument_k A tensor is missing or misshapen.
      */
     [[nodiscard]] static expected<vram_tower> make(uu::checkpoint_to_load_t const& checkpoint,
                                                    geometry_t const& geometry, precision_t precision,
                                                    nk_allocator_t policy, nk_stream_t stream) noexcept {
         vram_placer<entries_kit_type_> const placer {nk::allocator<b8_t> {policy, stream}, stream};
-        expected<tower_weights_t> weights = pack_weights<products_kit_type_, staging_kit_type_>(checkpoint, geometry,
-                                                                                                precision, placer);
-        if (!weights) return expected<vram_tower>::fail(std::move(weights));
+        auto [weights, status] = pack_weights<products_kit_type_, staging_kit_type_>(checkpoint, geometry, precision,
+                                                                                     placer);
+        if (!status) return expected<vram_tower>::fail(std::move(status));
         vram_tower tower;
-        tower.weights_ = std::move(*weights);
+        tower.weights_ = std::move(weights);
         return expected<vram_tower> {std::move(tower)};
     }
 

@@ -4357,7 +4357,7 @@ check_qualified_namespace() {
     spelled=$(printf '%s\n' "$staged_added_text" |
         grep -vE '^\+[[:space:]]*(\*|//|/\*)' |
         grep -vE 'namespace [a-z]+ = unum::uform(::[a-z_]+)*;|(using )?namespace unum::uform(::[a-z_]+)*( \{|;)$|^\+\} // namespace unum::uform' |
-        grep -vE 'struct (std|fmt)::[A-Za-z_]+<unum::uform::' |
+        grep -vE 'struct (std|fmt)::[A-Za-z_]+<([^<>]*, *)?unum::uform::|using type = typename unum::uform::' |
         grep -E 'unum::uform::' || true)
     [ -z "$spelled" ] || reject_with_reason "$spelled" \
         "$staged_path spells unum::uform:: in full - the name is already in scope through the \`uu\` / \`ue\` / \`ut\` / \`ul\` / \`um\` aliases," \
@@ -4777,6 +4777,27 @@ check_call_chained_subscript() {
     [ -z "$chained" ] || reject_with_reason "$chained" \
         "$staged_path subscripts a call result - write matrix(row, column) or results[index]," \
         "            never results.data()[index]:"
+}
+
+# Rejects `.value_` read straight off a call's result, as `parse(text).value_`, because an unchecked unwrap hides the
+# failure that the status reports: bind the result with `auto [value, status] = parse(text);` and check `status`.
+# A trait's `::value` and a call to `.value(...)` are not member reads and pass.
+check_call_value_unwrap() {
+    local unwrapped
+    unwrapped=$(grep -E '\)\.value_?\b([^(]|$)' "$staged_added_code_path" || true)
+    [ -z "$unwrapped" ] || reject_with_reason "$unwrapped" \
+        "$staged_path unwraps a call result with .value_ - bind it as auto [value, status] = call(...)," \
+        "            and check the status:"
+}
+
+# Rejects a local declared as `expected<...>` from a call, because it spells the return type twice: bind the result
+# with `auto [value, status] = call(...);`. Return types, parameters and members have no `=` or `{` after the name.
+check_expected_local_binding() {
+    local declared
+    declared=$(grep -E '^\+[[:space:]]*([A-Za-z_]+::)?expected<.*>([[:space:]]+const)?[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(=|\{)' "$staged_added_code_path" |
+        grep -vE '^\+[[:space:]]*(return|using|typedef|template)\b' || true)
+    [ -z "$declared" ] || reject_with_reason "$declared" \
+        "$staged_path declares an expected<...> local - bind it as auto [value, status] = call(...):"
 }
 
 # The `&*iterator` antipattern - laundering an iterator through a reference into a pointer. Take the
@@ -5353,6 +5374,8 @@ run_project_checks() {
         check_range_reconstruction
         check_data_null_probe
         check_call_chained_call
+        check_call_value_unwrap
+        check_expected_local_binding
         case "$staged_path" in test/* | bench/*) ;; *) check_gcc_atomics ;; esac
         case "$staged_path" in test/* | bench/*) ;; *) check_standard_atomics ;; esac
         check_numkong_dispatch

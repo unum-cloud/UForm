@@ -410,7 +410,7 @@ struct trainer_t {
      *  Every component calls the kernels of @p numerics .
      *
      *  @par Statuses:
-     *  - @c status_t::bad_alloc_k The envelope does not fit, with the measured numbers.
+     *  - @c status_code_t::out_of_memory_k The envelope does not fit, with the measured numbers.
      */
     [[nodiscard]] static expected_t make(trainer_t& placed, mesh_t& mesh, trainer_config_t const& requested,
                                          std::span<i32_t const> devices, gpu_numerics_t const& numerics) noexcept;
@@ -421,8 +421,8 @@ struct trainer_t {
      *      state it misses restarts, the masters re-seeded from the loaded weights.
      *
      *  @par Statuses:
-     *  - @c status_t::invalid_argument_k A matrix the checkpoint misses.
-     *  - @c status_t::unsupported_k A matrix or a state of another shape.
+     *  - @c status_code_t::invalid_argument_k A matrix the checkpoint misses.
+     *  - @c status_code_t::unsupported_k A matrix or a state of another shape.
      */
     [[nodiscard]] expected_t resume(sz::string_view_t path) noexcept;
 

@@ -52,37 +52,6 @@ namespace nk = ashvardanian::numkong;
 namespace sz = ashvardanian::stringzilla;
 namespace st = ashvardanian::smashtable;
 
-using utilities::b8_t;
-using utilities::bytes_span_t;
-using utilities::bytes_view_t;
-using utilities::caller_exclusivity_t;
-using utilities::checkpoint_to_load_t;
-using utilities::divide_round_up;
-using utilities::executor_t;
-using utilities::expected;
-using utilities::expected_t;
-using utilities::f32_t;
-using utilities::f32r2_span_t;
-using utilities::f32r2_view_t;
-using utilities::f64_t;
-using utilities::i32_t;
-using utilities::i64_t;
-using utilities::lent_pool_t;
-using utilities::max_gpus_per_host_k;
-using utilities::per_gpu_array;
-using utilities::pixel_t;
-using utilities::pool_view_t;
-using utilities::round_up_to_multiple;
-using utilities::status_t;
-using utilities::tape_view;
-using utilities::token_id_t;
-using utilities::topology_t;
-using utilities::u16_t;
-using utilities::u32_t;
-using utilities::u64_t;
-using utilities::u8_t;
-using utilities::wraps_on_multiply;
-
 /** Reports a progress handler hears at most when its call names zero steps. */
 inline constexpr std::size_t default_progress_steps_k = 10;
 
@@ -92,7 +61,8 @@ inline constexpr std::size_t idle_cores_denominator_k = 8;
 
 /** A borrowed byte run of the C interface, a path or a spelling, as the engine's string view. */
 [[nodiscard]] inline sz::string_view_t text_of(uform_bytes_view_t bytes) noexcept {
-    return {nk::as_values<char>(std::as_bytes(std::span<u8_t const> {bytes.data, bytes.length})).data(), bytes.length};
+    return {nk::as_values<char>(std::as_bytes(std::span<util::u8_t const> {bytes.data, bytes.length})).data(),
+            bytes.length};
 }
 
 /** Whether the @p count + 1 offsets of a caller's tape or edge list never step back, since an
@@ -107,7 +77,7 @@ template <typename view_type_>
 /** The @p count entries of a C tape as the engine's typed tape, whose elements reach the last
  *  offset; null offsets make an empty tape, and null data no elements. */
 template <typename element_type_>
-[[nodiscard]] tape_view<element_type_> tape_of(uform_tape_view_t tape, std::size_t count) noexcept {
+[[nodiscard]] util::tape_view<element_type_> tape_of(uform_tape_view_t tape, std::size_t count) noexcept {
     if (!tape.offsets) return {};
     return {{static_cast<element_type_*>(tape.data), tape.data ? tape.offsets[count] : 0}, {tape.offsets, count + 1}};
 }
@@ -115,7 +85,7 @@ template <typename element_type_>
 #pragma region Classes
 
 /** The CPU classes of @c uform_cpu_class_t as the engine names them, with the same values. */
-enum class cpu_class_t : u32_t {
+enum class cpu_class_t : util::u32_t {
     unknown_k = uform_cpu_class_unknown_k,
     serial_k = uform_cpu_class_serial_k,
     monoversioned_k = uform_cpu_class_monoversioned_k,
@@ -142,7 +112,7 @@ static_assert(uform_cpu_class_serial_k == 1 && uform_cpu_class_monoversioned_k =
               uform_cpu_class_ibm_power10_k == 18);
 
 /** The GPU classes of @c uform_gpu_class_t as the engine names them, with the same values. */
-enum class gpu_class_t : u32_t {
+enum class gpu_class_t : util::u32_t {
     unknown_k = uform_gpu_class_unknown_k,
     nvidia_ampere_k = uform_gpu_class_nvidia_ampere_k,
     nvidia_ada_k = uform_gpu_class_nvidia_ada_k,
@@ -477,7 +447,8 @@ inline constexpr fu::capabilities_t baseline_hints_k = fu::capability_x86_pause_
 template <cpu_class_t cpu_class_>
 constexpr fu::capabilities_t forkunion_capabilities_of() noexcept {
     constexpr fu::capabilities_t waits_k = waiter_of<cpu_class_>::capability_k;
-    constexpr fu::capabilities_t atomics_k = atomic_ref_for_cpu_class<cpu_class_>::template type<u32_t>::capabilities_k;
+    constexpr fu::capabilities_t atomics_k =
+        atomic_ref_for_cpu_class<cpu_class_>::template type<util::u32_t>::capabilities_k;
     return static_cast<fu::capabilities_t>((waits_k | atomics_k) & ~baseline_hints_k);
 }
 
@@ -648,9 +619,10 @@ constexpr bool cpu_class_compiled(cpu_class_t cpu_class) noexcept {
  *  and drops them where the kernel refuses. A value no class takes is an invalid argument, and a
  *  ceiling no compiled class fits, like one below a monoversioned build's masks, is unsupported,
  *  while one above the machine answers the machine's own masks. */
-inline expected<cpu_ceiling_t> pick_cpu_ceiling(uform_cpu_class_t ceiling) noexcept {
+inline util::expected<cpu_ceiling_t> pick_cpu_ceiling(uform_cpu_class_t ceiling) noexcept {
     if (ceiling != uform_cpu_class_unknown_k && !listed_in(cpu_classes_k, ceiling))
-        return expected<cpu_ceiling_t>::fail(status_t::invalid_argument_k, "no CPU class has that value");
+        return util::expected<cpu_ceiling_t>::fail(util::status_code_t::invalid_argument_k,
+                                                   "No CPU class has that value");
     cpu_ceiling_t picked;
     if (nk_capabilities_detected_cpu(&picked.compute) != nk_success_k) picked.compute = nk_cap_serial_k;
     picked.sync = fu::cpu_capabilities();
@@ -663,7 +635,8 @@ inline expected<cpu_ceiling_t> pick_cpu_ceiling(uform_cpu_class_t ceiling) noexc
     }
     for (uform_cpu_class_t const rung : cpu_classes_k)
         if (cpu_class_compiled(cpu_class_of(rung)) && cpu_rung_fits(cpu_class_of(rung), picked)) return picked;
-    return expected<cpu_ceiling_t>::fail(status_t::unsupported_k, "the build compiled no class under that ceiling");
+    return util::expected<cpu_ceiling_t>::fail(util::status_code_t::unsupported_k,
+                                               "The build compiled no class under that ceiling");
 }
 
 /** Whether the build compiled the unit of @p gpu_class, as CMake told the dispatch unit through
@@ -810,7 +783,7 @@ struct host_verbs_t {
 
     /** Returns once @p word no longer holds @p seen, reading it through the class's atomic
      *  reference and waiting between reads through the class's waiter. */
-    void (*wait)(u64_t& word, u64_t seen) noexcept;
+    void (*wait)(util::u64_t& word, util::u64_t seen) noexcept;
 };
 
 /** The host verbs one class unit compiles, defined in @c encoder_specializations.hpp , which the
@@ -818,7 +791,7 @@ struct host_verbs_t {
 template <cpu_class_t cpu_class_>
 struct host_class_tables {
     static host_verbs_t const* find() noexcept;
-    static void wait(u64_t& word, u64_t seen) noexcept;
+    static void wait(util::u64_t& word, util::u64_t seen) noexcept;
 };
 
 /** The host verbs of the newest compiled class on @p ladder that fits under @p ceiling, one of
@@ -839,7 +812,9 @@ host_verbs_t const* pick_host_verbs(cpu_ladder<classes_...>, cpu_ceiling_t ceili
 #pragma region Outcomes
 
 /** The C status a failure of the engine's own vocabulary crosses into, whose values it shares. */
-[[nodiscard]] inline uform_status_t status_of(status_t status) noexcept { return static_cast<uform_status_t>(status); }
+[[nodiscard]] inline uform_status_t status_of(util::status_t status) noexcept {
+    return static_cast<uform_status_t>(status.code);
+}
 
 /** The C status a NumKong failure crosses into; whatever a device answers beyond shapes and memory
  *  is the device's. */
@@ -872,12 +847,18 @@ inline bool propagate_error(uform_status_t status, uform_outcome_t* outcome,
     return succeeded;
 }
 
+/** An engine failure crosses with its own note, or names itself. */
+inline bool propagate_error(util::status_t status, uform_outcome_t* outcome) noexcept {
+    uform_status_t const code = status_of(status);
+    return propagate_error(code, outcome, status.note ? status.note : uform_status_name(code));
+}
+
 #pragma endregion Outcomes
 
 #pragma region Progress
 
 /** Whether the call a progress handler watches carries on or unwinds. */
-enum class continuation_t : u8_t {
+enum class continuation_t : util::u8_t {
     continue_k,
     cancel_k,
 };
@@ -915,7 +896,7 @@ class progress_ticks_t {
 
       private:
         [[nodiscard]] std::size_t boundary_(std::size_t index) const noexcept {
-            return divide_round_up(index * total_, slices_);
+            return util::divide_round_up(index * total_, slices_);
         }
 
         std::size_t index_;
@@ -987,7 +968,8 @@ class chunked_arena_t {
     chunked_arena_t(chunked_arena_t&&) noexcept = default;
     chunked_arena_t& operator=(chunked_arena_t&&) = delete;
     ~chunked_arena_t() noexcept {
-        for (bytes_span_t const chunk : chunks_) policy_.free(chunk.data(), chunk.size(), policy_.handle, stream_);
+        for (util::bytes_span_t const chunk : chunks_)
+            policy_.free(chunk.data(), chunk.size(), policy_.handle, stream_);
     }
 
     /** The stream its chunks are allocated and freed on; null for host pages. */
@@ -999,7 +981,7 @@ class chunked_arena_t {
 
     /** Whether @p address lies in memory this arena handed out, which its next rewind reuses. */
     [[nodiscard]] bool contains(void const* address) const noexcept {
-        for (bytes_span_t const chunk : chunks_)
+        for (util::bytes_span_t const chunk : chunks_)
             if (address >= chunk.data() && address < chunk.data() + chunk.size()) return true;
         return false;
     }
@@ -1007,22 +989,22 @@ class chunked_arena_t {
     /** Hands out @p bytes aligned for any kernel, growing by a chunk as large as everything held so
      *  far when full, or null when the policy or the limit refuses. */
     [[nodiscard]] void* allocate(std::size_t bytes) noexcept {
-        std::size_t const aligned = round_up_to_multiple(bytes, nk_default_alignment_k);
+        std::size_t const aligned = util::round_up_to_multiple(bytes, nk_default_alignment_k);
         if (aligned < bytes) return nullptr; // saturated within an alignment of the address space
         while (current_ != chunks_.size() && chunks_[current_].size() - used_ < aligned) ++current_, used_ = 0;
         if (current_ != chunks_.size()) {
-            b8_t* const landed = chunks_[current_].data() + used_;
+            util::b8_t* const landed = chunks_[current_].data() + used_;
             used_ += aligned;
             return landed;
         }
         std::size_t held = 0;
-        for (bytes_span_t const chunk : chunks_) held += chunk.size();
+        for (util::bytes_span_t const chunk : chunks_) held += chunk.size();
         std::size_t const capacity = held > aligned ? held : aligned;
         if (limit_ && capacity > limit_ - held) return nullptr;
         if (!policy_.allocate) return nullptr;
-        b8_t* const allocated = static_cast<b8_t*>(policy_.allocate(capacity, policy_.handle, stream_));
+        util::b8_t* const allocated = static_cast<util::b8_t*>(policy_.allocate(capacity, policy_.handle, stream_));
         if (!allocated) return nullptr;
-        if (st::failed(chunks_.push_back(bytes_span_t {allocated, capacity})))
+        if (st::failed(chunks_.push_back(util::bytes_span_t {allocated, capacity})))
             return policy_.free(allocated, capacity, policy_.handle, stream_), nullptr;
         current_ = chunks_.size() - 1, used_ = aligned;
         return allocated;
@@ -1042,7 +1024,7 @@ class chunked_arena_t {
 
     /** Bytes the chunks may span together, or zero for no ceiling. */
     std::size_t limit_;
-    st::basic_vector<bytes_span_t> chunks_;
+    st::basic_vector<util::bytes_span_t> chunks_;
 
     /** The chunk being filled, and the bytes of it already handed out since the last rewind. */
     std::size_t current_ = 0;
@@ -1087,10 +1069,10 @@ using owned_stream_t = nk::stream_t;
  *  no Apple devices. NVIDIA and AMD devices list through NumKong, and their entries units keep the
  *  CUDA and HIP tables their own launches take. */
 struct gpu_drivers_t {
-    utilities::metal_api_t metal;
-    utilities::metal_contexts_t metal_contexts;
+    util::metal_api_t metal;
+    util::metal_contexts_t metal_contexts;
 
-    gpu_drivers_t() noexcept : metal(utilities::metal_api_t::load()), metal_contexts(metal) {}
+    gpu_drivers_t() noexcept : metal(util::metal_api_t::load()), metal_contexts(metal) {}
     gpu_drivers_t(gpu_drivers_t const&) = delete;
     gpu_drivers_t& operator=(gpu_drivers_t const&) = delete;
 };
@@ -1104,13 +1086,13 @@ struct gpu_drivers_t {
 /** The host threads of a RAM executor, spawned here or lent by another library, and where its
  *  models place their bytes. */
 struct ram_executor_t {
-    std::variant<executor_t, lent_pool_t> pool;
+    std::variant<util::executor_t, util::lent_pool_t> pool;
 
     /** What the threads may run: the machine's masks under the executor's ceiling class. */
     cpu_ceiling_t ceiling;
 
     /** The NUMA nodes the executor's models place their bytes in. */
-    st::basic_vector<i32_t> memory_domains;
+    st::basic_vector<util::i32_t> memory_domains;
 };
 
 /** One GPU of a VRAM executor: its stream, and the scratch its calls rewind. */
@@ -1118,10 +1100,10 @@ struct vram_device_t {
 
     /** The UForm ordinal, the device's position in the @c uform_gpu_devices listing, NVIDIA
      *  devices first, which @c uform_vram_options_t names and a model's replicas match by. */
-    i32_t ordinal = 0;
+    util::i32_t ordinal = 0;
 
     /** The vendor's own ordinal, as @c cuDeviceGet or @c hipSetDevice takes it. */
-    i32_t vendor_ordinal = 0;
+    util::i32_t vendor_ordinal = 0;
 
     /** What the device runs, whose group names the vendor every NumKong call dispatches on. */
     nk_capability_t capabilities = 0;
@@ -1145,15 +1127,15 @@ struct vram_device_t {
 /** The devices of a VRAM executor and its decoders, a caller-inclusive pool whose thread 0 is the
  *  caller: it stages and feeds the devices and waits on them, while the rest decode for them. */
 struct vram_executor_t {
-    per_gpu_array<vram_device_t> devices;
-    executor_t decoders;
+    util::per_gpu_array<vram_device_t> devices;
+    util::executor_t decoders;
 
     /** Host pages for what only the decoders read: the plans and every thread's decode window. */
     host_arena_t staging;
 };
 
 /** The right to dispatch on @p pool , owned or lent. */
-[[nodiscard]] inline pool_view_t view_of(std::variant<executor_t, lent_pool_t> const& pool) noexcept {
+[[nodiscard]] inline util::pool_view_t view_of(std::variant<util::executor_t, util::lent_pool_t> const& pool) noexcept {
     return std::visit([](auto const& alternative) noexcept { return alternative.view(); }, pool);
 }
 
@@ -1162,7 +1144,7 @@ struct vram_executor_t {
 #pragma region Models
 
 /** Where an encoder's tower lives; there is no NVMe residency for models. */
-enum class vendored_residency_t : u32_t {
+enum class vendored_residency_t : util::u32_t {
     ram_k,
     vram_nvidia_k,
     vram_amd_k,
@@ -1188,7 +1170,7 @@ struct vendored_residency_executor {
 };
 template <>
 struct vendored_residency_executor<vendored_residency_t::ram_k> {
-    using type = pool_view_t;
+    using type = util::pool_view_t;
 };
 
 /** The verbs one encoder variant compiles in its class unit, defined in @c encoder_punned.hpp . */
@@ -1203,7 +1185,7 @@ using encoder_residency_tables_t = std::variant<
 
 /** One copy of a model's tower on one GPU, matched to an executor's device by its UForm ordinal. */
 struct vram_replica_t {
-    i32_t ordinal = 0;
+    util::i32_t ordinal = 0;
     void* tower = nullptr;
 };
 
@@ -1223,7 +1205,7 @@ using deferred_arguments_t = std::variant<                                      
     >;
 
 /** Whether an executor runs no call, or one call from its claim to its end. */
-enum class call_claim_t : u32_t {
+enum class call_claim_t : util::u32_t {
     free_k,
     held_k,
 };
@@ -1250,13 +1232,13 @@ struct holding_call_t {
     uform_outcome_t recorded {uform_status_internal_k, "The call finished without reporting a status"};
 
     /** The counts of the handles the call names, raised at the entry, lowered at its end. */
-    u64_t* named_calls[named_handles_max_k] {};
+    util::u64_t* named_calls[named_handles_max_k] {};
 
     /** The body pool thread 0 runs for a delegated call. */
     void (*delegated_body)(void*) = nullptr;
 
     /** The kernel ID of the thread running the body, or zero before thread 0 takes it up. */
-    u64_t body_thread = 0;
+    util::u64_t body_thread = 0;
 };
 
 /** Lets go of @p arena when the call whose published outcome is @p call holds it. */
@@ -1278,7 +1260,7 @@ void record_status(uform_executor_t executor, uform_outcome_t const& recorded) n
 void end_call(uform_executor_handle_t& executor) noexcept;
 
 /** Returns once no executor call names the handle whose count is @p named_calls . */
-void wait_named_calls(u64_t& named_calls) noexcept;
+void wait_named_calls(util::u64_t& named_calls) noexcept;
 
 /** A handle whose frees wait for the calls naming it; outputs for handles a call creates, and
  *  handles this build never defines, hold no count. */
@@ -1324,7 +1306,7 @@ bool submitted(arguments_type_* arguments) noexcept {
     auto const name = [&](auto handle) noexcept {
         if constexpr (counted_handle<decltype(handle)>)
             if (handle) {
-                fu::standard_atomic_ref<u64_t> {handle->named_calls}.fetch_add(1, std::memory_order_relaxed);
+                fu::standard_atomic_ref<util::u64_t> {handle->named_calls}.fetch_add(1, std::memory_order_relaxed);
                 call.named_calls[named++] = &handle->named_calls;
             }
     };
@@ -1411,6 +1393,7 @@ uform_arena_t claim_arena(uform_arena_t arena, uform_executor_t executor, std::i
 } // namespace unum::uform
 
 namespace uf = unum::uform;
+namespace util = unum::uform::utilities;
 
 /** The state behind @c uform_executor_t: the one call it holds and one residency's executor; the
  *  variant is the kind tag, so no second word can disagree. */
@@ -1442,7 +1425,7 @@ struct uform_arena_handle_t {
     uform_outcome_t const* holder = nullptr;
 
     /** Executor calls naming the arena that have not ended, which its free waits out. */
-    uf::u64_t named_calls = 0;
+    util::u64_t named_calls = 0;
 };
 
 /** What @c uform_model_t owns: the geometry its checkpoint carried, the precision its blocks run
@@ -1457,7 +1440,7 @@ struct uform_model_handle_t {
 
     /** Each question type's calibrated inverse temperature, in host memory where a choice's softmax
      *  runs; empty without the byte decoder. */
-    uf::st::basic_vector<uf::f32_t> choice_inverse_temperatures;
+    uf::st::basic_vector<util::f32_t> choice_inverse_temperatures;
 
     /** The variant picked once at load: its residency's verb table, which alone casts
      *  each tower back. */
@@ -1465,14 +1448,14 @@ struct uform_model_handle_t {
 
     /** The one host tower, serving any RAM executor, or one replica per GPU the load named, every
      *  one of the picked class. */
-    std::variant<void*, uf::per_gpu_array<uf::vram_replica_t>> towers;
+    std::variant<void*, util::per_gpu_array<uf::vram_replica_t>> towers;
 
     uform_model_handle_t() noexcept = default;
     uform_model_handle_t(uform_model_handle_t const&) = delete;
     uform_model_handle_t& operator=(uform_model_handle_t const&) = delete;
 
     /** Executor calls naming the model that have not ended, which its free waits out. */
-    uf::u64_t named_calls = 0;
+    util::u64_t named_calls = 0;
 
     /** Destroys every tower through the verbs that made it; defined beside them in
      *  @c model.cpp . */

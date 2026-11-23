@@ -483,11 +483,11 @@ struct multimodal_batch {
                                                          multimodal_batch_shape_t shape) noexcept {
         using result_t = expected<multimodal_batch>;
         if (shape.max_rows_per_gpu == 0 || shape.max_segments_per_gpu == 0 || shape.max_columns_per_row == 0)
-            return result_t::fail(status_t::invalid_argument_k,
+            return result_t::fail(status_code_t::invalid_argument_k,
                                   "a batch needs all three capacities (rows={} segments={} columns={})",
                                   shape.max_rows_per_gpu, shape.max_segments_per_gpu, shape.max_columns_per_row);
         if (shape.max_bags_per_gpu > shape.max_segments_per_gpu)
-            return result_t::fail(status_t::invalid_argument_k,
+            return result_t::fail(status_code_t::invalid_argument_k,
                                   "bag budget exceeds segment budget (bags={} segments={}) — each bag needs a segment",
                                   shape.max_bags_per_gpu, shape.max_segments_per_gpu);
         multimodal_batch batch;
@@ -528,8 +528,9 @@ struct multimodal_batch {
         if (!batch.segment_offsets || !batch.segment_lengths || !batch.segment_modality || !batch.segment_bag ||
             !batch.segment_role || !batch.segment_prefix_length || !batch.segment_key || !batch.segment_side ||
             !batch.tokens || !batch.image_shapes || !batch.video_shapes || !batch.dropped)
-            return result_t::fail(status_t::bad_alloc_k, "batch allocation failed (rows={} segments={} columns={})",
-                                  shape.max_rows_per_gpu, shape.max_segments_per_gpu, shape.max_columns_per_row);
+            return result_t::fail(status_code_t::out_of_memory_k,
+                                  "batch allocation failed (rows={} segments={} columns={})", shape.max_rows_per_gpu,
+                                  shape.max_segments_per_gpu, shape.max_columns_per_row);
         if (shape.image.patch_side != 0) {
             batch.images = nk::tensor<pixel_t, rebound<pixel_t>, 5>::uninitialized(
                                {shape.max_rows_per_gpu, shape.max_columns_per_row, shape.image.patch_side,
@@ -537,7 +538,7 @@ struct multimodal_batch {
                                rebound<pixel_t> {allocator})
                                .value;
             if (!batch.images)
-                return result_t::fail(status_t::bad_alloc_k, "image allocation failed ({} rows of {} patches)",
+                return result_t::fail(status_code_t::out_of_memory_k, "image allocation failed ({} rows of {} patches)",
                                       shape.max_rows_per_gpu, shape.max_columns_per_row);
         }
         if (shape.video.patch_side != 0) {
@@ -547,7 +548,7 @@ struct multimodal_batch {
                                rebound<pixel_t> {allocator})
                                .value;
             if (!batch.videos)
-                return result_t::fail(status_t::bad_alloc_k, "video allocation failed ({} rows of {} tubes)",
+                return result_t::fail(status_code_t::out_of_memory_k, "video allocation failed ({} rows of {} tubes)",
                                       shape.max_rows_per_gpu, shape.max_columns_per_row);
         }
         if (shape.audio.chunk_samples != 0) {
@@ -556,7 +557,7 @@ struct multimodal_batch {
                                       rebound<f32_t> {allocator})
                                       .value;
             if (!batch.audio_samples)
-                return result_t::fail(status_t::bad_alloc_k, "audio allocation failed ({} rows of {} frames)",
+                return result_t::fail(status_code_t::out_of_memory_k, "audio allocation failed ({} rows of {} frames)",
                                       shape.max_rows_per_gpu, shape.max_columns_per_row);
         }
         if (shape.max_choices_per_segment != 0) {
@@ -569,7 +570,8 @@ struct multimodal_batch {
                                                rebound<f32_t> {allocator})
                                                .value;
             if (!batch.segment_choices || !batch.segment_choice_targets)
-                return result_t::fail(status_t::bad_alloc_k, "choice allocation failed ({} segments of {} choices)",
+                return result_t::fail(status_code_t::out_of_memory_k,
+                                      "choice allocation failed ({} segments of {} choices)",
                                       shape.max_segments_per_gpu, shape.max_choices_per_segment);
         }
         return result_t {std::move(batch)};

@@ -161,19 +161,17 @@ using e4m3r2_span_t = nk::tensor_span<e4m3_t, 2>;
 using e4m3r3_view_t = nk::tensor_view<e4m3_t, 3>;
 using e4m3r3_span_t = nk::tensor_span<e4m3_t, 3>;
 
-/** Failure carrying a CUDA Driver error: @ref expected::fail tagged @c device_error_k , with the
+/** Failure carrying a CUDA Driver error: @ref expected::fail tagged @c device_k , with the
  *  driver's own error string appended to the description and @p cu_error kept in @c cu_error_ . */
 template <typename value_type_ = void, typename... arg_types_>
 [[nodiscard]] expected<value_type_> cuda_failure(CUresult cu_error, format_at_t format, arg_types_&&... args) noexcept {
-    expected<value_type_> result = expected<value_type_>::fail(status_t::device_error_k, format,
-                                                               std::forward<arg_types_>(args)...);
-    result.cu_error_ = static_cast<i32_t>(cu_error);
+    expected_t failure = expected_t::fail(status_code_t::device_k, format, std::forward<arg_types_>(args)...);
+    failure.cu_error_ = static_cast<i32_t>(cu_error);
     char const* cu_error_string = nullptr;
     if (cuGetErrorString(cu_error, &cu_error_string) != CUDA_SUCCESS || cu_error_string == nullptr)
         cu_error_string = "unknown";
-    (void)result.description_.append(": ");
-    (void)result.description_.append(cu_error_string);
-    return result;
+    [[maybe_unused]] bool const described = format_into(failure.description_, ": {}", cu_error_string);
+    return expected<value_type_>::fail(std::move(failure));
 }
 
 /** The Driver API address of the device @p pointer — the one place a pointer becomes a
@@ -354,10 +352,11 @@ struct gpu_arena_t {
                 return cuda_failure<gpu_arena_t>(result, "P2P capability query failed (device={} peer={})", device,
                                                  peer);
             if (can_access == 0)
-                return expected<gpu_arena_t>::fail(
-                    status_t::unsupported_k, "device {} cannot read the arena of device {}: no P2P path", peer, device);
+                return expected<gpu_arena_t>::fail(status_code_t::unsupported_k,
+                                                   "device {} cannot read the arena of device {}: no P2P path", peer,
+                                                   device);
             if (st::failed(arena.visible_to_.push_back(i32_t {peer})))
-                return expected<gpu_arena_t>::fail(status_t::bad_alloc_k, "peer table allocation failed");
+                return expected<gpu_arena_t>::fail(status_code_t::out_of_memory_k, "No room for the peer table");
         }
         CUmemAllocationProp properties = allocation_properties_(device);
         if (CUresult result = cuMemGetAllocationGranularity(&arena.granularity_, &properties,

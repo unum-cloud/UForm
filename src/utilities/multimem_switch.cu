@@ -12,11 +12,12 @@
  */
 #include "uform/utilities/multimem_collectives.cuh"
 
-using namespace unum::uform::utilities;
+namespace util = unum::uform::utilities;
 
 /** One switch-reduced load: the sum of this address across every bound replica. */
-[[nodiscard]] static __device__ inline f32_t multimem_load_reduce_add_(f32_t const* multimem_address) noexcept {
-    f32_t value;
+[[nodiscard]] static __device__ inline util::f32_t multimem_load_reduce_add_(
+    util::f32_t const* multimem_address) noexcept {
+    util::f32_t value;
     asm volatile("multimem.ld_reduce.relaxed.sys.global.add.f32 %0, [%1];"
                  : "=f"(value)
                  : "l"(multimem_address)
@@ -25,7 +26,7 @@ using namespace unum::uform::utilities;
 }
 
 /** One multicast release-add on the arrival counter of every replica. */
-static __device__ inline void multimem_red_add_release_(u32_t* multimem_address, u32_t value) noexcept {
+static __device__ inline void multimem_red_add_release_(util::u32_t* multimem_address, util::u32_t value) noexcept {
     asm volatile("multimem.red.release.sys.global.add.u32 [%0], %1;" : : "l"(multimem_address), "r"(value) : "memory");
 }
 
@@ -40,14 +41,14 @@ static __device__ inline void multimem_red_add_release_(u32_t* multimem_address,
  *
  *  __grid_size__ @c [1,1,1] , one warp; no dynamic shared memory.
  */
-extern "C" __global__ void multimem_barrier_switch_kernel_(multimem_member_t member) {
+extern "C" __global__ void multimem_barrier_switch_kernel_(util::multimem_member_t member) {
     if (threadIdx.x != 0u) return;
-    u32_t const target = *member.round + member.member_count;
+    util::u32_t const target = *member.round + member.member_count;
     multimem_red_add_release_(member.multimem_flag, 1u);
-    u64_t const deadline = global_nanoseconds() + member.wait_nanoseconds;
+    util::u64_t const deadline = util::global_nanoseconds() + member.wait_nanoseconds;
     while (multimem_load_acquire_(member.own_flag()) < target)
-        if (global_nanoseconds() > deadline)
-            trap_with(member.fault, gpu_fault_code_t::barrier_deadline_k, member.member_index, target, 0u);
+        if (util::global_nanoseconds() > deadline)
+            util::trap_with(member.fault, util::gpu_fault_code_t::barrier_deadline_k, member.member_index, target, 0u);
     __threadfence_system();
     *member.round = target; // Self-advance: only this member's own kernels ever read its round.
 }
@@ -58,7 +59,8 @@ extern "C" __global__ void multimem_barrier_switch_kernel_(multimem_member_t mem
  *
  *  __grid_size__ grid-stride over @c shard_scalars ; no dynamic shared memory.
  */
-extern "C" __global__ void multimem_reduce_scatter_switch_kernel_(multimem_member_t member, f32r1_span_t destination,
+extern "C" __global__ void multimem_reduce_scatter_switch_kernel_(util::multimem_member_t member,
+                                                                  util::f32r1_span_t destination,
                                                                   std::size_t shard_begin) {
     std::size_t const shard_scalars = destination.extent(0);
     std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
@@ -73,8 +75,9 @@ extern "C" __global__ void multimem_reduce_scatter_switch_kernel_(multimem_membe
  *
  *  __grid_size__ grid-stride; no dynamic shared memory.
  */
-extern "C" __global__ void adafactor_reduce_gradient_switch_kernel_(multimem_member_t member, f32r1_span_t destination,
-                                                                    std::size_t shard_begin, f32_t world_scale) {
+extern "C" __global__ void adafactor_reduce_gradient_switch_kernel_(util::multimem_member_t member,
+                                                                    util::f32r1_span_t destination,
+                                                                    std::size_t shard_begin, util::f32_t world_scale) {
     std::size_t const total = destination.extent(0);
     std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
     for (std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < total;

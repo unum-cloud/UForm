@@ -23,11 +23,11 @@ extern "C" {
 #include "uform/media/audio.hpp"
 
 namespace um = unum::uform::media;
-namespace uu = unum::uform::utilities;
+namespace util = unum::uform::utilities;
 using namespace um;
-using uu::bytes_view_t;
-using uu::i64_t;
-using uu::u8_t;
+using util::bytes_view_t;
+using util::i64_t;
+using util::u8_t;
 
 /** Working buffer size of the custom @c AVIOContext ; FFmpeg's own 32 KB default. */
 inline constexpr std::size_t audio_avio_buffer_bytes_k = 32u * 1024u;
@@ -135,39 +135,40 @@ struct audio_decoder_ {
 [[nodiscard]] static status_t open_audio_(bytes_view_t encoded, u32_t sample_rate, audio_decoder_& session) noexcept {
     session.reader = audio_memory_reader_t {encoded, 0u};
     u8_t* avio_buffer = static_cast<u8_t*>(av_malloc(audio_avio_buffer_bytes_k));
-    if (avio_buffer == nullptr) return status_t::bad_alloc_k;
+    if (avio_buffer == nullptr) return {status_code_t::out_of_memory_k, "No room for the AVIO buffer"};
     session.avio = avio_alloc_context(avio_buffer, static_cast<int>(audio_avio_buffer_bytes_k), 0, &session.reader,
                                       &audio_memory_read_, nullptr, &audio_memory_seek_);
     if (session.avio == nullptr) {
         av_free(avio_buffer);
-        return status_t::bad_alloc_k;
+        return {status_code_t::out_of_memory_k, "No room for the AVIO context"};
     }
     session.avio->seekable = AVIO_SEEKABLE_NORMAL; // advertise the seek callback so probing demuxers can rewind
     AVFormatContext* format = avformat_alloc_context();
-    if (format == nullptr) return status_t::bad_alloc_k;
+    if (format == nullptr) return {status_code_t::out_of_memory_k, "No room for the format context"};
     format->pb = session.avio;
     format->flags |= AVFMT_FLAG_CUSTOM_IO;
     // On failure `avformat_open_input` frees `format` itself, so the session adopts it only once
     // it is open.
-    if (avformat_open_input(&format, nullptr, nullptr, nullptr) < 0) return status_t::io_k;
+    if (avformat_open_input(&format, nullptr, nullptr, nullptr) < 0)
+        return {status_code_t::io_k, "Demuxer could not open the clip"};
     session.format = format;
-    if (avformat_find_stream_info(session.format, nullptr) < 0) return status_t::io_k;
+    if (avformat_find_stream_info(session.format, nullptr) < 0) return {status_code_t::io_k, "Stream info unreadable"};
 
     for (unsigned stream_index = 0; stream_index != session.format->nb_streams; ++stream_index)
         if (session.format->streams[stream_index]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
             session.audio_stream_index = static_cast<int>(stream_index);
             break;
         }
-    if (session.audio_stream_index < 0) return status_t::invalid_argument_k;
+    if (session.audio_stream_index < 0) return {status_code_t::invalid_argument_k, "No audio stream in the clip"};
 
     AVStream* audio_stream = session.format->streams[session.audio_stream_index];
     AVCodec const* codec = avcodec_find_decoder(audio_stream->codecpar->codec_id);
-    if (codec == nullptr) return status_t::unsupported_k;
+    if (codec == nullptr) return {status_code_t::unsupported_k, "No decoder for the audio codec"};
     session.decoder = avcodec_alloc_context3(codec);
-    if (session.decoder == nullptr) return status_t::bad_alloc_k;
+    if (session.decoder == nullptr) return {status_code_t::out_of_memory_k, "No room for the decoder context"};
     if (avcodec_parameters_to_context(session.decoder, audio_stream->codecpar) < 0 ||
         avcodec_open2(session.decoder, codec, nullptr) < 0)
-        return status_t::io_k;
+        return {status_code_t::io_k, "Decoder could not be opened"};
 
     AVChannelLayout output_layout {};
     av_channel_layout_default(&output_layout, 1);
@@ -175,7 +176,7 @@ struct audio_decoder_ {
     if (session.decoder->ch_layout.nb_channels > 0) {
         if (av_channel_layout_copy(&input_layout, &session.decoder->ch_layout) < 0) {
             av_channel_layout_uninit(&output_layout);
-            return status_t::io_k;
+            return {status_code_t::io_k, "Channel layout copy failed"};
         }
     }
     else
@@ -188,12 +189,14 @@ struct audio_decoder_ {
         session.decoder->sample_fmt, session.decoder->sample_rate, 0, nullptr);
     av_channel_layout_uninit(&input_layout);
     av_channel_layout_uninit(&output_layout);
-    if (resampler_built < 0 || swr_init(session.resampler) < 0) return status_t::io_k;
+    if (resampler_built < 0 || swr_init(session.resampler) < 0)
+        return {status_code_t::io_k, "Resampler could not be built"};
 
     session.packet = av_packet_alloc();
     session.frame = av_frame_alloc();
-    if (session.packet == nullptr || session.frame == nullptr) return status_t::bad_alloc_k;
-    return status_t::success_k;
+    if (session.packet == nullptr || session.frame == nullptr)
+        return {status_code_t::out_of_memory_k, "No room for the packet and frame"};
+    return status_code_t::success_k;
 }
 
 /** The state threaded through the resample phases. */
@@ -203,7 +206,7 @@ struct resample_cursor_t {
     std::size_t written = 0;
 
     /** The first error seen, or @c success_k while the phases keep running. */
-    status_t outcome = status_t::success_k;
+    status_t outcome = status_code_t::success_k;
 };
 
 /**
@@ -222,12 +225,12 @@ struct resample_cursor_t {
 static bool feed_(SwrContext* resampler, u8_t const* const* input, int input_samples, f32r1_span_t out,
                   resample_cursor_t& cursor) noexcept {
     std::size_t const capacity = out.extent(0);
-    if (cursor.outcome != status_t::success_k || cursor.written >= capacity) return false;
+    if (cursor.outcome != status_code_t::success_k || cursor.written >= capacity) return false;
     int const room = static_cast<int>(capacity - cursor.written);
     u8_t* output_planes[1] = {swr_plane_(out.data() + cursor.written)};
     int const converted = swr_convert(resampler, output_planes, room, input, input != nullptr ? input_samples : 0);
     if (converted < 0) {
-        cursor.outcome = status_t::io_k;
+        cursor.outcome = {status_code_t::io_k, "Resampler conversion failed"};
         return false;
     }
     cursor.written += static_cast<std::size_t>(converted);
@@ -237,11 +240,11 @@ static bool feed_(SwrContext* resampler, u8_t const* const* input, int input_sam
 /** Pull every frame the decoder holds and resample each into the clip, until it asks for input or
  *  the clip is full. */
 static void receive_frames_(audio_decoder_& session, f32r1_span_t out, resample_cursor_t& cursor) noexcept {
-    while (cursor.outcome == status_t::success_k && cursor.written < out.extent(0)) {
+    while (cursor.outcome == status_code_t::success_k && cursor.written < out.extent(0)) {
         int const received = avcodec_receive_frame(session.decoder, session.frame);
         if (received == AVERROR(EAGAIN) || received == AVERROR_EOF) break;
         if (received < 0) {
-            cursor.outcome = status_t::io_k;
+            cursor.outcome = {status_code_t::io_k, "Decoder could not produce a frame"};
             break;
         }
         feed_(session.resampler, session.frame->extended_data, session.frame->nb_samples, out, cursor);
@@ -252,19 +255,20 @@ static void receive_frames_(audio_decoder_& session, f32r1_span_t out, resample_
 expected_t um::decode_audio(bytes_view_t encoded, u32_t sample_rate, f32r1_span_t out) noexcept {
     std::size_t const samples = out.extent(0);
     std::fill(out.data(), out.data() + samples, 0.0f);
-    if (encoded.empty()) return expected_t::fail(status_t::invalid_argument_k, "empty audio clip");
-    if (sample_rate == 0) return expected_t::fail(status_t::invalid_argument_k, "audio sample rate must be nonzero");
+    if (encoded.empty()) return expected_t::fail(status_code_t::invalid_argument_k, "Empty audio clip");
+    if (sample_rate == 0)
+        return expected_t::fail(status_code_t::invalid_argument_k, "Audio sample rate must be nonzero");
 
     audio_decoder_ session;
-    if (status_t const opened = open_audio_(encoded, sample_rate, session); opened != status_t::success_k)
+    if (status_t const opened = open_audio_(encoded, sample_rate, session); opened != status_code_t::success_k)
         return expected_t::fail(opened, "audio clip of {} bytes failed to open", encoded.size());
 
     resample_cursor_t cursor;
-    while (cursor.outcome == status_t::success_k && cursor.written < samples) {
+    while (cursor.outcome == status_code_t::success_k && cursor.written < samples) {
         int const read = av_read_frame(session.format, session.packet);
         if (read == AVERROR_EOF) break;
         if (read < 0) {
-            cursor.outcome = status_t::io_k;
+            cursor.outcome = {status_code_t::io_k, "Demuxer could not read a packet"};
             break;
         }
         if (session.packet->stream_index != session.audio_stream_index) {
@@ -274,7 +278,7 @@ expected_t um::decode_audio(bytes_view_t encoded, u32_t sample_rate, f32r1_span_
         int const sent = avcodec_send_packet(session.decoder, session.packet);
         av_packet_unref(session.packet);
         if (sent < 0 && sent != AVERROR(EAGAIN)) {
-            cursor.outcome = status_t::io_k;
+            cursor.outcome = {status_code_t::io_k, "Decoder rejected a packet"};
             break;
         }
         receive_frames_(session, out, cursor);
@@ -282,12 +286,12 @@ expected_t um::decode_audio(bytes_view_t encoded, u32_t sample_rate, f32r1_span_
 
     // Flush the decoder's tail frames, then drain the resampler's delay line — mandatory for codecs
     // (MP3, AAC) that hold priming or look-ahead samples.
-    if (cursor.outcome == status_t::success_k) {
+    if (cursor.outcome == status_code_t::success_k) {
         avcodec_send_packet(session.decoder, nullptr);
         receive_frames_(session, out, cursor);
     }
     while (feed_(session.resampler, nullptr, 0, out, cursor)) {}
-    if (cursor.outcome != status_t::success_k) {
+    if (cursor.outcome != status_code_t::success_k) {
         std::fill(out.data(), out.data() + samples, 0.0f);
         return expected_t::fail(cursor.outcome, "audio decode failed after {} samples", cursor.written);
     }
@@ -298,8 +302,8 @@ expected_t um::resample_mono(std::span<f32_t const> samples, u32_t from_rate, u3
                              f32r1_span_t out) noexcept {
     std::fill(out.data(), out.data() + out.extent(0), 0.0f);
     if (from_rate == 0 || to_rate == 0)
-        return expected_t::fail(status_t::invalid_argument_k, "resample rates must be nonzero ({} → {})", from_rate,
-                                to_rate);
+        return expected_t::fail(status_code_t::invalid_argument_k, "resample rates must be nonzero ({} → {})",
+                                from_rate, to_rate);
     AVChannelLayout mono {};
     av_channel_layout_default(&mono, 1);
     SwrContext* resampler = nullptr;
@@ -308,14 +312,14 @@ expected_t um::resample_mono(std::span<f32_t const> samples, u32_t from_rate, u3
     av_channel_layout_uninit(&mono);
     if (built < 0 || swr_init(resampler) < 0) {
         swr_free(&resampler);
-        return expected_t::fail(status_t::io_k, "resampler setup failed ({} → {})", from_rate, to_rate);
+        return expected_t::fail(status_code_t::io_k, "resampler setup failed ({} → {})", from_rate, to_rate);
     }
     resample_cursor_t cursor;
     u8_t const* const input[1] = {swr_plane_(samples.data())};
     feed_(resampler, input, static_cast<int>(samples.size()), out, cursor);
     while (feed_(resampler, nullptr, 0, out, cursor)) {}
     swr_free(&resampler);
-    if (cursor.outcome != status_t::success_k)
+    if (cursor.outcome != status_code_t::success_k)
         return expected_t::fail(cursor.outcome, "resample failed after {} samples", cursor.written);
     return {};
 }

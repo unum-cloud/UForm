@@ -57,7 +57,7 @@ struct ram_placer_t {
         target = placed_array<value_type_> {nk::allocator<value_type_> {allocator}};
         if (values.empty()) return {};
         if (st::failed(target.resize(st::assume_uninitialized, values.size())))
-            return expected_t::fail(uu::status_t::bad_alloc_k, "{} allocation failed ({} bytes)", what,
+            return expected_t::fail(uu::status_code_t::out_of_memory_k, "{} allocation failed ({} bytes)", what,
                                     values.size_bytes());
         std::memcpy(target.data(), values.data(), values.size_bytes());
         return {};
@@ -149,7 +149,7 @@ struct ram_steps {
 
     /** @p status of a pool dispatch for step @p what , a failure naming the step. */
     [[nodiscard]] static expected_t dispatched(uu::status_t status, sz::string_view_t what) noexcept {
-        if (status == uu::status_t::success_k) return {};
+        if (status == uu::status_code_t::success_k) return {};
         return expected_t::fail(status, "{} dispatch was refused by the pool", what);
     }
 
@@ -205,7 +205,7 @@ struct ram_tower {
      *      the block products.
      *
      *  @par Statuses:
-     *  - @c status_t::invalid_argument_k A tensor is missing or misshapen.
+     *  - @c status_code_t::invalid_argument_k A tensor is missing or misshapen.
      */
     [[nodiscard]] static expected<ram_tower> make(uu::checkpoint_to_load_t const& checkpoint,
                                                   geometry_t const& geometry, precision_t precision) noexcept {
@@ -214,11 +214,11 @@ struct ram_tower {
             return expected<ram_tower>::fail(tower_status_of(status), "tower memory setup failed: {}",
                                              nk_status_name(status));
         ram_placer_t const placer {nk::allocator<b8_t> {policy, nullptr}, nullptr};
-        expected<tower_weights_t> weights = pack_weights<products_kit_type_, elementwise_kit_type_>(
-            checkpoint, geometry, precision, placer);
-        if (!weights) return expected<ram_tower>::fail(std::move(weights));
+        auto [weights, pack_status] = pack_weights<products_kit_type_, elementwise_kit_type_>(checkpoint, geometry,
+                                                                                              precision, placer);
+        if (!pack_status) return expected<ram_tower>::fail(std::move(pack_status));
         ram_tower tower;
-        tower.weights_ = std::move(*weights);
+        tower.weights_ = std::move(weights);
         return expected<ram_tower> {std::move(tower)};
     }
 
@@ -228,9 +228,9 @@ struct ram_tower {
                                                       std::size_t threads) const noexcept {
         scratch_cursor_t measure;
         [[maybe_unused]] entries_rows_t const unplaced = reserve_entries(measure, weights_.geometry, threads);
-        expected<std::size_t> activations = scratch_bytes_of<attention_kit_type_>(weights_, tokens, segments);
-        if (!activations) return activations;
-        return expected<std::size_t> {measure.used + *activations};
+        auto [activations, status] = scratch_bytes_of<attention_kit_type_>(weights_, tokens, segments);
+        if (!status) return expected<std::size_t>::fail(std::move(status));
+        return expected<std::size_t> {measure.used + activations};
     }
 
     /** Encode @p batch in host memory on @p pool 's threads. */
@@ -239,8 +239,8 @@ struct ram_tower {
         scratch_cursor_t cursor {scratch};
         steps_t steps {pool, reserve_entries(cursor, weights_.geometry, pool.threads_count())};
         if (scratch.size() < cursor.used)
-            return expected_t::fail(uu::status_t::bad_alloc_k, "the scratch holds {} bytes, the entries need {}",
-                                    scratch.size(), cursor.used);
+            return expected_t::fail(uu::status_code_t::out_of_memory_k,
+                                    "the scratch holds {} bytes, the entries need {}", scratch.size(), cursor.used);
         return encode_steps(steps, weights_, batch, outputs, scratch.subspan(cursor.used));
     }
 

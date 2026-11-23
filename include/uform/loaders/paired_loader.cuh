@@ -111,7 +111,7 @@ struct paired_loader_parquet_t {
      *  @param[out] batches The batches whose segment table, bags, tokens and images get populated.
      *
      *  @par Statuses:
-     *  - @c status_t::invalid_argument_k The loader's media are not images.
+     *  - @c status_code_t::invalid_argument_k The loader's media are not images.
      */
     [[nodiscard]] expected_t fill(gpu_stream_t& gpu_stream, nvjpeg_session_t& decoder, u32_t gpu_rank,
                                   u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept;
@@ -125,7 +125,7 @@ struct paired_loader_parquet_t {
      *  @param[out] batches The batches whose segment table, bags, tokens and videos get populated.
      *
      *  @par Statuses:
-     *  - @c status_t::invalid_argument_k The loader's media are not videos.
+     *  - @c status_code_t::invalid_argument_k The loader's media are not videos.
      */
     [[nodiscard]] expected_t fill(gpu_stream_t& gpu_stream, nvdec_session_t& decoder, u32_t gpu_rank,
                                   u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept;
@@ -139,7 +139,7 @@ struct paired_loader_parquet_t {
      *      samples get populated.
      *
      *  @par Statuses:
-     *  - @c status_t::invalid_argument_k The loader's positives are images or videos.
+     *  - @c status_code_t::invalid_argument_k The loader's positives are images or videos.
      */
     [[nodiscard]] expected_t fill(gpu_stream_t& gpu_stream, u32_t gpu_rank, u32_t training_step,
                                   std::span<multimodal_batch_on_gpu_t> batches) noexcept;

@@ -187,8 +187,8 @@ struct metal_context_t {
      *  HIP drivers. The 32 lanes checked are the simdgroup width every MSL source is written for.
      *
      *  @par Statuses:
-     *  - @c bad_alloc_k The registry cannot grow.
-     *  - @c device_error_k The device refused the source or has no such kernel.
+     *  - @c out_of_memory_k The registry cannot grow.
+     *  - @c device_k The device refused the source or has no such kernel.
      *  - @c unsupported_k The pipeline's simdgroups are not 32 lanes wide.
      */
     expected<metal_pipeline_state_t> pipeline(char const* source, // vendor-boundary: Metal reads C strings
@@ -203,7 +203,7 @@ struct metal_context_t {
             if (std::strcmp(entry.name, name) == 0) return entry.state;
         }
         if (st::failed(pipelines.reserve(pipelines.size() + 1)))
-            return expected<metal_pipeline_state_t>::fail(status_t::bad_alloc_k, "Metal pipeline registry");
+            return expected<metal_pipeline_state_t>::fail(status_code_t::out_of_memory_k, "Metal pipeline registry");
         metal_api_t const& api = *this->api;
         void* const pool = api.autorelease_pool_push();
         if (!library) {
@@ -224,10 +224,10 @@ struct metal_context_t {
             }
         }
         api.autorelease_pool_pop(pool);
-        if (!pipeline) return expected<metal_pipeline_state_t>::fail(status_t::device_error_k, "Metal kernel {}", name);
+        if (!pipeline) return expected<metal_pipeline_state_t>::fail(status_code_t::device_k, "Metal kernel {}", name);
         if (metal_send<std::size_t>(api, pipeline, "threadExecutionWidth") != simdgroup_lanes_k) {
             metal_send<void>(api, pipeline, "release");
-            return expected<metal_pipeline_state_t>::fail(status_t::unsupported_k, "Metal simdgroups of {}", name);
+            return expected<metal_pipeline_state_t>::fail(status_code_t::unsupported_k, "Metal simdgroups of {}", name);
         }
         u32_t const max_threads = static_cast<u32_t>(
             metal_send<std::size_t>(api, pipeline, "maxTotalThreadsPerThreadgroup"));
@@ -428,34 +428,34 @@ struct metal_launch_t {
      *  @brief Dispatches @p groups threadgroups of @p threads each and commits, without waiting.
      *
      *  @par Statuses:
-     *  - @c device_error_k The encoder is not open.
+     *  - @c device_k The encoder is not open.
      */
     status_t submit(std::size_t groups, std::size_t threads) noexcept {
         return submit(metal_size_t {groups}, metal_size_t {threads});
     }
 
     /** Dispatches a grid of @p groups threadgroups of @p threads each and commits, without
-     *  waiting; @c device_error_k when the encoder is not open. */
+     *  waiting; @c device_k when the encoder is not open. */
     status_t submit(metal_size_t groups, metal_size_t threads) noexcept {
-        if (!encoder) return status_t::device_error_k;
+        if (!encoder) return status_code_t::device_k;
         metal_send<void, metal_size_t, metal_size_t>(*api, encoder,
                                                      "dispatchThreadgroups:threadsPerThreadgroup:", groups, threads);
         metal_send<void>(*api, encoder, "endEncoding");
         metal_send<void>(*api, encoder, "release");
         encoder = nullptr;
         metal_send<void>(*api, commands, "commit");
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Waits for the committed command buffer and answers whether the device finished it; nothing
      *  committed has nothing to run. */
     status_t wait() noexcept {
-        if (!commands || encoder) return status_t::success_k;
+        if (!commands || encoder) return status_code_t::success_k;
         // `MTLCommandBufferStatusCompleted`
         constexpr std::size_t completed_k = 4;
         metal_send<void>(*api, commands, "waitUntilCompleted");
-        return metal_send<std::size_t>(*api, commands, "status") == completed_k ? status_t::success_k
-                                                                                : status_t::device_error_k;
+        return metal_send<std::size_t>(*api, commands, "status") == completed_k ? status_code_t::success_k
+                                                                                : status_code_t::device_k;
     }
 };
 
@@ -497,20 +497,20 @@ struct metal_executor_t {
      *
      *  @par Statuses:
      *  - @c invalid_argument_k The @p devices are empty.
-     *  - @c bad_alloc_k The stream table cannot grow.
-     *  - @c device_error_k A device is not listed or refused a queue.
+     *  - @c out_of_memory_k The stream table cannot grow.
+     *  - @c device_k A device is not listed or refused a queue.
      */
     static expected<metal_executor_t> spawn(metal_contexts_t& contexts, std::span<int const> devices,
                                             std::size_t scratch_limit = 0) noexcept {
-        if (devices.empty()) return expected<metal_executor_t>::fail(status_t::invalid_argument_k, "No Apple GPU");
+        if (devices.empty()) return expected<metal_executor_t>::fail(status_code_t::invalid_argument_k, "No Apple GPU");
         metal_executor_t executor;
         if (st::failed(executor.streams_.reserve(devices.size())))
-            return expected<metal_executor_t>::fail(status_t::bad_alloc_k, "Metal stream table");
+            return expected<metal_executor_t>::fail(status_code_t::out_of_memory_k, "Metal stream table");
         for (int const device : devices) {
             metal_context_t* const context = contexts.context(device);
-            if (!context) return expected<metal_executor_t>::fail(status_t::device_error_k, "No Apple GPU {}", device);
+            if (!context) return expected<metal_executor_t>::fail(status_code_t::device_k, "No Apple GPU {}", device);
             void* const queue = metal_send(*context->api, context->device, "newCommandQueue");
-            if (!queue) return expected<metal_executor_t>::fail(status_t::device_error_k, "Apple GPU {} queue", device);
+            if (!queue) return expected<metal_executor_t>::fail(status_code_t::device_k, "Apple GPU {} queue", device);
             [[maybe_unused]] st::status_t const kept = executor.streams_.push_back(
                 st::assume_reserved, stream_t {metal_stream_t {*context, device, queue}});
         }
@@ -524,19 +524,21 @@ struct metal_executor_t {
      *
      *  @par Statuses:
      *  - @c invalid_argument_k The executor has no streams.
-     *  - @c bad_alloc_k The @p bytes_per_stream pass the scratch ceiling or the device's memory.
-     *  - @c device_error_k A stream's device is not listed.
+     *  - @c out_of_memory_k @p bytes_per_stream pass the scratch ceiling or the device's memory.
+     *  - @c device_k A stream's device is not listed.
      */
     status_t reserve(std::size_t bytes_per_stream) noexcept {
-        if (streams_.empty()) return status_t::invalid_argument_k;
-        if (scratch_limit_ && bytes_per_stream > scratch_limit_) return status_t::bad_alloc_k;
+        if (streams_.empty()) return status_code_t::invalid_argument_k;
+        if (scratch_limit_ && bytes_per_stream > scratch_limit_)
+            return {status_code_t::out_of_memory_k, "Request passes the scratch ceiling"};
         for (stream_t& opened : streams_) {
             metal_context_t* const context = opened.handle.context();
-            if (!context) return status_t::device_error_k;
+            if (!context) return status_code_t::device_k;
             opened.arena = metal_allocate(*context, bytes_per_stream);
-            if (bytes_per_stream && !opened.arena) return status_t::bad_alloc_k;
+            if (bytes_per_stream && !opened.arena)
+                return {status_code_t::out_of_memory_k, "No room for the stream arena"};
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /**
@@ -544,16 +546,16 @@ struct metal_executor_t {
      *      per stream, which completes only after every one committed before it.
      *
      *  @par Statuses:
-     *  - @c device_error_k A stream's device is not listed, or failed its work.
+     *  - @c device_k A stream's device is not listed, or failed its work.
      */
     status_t wait() noexcept {
         for (stream_t const& opened : streams_) {
             metal_stream_t const& stream = opened.handle;
             metal_context_t* const context = stream.context();
             if (!context || !metal_synchronize(*context->api, stream.handle() ? stream.handle() : context->queue))
-                return status_t::device_error_k;
+                return status_code_t::device_k;
         }
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** The stream at @p index , in the order the devices were named. */

@@ -26,7 +26,7 @@
 
 #include "harness.hpp" // `run_test_case`, `expect_true`
 
-using namespace unum::uform::utilities;
+namespace util = unum::uform::utilities;
 using namespace unum::uform::test;
 
 /** Reservation ceiling of the probe arena — roomy enough for the bump tail plus
@@ -55,18 +55,19 @@ static void probe_gpu_registration_(int device) noexcept {
                          cuCtxSetCurrent(context) == CUDA_SUCCESS;
     if (!expect_true(entered, "context entry failed (device={})", device)) return;
 
-    expected<gpu_arena_t> arena = gpu_arena_t::make(device, probe_reserve_bytes_k);
-    if (!expect_true(arena, "probe arena reservation failed (device={})", device)) return;
-    std::byte* const tail = arena.value_.allocate_bytes(probe_tail_bytes_k);
-    std::byte* const heap = arena.value_.allocate_registrable_bytes(probe_heap_bytes_k);
+    auto [arena, make_arena_status] = util::gpu_arena_t::make(device, probe_reserve_bytes_k);
+    if (!expect_true(make_arena_status, "probe arena reservation failed (device={})", device)) return;
+    std::byte* const tail = arena.allocate_bytes(probe_tail_bytes_k);
+    std::byte* const heap = arena.allocate_registrable_bytes(probe_heap_bytes_k);
     expect_true(tail != nullptr && heap != nullptr, "probe arena allocation failed (device={})", device);
     if (heap == nullptr) return;
 
-    expected<infiniband_nic_t> nic = infiniband_nic_t::make(static_cast<u32_t>(device));
-    if (!expect_true(nic, "no NIC serves GPU {}: {}", device, nic.description_)) return;
-    expected<infiniband_endpoint_t> endpoint = infiniband_endpoint_t::make(nic.value_,
-                                                                           b8r1_span_t {heap, probe_heap_bytes_k});
-    expect_true(endpoint, "GPUDirect registration failed on GPU {}: {}", device, endpoint.description_);
+    auto [nic, make_nic_status] = util::infiniband_nic_t::make(static_cast<util::u32_t>(device));
+    if (!expect_true(make_nic_status, "no NIC serves GPU {}: {}", device, make_nic_status.description_)) return;
+    auto [endpoint, make_endpoint_status] = util::infiniband_endpoint_t::make(
+        nic, util::b8r1_span_t {heap, probe_heap_bytes_k});
+    expect_true(make_endpoint_status, "GPUDirect registration failed on GPU {}: {}", device,
+                make_endpoint_status.description_);
 }
 
 /** Registers every one of the @p device_count local GPUs with its same-index NIC. */
@@ -89,11 +90,11 @@ static case_result_t test_gpudirect_registration(int) noexcept {
  */
 static case_result_t test_exchange_directory() noexcept {
     char const* const exchange_directory = std::getenv("UFORM_EXCHANGE_DIR");
-    if (host_domain_count_from_environment() == 1u)
+    if (util::host_domain_count_from_environment() == 1u)
         return case_result_t::skipped("needs UFORM_HOST_DOMAIN_COUNT above 1");
     if (!expect_true(exchange_directory != nullptr, "UFORM_EXCHANGE_DIR unset in a multi-node world")) return {};
     sz::string_t probe_path;
-    if (!expect_true(format_into(probe_path, "{}/env-probe", exchange_directory), "probe path formatting failed"))
+    if (!expect_true(util::format_into(probe_path, "{}/env-probe", exchange_directory), "probe path formatting failed"))
         return {};
     std::FILE* const probe_file = std::fopen(probe_path.c_str(), "w");
     expect_true(probe_file != nullptr, "exchange directory not writable: {}", exchange_directory);

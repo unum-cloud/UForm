@@ -23,21 +23,21 @@
 
 namespace fu = ashvardanian::forkunion;
 namespace ue = unum::uform::encoder;
-namespace uu = unum::uform::utilities;
+namespace util = unum::uform::utilities;
 using namespace ue;
-using uu::b8_t;
-using uu::bytes_span_t;
-using uu::bytes_view_t;
-using uu::cuda_api_t;
-using uu::cuda_context_handle_t;
-using uu::cuda_device_address_t;
-using uu::cuda_function_handle_t;
-using uu::cuda_module_handle_t;
-using uu::cuda_result_t;
-using uu::cuda_stream_handle_t;
-using uu::divide_round_up;
-using uu::max_gpus_per_host_k;
-using uu::u8_t;
+using util::b8_t;
+using util::bytes_span_t;
+using util::bytes_view_t;
+using util::cuda_api_t;
+using util::cuda_context_handle_t;
+using util::cuda_device_address_t;
+using util::cuda_function_handle_t;
+using util::cuda_module_handle_t;
+using util::cuda_result_t;
+using util::cuda_stream_handle_t;
+using util::divide_round_up;
+using util::max_gpus_per_host_k;
+using util::u8_t;
 
 /** The bundle's bytes, linked in by the assembler stub @c uform_gpu_bundle writes. */
 extern "C" b8_t const uform_encoder_nvidia_bundle_start[], uform_encoder_nvidia_bundle_end[];
@@ -76,7 +76,7 @@ enum class load_stage_t : u8_t {
  *  stage is touched through the standard reference, since the entries name no CPU class. */
 struct device_module_t {
     load_stage_t stage = load_stage_t::unloaded_k;
-    cuda_result_t status = uu::cuda_error_not_initialized_k;
+    cuda_result_t status = util::cuda_error_not_initialized_k;
     cuda_context_handle_t context = nullptr;
     cuda_function_handle_t functions[std::size_t(kernel_t::count_k)] = {};
 };
@@ -99,12 +99,12 @@ template <typename enqueue_type_>
 [[nodiscard]] static nk_status_t in_context_(nk_stream_t stream, enqueue_type_ const& enqueue) noexcept {
     cuda_api_t const& driver = driver_();
     cuda_context_handle_t context = nullptr;
-    if (!driver || (stream && (driver.stream_context(native_(stream), &context) != uu::cuda_success_k ||
-                               driver.push_context(context) != uu::cuda_success_k)))
+    if (!driver || (stream && (driver.stream_context(native_(stream), &context) != util::cuda_success_k ||
+                               driver.push_context(context) != util::cuda_success_k)))
         return nk_device_code_mismatch_k;
     cuda_result_t const result = enqueue(driver, native_(stream));
     if (stream) driver.pop_context(&context);
-    return result == uu::cuda_success_k ? nk_success_k : nk_device_code_mismatch_k;
+    return result == util::cuda_success_k ? nk_success_k : nk_device_code_mismatch_k;
 }
 
 /** The function of @p kernel in the current context's device, loading the bundle there
@@ -113,31 +113,32 @@ template <typename enqueue_type_>
                                                 cuda_function_handle_t& function) noexcept {
     cuda_context_handle_t context = nullptr;
     int device = 0;
-    if (cuda_result_t const result = driver.get_current_context(&context); result != uu::cuda_success_k) return result;
-    if (cuda_result_t const result = driver.get_context_device(&device); result != uu::cuda_success_k) return result;
-    if (device < 0 || std::size_t(device) >= max_gpus_per_host_k) return uu::cuda_error_invalid_device_k;
+    if (cuda_result_t const result = driver.get_current_context(&context); result != util::cuda_success_k)
+        return result;
+    if (cuda_result_t const result = driver.get_context_device(&device); result != util::cuda_success_k) return result;
+    if (device < 0 || std::size_t(device) >= max_gpus_per_host_k) return util::cuda_error_invalid_device_k;
     device_module_t& module = device_modules_[device];
     fu::standard_atomic_ref<load_stage_t> const stage_ref {module.stage};
     load_stage_t stage = load_stage_t::unloaded_k;
     if (stage_ref.compare_exchange_strong(stage, load_stage_t::loading_k, std::memory_order_acquire)) {
         module.context = context;
         if (uform_encoder_nvidia_bundle_end - uform_encoder_nvidia_bundle_start == 0)
-            module.status = uu::cuda_error_no_binary_for_gpu_k;
+            module.status = util::cuda_error_no_binary_for_gpu_k;
         else {
             cuda_module_handle_t loaded = nullptr;
             module.status = driver.module_load_data(&loaded, uform_encoder_nvidia_bundle_start);
-            for (std::size_t index = 0; module.status == uu::cuda_success_k && index != std::size_t(kernel_t::count_k);
-                 ++index)
+            for (std::size_t index = 0;
+                 module.status == util::cuda_success_k && index != std::size_t(kernel_t::count_k); ++index)
                 module.status = driver.module_get_function(&module.functions[index], loaded, kernel_names_k[index]);
         }
         stage_ref.store(load_stage_t::loaded_k, std::memory_order_release);
     }
     while (stage_ref.load(std::memory_order_acquire) != load_stage_t::loaded_k)
         fu::standard_yield_t {}(&module.stage, load_stage_t::loading_k, std::size_t {0}, fu::wait_capped_k);
-    if (module.status != uu::cuda_success_k) return module.status;
-    if (module.context != context) return uu::cuda_error_invalid_context_k;
+    if (module.status != util::cuda_success_k) return module.status;
+    if (module.context != context) return util::cuda_error_invalid_context_k;
     function = module.functions[std::size_t(kernel)];
-    return uu::cuda_success_k;
+    return util::cuda_success_k;
 }
 
 /** Launch @p kernel over @p blocks blocks of @p threads on @p stream ; each argument is passed as
@@ -148,7 +149,7 @@ template <typename... argument_types_>
     void* addresses[] = {static_cast<void*>(&arguments)...}; // vendor-boundary: the launch takes argument addresses
     return in_context_(stream, [&](cuda_api_t const& driver, cuda_stream_handle_t native) {
         cuda_function_handle_t function = nullptr;
-        if (cuda_result_t const result = function_of_(driver, kernel, function); result != uu::cuda_success_k)
+        if (cuda_result_t const result = function_of_(driver, kernel, function); result != util::cuda_success_k)
             return result;
         return driver.launch_kernel(function, blocks, 1, 1, threads, 1, 1, 0, native, addresses, nullptr);
     });
@@ -179,15 +180,15 @@ nk_status_t ue::vram_nvidia_entries_kit_t::describe(std::size_t vendor_ordinal,
     cuda_api_t const& driver = driver_();
     int device = 0, compute_units = 0, architecture_major = 0, architecture_minor = 0;
     std::size_t memory_bytes = 0;
-    if (!driver || driver.get_device(&device, static_cast<int>(vendor_ordinal)) != uu::cuda_success_k ||
-        driver.get_device_name(description.name, sizeof(description.name), device) != uu::cuda_success_k ||
-        driver.get_device_attribute(&compute_units, uu::cuda_attribute_multiprocessor_count_k, device) !=
-            uu::cuda_success_k ||
-        driver.get_device_attribute(&architecture_major, uu::cuda_attribute_compute_capability_major_k, device) !=
-            uu::cuda_success_k ||
-        driver.get_device_attribute(&architecture_minor, uu::cuda_attribute_compute_capability_minor_k, device) !=
-            uu::cuda_success_k ||
-        driver.get_device_memory(&memory_bytes, device) != uu::cuda_success_k)
+    if (!driver || driver.get_device(&device, static_cast<int>(vendor_ordinal)) != util::cuda_success_k ||
+        driver.get_device_name(description.name, sizeof(description.name), device) != util::cuda_success_k ||
+        driver.get_device_attribute(&compute_units, util::cuda_attribute_multiprocessor_count_k, device) !=
+            util::cuda_success_k ||
+        driver.get_device_attribute(&architecture_major, util::cuda_attribute_compute_capability_major_k, device) !=
+            util::cuda_success_k ||
+        driver.get_device_attribute(&architecture_minor, util::cuda_attribute_compute_capability_minor_k, device) !=
+            util::cuda_success_k ||
+        driver.get_device_memory(&memory_bytes, device) != util::cuda_success_k)
         return nk_device_code_mismatch_k;
     description.compute_units = static_cast<u32_t>(compute_units);
     description.memory_bytes = memory_bytes;
@@ -198,16 +199,16 @@ nk_status_t ue::vram_nvidia_entries_kit_t::describe(std::size_t vendor_ordinal,
 
 nk_capability_t ue::vram_nvidia_entries_kit_t::capabilities_detected(std::size_t vendor_ordinal,
                                                                      device_description_t const&) noexcept {
-    nk::expected<nk::device_t> const device = nk::device_t::make(nk::device_kind_t::cuda_k, vendor_ordinal);
-    if (!device) return 0;
-    nk::expected<nk_capability_t> const detected = device.value.capabilities_detected();
-    return detected ? detected.value : 0;
+    auto const [device, open_status] = nk::device_t::make(nk::device_kind_t::cuda_k, vendor_ordinal);
+    if (nk::failed(open_status)) return 0;
+    auto const [detected, detect_status] = device.capabilities_detected();
+    return nk::succeeded(detect_status) ? detected : 0;
 }
 
 nk_capability_t ue::vram_nvidia_entries_kit_t::capabilities_compiled(std::size_t vendor_ordinal,
                                                                      device_description_t const&) noexcept {
-    nk::expected<nk::device_t> const device = nk::device_t::make(nk::device_kind_t::cuda_k, vendor_ordinal);
-    return device ? device.value.capabilities_compiled() : 0;
+    auto const [device, status] = nk::device_t::make(nk::device_kind_t::cuda_k, vendor_ordinal);
+    return nk::succeeded(status) ? device.capabilities_compiled() : 0;
 }
 
 nk_status_t ue::vram_nvidia_entries_kit_t::copy(bytes_span_t target, bytes_view_t source, nk_stream_t stream) noexcept {

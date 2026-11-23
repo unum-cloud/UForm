@@ -183,13 +183,13 @@ inline constexpr std::size_t product_qkv_k = 0, product_out_k = 1, product_gate_
  *  such as a device failing. */
 [[nodiscard]] inline static uu::status_t tower_status_of(nk_status_t status) noexcept {
     switch (status) {
-    case nk_success_k: return uu::status_t::success_k;
-    case nk_bad_alloc_k: return uu::status_t::bad_alloc_k;
+    case nk_success_k: return uu::status_code_t::success_k;
+    case nk_bad_alloc_k: return uu::status_code_t::out_of_memory_k;
     case nk_unexpected_dimensions_k:
     case nk_missing_kernel_k:
     case nk_misaligned_k:
-    case nk_pack_mismatch_k: return uu::status_t::unsupported_k;
-    default: return uu::status_t::internal_k;
+    case nk_pack_mismatch_k: return uu::status_code_t::unsupported_k;
+    default: return uu::status_code_t::internal_k;
     }
 }
 
@@ -296,7 +296,7 @@ template <typename attention_kit_type_>
         status = attention_kit_type_::pack_size_bf16(geometry.heads(), geometry.head_width, tokens, segments,
                                                      &pool_bytes);
     if (status != nk_success_k)
-        return expected<std::size_t>::fail(uu::status_t::internal_k, "attention pack sizing failed: {}",
+        return expected<std::size_t>::fail(uu::status_code_t::internal_k, "attention pack sizing failed: {}",
                                            nk_status_name(status));
     return expected<std::size_t> {fu::max_of<std::size_t>(block_bytes, pool_bytes)};
 }
@@ -305,12 +305,12 @@ template <typename attention_kit_type_>
 template <typename attention_kit_type_>
 [[nodiscard]] static expected<std::size_t> scratch_bytes_of(tower_weights_t const& weights, std::size_t tokens,
                                                             std::size_t segments) noexcept {
-    expected<std::size_t> keys_values = keys_values_bytes<attention_kit_type_>(weights.geometry, weights.precision,
-                                                                               tokens, segments);
-    if (!keys_values) return keys_values;
+    auto [keys_values, status] = keys_values_bytes<attention_kit_type_>(weights.geometry, weights.precision, tokens,
+                                                                        segments);
+    if (!status) return expected<std::size_t>::fail(std::move(status));
     scratch_cursor_t measure;
     [[maybe_unused]] activations_t const unplaced = reserve_activations(measure, weights.geometry, tokens, segments,
-                                                                        *keys_values);
+                                                                        keys_values);
     return expected<std::size_t> {measure.used};
 }
 
@@ -330,8 +330,8 @@ template <typename attention_kit_type_>
                                                                   std::size_t columns) noexcept {
     bf16r2_view_t const tensor = checkpoint[name];
     if (tensor.empty() || tensor.extent(0) != rows || tensor.extent(1) != columns)
-        return expected<bf16r2_view_t>::fail(uu::status_t::invalid_argument_k, "the checkpoint must hold {} as [{},{}]",
-                                             name, rows, columns);
+        return expected<bf16r2_view_t>::fail(uu::status_code_t::invalid_argument_k,
+                                             "the checkpoint must hold {} as [{},{}]", name, rows, columns);
     return expected<bf16r2_view_t> {tensor};
 }
 
@@ -341,13 +341,13 @@ template <typename staging_kit_type_, typename placer_type_>
 [[nodiscard]] static expected_t widen_gain(uu::checkpoint_to_load_t const& checkpoint, sz::string_view_t name,
                                            std::size_t width, placer_type_ const& placer,
                                            placed_array<f32_t>& gain) noexcept {
-    expected<bf16r2_view_t> tensor = lookup_tensor(checkpoint, name, 1, width);
-    if (!tensor) return expected_t::fail(std::move(tensor));
+    auto [tensor, status] = lookup_tensor(checkpoint, name, 1, width);
+    if (!status) return expected_t::fail(std::move(status));
     st::basic_vector<f32_t> wide;
     if (st::failed(wide.resize(st::assume_uninitialized, width)))
-        return expected_t::fail(uu::status_t::bad_alloc_k, "{} widening failed", name);
+        return expected_t::fail(uu::status_code_t::out_of_memory_k, "{} widening failed", name);
     expected_t widened = checked(
-        staging_kit_type_::cast(tensor->data(), nk_bf16_k, wide.data(), nk_f32_k, width, nullptr), name);
+        staging_kit_type_::cast(tensor.data(), nk_bf16_k, wide.data(), nk_f32_k, width, nullptr), name);
     if (!widened) return widened;
     return placer.place(std::span<f32_t const> {wide.data(), width}, gain, name);
 }
@@ -366,13 +366,13 @@ template <typename products_kit_type_, typename staging_kit_type_, typename plac
     if (precision == precision_t::bf16_k) status = products_kit_type_::pack_size_bf16(outputs, inputs, &bytes);
     else if constexpr (e4m3_products<products_kit_type_>)
         status = products_kit_type_::pack_size_e4m3(outputs, inputs, &bytes);
-    else return expected_t::fail(uu::status_t::unsupported_k, "the class has no E4M3 products");
+    else return expected_t::fail(uu::status_code_t::unsupported_k, "The class has no E4M3 products");
     if (status != nk_success_k)
-        return expected_t::fail(uu::status_t::internal_k, "pack sizing [{}x{}] failed: {}", outputs, inputs,
+        return expected_t::fail(uu::status_code_t::internal_k, "pack sizing [{}x{}] failed: {}", outputs, inputs,
                                 nk_status_name(status));
     packed.bytes = packed_bytes_t {placer.allocator};
     if (st::failed(packed.bytes.resize(st::assume_uninitialized, bytes)))
-        return expected_t::fail(uu::status_t::bad_alloc_k, "pack allocation failed ({} bytes)", bytes);
+        return expected_t::fail(uu::status_code_t::out_of_memory_k, "pack allocation failed ({} bytes)", bytes);
     if (precision == precision_t::bf16_k) {
         placed_array<nk_bf16_t> operand;
         expected_t placed = placer.place(std::span<nk_bf16_t const> {weight.data(), scalars}, operand, "pack operand");
@@ -386,7 +386,8 @@ template <typename products_kit_type_, typename staging_kit_type_, typename plac
         st::basic_vector<nk_e4m3_t> shadow;
         if (st::failed(wide.resize(st::assume_uninitialized, scalars)) ||
             st::failed(shadow.resize(st::assume_uninitialized, scalars)))
-            return expected_t::fail(uu::status_t::bad_alloc_k, "quantization staging failed ({} scalars)", scalars);
+            return expected_t::fail(uu::status_code_t::out_of_memory_k, "quantization staging failed ({} scalars)",
+                                    scalars);
         status = quantize_tokens_e4m3<staging_kit_type_>(
             weight.reshape<2>({1, scalars}), 0, e4m3r2_span_t {shadow.data(), 1, scalars},
             f32r1_span_t {&packed.descale, 1}, f32r1_span_t {wide.data(), scalars});
@@ -406,9 +407,9 @@ template <typename products_kit_type_, typename staging_kit_type_, typename plac
 [[nodiscard]] static expected_t load_product(uu::checkpoint_to_load_t const& checkpoint, sz::string_view_t name,
                                              std::size_t rows, std::size_t columns, precision_t precision,
                                              placer_type_ const& placer, packed_weight_t& packed) noexcept {
-    expected<bf16r2_view_t> tensor = lookup_tensor(checkpoint, name, rows, columns);
-    if (!tensor) return expected_t::fail(std::move(tensor));
-    return pack_product<products_kit_type_, staging_kit_type_>(*tensor, precision, placer, packed);
+    auto [tensor, status] = lookup_tensor(checkpoint, name, rows, columns);
+    if (!status) return expected_t::fail(std::move(status));
+    return pack_product<products_kit_type_, staging_kit_type_>(tensor, precision, placer, packed);
 }
 
 /**
@@ -417,8 +418,8 @@ template <typename products_kit_type_, typename staging_kit_type_, typename plac
  *      @c max_abs/240 descale — widening and quantizing on the host through @p staging_kit_type_ .
  *
  *  @par Statuses:
- *  - @c status_t::invalid_argument_k A tensor is missing or misshapen.
- *  - @c status_t::unsupported_k E4M3 asked of a products kit without E4M3 kernels.
+ *  - @c status_code_t::invalid_argument_k A tensor is missing or misshapen.
+ *  - @c status_code_t::unsupported_k E4M3 asked of a products kit without E4M3 kernels.
  */
 template <typename products_kit_type_, typename staging_kit_type_, typename placer_type_>
 [[nodiscard]] static expected<tower_weights_t> pack_weights(uu::checkpoint_to_load_t const& checkpoint,
@@ -431,7 +432,7 @@ template <typename products_kit_type_, typename staging_kit_type_, typename plac
     weights.precision = precision;
 
     if (st::failed(weights.blocks.resize(geometry.depth)))
-        return result_t::fail(uu::status_t::bad_alloc_k, "block table allocation failed ({})", geometry.depth);
+        return result_t::fail(uu::status_code_t::out_of_memory_k, "block table allocation failed ({})", geometry.depth);
     sz::string_t name;
     sz::string_view_t const parts[4] = {"qkv", "out", "gate_up", "down"};
     std::size_t const extents[4][2] = {{3 * hidden, hidden}, {hidden, hidden}, {2 * ffn, hidden}, {hidden, ffn}};
@@ -441,26 +442,27 @@ template <typename products_kit_type_, typename staging_kit_type_, typename plac
         for (std::size_t product = 0; loaded && product != 4; ++product) {
             name.clear();
             if (!uu::format_into(name, "model.blocks.{}.{}", index, parts[product]))
-                return result_t::fail(uu::status_t::bad_alloc_k, "name staging failed");
+                return result_t::fail(uu::status_code_t::out_of_memory_k, "Block product name staging failed");
             loaded = load_product<products_kit_type_, staging_kit_type_>(checkpoint, name.view(), extents[product][0],
                                                                          extents[product][1], precision, placer,
                                                                          block.products[product]);
         }
         name.clear();
         if (loaded && !uu::format_into(name, "model.blocks.{}.pre_norm", index))
-            return result_t::fail(uu::status_t::bad_alloc_k, "name staging failed");
+            return result_t::fail(uu::status_code_t::out_of_memory_k, "Pre-norm name staging failed");
         if (loaded) loaded = widen_gain<staging_kit_type_>(checkpoint, name.view(), hidden, placer, block.pre_norm);
         name.clear();
         if (loaded && !uu::format_into(name, "model.blocks.{}.post_norm", index))
-            return result_t::fail(uu::status_t::bad_alloc_k, "name staging failed");
+            return result_t::fail(uu::status_code_t::out_of_memory_k, "Post-norm name staging failed");
         if (loaded) loaded = widen_gain<staging_kit_type_>(checkpoint, name.view(), hidden, placer, block.post_norm);
         if (!loaded) return result_t::fail(std::move(loaded));
     }
 
     entry_weights_t& entries = weights.entries;
-    expected<bf16r2_view_t> embedding = lookup_tensor(checkpoint, "model.embedding", geometry.vocabulary, hidden);
-    if (!embedding) return result_t::fail(std::move(embedding));
-    expected_t loaded = placer.place(scalars_of(*embedding), entries.embedding, "embedding");
+    auto [embedding, look_up_embedding_status] = lookup_tensor(checkpoint, "model.embedding", geometry.vocabulary,
+                                                               hidden);
+    if (!look_up_embedding_status) return result_t::fail(std::move(look_up_embedding_status));
+    expected_t loaded = placer.place(scalars_of(embedding), entries.embedding, "embedding");
     if (loaded && geometry.image_patch_side)
         loaded = load_product<products_kit_type_, staging_kit_type_>(checkpoint, "model.image_projection", hidden,
                                                                      geometry.image_scalars(), precision_t::bf16_k,
@@ -493,9 +495,9 @@ template <typename products_kit_type_, typename staging_kit_type_, typename plac
     if (!loaded) return result_t::fail(std::move(loaded));
 
     pool_weights_t& pool = weights.pool;
-    expected<bf16r2_view_t> query = lookup_tensor(checkpoint, "model.pool_query", 1, hidden);
-    if (!query) return result_t::fail(std::move(query));
-    loaded = placer.place(std::span<nk_bf16_t const> {query->data(), hidden}, pool.query, "pool query");
+    auto [query, look_up_query_status] = lookup_tensor(checkpoint, "model.pool_query", 1, hidden);
+    if (!look_up_query_status) return result_t::fail(std::move(look_up_query_status));
+    loaded = placer.place(std::span<nk_bf16_t const> {query.data(), hidden}, pool.query, "pool query");
     if (loaded) loaded = widen_gain<staging_kit_type_>(checkpoint, "model.final_norm", hidden, placer, pool.final_norm);
     if (loaded) loaded = widen_gain<staging_kit_type_>(checkpoint, "model.head.norm", hidden, placer, pool.head_norm);
     if (loaded)
@@ -514,7 +516,7 @@ template <typename products_kit_type_, typename staging_kit_type_, typename plac
                 checkpoint, "model.token_head.projection", width, hidden, precision_t::bf16_k, placer, head.projection);
         st::basic_vector<f32_t> unit_gain;
         if (loaded && st::failed(unit_gain.resize(st::assume_uninitialized, width)))
-            return result_t::fail(uu::status_t::bad_alloc_k, "unit gain staging failed");
+            return result_t::fail(uu::status_code_t::out_of_memory_k, "Unit gain staging failed");
         for (f32_t& gain : unit_gain) gain = 1.0f / std::sqrt(static_cast<f32_t>(width));
         if (loaded)
             loaded = placer.place(std::span<f32_t const> {unit_gain.data(), width}, head.unit_gain, "unit gain");
@@ -526,12 +528,12 @@ template <typename products_kit_type_, typename staging_kit_type_, typename plac
             weights.masked_tokens.decoder);
     if (!loaded) return result_t::fail(std::move(loaded));
 
-    expected<rope_angles_t> angles = rope_angles_t::make(geometry.context, geometry.rope_temporal, geometry.rope_height,
-                                                         geometry.rope_width, geometry.rope_base);
-    if (!angles) return result_t::fail(std::move(angles));
-    loaded = placer.place(angles->scalars(), weights.angles, "angle grids");
+    auto [angles, make_status] = rope_angles_t::make(geometry.context, geometry.rope_temporal, geometry.rope_height,
+                                                     geometry.rope_width, geometry.rope_base);
+    if (!make_status) return result_t::fail(std::move(make_status));
+    loaded = placer.place(angles.scalars(), weights.angles, "angle grids");
     if (!loaded) return result_t::fail(std::move(loaded));
-    weights.angle_grids = angles->grids(weights.angles.data());
+    weights.angle_grids = angles.grids(weights.angles.data());
     return result_t {std::move(weights)};
 }
 
@@ -560,29 +562,29 @@ template <typename steps_type_>
 
     std::size_t const segments = batch.segment_lengths.extent(0);
     if (segments == 0 || batch.segment_offsets.extent(0) < segments || batch.segment_modality.extent(0) != segments)
-        return expected_t::fail(uu::status_t::invalid_argument_k,
-                                "a batch needs one offset, length and modality per item");
+        return expected_t::fail(uu::status_code_t::invalid_argument_k,
+                                "A batch needs offset, length, modality per item");
     if (outputs.embeddings.empty() && outputs.states.empty() && outputs.token_vectors.empty() &&
         outputs.masked_logits.empty())
-        return expected_t::fail(uu::status_t::invalid_argument_k, "an encode keeps at least one surface");
+        return expected_t::fail(uu::status_code_t::invalid_argument_k, "An encode keeps at least one surface");
     if (!outputs.token_vectors.empty() && weights.token_head.projection.bytes.empty())
-        return expected_t::fail(uu::status_t::invalid_argument_k, "the checkpoint carries no token head");
+        return expected_t::fail(uu::status_code_t::invalid_argument_k, "The checkpoint carries no token head");
     if (!outputs.masked_logits.empty() && weights.masked_tokens.decoder.bytes.empty())
-        return expected_t::fail(uu::status_t::invalid_argument_k, "the checkpoint carries no byte decoder");
+        return expected_t::fail(uu::status_code_t::invalid_argument_k, "The checkpoint carries no byte decoder");
     std::size_t tokens = 0;
     for (std::size_t segment = 0; segment != segments; ++segment) {
         if (batch.segment_lengths[segment] > geometry.context)
-            return expected_t::fail(uu::status_t::invalid_argument_k, "item {} spans {} cells, the context is {}",
+            return expected_t::fail(uu::status_code_t::invalid_argument_k, "item {} spans {} cells, the context is {}",
                                     segment, batch.segment_lengths[segment], geometry.context);
         tokens += batch.segment_lengths[segment];
     }
-    if (tokens == 0) return expected_t::fail(uu::status_t::invalid_argument_k, "a batch needs a live cell");
-    expected<std::size_t> keys_values = keys_values_bytes<attention_kit_t>(geometry, precision, tokens, segments);
-    if (!keys_values) return expected_t::fail(std::move(keys_values));
+    if (tokens == 0) return expected_t::fail(uu::status_code_t::invalid_argument_k, "A batch needs a live cell");
+    auto [keys_values, status] = keys_values_bytes<attention_kit_t>(geometry, precision, tokens, segments);
+    if (!status) return expected_t::fail(std::move(status));
     scratch_cursor_t cursor {scratch};
-    activations_t const a = reserve_activations(cursor, geometry, tokens, segments, *keys_values);
+    activations_t const a = reserve_activations(cursor, geometry, tokens, segments, keys_values);
     if (scratch.size() < cursor.used)
-        return expected_t::fail(uu::status_t::bad_alloc_k, "the scratch holds {} bytes, the call needs {}",
+        return expected_t::fail(uu::status_code_t::out_of_memory_k, "the scratch holds {} bytes, the call needs {}",
                                 scratch.size(), cursor.used);
 
     std::size_t const hidden = geometry.hidden, ffn = geometry.ffn(), heads = geometry.heads();

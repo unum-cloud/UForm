@@ -67,24 +67,26 @@ consteval bool class_advances() noexcept {
  *  body compiled in one class unit merges into another's. */
 template <typename tower_type_>
 struct ram_bodies {
-    static expected<void*> create(checkpoint_to_load_t const& checkpoint, encoder::geometry_t const& geometry,
-                                  encoder::precision_t precision, nk_stream_t) noexcept {
-        expected<tower_type_> made = tower_type_::make(checkpoint, geometry, precision);
-        if (!made) return expected<void*>::fail(std::move(made));
-        tower_type_* const tower = new (std::nothrow) tower_type_(std::move(*made));
-        if (!tower) return expected<void*>::fail(status_t::bad_alloc_k, "tower allocation failed");
-        return expected<void*> {tower};
+    static util::expected<void*> create(util::checkpoint_to_load_t const& checkpoint,
+                                        encoder::geometry_t const& geometry, encoder::precision_t precision,
+                                        nk_stream_t) noexcept {
+        auto [tower, status] = tower_type_::make(checkpoint, geometry, precision);
+        if (!status) return util::expected<void*>::fail(std::move(status));
+        tower_type_* const handle = new (std::nothrow) tower_type_(std::move(tower));
+        if (!handle) return util::expected<void*>::fail(util::status_code_t::out_of_memory_k, "No room for the tower");
+        return util::expected<void*> {handle};
     }
 
     static void destroy(void* tower) noexcept { delete static_cast<tower_type_*>(tower); }
 
-    static expected<std::size_t> scratch_bytes(void const* tower, std::size_t tokens, std::size_t segments,
-                                               pool_view_t pool) noexcept {
+    static util::expected<std::size_t> scratch_bytes(void const* tower, std::size_t tokens, std::size_t segments,
+                                                     util::pool_view_t pool) noexcept {
         return static_cast<tower_type_ const*>(tower)->scratch_bytes(tokens, segments, pool.threads_count());
     }
 
-    static expected_t encode(void const* tower, encoder::multimodal_batch_view_t batch, encoder::outputs_t outputs,
-                             bytes_span_t scratch, pool_view_t pool) noexcept {
+    static util::expected_t encode(void const* tower, encoder::multimodal_batch_view_t batch,
+                                   encoder::outputs_t outputs, util::bytes_span_t scratch,
+                                   util::pool_view_t pool) noexcept {
         return static_cast<tower_type_ const*>(tower)->encode(batch, outputs, scratch, pool);
     }
 };
@@ -95,31 +97,35 @@ template <typename tower_type_>
 struct vram_bodies {
     using entries_kit_t = typename tower_type_::steps_t::entries_kit_t;
 
-    static expected<void*> create(checkpoint_to_load_t const& checkpoint, encoder::geometry_t const& geometry,
-                                  encoder::precision_t precision, nk_stream_t stream) noexcept {
+    static util::expected<void*> create(util::checkpoint_to_load_t const& checkpoint,
+                                        encoder::geometry_t const& geometry, encoder::precision_t precision,
+                                        nk_stream_t stream) noexcept {
         nk_allocator_t const policy = entries_kit_t::policy(stream, uform_residency_vram_k);
         if (!policy.allocate)
-            return expected<void*>::fail(status_t::device_error_k, "tower memory setup failed: no device allocator");
-        expected<tower_type_> made = tower_type_::make(checkpoint, geometry, precision, policy, stream);
-        if (!made) return expected<void*>::fail(std::move(made));
+            return util::expected<void*>::fail(util::status_code_t::device_k,
+                                               "Tower memory setup failed: no device allocator");
+        auto [tower, status] = tower_type_::make(checkpoint, geometry, precision, policy, stream);
+        if (!status) return util::expected<void*>::fail(std::move(status));
         // The packs and the operands staged for them land before the tower is handed out
         nk_status_t const landed = entries_kit_t::synchronize(stream);
         if (landed != nk_success_k)
-            return expected<void*>::fail(encoder::tower_status_of(landed), "load failed: {}", nk_status_name(landed));
-        tower_type_* const tower = new (std::nothrow) tower_type_(std::move(*made));
-        if (!tower) return expected<void*>::fail(status_t::bad_alloc_k, "tower allocation failed");
-        return expected<void*> {tower};
+            return util::expected<void*>::fail(encoder::tower_status_of(landed), "load failed: {}",
+                                               nk_status_name(landed));
+        tower_type_* const handle = new (std::nothrow) tower_type_(std::move(tower));
+        if (!handle) return util::expected<void*>::fail(util::status_code_t::out_of_memory_k, "No room for the tower");
+        return util::expected<void*> {handle};
     }
 
     static void destroy(void* tower) noexcept { delete static_cast<tower_type_*>(tower); }
 
-    static expected<std::size_t> scratch_bytes(void const* tower, std::size_t tokens, std::size_t segments,
-                                               nk_stream_t) noexcept {
+    static util::expected<std::size_t> scratch_bytes(void const* tower, std::size_t tokens, std::size_t segments,
+                                                     nk_stream_t) noexcept {
         return static_cast<tower_type_ const*>(tower)->scratch_bytes(tokens, segments);
     }
 
-    static expected_t encode(void const* tower, encoder::multimodal_batch_view_t batch, encoder::outputs_t outputs,
-                             bytes_span_t scratch, nk_stream_t stream) noexcept {
+    static util::expected_t encode(void const* tower, encoder::multimodal_batch_view_t batch,
+                                   encoder::outputs_t outputs, util::bytes_span_t scratch,
+                                   nk_stream_t stream) noexcept {
         return static_cast<tower_type_ const*>(tower)->encode(batch, outputs, scratch, stream);
     }
 };
@@ -152,9 +158,9 @@ encoder_verbs<residency_> const* encoder_class_tables<residency_, class_>::find(
 }
 
 template <cpu_class_t cpu_class_>
-void host_class_tables<cpu_class_>::wait(u64_t& word, u64_t seen) noexcept {
-    using atomic_ref_t = typename atomic_ref_for_cpu_class<cpu_class_>::template type<u64_t>;
-    u64_t const* const watched = &word;
+void host_class_tables<cpu_class_>::wait(util::u64_t& word, util::u64_t seen) noexcept {
+    using atomic_ref_t = typename atomic_ref_for_cpu_class<cpu_class_>::template type<util::u64_t>;
+    util::u64_t const* const watched = &word;
     while (atomic_ref_t {word}.load(std::memory_order_acquire) == seen)
         waiter_of<cpu_class_> {}(watched, seen, std::size_t {0}, fu::wait_capped_k);
 }
@@ -164,8 +170,8 @@ host_verbs_t const* host_class_tables<cpu_class_>::find() noexcept {
     constexpr cpu_class_t parent_k = parent_class_of(cpu_class_);
     static_assert(class_advances<vendored_residency_t::ram_k, cpu_class_>() ||
                       !std::is_same_v<waiter_of<cpu_class_>, waiter_of<parent_k>> ||
-                      !std::is_same_v<typename atomic_ref_for_cpu_class<cpu_class_>::template type<u64_t>,
-                                      typename atomic_ref_for_cpu_class<parent_k>::template type<u64_t>>,
+                      !std::is_same_v<typename atomic_ref_for_cpu_class<cpu_class_>::template type<util::u64_t>,
+                                      typename atomic_ref_for_cpu_class<parent_k>::template type<util::u64_t>>,
                   "A compiled class no longer advances past the one below");
     static constexpr host_verbs_t verbs_k {&host_class_tables::wait};
     return &verbs_k;

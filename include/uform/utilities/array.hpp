@@ -73,21 +73,21 @@ class stack_array {
     [[nodiscard]] std::span<value_type> span() noexcept { return {begin(), size_}; }
     [[nodiscard]] std::span<value_type const> view() const noexcept { return {begin(), size_}; }
 
-    /** Move-append one element; @c status_t::bad_alloc_k past the capacity limit. */
+    /** Move-append one element; @c status_code_t::out_of_memory_k past the capacity limit. */
     [[nodiscard]] status_t push_back(value_type value) noexcept {
-        if (size_ == capacity_limit_) return status_t::bad_alloc_k;
+        if (size_ == capacity_limit_) return status_code_t::out_of_memory_k;
         new (pointer_at(size_)) value_type(std::move(value));
         ++size_;
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     /** Grow to @p new_size default-constructed elements (or shrink, destroying the tail);
-     *  @c status_t::bad_alloc_k past the capacity limit. */
+     *  @c status_code_t::out_of_memory_k past the capacity limit. */
     [[nodiscard]] status_t resize(size_type new_size) noexcept {
-        if (new_size > capacity_limit_) return status_t::bad_alloc_k;
+        if (new_size > capacity_limit_) return status_code_t::out_of_memory_k;
         for (; size_ > new_size; --size_) std::launder(pointer_at(size_ - 1))->~value_type();
         for (; size_ < new_size; ++size_) new (pointer_at(size_)) value_type();
-        return status_t::success_k;
+        return status_code_t::success_k;
     }
 
     void clear() noexcept {

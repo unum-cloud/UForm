@@ -33,7 +33,7 @@
 #include <cmath>   // `std::fabs`, `std::fmax`, `std::llround`
 #include <cstdint> // `std::uint64_t`
 #include <cstdio>  // `std::FILE`, `std::setvbuf`, `std::fflush`, `stdout`
-#include <cstdlib> // `std::getenv`, `std::exit`, `std::strtod`
+#include <cstdlib> // `std::getenv`, `std::exit`, `std::strtod`, `std::abort`
 #include <cstring> // `std::strcmp`, `std::strlen`
 
 #include <algorithm>       // `std::max`
@@ -95,8 +95,6 @@ struct fmt::formatter<ashvardanian::stringzilla::string_t> : fmt::formatter<std:
 };
 
 namespace unum::uform::test {
-
-using namespace unum::uform::utilities;
 
 /** Stops in an attached debugger, or dumps core without one; crash handlers leave SIGTRAP alone. */
 inline void trap_into_debugger() noexcept {
@@ -306,38 +304,39 @@ struct split_mix_generator_t {
 #pragma endregion Shared Settings
 
 /** Every GPU @c uform_gpu_devices lists, each at its UForm device ordinal. */
-[[nodiscard]] inline per_gpu_array<uform_gpu_device_t> listed_gpu_devices() noexcept {
-    per_gpu_array<uform_gpu_device_t> listed;
+[[nodiscard]] inline util::per_gpu_array<uform_gpu_device_t> listed_gpu_devices() noexcept {
+    util::per_gpu_array<uform_gpu_device_t> listed;
     std::size_t count = 0;
     uform_outcome_t outcome {};
-    [[maybe_unused]] status_t const sized = listed.resize(listed.capacity());
+    [[maybe_unused]] util::status_t const sized = listed.resize(listed.capacity());
     uform_gpu_devices_t listing {&outcome, listed.begin(), listed.size(), &count};
     uform_gpu_devices(&listing);
-    [[maybe_unused]] status_t const trimmed = listed.resize(fu::min_of<std::size_t>(count, listed.capacity()));
+    [[maybe_unused]] util::status_t const trimmed = listed.resize(fu::min_of<std::size_t>(count, listed.capacity()));
     return listed;
 }
 
 /** The ordinals @p text lists, comma-separated, or the first listed device of every vendor when it
  *  is null; exits with status 1 on text that does not parse or names a device past the listing. */
-[[nodiscard]] inline per_gpu_array<i32_t> parse_devices(char const* text) noexcept {
-    per_gpu_array<uform_gpu_device_t> const listed = listed_gpu_devices();
+[[nodiscard]] inline util::per_gpu_array<util::i32_t> parse_devices(char const* text) noexcept {
+    util::per_gpu_array<uform_gpu_device_t> const listed = listed_gpu_devices();
     std::size_t const listed_count = listed.size();
-    per_gpu_array<i32_t> devices;
+    util::per_gpu_array<util::i32_t> devices;
     if (!text) {
         for (std::size_t ordinal = 0; ordinal != listed_count; ++ordinal) {
             if (ordinal != 0 && listed[ordinal - 1].vendor == listed[ordinal].vendor) continue;
-            [[maybe_unused]] status_t const pushed = devices.push_back(static_cast<i32_t>(ordinal));
+            [[maybe_unused]] util::status_t const pushed = devices.push_back(static_cast<util::i32_t>(ordinal));
         }
         return devices;
     }
     std::string_view const spelled {text};
     for (std::size_t begin = 0; begin <= spelled.size();) {
         std::size_t const end = fu::min_of(spelled.find(',', begin), spelled.size());
-        u32_t ordinal = 0;
+        util::u32_t ordinal = 0;
         auto const [parsed_end, parse_status] = std::from_chars(spelled.data() + begin, spelled.data() + end, ordinal);
         if (parse_status != std::errc {} || parsed_end != spelled.data() + end)
             exit_unparsed("UFORM_DEVICES", text, "unsigned integers like 0,1");
-        if (ordinal >= listed_count || devices.push_back(static_cast<i32_t>(ordinal)) != status_t::success_k) {
+        if (ordinal >= listed_count ||
+            devices.push_back(static_cast<util::i32_t>(ordinal)) != util::status_code_t::success_k) {
             fmt::println(stderr, "UFORM_DEVICES names device {}, past the {} listed", ordinal, listed_count);
             std::exit(1);
         }
@@ -353,7 +352,7 @@ struct test_settings_t : common_settings_t {
     bool refuse_skips = false;
 
     /** UForm device ordinals the GPU cases run on, positions in @c uform_gpu_devices . */
-    per_gpu_array<i32_t> devices {};
+    util::per_gpu_array<util::i32_t> devices {};
 };
 
 /** Reads every @ref test_settings_t field, exiting with status 1 on the first unparsable one. */
@@ -545,16 +544,16 @@ inline void pause_between_polls() noexcept { std::this_thread::sleep_for(std::ch
 
 /** Prints @p context formatted with @p args , four spaces in, under a failed check's location. */
 template <typename... args_types_>
-void print_context_(format_at_t const& context, args_types_&&... args) noexcept {
+void print_context_(util::format_at_t const& context, args_types_&&... args) noexcept {
     sz::string_t text;
-    std::vformat_to(format_into_t {&text}, context.format, std::make_format_args(args...));
+    std::vformat_to(util::format_into_t {&text}, context.format, std::make_format_args(args...));
     std::fprintf(stderr, "    %.*s\n", static_cast<int>(text.size()), text.data());
 }
 
 /** Holds when @p is_met does, read as a condition, so an @ref expected reads as itself; otherwise
  *  counts a failed check at the caller's line and prints the formatted @p context and @p args. */
 template <typename condition_type_, typename... args_types_>
-bool expect_true(condition_type_ const& is_met, format_at_t context, args_types_&&... args) noexcept {
+bool expect_true(condition_type_ const& is_met, util::format_at_t context, args_types_&&... args) noexcept {
     if (is_met) return true;
     record_failed_check(context.location);
     print_context_(context, args...);
@@ -564,7 +563,7 @@ bool expect_true(condition_type_ const& is_met, format_at_t context, args_types_
 /** Holds when @p actual equals @p wanted ; otherwise counts a failed check at the caller's line and
  *  prints @p context and both values under it. */
 template <typename actual_type_, typename wanted_type_, typename... args_types_>
-bool expect_equal(actual_type_ const& actual, wanted_type_ const& wanted, format_at_t context,
+bool expect_equal(actual_type_ const& actual, wanted_type_ const& wanted, util::format_at_t context,
                   args_types_&&... args) noexcept {
     if (actual == wanted) return true;
     record_failed_check(context.location);
@@ -576,7 +575,8 @@ bool expect_equal(actual_type_ const& actual, wanted_type_ const& wanted, format
 /** Holds when @p actual and @p wanted differ by at most @p tolerance times the larger of their
  *  magnitudes and 1; otherwise counts a failed check and prints @p context with both values. */
 template <typename... args_types_>
-bool expect_near(f64_t actual, f64_t wanted, f64_t tolerance, format_at_t context, args_types_&&... args) noexcept {
+bool expect_near(util::f64_t actual, util::f64_t wanted, util::f64_t tolerance, util::format_at_t context,
+                 args_types_&&... args) noexcept {
     if (std::fabs(actual - wanted) <= tolerance * std::fmax(std::fmax(std::fabs(actual), std::fabs(wanted)), 1.0))
         return true;
     record_failed_check(context.location);
@@ -677,26 +677,50 @@ inline void install_test_signal_handlers() noexcept {
 }
 
 /** The Float64 borrows the host oracles read, beside the core's Float32 ones. */
-using f64r1_view_t = nk::tensor_view<f64_t, 1>;
-using f64r2_view_t = nk::tensor_view<f64_t, 2>;
-using f64r2_span_t = nk::tensor_span<f64_t, 2>;
-using f64r3_view_t = nk::tensor_view<f64_t, 3>;
-using f64r3_span_t = nk::tensor_span<f64_t, 3>;
-using f64r4_view_t = nk::tensor_view<f64_t, 4>;
-using f64r4_span_t = nk::tensor_span<f64_t, 4>;
+using f64r1_view_t = nk::tensor_view<util::f64_t, 1>;
+using f64r2_view_t = nk::tensor_view<util::f64_t, 2>;
+using f64r2_span_t = nk::tensor_span<util::f64_t, 2>;
+using f64r3_view_t = nk::tensor_view<util::f64_t, 3>;
+using f64r3_span_t = nk::tensor_span<util::f64_t, 3>;
+using f64r4_view_t = nk::tensor_view<util::f64_t, 4>;
+using f64r4_span_t = nk::tensor_span<util::f64_t, 4>;
 
-/** ⟨a,b⟩ of two equally long contiguous Float64 runs, compensated by NumKong. */
-[[nodiscard]] inline f64_t dot(auto const& a, auto const& b) noexcept { return nk::dot<nk::f64_t>(a, b).value; }
+/** Factory function to allocate zeroed tensors, aborting on exhaustion. */
+template <typename tensor_type_>
+[[nodiscard]] tensor_type_ make_zeros(std::initializer_list<std::size_t> extents,
+                                      typename tensor_type_::allocator_type allocator = {}) noexcept {
+    auto [tensor, status] = tensor_type_::zeros(extents, allocator);
+    if (nk::failed(status)) std::abort();
+    return std::move(tensor);
+}
+
+/** Factory function to allocate tensors a copy or a kernel fills, aborting on exhaustion. */
+template <typename tensor_type_>
+[[nodiscard]] tensor_type_ make_uninitialized(std::initializer_list<std::size_t> extents,
+                                              typename tensor_type_::allocator_type allocator = {}) noexcept {
+    auto [tensor, status] = tensor_type_::uninitialized(extents, allocator);
+    if (nk::failed(status)) std::abort();
+    return std::move(tensor);
+}
+
+/** ⟨a,b⟩ of two equally long contiguous Float64 runs, compensated by NumKong; runs of unequal
+ *  lengths fail the case at the caller's line. */
+[[nodiscard]] inline util::f64_t dot(auto const& a, auto const& b,
+                                     std::source_location where = std::source_location::current()) noexcept {
+    auto const [product, status] = nk::dot<nk::f64_t>(a, b);
+    expect_true(nk::succeeded(status), where);
+    return product;
+}
 
 /** Narrow @p values onto the BFloat16 grid in place, leaving their bit patterns in @p staging for
  *  a device upload. */
-[[nodiscard]] inline bool narrow_to_bf16(std::span<f64_t> values, std::span<nk_bf16_t> staging) noexcept {
+[[nodiscard]] inline bool narrow_to_bf16(std::span<util::f64_t> values, std::span<nk_bf16_t> staging) noexcept {
     return nk::cast<nk::f64_t, nk::bf16_t>(values, staging) == nk::status_t::success_k &&
            nk::cast<nk::bf16_t, nk::f64_t>(std::span<nk_bf16_t const> {staging}, values) == nk::status_t::success_k;
 }
 
 /** Widen the BFloat16 bit patterns of a device download in @p staging into @p values . */
-[[nodiscard]] inline bool widen_from_bf16(std::span<nk_bf16_t const> staging, std::span<f64_t> values) noexcept {
+[[nodiscard]] inline bool widen_from_bf16(std::span<nk_bf16_t const> staging, std::span<util::f64_t> values) noexcept {
     return nk::cast<nk::bf16_t, nk::f64_t>(staging, values) == nk::status_t::success_k;
 }
 
