@@ -45,7 +45,7 @@
 
 #include <nvjpeg.h> // vendor-boundary: `nvjpegHandle_t` / `nvjpegJpegState_t` — the session's device state
 
-#include "uform/utilities/ram_device.hpp"           // `pool_view_t` — the borrowed CPU-decode pool
+#include "uform/utilities/ram_device.hpp"           // `pool_view_t` — the CPU-decode pool the composition root owns
 #include "uform/utilities/vram_nvidia_device.hpp"   // `pinned_alloc` — the non-JPEG fallback's host tapes
 #include "uform/encoder/multimodal_batch.cuh"       // `multimodal_batch_on_gpu_t` — the decode target
 #include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
@@ -90,7 +90,7 @@ struct jpeg_entry_t {
  *
  *  Its whole state is the nvJPEG handle and batched-decode state — both light C handles, so there
  *  is no pimpl; move-only RAII. The CPU-fallback pool and the per-fill scratch are not the
- *  session's — they are borrowed / per-call.
+ *  session's: the composition root owns the pool, and the scratch lives per call.
  */
 struct nvjpeg_session_t {
 
@@ -140,16 +140,16 @@ struct nvjpeg_session_t {
  *  on the CPU, then one NPP batch crops each to its factor-pair aspect and resizes it into the
  *  grid. Pure enqueue on @p stream but for the triage and CPU-fallback host hops.
  *
- *  @param[in,out] jpeg This GPU's nvJPEG session, borrowed for the JPEG rows.
- *  @param[in,out] pool The run's CPU-decode worker pool, borrowed for the non-JPEG
+ *  @param[in,out] jpeg This GPU's nvJPEG session, used for the JPEG rows.
+ *  @param[in,out] pool The run's CPU-decode worker pool, used for the non-JPEG
  *      / rejected-JPEG rows.
  *  @param[in] tape The pooled blob column with its offsets landed on host — device bytes,
  *      host-indexable, so @c tape[row] is a device slice computed on the host.
  *  @param[in] drawn_rows The tape rows to decode; each becomes one live image segment,
  *      in draw order.
  *  @param[in] representations The flat @ref unum::uform::encoder::image_batch_shape_t
- *      representations ( @c patch_side , @c channels ); the shape is the single source of geometry,
- *      validated against the grid. Image carries no per-representation variation yet, so it
+ *      representations ( @c patch_side , @c channels ); the shape is the single source of
+ *      geometry, validated against the grid. Image has no per-representation variation yet, so it
  *      consumes one (must be non-empty).
  *  @param[out] pixels The patch-arranged @b [rows,columns,P,P,C] grid to fill; its extents
  *      give the row width (columns), the square patch side (extent 2), and the RGBA channel
@@ -198,7 +198,7 @@ struct image_loader_parquet_t {
      *  @param[in] path_or_glob Dataset's Parquet paths or a GLOB pattern for all the files.
      *  @param[in] seed The training-run specific order-affecting seed.
      *  @param[in,out] pool The run's CPU-decode worker pool, owned at the composition root and
-     *      borrowed here for the PNG / WebP / progressive-JPEG fallback; the loader never spawns
+     *      used here for the PNG / WebP / progressive-JPEG fallback; the loader never spawns
      *      threads of its own.
      *  @param[in] image The image modality's own geometry slice ( @c patch_side ,
      *      @c channels ) — the single source of a step's image geometry; it never sees the
@@ -222,7 +222,7 @@ struct image_loader_parquet_t {
      *
      *  @param[in,out] gpu_stream The GPU-specific stream the staging, decode, resize, and
      *      segmenting run on.
-     *  @param[in,out] decoder This GPU's nvJPEG session, borrowed for the decode.
+     *  @param[in,out] decoder This GPU's nvJPEG session, used for the decode.
      *  @param[in] config Which Parquet column holds the image blobs.
      *  @param[in] gpu_rank Ensures different GPUs draw different rows from the same dataset.
      *  @param[in] training_step Ensures subsequent steps sample different data.
@@ -235,11 +235,12 @@ struct image_loader_parquet_t {
 
   private:
 
-    /** The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
+    /** The configured KvikIO / GDS storage session the reader needs, owned by the composition
+     *  root. */
     gpu_direct_storage_session_t* storage_ = nullptr;
 
-    /** The run's CPU-decode worker pool — borrowed from the composition root, handed to the
-     *  decode's PNG / WebP / progressive-JPEG fallback; never owned, never spawned here. */
+    /** The run's CPU-decode worker pool, owned by the composition root and handed to the
+     *  decode's PNG / WebP / progressive-JPEG fallback; never spawned here. */
     pool_view_t pool_ {nullptr};
 
     /** The dataset's Parquet shard paths, sorted by the glob — owned. */

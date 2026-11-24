@@ -2,7 +2,7 @@
 //! late-interaction and calibrated-choice losses joined into one optimizer step, checkpoints out.
 //!
 //! A [`Mesh`] places this process among the processes of a run, made once by [`Mesh::bootstrap`]
-//! and borrowed by every [`Trainer`]. A trainer owns the tower replicas, gradients, optimizer
+//! and outliving every [`Trainer`]. A trainer owns the tower replicas, gradients, optimizer
 //! moments, heads and temperatures on its executor's devices; training is GPU-only, so its one
 //! constructor is [`Trainer::init_vram`]. Its verbs come from [`TrainVerbs`], which run on the
 //! executor the trainer was made on: `trainer.on(&executor)` blocks, and
@@ -473,7 +473,7 @@ impl FromStr for LateInteractionSide {
 pub struct ImageShape {
     /// The square patch side images tile into, in pixels.
     pub patch_side: usize,
-    /// Channels every pixel carries; zero derives four, RGBA end to end.
+    /// Channels every pixel has; zero derives four, RGBA end to end.
     pub channels: usize,
 }
 
@@ -489,7 +489,7 @@ pub struct VideoShape {
     pub tube_frames: usize,
     /// Source frames between sampled ones; zero derives one, every frame.
     pub frame_stride: usize,
-    /// Channels every pixel carries; zero derives three.
+    /// Channels every pixel has; zero derives three.
     pub channels: usize,
 }
 
@@ -505,7 +505,7 @@ pub struct AudioShape {
     pub sample_rate: usize,
 }
 
-/// What one device's step carries at most, whatever the modality mix: capacity fixed at creation.
+/// What one device's step holds at most, whatever the modality mix: capacity fixed at creation.
 /// Text always takes part; a media modality takes part when its slice is live.
 ///
 /// Mirrors `uform_batch_shape_t`.
@@ -514,11 +514,11 @@ pub struct AudioShape {
 pub struct BatchShape {
     /// Rows one device's step packs.
     pub max_rows_per_device: usize,
-    /// Items one device's step carries across all its rows, which is also its pooling axis.
+    /// Items one device's step holds across all its rows, which is also its pooling axis.
     pub max_segments_per_device: usize,
     /// Positions one row spans, the sequence length.
     pub max_columns_per_row: usize,
-    /// Bags one device's step carries; zero keeps every item its own routing unit.
+    /// Bags one device's step holds; zero keeps every item its own routing unit.
     pub max_bags_per_device: usize,
     /// Legal bytes one item offers to choose from at most; zero makes no choices.
     pub max_choices_per_item: usize,
@@ -568,7 +568,8 @@ pub struct Masking {
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Contrastive<'config> {
     /// Matryoshka prefix widths, strictly ascending, each a multiple of 8, at most 8 of them, every
-    /// one scored; empty scores the full width alone. Copied, not borrowed.
+    /// one scored; empty scores the full width alone. Copied at creation, so the caller may free it
+    /// once the call returns.
     pub matryoshka_dimensions: &'config [usize],
     /// Learnable inverse temperature and bias pairs, one per group a step's items select; one.
     pub temperature_groups: usize,
@@ -730,7 +731,7 @@ pub struct TrainerInitVramConfig<'config, 'mesh> {
     pub depth: usize,
     /// Embedding width, a multiple of 128.
     pub hidden: usize,
-    /// What one device's step carries at most.
+    /// What one device's step holds at most.
     pub batch: BatchShape,
     /// Which losses a step relaxes.
     pub objective: Objective,
@@ -746,7 +747,7 @@ pub struct TrainerInitVramConfig<'config, 'mesh> {
     pub choices: Choices,
     /// The learning-rate schedule.
     pub schedule: Schedule,
-    /// The mesh made over the same executor, borrowed until the trainer drops; `None` runs
+    /// The mesh made over the same executor, which must outlive the trainer; `None` runs
     /// this process alone.
     pub mesh: Option<&'mesh Mesh>,
     /// The base of every keyed draw: initialization, corruption and the shuffle.
@@ -772,7 +773,7 @@ pub struct Edges<'config> {
 }
 
 impl Edges<'_> {
-    /// Lends the edge set to a step over `count` items, refusing one the library would read past.
+    /// Lowers the edge set for a step over `count` items, refusing one the library would read past.
     fn lower(&self, count: usize) -> Result<uform_edges_view_t> {
         if self.offsets.is_empty() {
             return match self.ids.is_empty() && self.weights.is_empty() {
@@ -852,7 +853,7 @@ pub struct TrainerStepStats {
     pub dropped: usize,
 }
 
-/// Lends a step over `count` items its choices and their targets, both `(data, offsets)` tapes or
+/// Lowers the choices and targets of a step over `count` items, both `(data, offsets)` tapes or
 /// neither, refusing ones the library would read past or pair unevenly.
 fn lower_choices(
     choices: (&[u8], &[usize]),
@@ -865,9 +866,9 @@ fn lower_choices(
             false => Err(fail(Status::InvalidArgument, "choices without offsets name no items")),
         };
     }
-    let lent = choices.tape(&mut Gathered::default())?;
+    let offered = choices.tape(&mut Gathered::default())?;
     let aimed = targets.tape(&mut Gathered::default())?;
-    if lent.count != count || aimed.count != count {
+    if offered.count != count || aimed.count != count {
         return Err(fail(
             Status::ShapeMismatch,
             "choices and their targets hold one more offset than the step's items",
@@ -877,12 +878,12 @@ fn lower_choices(
     if entries.any(|(offered, aimed)| offered[1] - offered[0] != aimed[1] - aimed[0]) {
         return Err(fail(Status::ShapeMismatch, "every choice needs one target"));
     }
-    Ok((lent.tape, aimed.tape))
+    Ok((offered.tape, aimed.tape))
 }
 
 /// The routing, targets and reports of [`TrainVerbs::step`].
 ///
-/// A blocking call lends its stats; a deferred one owns them, and
+/// A blocking call uses the caller's stats only during the call; a deferred one owns them, and
 /// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
 ///
 /// Mirrors `uform_trainer_step_t`.
@@ -940,7 +941,8 @@ impl<'config> From<Relations<'config>> for TrainerStepConfig<'config, '_, '_> {
 /// The path a checkpoint is written to and the handler counting its
 /// tensors; see [`TrainVerbs::save`].
 ///
-/// A blocking call lends its handler; a deferred one borrows it for `'static`.
+/// A blocking call uses the caller's handler only during the call; a deferred one holds it for
+/// `'static`.
 ///
 /// Mirrors `uform_trainer_save_t`.
 pub struct TrainerSaveConfig<'config, Location> {
@@ -966,15 +968,15 @@ impl<Location> Accepts<TrainerSaveConfig<'static, Location>> for Deferring where
 // region: Mesh
 
 /// One process's place among the processes of a run: the topology every process agreed on at
-/// bootstrap, and the InfiniBand domain joining its NVLink domains, borrowed by every trainer.
+/// bootstrap, and the InfiniBand domain joining its NVLink domains, outliving every trainer.
 ///
-/// Mirrors `uform_mesh_t`; dropping it calls `uform_mesh_free`, after every trainer borrowing it.
+/// Mirrors `uform_mesh_t`; dropping it calls `uform_mesh_free`, after every trainer made over it.
 #[derive(Debug)]
 pub struct Mesh {
     handle: uform_mesh_t,
 }
 
-// Safety: a mesh is process-wide, made once and only read by the trainers that borrow it.
+// Safety: a mesh is process-wide, made once and only read by the trainers made over it.
 unsafe impl Send for Mesh {}
 unsafe impl Sync for Mesh {}
 
@@ -1066,8 +1068,8 @@ impl Mesh {
 /// # Ok::<(), uform::Error>(())
 /// ```
 ///
-/// Mirrors `uform_trainer_t`; dropping it calls `uform_trainer_free`. `'mesh` is the borrow of the
-/// [`Mesh`] it was made over.
+/// Mirrors `uform_trainer_t`; dropping it calls `uform_trainer_free`. `'mesh` is the lifetime of
+/// the [`Mesh`] it was made over.
 #[derive(Debug)]
 pub struct Trainer<'mesh> {
     handle: uform_trainer_t,

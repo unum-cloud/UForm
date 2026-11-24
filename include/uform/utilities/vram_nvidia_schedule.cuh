@@ -600,7 +600,7 @@ struct cuda_warp_t {
 /** How a §10 model region runs: captured once into a
  *  @ref unum::uform::utilities::gpu_replay_graph_t and replayed every step (the production
  *  default), or re-enqueued eagerly each step — the bring-up / debugging path, and the other half
- *  of every capture-vs-eager parity test. A trainer carries it as a run knob; the two modes must
+ *  of every capture-vs-eager parity test. A trainer keeps it as a run knob; the two modes must
  *  land on bitwise-identical weights over identical seeds. */
 enum capture_t : u32_t {
     replayed_k = 0,
@@ -668,8 +668,8 @@ struct gpu_replay_graph_t {
      *      co-resident at replay.
      *
      *  @param[in] streams One real stream per rank; @c streams[0] is the trunk that begins and ends
-     *      the capture and carries the upload. Each stream may live on a different device; peer
-     *      access must already be wired.
+     *      the capture and runs the upload. Each stream may live on a different device; peer access
+     *      must already be wired.
      *  @param[in] body A callable invoked once per rank as @c body(rank) returning
      *      @ref expected_t , enqueuing rank-local work onto @c streams[rank] . Branch bodies must
      *      not depend on each other.
@@ -881,8 +881,8 @@ struct barrier_round_t {
 
     /**
      *  @brief Seed the device round scalar — once, at setup, with a current context.
-     *  @param[in] device_round The one-scalar device destination, borrowed for
-     *      this object's lifetime.
+     *  @param[in] device_round The one-scalar device destination, which must
+     *      outlive this object.
      *  @param[in] increment How far one step advances the count (a member count, a round count).
      *  @param[in] stream The lead stream the seed is enqueued on, ordered before the
      *      first @ref advance.
@@ -906,7 +906,7 @@ struct barrier_round_t {
 
   private:
 
-    /** The borrowed one-scalar device destination the barriers spin against and
+    /** The caller-owned one-scalar device destination the barriers spin against and
      *  @ref advance bumps. */
     u32r1_span_t device_round_ {};
 

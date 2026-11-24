@@ -136,24 +136,45 @@ using namespace unum::uform::train;
                  config.batch.contains(modality_t::audio_k) ? "+audio" : "", device_count, options.host_domain_index,
                  options.host_domain_count);
 
-    // The loaders open before the trainer, so the envelope leaves room for their reservoirs.
-    auto [storage, make_status] = ul::gpu_direct_storage_session_t::make();
-    if (!make_status) return fail_out_(make_status.description_.view());
-    dataset_source_t datasets, held_out;
-    if (!config.mixture.empty())
-        if (expected_t opened = dataset_source_t::open(datasets, config, storage, std::move(mixture),
-                                                       config.batches_per_fill);
-            !opened)
-            return fail_out_(opened.description_.view());
     if (config.eval_every && config.eval_mixture.empty() && !config.mixture.empty())
         return fail_out_("--eval-every over a mixture needs --eval-mixture, whose shards training never draws");
+    mixture_t held_out_mixture;
     if (config.eval_every && !config.eval_mixture.empty()) {
         auto [eval_mixture, read_status] = mixture_t::read(config.eval_mixture);
         if (!read_status) return fail_out_(read_status.description_.view());
+        held_out_mixture = std::move(eval_mixture);
+    }
+
+    // Counted before the spawn, since a caller-inclusive pool pins this thread to one core.
+    auto [topology, make_topology_status] = topology_t::make();
+    if (!make_topology_status) return fail_out_(make_topology_status.description_.view());
+    std::size_t const allowed_cores = topology.logical_cores_count();
+    ram_executor_t decoders;
+    if (mixture.pairs() || held_out_mixture.pairs()) {
+        auto [spawned, spawn_status] = ram_executor_t::make(topology, allowed_cores,
+                                                            caller_exclusivity_t::caller_inclusive_k);
+        if (!spawn_status) return fail_out_(spawn_status.description_.view());
+        decoders = std::move(spawned);
+    }
+    std::size_t const spawned_threads = decoders.threads_count();
+
+    // The loaders open before the trainer, so the envelope leaves room for their reservoirs.
+    auto [storage, make_status] = ul::gpu_direct_storage_session_t::make(
+        allowed_cores > spawned_threads ? allowed_cores - spawned_threads : 1);
+    if (!make_status) return fail_out_(make_status.description_.view());
+    dataset_source_t datasets, held_out;
+    if (!config.mixture.empty())
+        if (expected_t opened = dataset_source_t::open(datasets, config, storage, std::move(mixture), decoders.view(),
+                                                       config.batches_per_fill);
+            !opened)
+            return fail_out_(opened.description_.view());
+    if (config.eval_every && !config.eval_mixture.empty()) {
         // Each source charges its own reservoir, so the envelope makes room for both.
         std::size_t const training_fixed = config.reservoir_fixed_bytes, training_row = config.reservoir_row_bytes;
         // Every evaluation refills, so each scores fresh entries rather than a fill 16 evals old.
-        if (expected_t opened = dataset_source_t::open(held_out, config, storage, std::move(eval_mixture), 1); !opened)
+        if (expected_t opened = dataset_source_t::open(held_out, config, storage, std::move(held_out_mixture),
+                                                       decoders.view(), 1);
+            !opened)
             return fail_out_(opened.description_.view());
         config.reservoir_fixed_bytes += training_fixed, config.reservoir_row_bytes += training_row;
     }
@@ -257,7 +278,7 @@ static constexpr std::array<uform_pair_loss_form_t, 4> pair_loss_forms_k {
         {"--learning-rate", "real", "the peak learning rate, the tier's unless given", &learning_rate},
         {"--warmup-steps", "count", "linear warmup steps, zero for a tenth of the run up to 400", &warmup_steps},
         {"--seed", "seed", "the run's base seed, which every draw derives from", &seed},
-        {"--nvdec-engines", "count", "the NVDEC engines a GPU carries, which a video mixture needs", &nvdec_engines},
+        {"--nvdec-engines", "count", "the NVDEC engines a GPU has, which a video mixture needs", &nvdec_engines},
         {"--batches-per-fill", "count", "steps' batches one data fill packs per GPU", &batches_per_fill},
         {"--pair-loss", "name", "the contrastive pair loss, each starting at its own logit scale", &pair_loss_choice},
         {"--late-interaction-weight", "real", "the late-interaction loss's weight, zero for none",

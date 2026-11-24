@@ -676,7 +676,7 @@ inline void install_test_signal_handlers() noexcept {
 #endif // UFORM_OS_WINDOWS_
 }
 
-/** The Float64 borrows the host oracles read, beside the core's Float32 ones. */
+/** The Float64 views the host oracles read, beside the core's Float32 ones. */
 using f64r1_view_t = nk::tensor_view<util::f64_t, 1>;
 using f64r2_view_t = nk::tensor_view<util::f64_t, 2>;
 using f64r2_span_t = nk::tensor_span<util::f64_t, 2>;

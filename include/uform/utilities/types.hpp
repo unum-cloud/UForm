@@ -26,7 +26,7 @@
 #include <source_location> // `std::source_location`
 
 #include <forkunion/types.hpp>         // `ashvardanian::forkunion`, which `fu` names
-#include <numkong/tensor.hpp>          // `nk::tensor_span`, `nk::tensor_view` — the rank-tagged borrows
+#include <numkong/tensor.hpp>          // `nk::tensor_span`, `nk::tensor_view` — the rank-tagged views and spans
 #include <stringzilla/stringzilla.hpp> // `sz::string_t` — the exception-free diagnostics carrier
 #include <smashtable/basic_vector.hpp> // `st::basic_vector` — the exception-free growable array
 
@@ -71,11 +71,11 @@ using i64_t = std::int64_t;
 using f32_t = float;
 using f64_t = double;
 
-/** The rank-tagged borrow vocabulary over the scalar dtypes — the view type of a dtype and rank
- *  reads, the span type writes, each a borrow into memory owned elsewhere. The owning
- *  @c *_tensor_arena_t / @c *_tensor_pinned_t counterparts live in @c gpu_allocators.hpp , beside
- *  the allocator they bind, as do the CUDA-scalar @c bf16_t / @c e4m3_t borrows. Concept-named
- *  views (a token rectangle, a pixel image) stay with their cell. */
+/** The rank-tagged view vocabulary over the scalar dtypes — the view type of a dtype and rank
+ *  reads, the span type writes, each pointing into memory owned elsewhere and valid while it lives.
+ *  The owning @c *_tensor_arena_t / @c *_tensor_pinned_t counterparts live beside the allocator
+ *  they bind in @c gpu_allocators.hpp , as do the CUDA-scalar @c bf16_t / @c e4m3_t views.
+ *  Concept-named views (a token rectangle, a pixel image) stay with their cell. */
 using b8r1_view_t = nk::tensor_view<b8_t, 1>;
 using b8r1_span_t = nk::tensor_span<b8_t, 1>;
 using i16r2_view_t = nk::tensor_view<i16_t, 2>;
@@ -99,7 +99,7 @@ using f32r3_span_t = nk::tensor_span<f32_t, 3>;
 using f32r4_view_t = nk::tensor_view<f32_t, 4>;
 using f32r4_span_t = nk::tensor_span<f32_t, 4>;
 
-/** Entries end to end and @c count+1 offsets into them, as the C ABI's tapes carry them;
+/** Entries end to end and @c count+1 offsets into them, as the C ABI's tapes hold them;
  *  @c elements runs from where every offset counts to the last offset, and an empty tape
  *  holds no entries. */
 template <typename element_type_>

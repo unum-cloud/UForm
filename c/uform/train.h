@@ -14,7 +14,7 @@
  *  @section train_objectives Objectives
  *
  *  The two losses the engine implements join additively at the final-norm states, so a joint step
- *  carries @c L = L_contrastive + Σ λ · L_masked exactly:
+ *  optimizes @c L = L_contrastive + Σ λ · L_masked exactly:
  *
  *      Objective     Scores                                    Against
  *      masked        byte cross-entropy for text, normalized   the clean copy of the batch the step
@@ -107,7 +107,7 @@ typedef struct uform_image_shape_t {
     /** The square patch side images tile into, in pixels. */
     size_t patch_side;
 
-    /** Channels every pixel carries; zero derives four, RGBA end to end. */
+    /** Channels every pixel has; zero derives four, RGBA end to end. */
     size_t channels;
 } uform_image_shape_t;
 
@@ -123,7 +123,7 @@ typedef struct uform_video_shape_t {
     /** Source frames between sampled ones; zero derives one, every frame. */
     size_t frame_stride;
 
-    /** Channels every pixel carries; zero derives three. */
+    /** Channels every pixel has; zero derives three. */
     size_t channels;
 } uform_video_shape_t;
 
@@ -137,7 +137,7 @@ typedef struct uform_audio_shape_t {
     size_t sample_rate;
 } uform_audio_shape_t;
 
-/** What one device's step carries at most, whatever the modality mix: capacity fixed at creation,
+/** What one device's step holds at most, whatever the modality mix: capacity fixed at creation,
  *  with padding through the data. Text always takes part; a media modality takes part when its
  *  slice is live. */
 typedef struct uform_batch_shape_t {
@@ -145,13 +145,13 @@ typedef struct uform_batch_shape_t {
     /** Rows one device's step packs. */
     size_t max_rows_per_device;
 
-    /** Items one device's step carries across all its rows, which is also its pooling axis. */
+    /** Items one device's step holds across all its rows, which is also its pooling axis. */
     size_t max_segments_per_device;
 
     /** Positions one row spans, the sequence length. */
     size_t max_columns_per_row;
 
-    /** Bags one device's step carries; zero keeps every item its own routing unit. */
+    /** Bags one device's step holds; zero keeps every item its own routing unit. */
     size_t max_bags_per_device;
 
     /** Legal bytes one item offers to choose from at most; zero makes no choices. */
@@ -264,7 +264,8 @@ typedef enum uform_pair_loss_form_t {
 typedef struct uform_contrastive_t {
 
     /** The @b optional Matryoshka prefix widths, strictly ascending, each a multiple of 8, at most
-     *  8 of them, every one scored; @c NULL scores the full width alone. Copied, not borrowed. */
+     *  8 of them, every one scored; @c NULL scores the full width alone. Copied at creation, so the
+     *  caller may free it once the call returns. */
     size_t const* matryoshka_dimensions;
 
     /** Entries in @c matryoshka_dimensions. */
@@ -400,11 +401,11 @@ typedef struct uform_mesh_options_t {
  *  @brief One process's place among the processes of a run: the topology every process agreed on at
  *      bootstrap, and the InfiniBand domain joining its NVLink domains.
  *
- *  The process-wide half of a run's transport, made once and borrowed by every trainer, so no
- *  consumer wires its own adapters. The NVLink multicast domain is not here: its size is the sum
- *  of what its consumers reserve, so each trainer makes its own over the mesh's devices. Bootstrap
- *  is a one-time rendezvous through files in @c directory; after it, processes talk only over
- *  NVLink and InfiniBand.
+ *  The process-wide half of a run's transport, made once, owned by the caller and used by every
+ *  trainer, so no consumer wires its own adapters. The NVLink multicast domain is not here: its
+ *  size is the sum of what its consumers reserve, so each trainer makes its own over the mesh's
+ *  devices. Bootstrap is a one-time rendezvous through files in @c directory; after it, processes
+ *  talk only over NVLink and InfiniBand.
  */
 typedef struct uform_mesh_handle_t* uform_mesh_t;
 
@@ -488,7 +489,7 @@ typedef struct uform_mesh_describe_t {
 UFORM_EXPORT void uform_mesh_describe(uform_mesh_describe_t* arguments);
 
 /** Leaves the mesh; @c NULL is safe, and it cannot fail, so takes no outcome. Every trainer
- *  borrowing it must be freed first. */
+ *  made over it must be freed first. */
 UFORM_EXPORT void uform_mesh_free(uform_mesh_t mesh);
 
 /** The canonical spelling of a multimem tier, as
@@ -546,7 +547,7 @@ typedef struct uform_trainer_init_vram_t {
     /** Embedding width, a multiple of 128. */
     size_t hidden;
 
-    /** What one device's step carries at most. */
+    /** What one device's step holds at most. */
     uform_batch_shape_t batch;
 
     /** Which losses a step relaxes. */
@@ -569,8 +570,8 @@ typedef struct uform_trainer_init_vram_t {
     /** The learning-rate schedule. */
     uform_schedule_t schedule;
 
-    /** The @b optional mesh, borrowed until the trainer is freed and made over this same executor;
-     *  @c NULL runs this process alone. */
+    /** The @b optional mesh, made over this same executor, which must stay allocated until the
+     *  trainer is freed; @c NULL runs this process alone. */
     uform_mesh_t mesh;
 
     /** The base of every keyed draw: initialization, corruption and the shuffle. */

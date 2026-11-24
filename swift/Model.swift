@@ -22,7 +22,7 @@ public struct ModelDescription: Sendable {
     public var cpuClass: CPUClass?
     /// The class every replica of a VRAM model runs as, or nil for a RAM model.
     public var gpuClass: GPUClass?
-    /// Scalars per token vector; zero when the checkpoint carries no token head.
+    /// Scalars per token vector; zero when the checkpoint has no token head.
     public var tokenWidth: Int
     /// Question types the choice temperatures were calibrated over: zero without the byte decoder,
     /// one when uncalibrated.
@@ -76,10 +76,10 @@ public final class Model: @unchecked Sendable {
             executor: executor?.raw,
             outcome: landing.outcome,
             completion: landing.completion,
-            path: landing.lend(path),
+            path: landing.copy(path),
             ram: landing.ram(memoryDomains, cpuClassCeiling),
             quantization: quantization.raw,
-            progress: landing.lend(progress, steps: progressSteps)
+            progress: landing.progress(progress, steps: progressSteps)
         )
         uform_model_load_ram(&arguments)
         return try adopted(model, landing)
@@ -107,7 +107,7 @@ public final class Model: @unchecked Sendable {
                 buffer: uform_bytes_view_t(bytes),
                 ram: landing.ram(memoryDomains, cpuClassCeiling),
                 quantization: quantization.raw,
-                progress: landing.lend(progress, steps: progressSteps)
+                progress: landing.progress(progress, steps: progressSteps)
             )
             uform_model_load_ram_buffer(&arguments)
         }
@@ -133,10 +133,10 @@ public final class Model: @unchecked Sendable {
             executor: executor?.raw,
             outcome: landing.outcome,
             completion: landing.completion,
-            path: landing.lend(path),
+            path: landing.copy(path),
             vram: landing.vram(devices, gpuClassCeiling),
             quantization: quantization.raw,
-            progress: landing.lend(progress, steps: progressSteps)
+            progress: landing.progress(progress, steps: progressSteps)
         )
         uform_model_load_vram(&arguments)
         return try adopted(model, landing)
@@ -164,7 +164,7 @@ public final class Model: @unchecked Sendable {
                 buffer: uform_bytes_view_t(bytes),
                 vram: landing.vram(devices, gpuClassCeiling),
                 quantization: quantization.raw,
-                progress: landing.lend(progress, steps: progressSteps)
+                progress: landing.progress(progress, steps: progressSteps)
             )
             uform_model_load_vram_buffer(&arguments)
         }
@@ -219,7 +219,7 @@ public struct ModelOn: Sendable {
 /// that finishes there.
 ///
 /// A deferred call copies its inputs, so the caller's arrays may go at once. The model, the
-/// executor and the arena are borrowed as a blocking call borrows them, since releasing any of them
+/// executor and the arena stay the caller's, as in a blocking call, and releasing any of them
 /// waits for the calls naming it.
 public struct ModelDeferredOn: Sendable {
     /// The model every verb addresses.

@@ -47,7 +47,7 @@ struct uform_arena_handle_t {
     uform_outcome_t const* holder = nullptr;
 };
 
-/** What @c uform_model_t owns: the geometry a checkpoint would carry, and the bytes it
+/** What @c uform_model_t owns: the geometry a checkpoint would hold, and the bytes it
  *  was read from. */
 struct uform_model_handle_t {
     uform_scalar_t quantization = uform_scalar_bf16_k;
@@ -351,7 +351,7 @@ struct progress_ticks_t {
     /** One past the last item of @p slice. */
     std::size_t end_of(std::size_t slice) const noexcept { return count * (slice + 1) / slices(); }
 
-    /** Reports @p completed items, answering whether the handler lets the call carry on. */
+    /** Reports @p completed items, answering whether the handler lets the call continue. */
     bool carry_on(std::size_t completed) const {
         return !progress.callback || progress.callback(completed, count, progress.state) == uform_continue_k;
     }

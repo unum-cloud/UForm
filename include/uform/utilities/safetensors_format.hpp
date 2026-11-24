@@ -185,7 +185,7 @@ struct checkpoint_to_load_t {
      *  in another dtype. */
     [[nodiscard]] nk::tensor_view<f32_t, 2> float32(sz::string_view_t name) const noexcept;
 
-    /** The metadata value of @p key , or an empty view when the file carries none. */
+    /** The metadata value of @p key , or an empty view when the file has none. */
     [[nodiscard]] sz::string_view_t metadata(sz::string_view_t key) const noexcept;
 
     /** Every metadata pair, in file order, for a tool copying the checkpoint whole. */

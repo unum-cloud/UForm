@@ -7,13 +7,13 @@
  *  @ref unum::uform::loaders::parquet_file_t and @ref unum::uform::loaders::jsonl_file_t decode one
  *  shard — Parquet columns or a newline-delimited JSON field — straight into device memory over
  *  KvikIO / GPU Direct Storage, own the decoded columns for their lifetime, and hand out
- *  @b zero-copy @ref unum::uform::loaders::column_view_t borrows. No host bounce, no Apache Arrow,
- *  no bespoke tape — cuDF is a required dependency, and its owned columns are the tape.
+ *  @b zero-copy @ref unum::uform::loaders::column_view_t views. No host bounce, no Apache Arrow, no
+ *  bespoke tape — cuDF is a required dependency, and its owned columns are the tape.
  *
- *  A file's payload — the concatenated bytes of every row of a column — is borrowed in place from
- *  the owned cuDF table, never copied out. cuDF emits 32- or 64-bit @b signed offsets; the reader
- *  casts them once to unsigned @c u64_t and keeps that column alive alongside the table, so every
- *  @c column view carries 64-bit unsigned offsets and nothing downstream meets a 32-bit or a
+ *  A file's payload — the concatenated bytes of every row of a column — is viewed in place in the
+ *  owned cuDF table, never copied out. cuDF emits 32- or 64-bit @b signed offsets; the reader casts
+ *  them once to unsigned @c u64_t and keeps that column alive alongside the table, so every
+ *  @c column view holds 64-bit unsigned offsets and nothing downstream meets a 32-bit or a
  *  signedness boundary. @c string and @c list<uint8> columns both flatten to the same @c (bytes,
  *  offsets) shape, so text documents and media blobs come back through one interface.
  *
@@ -242,7 +242,7 @@ struct jsonl_file_t {
     ~jsonl_file_t();
 
     /** Decode @p field of the JSONL shard at @p path — one JSON object per line — into device
-     *  memory on @p stream over KvikIO / GDS. JSONL carries no footer, so a shard is always
+     *  memory on @p stream over KvikIO / GDS. JSONL has no footer, so a shard is always
      *  decoded to learn its rows; @ref file_size_bytes is the cheap size the loader draws
      *  files by instead. */
     [[nodiscard]] static expected<jsonl_file_t> make(gpu_direct_storage_session_t const& storage,
@@ -293,8 +293,8 @@ struct csv_file_t {
 
     /** Decode @p column of the CSV shard at @p path into device memory on @p stream over KvikIO /
      *  GDS. @p delimiter is the field separator; @p header says whether row 0 names the columns,
-     *  and when positional, @p column is a 0-based index string. CSV carries no footer, so a shard
-     *  is always decoded to learn its rows; @ref file_size_bytes is the loader's cheap weight. */
+     *  and when positional, @p column is a 0-based index string. CSV has no footer, so a shard is
+     *  always decoded to learn its rows; @ref file_size_bytes is the loader's cheap weight. */
     [[nodiscard]] static expected<csv_file_t> make(gpu_direct_storage_session_t const& storage, sz::string_view_t path,
                                                    sz::string_view_t column, char delimiter, csv_header_t header,
                                                    gpu_stream_t& stream) noexcept;

@@ -6,18 +6,18 @@
  *      attention and its element-wise steps, one kit per capability that changes any of them,
  *      and a ladder per family picking the highest kit a capability mask runs.
  *
- *  A kit names NumKong's per-capability kernels directly, never a @c _best dispatcher, so the
- *  class unit that instantiates a tower compiles its calls once, for its class. Where a
- *  capability carries only some of a family's kernels, its kit borrows the rest from its
- *  lineage, and @c capability_k is the union of every bit the kit calls, so a ladder admits it
- *  only on a mask holding them all. A kit this build's NumKong did not compile keeps its name
- *  with @c compiled_k false, so every ladder stays one list.
+ *  A kit names NumKong's per-capability kernels directly, never a @c _best dispatcher, so the class
+ *  unit that instantiates a tower compiles its calls once, for its class. Where a capability has
+ *  only some of a family's kernels, its kit takes the rest from its lineage, and @c capability_k is
+ *  the union of every bit the kit calls, so a ladder admits it only on a mask holding them all. A
+ *  kit this build's NumKong did not compile keeps its name with @c compiled_k false, so every
+ *  ladder stays one list.
  *
- *  Every kit carries BFloat16 products, and E4M3 ones where its capability has them: precision is a
+ *  Every kit runs BFloat16 products, and E4M3 ones where its capability has them: precision is a
  *  runtime value of the tower, never a type, so a class whose products kit has no E4M3 kernel
  *  refuses an E4M3 load, as @c e4m3_products tells. Where a whole ISA family lacks a kernel, its
  *  kits compose the operation from the family's own kernels, as @c mrope rotates without
- *  @c rope_bf16 , or, with nothing to compose from, borrow the serial kit's row, the only place a
+ *  @c rope_bf16 , or, with nothing to compose from, reuse the serial kit's row, the only place a
  *  @c _serial kernel is named.
  *
  *  The host entries close the file as @c inline @c static function templates over the element-wise
@@ -58,12 +58,12 @@ struct highest_kit<caps_, floor_, head_, tail_...> {
                                     typename highest_kit<caps_, floor_, tail_...>::type>;
 };
 
-/** Whether a products kit carries E4M3 products; a class whose kit has none refuses E4M3 loads
+/** Whether a products kit has E4M3 products; a class whose kit has none refuses E4M3 loads
  *  rather than fall to serial code. */
 template <typename products_kit_type_>
 concept e4m3_products = requires { products_kit_type_::multiply_e4m3; };
 
-/** Whether an element-wise kit carries NumKong's rotation; @c mrope composes one without it. */
+/** Whether an element-wise kit has NumKong's rotation; @c mrope composes one without it. */
 template <typename elementwise_kit_type_>
 concept rope_rotations = requires { elementwise_kit_type_::rope_bf16; };
 

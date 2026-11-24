@@ -101,10 +101,10 @@ util::expected_t ue::pad_choices(multimodal_batch_on_gpu_t& batch, util::gpu_str
     return util::zero_async(batch.segment_choice_targets.span().flatten<1>(), stream);
 }
 
-/** One member's batch, the gather kernels' read view of a peer. Carries every per-segment
- *  descriptor and every modality's content as @b [cells,scalars] rows, so a routed segment's media
- *  survives the cross-GPU shuffle, not just its tokens. Positions index the flat @c tokens run. A
- *  modality absent from the batch leaves its view empty. */
+/** One member's batch, the gather kernels' read view of a peer. Holds every per-segment descriptor
+ *  and every modality's content as @b [cells,scalars] rows, so a routed segment's media survives
+ *  the cross-GPU shuffle, not just its tokens. Positions index the flat @c tokens run. A modality
+ *  absent from the batch leaves its view empty. */
 struct batch_source_t_ {
     util::tokens_view_t tokens {};
     util::u32r1_view_t segment_offsets {}, segment_lengths {}, segment_bag {};
@@ -137,7 +137,7 @@ struct batch_dest_t_ {
     util::f32r2_span_t segment_choice_targets {};
 };
 
-/** The sentinel the mixer's routing scratch carries for a mixed PAD segment that has no world
+/** The sentinel the mixer's routing scratch holds for a mixed PAD segment that has no world
  *  source — a dropped bag's segments and the unclaimed tail both read as this. */
 static constexpr util::u32_t mixed_source_absent_k = ~util::u32_t {0};
 
@@ -372,7 +372,7 @@ static __global__ void batch_world_geometry_kernel_(__grid_constant__ sources_ty
  *  copies its content ( @c tokens , or the @c [begin,begin+columns) rows of patch, tube or frame
  *  cells) from the peer's loaded batch into this member's mixed batch, threads striding the run. A
  *  sourceless PAD (a dropped bag or the unclaimed tail) is a @c text_k anchor outside late
- *  interaction that makes no choice and carries nothing, and every PAD is keyless. The destination
+ *  interaction that makes no choice and holds nothing, and every PAD is keyless. The destination
  *  geometry is what @ref batch_geometry_kernel_ wrote.
  *
  *  __grid_size__ @c [segments_per_gpu,1,1] , threads stripe the content run; no

@@ -57,7 +57,6 @@ struct hip_api_t {
     hip_result_t (*get_device_memory)(std::size_t*, int) = nullptr;
     hip_result_t (*get_device)(int*) = nullptr;
     hip_result_t (*set_device)(int) = nullptr;
-    hip_result_t (*stream_device)(hip_stream_handle_t, int*) = nullptr;
     hip_result_t (*copy_async)(void*, void const*, std::size_t, int, hip_stream_handle_t) = nullptr;
     hip_result_t (*fill_async)(void*, int, std::size_t, hip_stream_handle_t) = nullptr;
     hip_result_t (*module_load_data)(hip_module_handle_t*, void const*) = nullptr;
@@ -82,7 +81,6 @@ struct hip_api_t {
             library.resolve("hipDeviceGetName", api.get_device_name) &&
             library.resolve("hipDeviceTotalMem", api.get_device_memory) &&
             library.resolve("hipGetDevice", api.get_device) && library.resolve("hipSetDevice", api.set_device) &&
-            library.resolve("hipStreamGetDevice", api.stream_device) &&
             library.resolve("hipMemcpyAsync", api.copy_async) && library.resolve("hipMemsetAsync", api.fill_async) &&
             library.resolve("hipModuleLoadData", api.module_load_data) &&
             library.resolve("hipModuleGetFunction", api.module_get_function) &&

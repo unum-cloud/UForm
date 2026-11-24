@@ -54,19 +54,19 @@ pub trait Completion: Sized {
     fn answer<'handle, Verb: Calling>(verb: Verb) -> Self::Deferrable<'handle, Verb>;
 }
 
-/// The inputs a completion takes: a blocking receiver takes borrows and owned values alike,
+/// The inputs a completion takes: a blocking receiver takes references and owned values alike,
 /// while a deferring one takes only what it owns, since the library reads its inputs after the
-/// verb returns. Both borrow the arena, which no call reads as an input.
+/// verb returns. Both take the arena by `&mut`, which no call reads as an input.
 #[diagnostic::on_unimplemented(
     message = "a deferred receiver needs owned inputs",
-    label = "the library would still read this borrow after the verb returns",
+    label = "the library would still read this reference after the verb returns",
     note = "pass texts, files and samples in a `Vec` or an array of owned or `'static` items, a tape as \
             `(Vec<_>, Vec<usize>)`, a `PathBuf`, `String` or `'static` path, and a config owning its \
             handler and stats"
 )]
 pub trait Accepts<Input> {}
 
-/// A borrowed tape and the batch axis it spans.
+/// A tape the library reads without a copy, and the batch axis it spans.
 pub struct Batch {
     pub tape: uform_tape_view_t,
     pub count: usize,
@@ -86,7 +86,7 @@ impl<Value> Default for Gathered<Value> {
 }
 
 /// A ragged batch a verb reads its items from: separate items, gathered into `gathered`, or a
-/// tape of data and offsets, borrowed as it is.
+/// tape of data and offsets, read in place.
 pub trait TapeView<Value: Element> {
     /// The tape and its count, refused when the offsets do not fit the data.
     fn tape(&self, gathered: &mut Gathered<Value>) -> Result<Batch>;

@@ -443,7 +443,7 @@ int main(int argc, char** argv) {
     auto [geometry, read_status] = geometry_t::from(checkpoint);
     if (!expect_true(read_status, "geometry: {}", read_status.description_)) return finish_test_run();
 
-    auto [pool, make_pool_status] = executor_t::make(4, caller_exclusivity_t::caller_inclusive_k);
+    auto [pool, make_pool_status] = util::ram_executor_t::make(4, util::caller_exclusivity_t::caller_inclusive_k);
     if (!expect_true(make_pool_status, "pool: {}", make_pool_status.description_)) return finish_test_run();
 
     encoder_verbs<vendored_residency_t::ram_k> const& reference =

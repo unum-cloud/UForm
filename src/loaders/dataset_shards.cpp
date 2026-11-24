@@ -14,7 +14,7 @@
 
 #include <algorithm> // `std::sort`, `std::upper_bound` — the shard order and the row-group draw, `std::find_if`
 #include <limits>    // `std::numeric_limits` — a statistic-less group's unbounded span
-#include <span>      // `std::span` — the borrowed payload / offsets
+#include <span>      // `std::span` — the payload / offsets views into cuDF columns
 #include <string>
 #include <vector>
 
@@ -43,10 +43,10 @@ namespace ul = unum::uform::loaders;
 namespace util = unum::uform::utilities;
 using namespace ul;
 
-/** One decoded column's device-resident spans and the cuDF columns that back them —
- *  everything RAII, nothing hand-freed. A shared @b representation (not a shared type) behind
- *  both the Parquet and JSONL readers: the payload and offsets are @c std::span borrows into
- *  an owned cuDF buffer. */
+/** One decoded column's device-resident spans and the cuDF columns that back them — everything
+ *  RAII, nothing hand-freed. A shared @b representation (not a shared type) behind both the Parquet
+ *  and JSONL readers: the payload and offsets are @c std::span views into an owned cuDF buffer,
+ *  valid while the buffer lives. */
 struct column_span_t {
 
     /** cuDF's widened leaf-offset column, owned; the leaf offsets are always cast to @c u64 . */
@@ -55,7 +55,8 @@ struct column_span_t {
     /** cuDF's widened group-offset column, owned; non-null only for a nested @c list<string> . */
     std::unique_ptr<cudf::column> widened_groups;
 
-    /** The column's leaf bytes, back to back — borrowed from the owning table / column. */
+    /** The column's leaf bytes, back to back, a view into the owning table / column, valid while it
+     *  lives. */
     util::bytes_view_t payload;
 
     /** @b [elements+1] leaf offsets — owned by @ref widened_offsets . */
@@ -71,8 +72,8 @@ struct column_span_t {
     return {column.payload, column.offsets};
 }
 
-/** What a decoded Parquet file owns and lends: the cuDF table (every column's payload + native
- *  offsets) and one @ref column_span_t per requested column, in request order. */
+/** What a decoded Parquet file owns and exposes as views: the cuDF table (every column's payload +
+ *  native offsets) and one @ref column_span_t per requested column, in request order. */
 struct parquet_file_t::state_t {
     std::unique_ptr<cudf::table> table;
     st::basic_vector<column_span_t> columns;
@@ -96,8 +97,8 @@ std::span<util::u64_t const> parquet_file_t::groups(std::size_t index) const noe
 
 /** A decoded column flattened to its leaf payload, the leaf offsets child, and — for a nested
  *  @c list<string> column — the outer row → element offsets child. A @c string and a
- *  @c list<uint8> column differ only in which child holds the payload and carry no groups; a
- *  @c list<string> column carries both offset levels. */
+ *  @c list<uint8> column differ only in which child holds the payload and have no groups; a
+ *  @c list<string> column holds both offset levels. */
 struct flat_column_t {
 
     /** The column's leaf bytes, back to back. */
@@ -165,7 +166,7 @@ struct flat_column_t {
 
 /** Own a @c u64_t copy of @p offsets — cuDF decodes 32- or 64-bit @b signed offsets, and byte
  *  positions are unsigned sizes, so the one @c cudf::cast to @c UINT64 both widens and unsigns.
- *  Writes the borrow into @p span and the owning column into @p owner . */
+ *  Writes the view into @p span and the owning column into @p owner . */
 static void widen_offsets_(cudf::column_view const& offsets, cuda::stream_ref stream,
                            std::span<util::u64_t const>& span,
                            std::unique_ptr<cudf::column>& owner) { // vendor-boundary: cuDF throws into the caller's try
@@ -518,8 +519,8 @@ util::expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t
             if (!read_status) return result_t::fail(std::move(read_status));
             state->columns[index] = std::move(column);
         }
-        // Adopt the table: the borrowed payload / native-offset spans stay valid, now owned by the
-        // file, and free stream-ordered on destruction.
+        // Adopt the table: the payload / native-offset views stay valid, their storage now owned by
+        // the file, and free stream-ordered on destruction.
         state->table = std::move(whole);
         return result_t {parquet_file_t {std::move(state)}};
     }

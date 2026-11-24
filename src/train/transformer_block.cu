@@ -666,8 +666,8 @@ util::expected_t transformer_block_bf16_t::forward(util::f32r2_view_t input, uti
                                    2 * heads, transformer_head_dim_k, qkv_stride, qkv_narrow_stride, epsilon,
                                    stream.numkong()),
             "QK-norm");
-    // The rotary rows borrow the SwiGLU products, which the MLP below writes only after the
-    // rotation read them.
+    // The rotary rows reuse the storage of the SwiGLU products, which the MLP below writes only
+    // after the rotation read them.
     if (staged)
         staged = transformer_rotate_(packed_qkv, scratch_->products.span(), angles, coords, heads, 1.0f, numerics_,
                                      stream);
@@ -752,7 +752,7 @@ util::expected_t transformer_block_bf16_t::backward(util::f32r2_view_t output_gr
         return util::expected_t::fail(util::status_code_t::unsupported_k,
                                       "gradient shapes disagree with the stashed [{}x{}]", tokens, hidden);
     // Backward-only transients the forward never touches — their live extent still needs setting to
-    // this step's token count (the stashes above already carry it from the paired forward call).
+    // this step's token count (the stashes above already hold it from the paired forward call).
 
     transformer_scratch_t& scratch = *scratch_;
     bool const resized = nk::succeeded(scratch.packed_qkv.resize({tokens, 3 * hidden})) &&

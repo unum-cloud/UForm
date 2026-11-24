@@ -172,7 +172,7 @@ struct contrastive_tokens_t {
 
     /** Turn the @b [1,subgraphs,segments,segments] raw score rows of this GPU's queries into the
      *  score gradient in place, through the pair loss over @p relations whose PAD columns are
-     *  replaced by the token spans. @p world_document_lengths and @p live_queries carry the world's
+     *  replaced by the token spans. @p world_document_lengths and @p live_queries hold the world's
      *  document spans and query count. */
     [[nodiscard]] expected_t relax(f32r4_span_t scores, contrastive_relations_view_t relations,
                                    contrastive_recipe_t recipe, u32r1_view_t world_document_lengths,
@@ -408,10 +408,11 @@ struct distributed_contrastive_tokens_t {
     /** One share per local GPU. */
     per_gpu_array<contrastive_tokens_t> losses_ {};
 
-    /** The main-owned level-1 surface, borrowed. */
+    /** The level-1 surface @c main owns, which outlives this object. */
     multimem_domain_t* domain_ = nullptr;
 
-    /** The main-owned level-2 surface, borrowed; its topology counts the domains. */
+    /** The level-2 surface @c main owns, which outlives this object; its topology counts the
+     *  domains. */
     colocated_domain_t* colocated_ = nullptr;
 
     /** This process's own multimem domain coordinate, the world GPU index's major part. */

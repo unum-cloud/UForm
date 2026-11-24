@@ -23,7 +23,7 @@
  *  the tower stops after the final norm and exposes the per-token states through @c normalized ,
  *  which the masked head reads. @c backward mirrors this: @c vertices_grad drives the contrastive
  *  path, @c hidden_grad the masked path, and when both are present the masked force is added onto
- *  the pooled force at the final-norm states so a co-trained step carries @c dL_pooled + dL_tokens
+ *  the pooled force at the final-norm states so a co-trained step gets @c dL_pooled + dL_tokens
  *  exactly.
  *
  *  @section tower_entry Per-segment entry over the packed grid
@@ -77,7 +77,7 @@ using encoder::multimodal_batch_view_t;
  *  are opt-in: a modality whose patch geometry is zero has no entry, projection, or pack. */
 struct encoder_tower_config_t {
 
-    /** Token-embedding rows; 0 ⇒ the tower carries no token entry. */
+    /** Token-embedding rows; 0 ⇒ the tower has no token entry. */
     u32_t vocabulary = 0;
 
     /** Transformer blocks stacked. */
@@ -89,7 +89,7 @@ struct encoder_tower_config_t {
     /** Image patch extents in pixels; either 0 ⇒ no image entry. */
     u32_t image_patch_height = 0, image_patch_width = 0;
 
-    /** The channel count every image pixel carries — RGBA end to end, the innermost projection rank. */
+    /** The channel count every image pixel has — RGBA end to end, the innermost projection rank. */
     u32_t image_channels = 4;
 
     /** Video tube extents (temporal × spatial); any 0 ⇒ no video entry. */
@@ -98,7 +98,8 @@ struct encoder_tower_config_t {
     /** The source frames between two sampled video frames, scaling the temporal coordinate to absolute time. */
     u32_t video_frame_stride = 1;
 
-    /** The channel count every video pixel carries — independent of image, the innermost content rank. */
+    /** The channel count every video pixel has — independent of image, the innermost content
+     *  rank. */
     u32_t video_channels = 3;
 
     /** Raw samples per audio frame; 0 ⇒ no audio entry. Audio is 1-D — a frame is a chunk of raw
@@ -128,7 +129,7 @@ struct encoder_tower_config_t {
     /** The rotary frequency base. */
     f32_t rope_base = 10000.0f;
 
-    /** The per-token late-interaction width; 0 ⇒ the tower carries no token head. */
+    /** The per-token late-interaction width; 0 ⇒ the tower has no token head. */
     u32_t token_width = 0;
 };
 
@@ -227,7 +228,7 @@ struct tower_token_head_t {
      *  @param[in] batch The geometry the forward read.
      *  @param[in,out] states_grad @b [tokens,hidden] the Float32 gradient of the final-norm states,
      *      added onto.
-     *  @param[in,out] scratch The tower's shared transients, borrowed for the weight-gradient
+     *  @param[in,out] scratch The tower's shared transients, reused for the weight-gradient
      *      products.
      *  @param[in,out] stream The stream every launch enqueues on.
      */
@@ -333,7 +334,7 @@ struct encoder_tower_bf16_t {
 
     /** Fill @p weights with every optimizer-facing weight in the canonical reduction order:
      *  entry → media projections → per-layer block weights → final norm → pool query → head.
-     *  Each entry carries the checkpoint name every SafeTensors parser keys by — @c embedding , the
+     *  Each entry holds the checkpoint name every SafeTensors parser keys by — @c embedding , the
      *  per-modality @c image_projection / @c video_projection / @c audio_projection (present iff
      *  configured), the per-layer @c blocks.{i}.qkv / @c blocks.{i}.out / @c blocks.{i}.gate_up /
      *  @c blocks.{i}.down / @c blocks.{i}.pre_norm / @c blocks.{i}.post_norm , then @c final_norm ,
@@ -382,7 +383,8 @@ struct encoder_tower_bf16_t {
     /** The NumKong kernels of the arena's device class: the products, casts and norm. */
     gpu_numerics_t numerics_ {};
 
-    /** The transients every block shares; heap-held so the blocks' borrows survive the tower's moves. */
+    /** The transients every block shares; heap-held so the blocks' pointers survive the tower's
+     *  moves. */
     std::unique_ptr<transformer_scratch_t> scratch_ {};
 
     /** The @c depth transformer blocks, owned in order. */
@@ -450,7 +452,7 @@ struct encoder_tower_bf16_t {
     f32r1_tensor_arena_t head_inverse_rms_ {};
 
     /** The block stack's @b [tokens,hidden] Float32 residual-stream ping-pong, the widened entry state
-     *  entering at @c activations_b_ , and the borrowed last-layer view. */
+     *  entering at @c activations_b_ , and the last-layer view into one of the two. */
     f32r2_tensor_arena_t activations_a_ {}, activations_b_ {};
     f32r2_view_t stack_output_ {};
 
@@ -472,7 +474,7 @@ struct encoder_tower_bf16_t {
     /** The @b [rows,patch_pixels] patch-cut scratch the media entries fill before their projection. */
     bf16r2_tensor_arena_t patch_scratch_ {};
 
-    /** The step's token ids / media presence, borrowed for the entry backward. */
+    /** The step's token IDs / media presence, a view into the batch read by the entry backward. */
     tokens_view_t live_token_ids_ {};
 };
 

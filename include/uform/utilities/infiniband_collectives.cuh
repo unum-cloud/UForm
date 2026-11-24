@@ -58,13 +58,13 @@
  *
  *  @section infiniband_platform Platform contract
  *
- *  LID-routed same-subnet InfiniBand (GID carried but unused), pkey 0, GID index 0 — the
- *  single-fabric cluster this project targets. The BlueFlame register lives in NIC BAR / MMIO
- *  space: mapping it for the GPU needs @c CU_MEMHOSTREGISTER_IOMEMORY , and a platform whose IOMMU
- *  / ACS configuration refuses that registration cannot run the device-initiated path —
+ *  LID-routed same-subnet InfiniBand (GID kept but unused), pkey 0, GID index 0 — the single-fabric
+ *  cluster this project targets. The BlueFlame register lives in NIC BAR / MMIO space: mapping it
+ *  for the GPU needs @c CU_MEMHOSTREGISTER_IOMEMORY , and a platform whose IOMMU / ACS
+ *  configuration refuses that registration cannot run the device-initiated path —
  *  @c infiniband_queue_mapping_t::make names that failure explicitly. CQE compression must be off
- *  (validated at mapping time). Everything below layer 1 builds only under @c UFORM_WITH_INFINIBAND
- *  ; without it the wire PODs remain and every factory fails loudly naming the gate.
+ *  (validated at mapping time). Everything below layer 1 builds only with @c UFORM_WITH_INFINIBAND
+ *  on; without it the wire PODs remain and every factory fails loudly naming the gate.
  */
 #pragma once
 
@@ -137,7 +137,7 @@ struct infiniband_coordinates_t {
      *  @c buffer_address+offset . */
     u64_t buffer_address = 0;
 
-    /** The port's global identifier — carried for a future routed fabric, unused on LID routing. */
+    /** The port's global identifier — kept for a future routed fabric, unused on LID routing. */
     u8_t global_identifier[16] = {};
 
     /** Serialize into the line-oriented exchange payload; @c false only on allocation failure. */
@@ -257,7 +257,7 @@ struct infiniband_completion_handles_t {
      *  @c (i>>entry_log_count)&1 . */
     u32_t entry_log_count = 0;
 
-    /** The completion queue number, carried for diagnostics. */
+    /** The completion queue number, kept for diagnostics. */
     u32_t completion_queue_number = 0;
 
     /** Owner-bit polarity of a valid entry at consumer index zero. */
@@ -336,7 +336,7 @@ inline constexpr int infiniband_access_flags_k = IBV_ACCESS_LOCAL_WRITE | IBV_AC
  *  writes per exchange. */
 inline constexpr int infiniband_queue_depth_k = 16;
 
-/** Whether a host-posted write also carries immediate data (consuming a posted receive
+/** Whether a host-posted write also sends immediate data (consuming a posted receive
  *  on the peer). */
 enum class infiniband_signal_t : u32_t {
     plain_signaled_k = 0,
@@ -349,8 +349,8 @@ enum class host_memory_t : bool { dma_k, mmio_k };
 
 /** One registered host page and its reference count — mlx5 packs many doorbell records
  *  (and neighboring rings) per OS page, so several mappings routinely share one page. A
- *  page someone outside the registry registered first is @b borrowed ( @c owned false)
- *  and never unregistered. */
+ *  page someone outside the registry registered first stays @b theirs ( @c owned false)
+ *  and is never unregistered. */
 struct host_page_registration_t {
 
     /** The page base; null marks a free table entry reused by the next @c acquire . */
@@ -365,7 +365,7 @@ struct host_page_registration_t {
 
 /**
  *  @brief The NIC's ledger of host pages registered for GPU access — owned by @ref infiniband_nic_t
- *      , borrowed by every queue / completion mapping on that NIC.
+ *      , used by every queue / completion mapping on that NIC.
  *
  *  mlx5 allocates work queues, completion rings, and doorbell records from page-shared pools,
  *  so two mappings routinely land on one OS page. An unshared @c cuMemHostRegister per mapping
@@ -462,7 +462,7 @@ struct host_page_registry_t {
 
 /**
  *  @brief One opened mlx5 adapter serving one GPU: the device context, the protection domain, the
- *      page registry, and the port identity (LID, GID, MTU) every endpoint on this GPU borrows —
+ *      page registry, and the port identity (LID, GID, MTU) every endpoint on this GPU uses —
  *      opened @b once, in main, never per queue pair.
  *
  *  Move-only; teardown deallocates the domain and closes the device.
@@ -510,7 +510,8 @@ struct infiniband_nic_t {
      */
     [[nodiscard]] static expected<infiniband_nic_t> make(u32_t local_gpu_index, u8_t infiniband_port = 1) noexcept;
 
-    /** The opened device context endpoints create queues against — borrowed, still owned here. */
+    /** The opened device context endpoints create queues against, owned here and valid while this
+     *  NIC lives. */
     [[nodiscard]] ibv_context* context() const noexcept { return device_context_; }
 
     /** The shared protection domain endpoints register regions and queue pairs in. */
@@ -581,8 +582,8 @@ struct infiniband_nic_t {
 
 /**
  *  @brief One Reliable-Connection endpoint talking to one remote GPU: completion queue, RC queue
- *      pair, and a memory region over GPU VRAM — all inside a borrowed @ref infiniband_nic_t 's
- *      device context and protection domain.
+ *      pair, and a memory region over GPU VRAM — all inside the device context and protection
+ *      domain of an @ref infiniband_nic_t that outlives the endpoint.
  *
  *  The region registers dmabuf-first ( @c cuMemGetHandleForAddressRange exports the range,
  *  @c ibv_reg_dmabuf_mr registers the descriptor with the GPU virtual address as the I/O address so
@@ -628,7 +629,7 @@ struct infiniband_endpoint_t {
      *  @brief Build the completion queue + RC queue pair inside @p nic 's protection domain and
      *      register @p gpu_buffer as a GPUDirect memory region — everything a peer handshake needs.
      *
-     *  @param[in] nic The GPU's opened adapter — borrowed for this endpoint's whole lifetime.
+     *  @param[in] nic The GPU's opened adapter, which must outlive this endpoint.
      *  @param[in] gpu_buffer The GPU VRAM range peers will read and write, shaped
      *      @b [buffer_bytes] — typically a window over a @ref gpu_arena_t (its chunks
      *      are created GPUDirect-RDMA-capable).
@@ -638,13 +639,15 @@ struct infiniband_endpoint_t {
     /** What this endpoint publishes for the peer's @ref connect . */
     [[nodiscard]] infiniband_coordinates_t const& local_coordinates() const noexcept { return local_coordinates_; }
 
-    /** The queue pair the GDAKI mapping layers onto — borrowed, still owned here. */
+    /** The queue pair the GDAKI mapping layers onto, owned here and valid while this endpoint
+     *  lives. */
     [[nodiscard]] ibv_qp* queue_pair() const noexcept { return queue_pair_; }
 
-    /** The completion queue the GDAKI mapping layers onto — borrowed, still owned here. */
+    /** The completion queue the GDAKI mapping layers onto, owned here and valid while this endpoint
+     *  lives. */
     [[nodiscard]] ibv_cq* completion_queue() const noexcept { return completion_queue_; }
 
-    /** The registered memory region's local key — the source authorization every post carries. */
+    /** The registered memory region's local key — the source authorization every post includes. */
     [[nodiscard]] u32_t local_key() const noexcept { return memory_region_->lkey; }
 
     /**
@@ -730,7 +733,8 @@ struct infiniband_endpoint_t {
         gpu_buffer_ = b8r1_span_t {};
     }
 
-    /** This endpoint's completion queue — its own, so drains never cross lanes. */
+    /** This endpoint's own completion queue, so a drain never reads another endpoint's
+     *  completions. */
     ibv_cq* completion_queue_ = nullptr;
 
     /** The Reliable-Connection queue pair — the single-poster concurrency granularity. */
@@ -766,10 +770,10 @@ struct infiniband_endpoint_t {
  *      doorbell record, and the BlueFlame register mapped into GPU address space, plus a
  *      device producer-index counter.
  *
- *  Layers onto a built, connected @c infiniband_endpoint_t 's queue pair (borrowed, never owned) —
- *  build it once after Ready-To-Send, @b outside any capture. The BlueFlame registration (
- *  @c CU_MEMHOSTREGISTER_IOMEMORY over NIC BAR space) is @b the platform gate for device-initiated
- *  GDAKI; its failure is reported by name.
+ *  Layers onto the queue pair of a built, connected @c infiniband_endpoint_t , which outlives the
+ *  mapping — build it once after Ready-To-Send, @b outside any capture. The BlueFlame registration
+ *  ( @c CU_MEMHOSTREGISTER_IOMEMORY over NIC BAR space) is @b the platform gate for
+ *  device-initiated GDAKI; its failure is reported by name.
  */
 struct infiniband_queue_mapping_t {
 
@@ -818,7 +822,7 @@ struct infiniband_queue_mapping_t {
 
     infiniband_queue_handles_t handles_ {};
 
-    /** The owning NIC's page ledger — borrowed; outlives the mapping like the protection domain. */
+    /** The owning NIC's page ledger, which outlives the mapping like the protection domain. */
     host_page_registry_t* registry_ = nullptr;
 
     /** The send queue's acquired range, released through @ref registry_ at teardown. */
@@ -880,7 +884,7 @@ struct infiniband_completion_mapping_t {
 
     infiniband_completion_handles_t handles_ {};
 
-    /** The owning NIC's page ledger — borrowed; outlives the mapping like the protection domain. */
+    /** The owning NIC's page ledger, which outlives the mapping like the protection domain. */
     host_page_registry_t* registry_ = nullptr;
 
     /** The completion ring's acquired range, released through @ref registry_ at teardown. */
@@ -1282,11 +1286,11 @@ struct infiniband_reach_t {
  *  every cross-domain consumer, exactly like the per-rank arenas and the one
  *  @ref multimem_domain_t .
  *
- *  Wiring a handle is a consumer's own lane — its queue pairs (the single-poster concurrency
- *  granularity, so consumers' collectives can overlap), its heap, its round; this domain only lends
- *  the shared adapters and the exchange. The typed handles ( @ref infiniband_all_reduce ,
- *  @ref infiniband_all_gather , @ref infiniband_all_to_all ) are the whole wiring surface — the
- *  handle's type is the role, and rendezvous keys never appear in any API.
+ *  Each consumer wires its handles over queues of its own: its queue pairs (the single-poster
+ *  concurrency granularity, so consumers' collectives can overlap), its heap, its round; this
+ *  domain owns only the shared adapters and the exchange. The typed handles (
+ *  @ref infiniband_all_reduce , @ref infiniband_all_gather , @ref infiniband_all_to_all ) are the
+ *  whole wiring surface — the handle's type is the role, and rendezvous keys appear in no API.
  */
 struct colocated_domain_t {
 
@@ -1341,7 +1345,7 @@ struct colocated_domain_t {
                                                       infiniband_reach_t::heap_layout_t layout,
                                                       f64_t timeout_seconds) noexcept;
 
-    /** The bootstrapped world — borrowed; main owns it for the process lifetime, and every wired
+    /** The bootstrapped world, owned by @c main for the process lifetime; every wired
      *  handle claims its rendezvous generation from it. */
     mesh_topology_t* topology_ = nullptr;
 

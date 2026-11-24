@@ -87,7 +87,7 @@ struct choices_loader_parquet_t {
      *      targets get populated.
      *
      *  @par Statuses:
-     *  - @c status_code_t::unsupported_k The batches carry no choice columns, or the pool holds
+     *  - @c status_code_t::unsupported_k The batches have no choice columns, or the pool holds
      *    no well-formed row.
      */
     [[nodiscard]] expected_t fill(gpu_stream_t& gpu_stream, u32_t gpu_rank, u32_t training_step,
@@ -101,7 +101,8 @@ struct choices_loader_parquet_t {
 
   private:
 
-    /** The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
+    /** The configured KvikIO / GDS storage session the reader needs, owned by the composition
+     *  root. */
     gpu_direct_storage_session_t* storage_ = nullptr;
 
     /** The state, choices and targets columns. */

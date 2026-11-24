@@ -16,20 +16,16 @@
 #include <rmm/mr/cuda_async_memory_resource.hpp> // vendor-boundary: `rmm::mr::cuda_async_memory_resource`
 #include <rmm/mr/per_device_resource.hpp>        // vendor-boundary: `rmm::mr::set_per_device_resource`
 
-#include "uform/utilities/ram_device.hpp" // `topology_t` — one KvikIO thread per core
 #include "uform/loaders/direct_storage.hpp"
 
 namespace ul = unum::uform::loaders;
 using namespace ul;
 
-expected<gpu_direct_storage_session_t> gpu_direct_storage_session_t::make() noexcept {
+expected<gpu_direct_storage_session_t> gpu_direct_storage_session_t::make(std::size_t idle_cores) noexcept {
     using result_t = expected<gpu_direct_storage_session_t>;
-    auto [topology, make_status] = topology_t::make();
-    if (!make_status) return result_t::fail(std::move(make_status));
-    std::size_t const cores = topology.logical_cores_count();
-    if (cores == 0) return result_t::fail(status_code_t::io_k, "No logical core to run KvikIO's threads on");
+    if (idle_cores == 0) return result_t::fail(status_code_t::io_k, "No logical core to run KvikIO's threads on");
     try {
-        cudf::io::kvikio_integration::set_up_kvikio(static_cast<u32_t>(cores));
+        cudf::io::kvikio_integration::set_up_kvikio(static_cast<u32_t>(idle_cores));
         // Pools outlive every buffer they serve, so only the first session installs them.
         [[maybe_unused]] static bool const pooled = [] { // vendor-boundary: RMM's resource map is process-global
             for (int device = 0; device != rmm::get_num_cuda_devices(); ++device) {

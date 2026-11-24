@@ -16,7 +16,7 @@ namespace util = unum::uform::utilities;
  *  multicast-capable code. */
 extern "C" util::b8_t const uform_multimem_switch_bundle_start[], uform_multimem_switch_bundle_end[];
 
-/** A fabric handle is 64 opaque bytes; the mesh rendezvous carries text, so it travels 128-hex. */
+/** A fabric handle is 64 opaque bytes; the mesh rendezvous sends text, so it travels 128-hex. */
 static bool format_fabric_handle_(sz::string_t& text, CUmemFabricHandle const& handle) noexcept {
     bool built = true;
     for (unsigned char const byte : handle.data)

@@ -520,7 +520,7 @@ def test_awaited_failures_raise() raises:
 
 
 def test_arenas_free_before_their_executor() raises:
-    """An arena borrows the executor that made it, so the executor outlives it past its own last use."""
+    """An arena refers to the executor that made it, so the executor outlives it past its own last use."""
     if not _library_is_present():
         _skipped(library_missing_k)
         return

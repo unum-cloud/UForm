@@ -106,7 +106,7 @@ util::expected_t choices_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, 
     std::size_t const segments = batches[0].segment_lengths.extent(0);
     std::size_t const width = batches[0].segment_choices.extent(1), total_segments = unroll * segments;
     if (width == 0)
-        return util::expected_t::fail(util::status_code_t::unsupported_k, "The batches carry no choice columns");
+        return util::expected_t::fail(util::status_code_t::unsupported_k, "The batches have no choice columns");
 
     if (util::expected_t picked = groups_.draw(seed_, training_step, gpu_rank, file_draw_salt_k, total_segments, 2);
         !picked)

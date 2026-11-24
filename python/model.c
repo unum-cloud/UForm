@@ -107,7 +107,7 @@ static char const doc_Model_load_ram[] =                                        
     "quantization=Scalar.BF16, progress=None, progress_steps=0) -> Model\n"                        //
     "\n"                                                                                           //
     "Copies a safetensors checkpoint into host memory and packs its products for the CPU; the\n"   //
-    "checkpoint carries the model's geometry.\n"                                                   //
+    "checkpoint holds the model's geometry.\n"                                                     //
     "Calls `uform_model_load_ram`.\n"                                                              //
     "\n"                                                                                           //
     "Args:\n"                                                                                      //
@@ -394,8 +394,7 @@ static PyGetSetDef ModelDescription_getset[] = {
      "The `CPUClass` a RAM model was packed for, or None for a VRAM model.", NULL},
     {"gpu_class", (getter)ModelDescription_get_gpu_class, NULL,
      "The `GPUClass` every replica of a VRAM model runs as, or None for a RAM model.", NULL},
-    {"token_width", uform_py_size_getter, NULL,
-     "Scalars per token vector; 0 when the checkpoint carries no token head.",
+    {"token_width", uform_py_size_getter, NULL, "Scalars per token vector; 0 when the checkpoint has no token head.",
      (void*)offsetof(ModelDescription, description.token_width)},
     {"choice_temperature_groups", uform_py_size_getter, NULL,
      "Question types of `text_choose`: 0 without the byte decoder, 1 when uncalibrated.",

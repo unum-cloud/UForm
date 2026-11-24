@@ -55,9 +55,9 @@ export type MeshDescription = CompiledMeshDescription;
 /** The token the bootstrap holds, which is what a direct `new Mesh` cannot produce. */
 const meshSeal = Symbol("Mesh");
 
-/** One process's place among the processes of a run, made once and borrowed by every trainer. */
+/** One process's place among the processes of a run, made once and shared by every trainer. */
 export class Mesh implements Disposable {
-  /** The backend handle a trainer borrows. */
+  /** The backend handle every trainer holds. */
   readonly compiled: CompiledMesh;
 
   /** Reached through `Mesh.bootstrap`. */
@@ -81,7 +81,7 @@ export class Mesh implements Disposable {
     return this.compiled.describe();
   }
 
-  /** Leaves the mesh; every trainer borrowing it must be freed first. Calls `uform_mesh_free`. */
+  /** Leaves the mesh; every trainer holding it must be freed first. Calls `uform_mesh_free`. */
   free(): void {
     this.compiled.free();
   }
@@ -91,7 +91,7 @@ export class Mesh implements Disposable {
   }
 }
 
-/** What one device's step carries at most. Mirrors `uform_batch_shape_t`; every absent
+/** What one device's step holds at most. Mirrors `uform_batch_shape_t`; every absent
  *  field reads zero. */
 export interface BatchShape {
   maxRowsPerDevice?: number;
@@ -370,7 +370,7 @@ export class Trainer implements Disposable {
    *  Builds one replica per device and starts or resumes the run. Calls `uform_trainer_init_vram`.
    *  @param executor - A VRAM executor, every device of which holds one replica.
    *  @param config - The geometry, objectives and schedule.
-   *  @param mesh - The mesh to borrow until the trainer is freed; absent runs this process alone.
+   *  @param mesh - The mesh the trainer holds until it is freed; absent runs this process alone.
    */
   static initVram(executor: Executor, config: TrainerConfig, mesh?: Mesh): Trainer {
     const coded = {

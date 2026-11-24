@@ -28,8 +28,6 @@ import (
 #cgo nocallback uform_outcome_wait
 #cgo noescape uform_executor_for_ram
 #cgo nocallback uform_executor_for_ram
-#cgo noescape uform_executor_on_pool
-#cgo nocallback uform_executor_on_pool
 #cgo noescape uform_executor_for_vram
 #cgo nocallback uform_executor_for_vram
 #cgo noescape uform_executor_drain
@@ -321,7 +319,7 @@ func (rows Rows) Stride() uint { return uint(rows.raw.stride) }
 // Scalar reports the scalar type the rows were written as.
 func (rows Rows) Scalar() Scalar { return Scalar(rows.raw.scalar) }
 
-// RowValues borrows one row's values from the arena, refused with StatusInvalidArgument when Value
+// RowValues views one row's values in the arena, refused with StatusInvalidArgument when Value
 // is not the scalar type they were written as or row is not below Count.
 func RowValues[Value Element](rows Rows, row uint) ([]Value, error) {
 	if scalar := scalarOf[Value](); scalar != rows.Scalar() {
@@ -346,7 +344,7 @@ type RowsTape struct {
 // Count reports how many items the call wrote rows for, zero for a surface it did not keep.
 func (tape RowsTape) Count() uint { return tape.count }
 
-// Offsets borrows the Count + 1 offsets into the rows, in rows.
+// Offsets views the Count + 1 offsets into the rows, in rows.
 func (tape RowsTape) Offsets() []uint {
 	if tape.raw.offsets == nil {
 		return nil
@@ -354,7 +352,7 @@ func (tape RowsTape) Offsets() []uint {
 	return unsafe.Slice((*uint)(unsafe.Pointer(tape.raw.offsets)), tape.count+1)
 }
 
-// Item borrows the rows of one item, refused with [StatusInvalidArgument] when item is not below
+// Item views the rows of one item, refused with [StatusInvalidArgument] when item is not below
 // [RowsTape.Count].
 func (tape RowsTape) Item(item uint) (Rows, error) {
 	if item >= tape.count {
@@ -370,11 +368,11 @@ func (tape RowsTape) Item(item uint) (Rows, error) {
 
 // region: Tapes
 
-// Tape borrows a ragged batch as Apache Arrow lays one out: elements end to end, and one more
+// Tape views a ragged batch as Apache Arrow lays one out: elements end to end, and one more
 // offset than entries around them, entry i spanning offsets[i] up to offsets[i+1]. An element is
 // a byte of UTF-8 text or of an encoded file, or a sample of a recording.
 //
-// A Tape borrows and never owns, and the binding pins both slices until each call it crosses is
+// A Tape views and never owns, and the binding pins both slices until each call it crosses is
 // final, so neither may change until then.
 type Tape struct {
 	pointer unsafe.Pointer
@@ -442,7 +440,7 @@ func (tape Tape) Entries() uint {
 // Scalar reports the scalar type the elements hold.
 func (tape Tape) Scalar() Scalar { return tape.scalar }
 
-// lower lends the tape as the batch view a verb reads; the zero Tape lends no offsets, which a
+// lower pins the tape as the batch view a verb reads; the zero Tape passes no offsets, which a
 // verb's optional tapes read as none.
 func (tape Tape) lower(call *call) C.uform_tape_view_t {
 	if tape.pointer != nil {
@@ -450,7 +448,7 @@ func (tape Tape) lower(call *call) C.uform_tape_view_t {
 	}
 	return C.uform_tape_view_t{
 		data:    tape.pointer,
-		offsets: (*C.size_t)(call.lend(unsafe.Pointer(unsafe.SliceData(tape.offsets)), len(tape.offsets))),
+		offsets: (*C.size_t)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(tape.offsets)), len(tape.offsets))),
 		scalar:  C.uform_scalar_t(tape.scalar),
 	}
 }
@@ -470,7 +468,7 @@ func (tape TapeView) Entries() uint { return tape.count }
 // Scalar reports the scalar type the elements were written as.
 func (tape TapeView) Scalar() Scalar { return Scalar(tape.raw.scalar) }
 
-// TapeEntry borrows one entry's elements from the arena, refused with StatusInvalidArgument when
+// TapeEntry views one entry's elements in the arena, refused with StatusInvalidArgument when
 // Value is not the scalar type they were written as or entry is not below Entries.
 func TapeEntry[Value Element](tape TapeView, entry uint) ([]Value, error) {
 	if scalar := scalarOf[Value](); scalar != tape.Scalar() {
@@ -506,7 +504,7 @@ func uformContinues(completed, total C.size_t, state unsafe.Pointer) C.uform_con
 	return C.uform_cancel_k
 }
 
-// progress lends an optional handler and its report count as the struct a reporting verb takes.
+// progress lowers an optional handler and its report count as the struct a reporting verb takes.
 func (call *call) progress(progress ProgressCallback, steps uint) C.uform_progress_t {
 	if progress == nil {
 		return C.uform_progress_t{}
@@ -514,8 +512,8 @@ func (call *call) progress(progress ProgressCallback, steps uint) C.uform_progre
 	return C.uform_progress_t{callback: C.uform_go_continues(), state: call.callback(1, progress), steps: C.size_t(steps)}
 }
 
-// callback lends a handler to its C trampoline as an opaque handle in the call's slot rather than a
-// Go pointer, since the closure holds Go pointers the cgo rules forbid handing to C.
+// callback passes a handler to its C trampoline as an opaque handle in the call's slot rather than
+// a Go pointer, since the closure holds Go pointers the cgo rules forbid handing to C.
 func (call *call) callback(slot int, handler any) unsafe.Pointer {
 	call.slots.handles[slot] = cgo.NewHandle(handler)
 	return unsafe.Pointer(&call.slots.handles[slot])
@@ -739,51 +737,35 @@ var (
 // GPUDevices fills devices with the GPUs this process can drive, NVIDIA first, then AMD, then
 // Apple, and reports how many there are, which may exceed len(devices).
 func GPUDevices(devices []GPUDevice) (uint, error) {
-	var lent lent[uint]
-	arguments := open[C.uform_gpu_devices_t](&lent)
+	var call callWithResult[uint]
+	arguments := open[C.uform_gpu_devices_t](&call)
 	*arguments = C.uform_gpu_devices_t{
-		outcome:          lent.outcome(),
-		devices:          (*C.uform_gpu_device_t)(lent.lend(unsafe.Pointer(unsafe.SliceData(devices)), len(devices))),
+		outcome:          call.outcome(),
+		devices:          (*C.uform_gpu_device_t)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(devices)), len(devices))),
 		devices_capacity: C.size_t(len(devices)),
-		devices_count:    (*C.size_t)(unsafe.Pointer(lent.result)),
+		devices_count:    (*C.size_t)(unsafe.Pointer(call.result)),
 	}
 	C.uform_gpu_devices(arguments)
-	return block(&lent, nil)
+	return block(&call, nil)
 }
 
-// ExecutorForRam spawns host threads for RAM-resident models, interleaved across the compute
-// domains local to memoryDomains, the list the models were loaded with; an empty list derives them
-// from the machine.
+// ExecutorForRam spawns host threads for RAM-resident models near the one memory domain
+// memoryDomains names, or interleaved across the machine for none or several; the list is the one
+// the models were loaded with, and an empty list derives it from the machine.
 //
 // Zero threads takes seven eighths of the cores those domains carry. A cpuClassCeiling intersects
 // with what the machine runs, so a class the machine lacks narrows rather than refuses.
 func ExecutorForRam(memoryDomains []int32, cpuClassCeiling CPUClass, threads uint) (*Executor, error) {
-	var lent lent[C.uform_executor_t]
-	arguments := open[C.uform_executor_for_ram_t](&lent)
+	var call callWithResult[C.uform_executor_t]
+	arguments := open[C.uform_executor_for_ram_t](&call)
 	*arguments = C.uform_executor_for_ram_t{
-		executor: lent.result,
-		outcome:  lent.outcome(),
-		ram:      lent.ram(memoryDomains, cpuClassCeiling),
+		executor: call.result,
+		outcome:  call.outcome(),
+		ram:      call.ram(memoryDomains, cpuClassCeiling),
 		threads:  C.size_t(threads),
 	}
 	C.uform_executor_for_ram(arguments)
-	return executorOf(block(&lent, nil))
-}
-
-// ExecutorOnPool creates a RAM executor over a borrowed fu_pool_t, so several libraries in one
-// process share one set of threads while each keeps its own scratch. The pool must outlive the
-// executor, and keeps its lender's mood.
-func ExecutorOnPool(memoryDomains []int32, cpuClassCeiling CPUClass, pool unsafe.Pointer) (*Executor, error) {
-	var lent lent[C.uform_executor_t]
-	arguments := open[C.uform_executor_on_pool_t](&lent)
-	*arguments = C.uform_executor_on_pool_t{
-		executor: lent.result,
-		outcome:  lent.outcome(),
-		ram:      lent.ram(memoryDomains, cpuClassCeiling),
-		pool:     pool,
-	}
-	C.uform_executor_on_pool(arguments)
-	return executorOf(block(&lent, nil))
+	return executorOf(block(&call, nil))
 }
 
 // ExecutorForVram opens one submission stream on every named device, all driven by the one host
@@ -801,18 +783,18 @@ func ExecutorForVram(
 	if len(streams) != 0 && len(streams) != len(devices) {
 		return nil, fail(StatusShapeMismatch, "pass no streams or one per device")
 	}
-	var lent lent[C.uform_executor_t]
-	arguments := open[C.uform_executor_for_vram_t](&lent)
+	var call callWithResult[C.uform_executor_t]
+	arguments := open[C.uform_executor_for_vram_t](&call)
 	*arguments = C.uform_executor_for_vram_t{
-		executor:      lent.result,
-		outcome:       lent.outcome(),
-		vram:          lent.vram(devices, gpuClassCeiling),
-		ram:           lent.ram(memoryDomains, cpuClassCeiling),
-		streams:       (*unsafe.Pointer)(lent.lend(unsafe.Pointer(unsafe.SliceData(streams)), len(streams))),
+		executor:      call.result,
+		outcome:       call.outcome(),
+		vram:          call.vram(devices, gpuClassCeiling),
+		ram:           call.ram(memoryDomains, cpuClassCeiling),
+		streams:       (*unsafe.Pointer)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(streams)), len(streams))),
 		scratch_limit: C.size_t(scratchLimit),
 	}
 	C.uform_executor_for_vram(arguments)
-	return executorOf(block(&lent, nil))
+	return executorOf(block(&call, nil))
 }
 
 // executorOf wraps the handle an executor factory wrote.
@@ -831,11 +813,11 @@ func (executor *Executor) Drain(mood Mood) error {
 	if err != nil {
 		return err
 	}
-	var lent lent[struct{}]
-	arguments := open[C.uform_executor_drain_t](&lent)
-	*arguments = C.uform_executor_drain_t{executor: handle, outcome: lent.outcome(), mood: C.uform_mood_t(mood)}
+	var call callWithResult[struct{}]
+	arguments := open[C.uform_executor_drain_t](&call)
+	*arguments = C.uform_executor_drain_t{executor: handle, outcome: call.outcome(), mood: C.uform_mood_t(mood)}
 	C.uform_executor_drain(arguments)
-	_, err = block(&lent, nil)
+	_, err = block(&call, nil)
 	return err
 }
 
@@ -849,9 +831,9 @@ func (executor *Executor) Drain(mood Mood) error {
 // Every call given an arena rewinds and refills it, so the views of its previous call and every
 // slice they handed out end there, as they do once it is closed; to keep one call's views past
 // the next, give that call another arena. An arena serves one call at a time, and a second
-// overlapping it fails with StatusContended. Deferred verbs borrow it as blocking ones do,
-// since Close waits for every deferred call naming it. Views over a GPU arena hold device
-// memory, which Describe reports and no Go code may read.
+// overlapping it fails with StatusContended. Deferred verbs hold it as blocking ones do, since
+// Close waits for every deferred call naming it. Views over a GPU arena hold device memory,
+// which Describe reports and no Go code may read.
 type Arena struct {
 	handle C.uform_arena_t
 }
@@ -866,11 +848,11 @@ func NewArena(executor *Executor) (*Arena, error) {
 	if err != nil {
 		return nil, err
 	}
-	var lent lent[C.uform_arena_t]
-	arguments := open[C.uform_arena_init_t](&lent)
-	*arguments = C.uform_arena_init_t{arena: lent.result, executor: handle, outcome: lent.outcome()}
+	var call callWithResult[C.uform_arena_t]
+	arguments := open[C.uform_arena_init_t](&call)
+	*arguments = C.uform_arena_init_t{arena: call.result, executor: handle, outcome: call.outcome()}
 	C.uform_arena_init(arguments)
-	arena, err := block(&lent, nil)
+	arena, err := block(&call, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -894,15 +876,15 @@ func (arena *Arena) Describe() (ArenaDescription, error) {
 	if err != nil {
 		return ArenaDescription{}, err
 	}
-	var lent lent[ArenaDescription]
-	arguments := open[C.uform_arena_describe_t](&lent)
+	var call callWithResult[ArenaDescription]
+	arguments := open[C.uform_arena_describe_t](&call)
 	*arguments = C.uform_arena_describe_t{
 		arena:       handle,
-		outcome:     lent.outcome(),
-		description: (*C.uform_arena_description_t)(unsafe.Pointer(lent.result)),
+		outcome:     call.outcome(),
+		description: (*C.uform_arena_description_t)(unsafe.Pointer(call.result)),
 	}
 	C.uform_arena_describe(arguments)
-	return block(&lent, nil)
+	return block(&call, nil)
 }
 
 // endregion: Arenas
@@ -936,8 +918,8 @@ type call struct {
 	arguments []byte
 }
 
-// lent is a call and the slot its result lands in, which the library writes in place.
-type lent[Result any] struct {
+// callWithResult is a call and the slot its result lands in, which the library writes in place.
+type callWithResult[Result any] struct {
 	call
 	result *Result
 }
@@ -945,11 +927,11 @@ type lent[Result any] struct {
 // open pins a fresh frame and hands back its argument structure, which a verb fills and passes to
 // C; verbs refuse before opening, so a refusal pins and allocates nothing. The arguments live in
 // the frame because cgo moves to the heap whatever a C function that may call back into Go reaches.
-func open[Arguments, Result any](lent *lent[Result]) *Arguments {
+func open[Arguments, Result any](opened *callWithResult[Result]) *Arguments {
 	frame := new(frame[Arguments, Result])
-	lent.pinner.Pin(frame)
-	lent.slots, lent.result = &frame.slots, &frame.result
-	lent.arguments = unsafe.Slice((*byte)(unsafe.Pointer(&frame.arguments)), unsafe.Sizeof(frame.arguments))
+	opened.pinner.Pin(frame)
+	opened.slots, opened.result = &frame.slots, &frame.result
+	opened.arguments = unsafe.Slice((*byte)(unsafe.Pointer(&frame.arguments)), unsafe.Sizeof(frame.arguments))
 	return &frame.arguments
 }
 
@@ -961,7 +943,7 @@ func (call *call) status() Status {
 	return Status(C.uform_outcome_status(call.outcome()))
 }
 
-// settle waits until the call is final, releases everything it lent, and reports its failure, the
+// settle waits until the call is final, releases everything it pinned, and reports its failure, the
 // same every time it is asked.
 func (call *call) settle() error {
 	if call.status() == StatusDeferred {
@@ -979,15 +961,15 @@ func (call *call) settle() error {
 }
 
 // block settles the call a verb opened and hands back its result, or the verb's refusal.
-func block[Result any](lent *lent[Result], refusal error) (Result, error) {
+func block[Result any](call *callWithResult[Result], refusal error) (Result, error) {
 	var none Result
 	if refusal != nil {
 		return none, refusal
 	}
-	if err := lent.settle(); err != nil {
+	if err := call.settle(); err != nil {
 		return none, err
 	}
-	return *lent.result, nil
+	return *call.result, nil
 }
 
 // configOf reads a nil config as the zero one, by value, so generic verbs allocate nothing for it.
@@ -1001,22 +983,22 @@ func configOf[Config any](config *Config) Config {
 
 // pin keeps a Go object in place until the call is final and hands back its address. It takes no
 // type parameter, since a generic call inlined into a generic verb reaches its callee through a
-// dictionary, and escape analysis then moves the verb's lent to the heap.
+// dictionary, and escape analysis then moves the verb's call to the heap.
 func (call *call) pin(pointer unsafe.Pointer) unsafe.Pointer {
 	call.pinner.Pin(pointer)
 	return pointer
 }
 
-// lend pins the backing array of a slice of length elements at data until the call is final, and
-// lends an empty slice as nil.
-func (call *call) lend(data unsafe.Pointer, length int) unsafe.Pointer {
+// pinSlice pins the backing array of a slice of length elements at data until the call is final,
+// and answers nil for an empty slice.
+func (call *call) pinSlice(data unsafe.Pointer, length int) unsafe.Pointer {
 	if length == 0 {
 		return nil
 	}
 	return call.pin(data)
 }
 
-// view lends a string to a call that only reads it before returning.
+// view passes a string to a call that only reads it before returning.
 func view(text string) C.uform_bytes_view_t {
 	view := C.uform_bytes_view_t{data: (*C.uint8_t)(unsafe.Pointer(unsafe.StringData(text)))}
 	// cgo names the length's typedef apart from size_t, though the two are as wide.
@@ -1030,7 +1012,7 @@ func view(text string) C.uform_bytes_view_t {
 // dropped without Wait or Close is released by the collector once the call is final, never
 // blocking on it: until then every later collection checks it again.
 type Deferred[Result any] struct {
-	lent    lent[Result]
+	call    callWithResult[Result]
 	cleanup runtime.Cleanup
 }
 
@@ -1040,7 +1022,7 @@ func submitted[Result any](deferred *Deferred[Result], refusal error) (*Deferred
 	if refusal != nil {
 		return nil, refusal
 	}
-	deferred.cleanup = runtime.AddCleanup(deferred, release, deferred.lent.call)
+	deferred.cleanup = runtime.AddCleanup(deferred, release, deferred.call.call)
 	return deferred, nil
 }
 
@@ -1055,20 +1037,20 @@ func release(call call) {
 }
 
 // Status reports StatusDeferred until the call is final, then its final status, without blocking.
-func (deferred *Deferred[Result]) Status() Status { return deferred.lent.status() }
+func (deferred *Deferred[Result]) Status() Status { return deferred.call.status() }
 
 // Wait blocks until the call is final, releases its pins, then hands back its result, the same
 // every time it is asked.
 func (deferred *Deferred[Result]) Wait() (Result, error) {
 	deferred.cleanup.Stop()
-	return block(&deferred.lent, nil)
+	return block(&deferred.call, nil)
 }
 
 // Close blocks until the call is final, releases its pins, and reports the call's failure. It is
 // idempotent and safe after Wait.
 func (deferred *Deferred[Result]) Close() error {
 	deferred.cleanup.Stop()
-	return deferred.lent.settle()
+	return deferred.call.settle()
 }
 
 // endregion: Calls
@@ -1167,7 +1149,7 @@ func CapabilitiesAvailable() string { return C.GoString(C.uform_capabilities_ava
 
 // region: Helpers
 
-// optional pins a caller's report until the call is final, and lends a nil one as nil.
+// optional pins a caller's report until the call is final, and passes a nil one as nil.
 func (call *call) optional(report unsafe.Pointer) unsafe.Pointer {
 	if report == nil {
 		return nil
@@ -1175,12 +1157,12 @@ func (call *call) optional(report unsafe.Pointer) unsafe.Pointer {
 	return call.pin(report)
 }
 
-// ints lends a slice of IDs until the call is final.
+// ints pins a slice of IDs until the call is final.
 func (call *call) ints(values []int32) (*C.int32_t, C.size_t) {
-	return (*C.int32_t)(call.lend(unsafe.Pointer(unsafe.SliceData(values)), len(values))), C.size_t(len(values))
+	return (*C.int32_t)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(values)), len(values))), C.size_t(len(values))
 }
 
-// ram lends the memory domains of a RAM placement or executor, beside the class ceiling.
+// ram pins the memory domains of a RAM placement or executor, beside the class ceiling.
 func (call *call) ram(memoryDomains []int32, cpuClassCeiling CPUClass) C.uform_ram_options_t {
 	domains, count := call.ints(memoryDomains)
 	return C.uform_ram_options_t{
@@ -1190,7 +1172,7 @@ func (call *call) ram(memoryDomains []int32, cpuClassCeiling CPUClass) C.uform_r
 	}
 }
 
-// vram lends the devices of a VRAM placement or executor, beside the class ceiling.
+// vram pins the devices of a VRAM placement or executor, beside the class ceiling.
 func (call *call) vram(devices []int32, gpuClassCeiling GPUClass) C.uform_vram_options_t {
 	ordinals, count := call.ints(devices)
 	return C.uform_vram_options_t{
@@ -1200,10 +1182,10 @@ func (call *call) vram(devices []int32, gpuClassCeiling GPUClass) C.uform_vram_o
 	}
 }
 
-// bytes lends a byte slab as the view the C interface reads, with no terminator and no copy.
+// bytes pins a byte slice as the view the C interface reads, with no terminator and no copy.
 func (call *call) bytes(bytes []byte) C.uform_bytes_view_t {
 	return C.uform_bytes_view_t{
-		data:   (*C.uint8_t)(call.lend(unsafe.Pointer(unsafe.SliceData(bytes)), len(bytes))),
+		data:   (*C.uint8_t)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(bytes)), len(bytes))),
 		length: C.size_t(len(bytes)),
 	}
 }
@@ -1220,9 +1202,9 @@ func (call *call) text(text string) C.uform_bytes_view_t {
 	}
 }
 
-// uint32s lends a slice of per-item counts or tags as the C array a verb reads.
+// uint32s pins a slice of per-item counts or tags as the C array a verb reads.
 func (call *call) uint32s(values []uint32) *C.uint32_t {
-	return (*C.uint32_t)(call.lend(unsafe.Pointer(unsafe.SliceData(values)), len(values)))
+	return (*C.uint32_t)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(values)), len(values)))
 }
 
 // endregion: Helpers

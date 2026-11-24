@@ -1,6 +1,6 @@
 """Training on the GPU: the mesh joining a run's processes, and the trainer stepping one model across them.
 
-A `Mesh` is one process's place among the processes of a run, made once and borrowed by every
+A `Mesh` is one process's place among the processes of a run, made once and shared by every
 trainer over the same executor. A `Trainer` owns the replicas, gradients, optimizer moments, heads
 and temperatures on its executor's devices. Both are made over a VRAM executor, and a build without
 the NVIDIA trainer answers every training verb with `UNSUPPORTED`.
@@ -148,7 +148,7 @@ struct ImageShape(ImplicitlyCopyable):
     var patch_side: c_size_t
     """The square patch side images tile into, in pixels."""
     var channels: c_size_t
-    """Channels every pixel carries; zero derives four."""
+    """Channels every pixel has; zero derives four."""
 
     def __init__(out self, *, patch_side: Int = 0, channels: Int = 0):
         """Names only the fields that differ from the derived ones."""
@@ -167,7 +167,7 @@ struct VideoShape(ImplicitlyCopyable):
     var frame_stride: c_size_t
     """Source frames between sampled ones; zero derives one."""
     var channels: c_size_t
-    """Channels every pixel carries; zero derives three."""
+    """Channels every pixel has; zero derives three."""
 
     def __init__(out self, *, patch_side: Int = 0, tube_frames: Int = 0, frame_stride: Int = 0, channels: Int = 0):
         """Names only the fields that differ from the derived ones."""
@@ -194,16 +194,16 @@ struct AudioShape(ImplicitlyCopyable):
 
 @fieldwise_init
 struct BatchShape(ImplicitlyCopyable):
-    """What one device's step carries at most, whatever the modality mix, `uform_batch_shape_t`."""
+    """What one device's step holds at most, whatever the modality mix, `uform_batch_shape_t`."""
 
     var max_rows_per_device: c_size_t
     """Rows one device's step packs."""
     var max_segments_per_device: c_size_t
-    """Items one device's step carries across all its rows, which is also its pooling axis."""
+    """Items one device's step holds across all its rows, which is also its pooling axis."""
     var max_columns_per_row: c_size_t
     """Positions one row spans, the sequence length."""
     var max_bags_per_device: c_size_t
-    """Bags one device's step carries; zero keeps every item its own routing unit."""
+    """Bags one device's step holds; zero keeps every item its own routing unit."""
     var max_choices_per_item: c_size_t
     """Legal bytes one item offers to choose from at most; zero makes no choices."""
     var image: ImageShape
@@ -446,7 +446,7 @@ struct Contrastive(Copyable, Defaultable, Movable):
         self = Self(List[c_size_t](), 0, 0, 0, Negatives.AMBIENT, 0, 0, PairLossForm.DERIVED)
 
     def _arguments(self) -> ContrastiveArguments:
-        """The C layout, borrowing `matryoshka_dimensions` for the call."""
+        """The C layout, pointing at `matryoshka_dimensions`, read only during the call."""
         var dimensions: Optional[Pointer[c_size_t, ImmUntrackedOrigin]] = None
         if len(self.matryoshka_dimensions):
             dimensions = Pointer[c_size_t, ImmUntrackedOrigin](
@@ -505,7 +505,7 @@ struct TrainerInitVramConfig[mesh_origin: ImmOrigin = ImmUntrackedOrigin](Copyab
     """The geometry, objective and starting point of a run, `uform_trainer_init_vram_t`.
 
     Parameters:
-        mesh_origin: The borrowed mesh's origin, which the trainer then keeps alive.
+        mesh_origin: The origin of the caller's mesh, which the trainer then keeps alive.
     """
 
     var resume: String
@@ -515,7 +515,7 @@ struct TrainerInitVramConfig[mesh_origin: ImmOrigin = ImmUntrackedOrigin](Copyab
     var hidden: Int
     """Embedding width, a multiple of 128."""
     var batch: BatchShape
-    """What one device's step carries at most."""
+    """What one device's step holds at most."""
     var objective: Objective
     """Which losses a step relaxes."""
     var masking: Masking
@@ -573,13 +573,13 @@ struct RelationsViewArguments(ImplicitlyCopyable):
 
 
 def _array[T: AnyType, origin: ImmOrigin, //](items: Span[T, origin]) -> Optional[Pointer[T, ImmUntrackedOrigin]]:
-    """A borrowed host array with its borrow erased, absent when empty, as the C layout names it."""
+    """The caller's host array with its origin erased, absent when empty, as the C layout names it."""
     if len(items) == 0:
         return None
     return Pointer[T, ImmUntrackedOrigin](unsafe_from_address=Int(items.unsafe_ptr()))
 
 
-def _reborrow[T: Copyable, origin: ImmOrigin, //, wider: ImmOrigin](items: Span[T, origin]) -> Span[T, wider]:
+def _widened[T: Copyable, origin: ImmOrigin, //, wider: ImmOrigin](items: Span[T, origin]) -> Span[T, wider]:
     """The same items under an origin that unions theirs with others."""
     if len(items) == 0:
         return Span[T, wider]()
@@ -591,7 +591,7 @@ struct Edges[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Default
     """One edge set over a step's items as compressed sparse rows; empty offsets name no edges.
 
     Parameters:
-        origin: The borrowed offsets, IDs and weights, kept alive for as long as the edges are used.
+        origin: The caller's offsets, IDs and weights, kept alive for as long as the edges are used.
     """
 
     var offsets: Span[c_size_t, Self.origin]
@@ -611,12 +611,12 @@ struct Edges[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Default
     ](
         offsets: Span[c_size_t, offsets_origin], ids: Span[UInt32, ids_origin], weights: Span[Float32, weights_origin]
     ) -> Edges[ImmOrigin(origin_of(_anchor[offsets_origin](), _anchor[ids_origin](), _anchor[weights_origin]()))]:
-        """Borrows the three arrays of one edge set; an empty `weights` weighs every edge one."""
+        """Points at the caller's three arrays of one edge set; an empty `weights` weighs every edge one."""
         comptime union = ImmOrigin(origin_of(_anchor[offsets_origin](), _anchor[ids_origin](), _anchor[weights_origin]()))
-        return Edges[union](_reborrow[union](offsets), _reborrow[union](ids), _reborrow[union](weights))
+        return Edges[union](_widened[union](offsets), _widened[union](ids), _widened[union](weights))
 
     def _arguments(self) -> EdgesViewArguments:
-        """The C layout, erased inside the verb that borrows it."""
+        """The C layout, erased inside the verb that reads it."""
         return EdgesViewArguments(_array(self.offsets), _array(self.ids), _array(self.weights))
 
 
@@ -627,7 +627,7 @@ struct Relations[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Def
     follows the run's negatives.
 
     Parameters:
-        origin: The borrowed edge sets, kept alive for as long as the relations are used.
+        origin: The caller's edge sets, kept alive for as long as the relations are used.
     """
 
     var attract: Edges[Self.origin]
@@ -652,13 +652,13 @@ struct Relations[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Def
         """Gathers the three edge sets of one step."""
         comptime union = ImmOrigin(origin_of(_anchor[attract_origin](), _anchor[repel_origin](), _anchor[ignore_origin]()))
         return Relations[union](
-            Edges[union](_reborrow[union](attract.offsets), _reborrow[union](attract.ids), _reborrow[union](attract.weights)),
-            Edges[union](_reborrow[union](repel.offsets), _reborrow[union](repel.ids), _reborrow[union](repel.weights)),
-            Edges[union](_reborrow[union](ignore.offsets), _reborrow[union](ignore.ids), _reborrow[union](ignore.weights)),
+            Edges[union](_widened[union](attract.offsets), _widened[union](attract.ids), _widened[union](attract.weights)),
+            Edges[union](_widened[union](repel.offsets), _widened[union](repel.ids), _widened[union](repel.weights)),
+            Edges[union](_widened[union](ignore.offsets), _widened[union](ignore.ids), _widened[union](ignore.weights)),
         )
 
     def _arguments(self) -> RelationsViewArguments:
-        """The C layout, erased inside the verb that borrows it."""
+        """The C layout, erased inside the verb that reads it."""
         return RelationsViewArguments(self.attract._arguments(), self.repel._arguments(), self.ignore._arguments())
 
 
@@ -815,7 +815,7 @@ comptime TrainerSave = Verb[TrainerSaveArguments]
 
 @fieldwise_init
 struct _TrainerStepCall[origin: MutOrigin](Call):
-    """The crossing of `uform_trainer_step`, its borrowed inputs erased by the verb that built it and
+    """The crossing of `uform_trainer_step`, the caller's inputs erased by the verb that built it and
     kept alive by that verb, or by its `Deferred`."""
 
     comptime Outputs = RowsViewArguments
@@ -848,9 +848,9 @@ struct _TrainerStepCall[origin: MutOrigin](Call):
             return _refuse(outcome, Status.SHAPE_MISMATCH)
         var embeddings: Optional[Pointer[RowsViewArguments, MutUntrackedOrigin]] = None
         var arena = NULL_ADDRESS
-        if case .Some(lent) = self.arena:
+        if case .Some(arena_pointer) = self.arena:
             embeddings = outputs
-            arena = lent[]._address
+            arena = arena_pointer[]._address
         _cross(
             TrainerStepArguments(
                 handle,
@@ -875,13 +875,13 @@ struct _TrainerStepCall[origin: MutOrigin](Call):
         )
 
     def served(self, status: Status) -> Int:
-        if case .Some(lent) = self.arena:
-            return _served(lent, status)
+        if case .Some(arena_pointer) = self.arena:
+            return _served(arena_pointer, status)
         return 0
 
     def conclude(deinit self, outputs: RowsViewArguments, generation: Int) -> Self.Result:
-        if case .Some(lent) = self.arena:
-            return Rows[Self.origin](lent, generation, outputs, self.count)
+        if case .Some(arena_pointer) = self.arena:
+            return Rows[Self.origin](arena_pointer, generation, outputs, self.count)
         return None
 
 
@@ -904,7 +904,7 @@ def _step_call[
         bags_origin, groups_origin, sides_origin, choices_origin, targets_origin, relations_origin, stats_origin
     ],
 ) -> _TrainerStepCall[origin]:
-    """Lowers a step's borrowed inputs into its crossing, inside the verb that keeps them alive."""
+    """Lowers the caller's step inputs into its crossing, inside the verb that keeps them alive."""
     var count = contents.count
 
     def optional_length(length: Int) {var count} -> Bool:
@@ -975,8 +975,8 @@ struct _TrainerSaveCall(Call):
 
 
 struct Mesh(Movable):
-    """One process's place among the processes of a run, borrowed by every trainer over the same executor;
-    released when it goes out of scope, after every trainer borrowing it."""
+    """One process's place among the processes of a run, shared by every trainer over the same executor;
+    released when it goes out of scope, after every trainer pointing at it."""
 
     var library: Library
     """The loaded engine, held so the release can still reach `uform_mesh_free`."""
@@ -1059,7 +1059,7 @@ struct Trainer[mesh_origin: ImmOrigin = ImmUntrackedOrigin](Movable):
     `trainer.deferred(executor)` submits there and answers a `Deferred`.
 
     Parameters:
-        mesh_origin: The mesh it borrows, kept alive for as long as the trainer is.
+        mesh_origin: The caller's mesh it points at, kept alive for as long as the trainer is.
     """
 
     var library: Library
@@ -1093,8 +1093,8 @@ struct Trainer[mesh_origin: ImmOrigin = ImmUntrackedOrigin](Movable):
         var outcome = stack_allocation[1, Outcome]()
         outcome[unsafe_offset=0] = Outcome()
         var mesh = NULL_ADDRESS
-        if case .Some(borrowed) = config.mesh:
-            mesh = borrowed[].address
+        if case .Some(mesh_pointer) = config.mesh:
+            mesh = mesh_pointer[].address
         _cross(
             TrainerInitVramArguments(
                 created.unsafe_origin_cast[MutUntrackedOrigin](),
@@ -1222,7 +1222,7 @@ struct TrainerOn[origin: ImmOrigin](ImplicitlyCopyable, TrainVerbs):
     """A trainer bound to the executor its verbs block on, as `trainer.on(executor)` answers it. Binding-only.
 
     Parameters:
-        origin: The trainer and the executor, which this receiver borrows.
+        origin: The trainer and the executor, which the caller owns and this receiver points at.
     """
 
     var library: Library
@@ -1248,7 +1248,7 @@ struct TrainerDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
     Binding-only.
 
     Parameters:
-        origin: The trainer and the executor, which this receiver borrows.
+        origin: The trainer and the executor, which the caller owns and this receiver points at.
     """
 
     var library: Library
@@ -1300,8 +1300,8 @@ struct TrainerDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
             )
         ),
     ]:
-        """Submits `TrainVerbs.step` with its embeddings; every input stays borrowed until final.
-        Calls `uform_trainer_step`."""
+        """Submits `TrainVerbs.step` with its embeddings; every input must stay allocated and unchanged
+        until the call is final. Calls `uform_trainer_step`."""
         return {
             self.library,
             _step_call[origin_of(arena)](modalities, contents, arena._pointer(), config),
@@ -1344,7 +1344,8 @@ struct TrainerDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
             )
         ),
     ]:
-        """Submits `TrainVerbs.step`; every input stays borrowed until final. Calls `uform_trainer_step`."""
+        """Submits `TrainVerbs.step`; every input must stay allocated and unchanged until the call is final.
+        Calls `uform_trainer_step`."""
         return {
             self.library,
             _step_call[MutUntrackedOrigin](
@@ -1360,7 +1361,8 @@ struct TrainerDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         _TrainerSaveCall,
         ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[path_origin]())),
     ]:
-        """Submits `TrainVerbs.save`; the path stays borrowed until final. Calls `uform_trainer_save`."""
+        """Submits `TrainVerbs.save`; the path must stay allocated and unchanged until the call is final.
+        Calls `uform_trainer_save`."""
         return {self.library, _TrainerSaveCall(BytesView.of(path).arguments(), progress), self.trainer, self.executor}
 
 

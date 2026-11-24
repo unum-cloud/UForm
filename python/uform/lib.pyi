@@ -288,18 +288,6 @@ class Executor:
         ...
 
     @classmethod
-    def on_pool(
-        cls,
-        pool: int,
-        /,
-        *,
-        memory_domains: Sequence[int] | None = None,
-        cpu_class_ceiling: CPUClass | None = None,
-    ) -> Executor:
-        """Borrows a ForkUnion pool; raises `UnsupportedError` until borrowing is designed. Calls `uform_executor_on_pool`."""
-        ...
-
-    @classmethod
     def for_vram(
         cls,
         devices: Sequence[int] | None = None,
@@ -327,7 +315,10 @@ class Executor:
 
 @final
 class Arena:
-    """The memory every output whose length scales with a call lands in, rewound by each call handed it."""
+    """The memory every output whose length scales with a call lands in, rewound by each call handed it.
+
+    An arena never outlives the executor that made it: drop it before the executor closes.
+    """
 
     def __new__(cls, executor: Executor | None = None, /) -> Self:
         """Makes one where `executor` computes, or host pages for the calling thread. Calls `uform_arena_init`."""
@@ -438,7 +429,7 @@ class ModelDescription:
 
     @property
     def token_width(self) -> int:
-        """Scalars per token vector; 0 when the checkpoint carries no token head."""
+        """Scalars per token vector; 0 when the checkpoint has no token head."""
         ...
 
     @property
@@ -723,7 +714,7 @@ class AudioShape(_Fields):
 
 @final
 class BatchShape(_Fields):
-    """What one device's step carries at most, whatever the modality mix, fixed at creation."""
+    """What one device's step holds at most, whatever the modality mix, fixed at creation."""
 
     max_rows_per_device: Final[int]
     max_segments_per_device: Final[int]
@@ -872,7 +863,10 @@ class MeshOptions(_Fields):
 
 @final
 class Edges(_Fields):
-    """One edge set over a step's items, as compressed sparse rows of buffers borrowed until the step is final."""
+    """One edge set over a step's items, as compressed sparse rows of buffers.
+
+    The buffers must stay alive and unchanged until the step is final.
+    """
 
     offsets: Final[Buffer | None]
     ids: Final[Buffer | None]
@@ -933,7 +927,7 @@ class MeshDescription:
 
 @final
 class Mesh:
-    """One process's place among the processes of a run, borrowed by every trainer."""
+    """One process's place among the processes of a run, shared by every trainer."""
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
     @classmethod

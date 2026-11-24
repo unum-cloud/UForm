@@ -9,7 +9,7 @@
  *  Every verb answers through a receiver whose type picks how it completes: a blocking receiver
  *  answers a bare @c status_t or an @c expected value unpacked as a pair, and a deferred one
  *  answers a @c deferred call its one owner polls, waits on or awaits. Handlers are @c noexcept
- *  callables borrowed for one call, so no fault ever unwinds through the library.
+ *  callables the caller keeps for one call, so no fault ever unwinds through the library.
  */
 #pragma once
 
@@ -102,7 +102,7 @@ class awaiter;
 
 /**
  *  @brief A submitted call: its outcome and its outputs, owned until the call is final, while the
- *      receiver, the inputs, the arena and the handlers it was handed stay borrowed until then.
+ *      receiver, the inputs, the arena and the handlers it was handed stay the caller's until then.
  *
  *  It never moves, as the library writes into it, and its one owner polls @c status, blocks in
  *  @c wait or awaits @c wait on its own loop; destruction waits, so nothing the call writes into
@@ -206,7 +206,7 @@ struct answer_value<expected<value_type_>> {
 template <typename answer_type_>
 using answer_value_t = typename answer_value<answer_type_>::type;
 
-/** Answers @p answer_type_ from a verb's @p body: a deferred call lends C its own outcome and
+/** Answers @p answer_type_ from a verb's @p body: a deferred call hands C its own outcome and
  *  outputs; a blocking call writes its outputs in place, then takes the C outcome's two words once
  *  it is final. */
 template <typename answer_type_, typename body_type_>
@@ -284,9 +284,10 @@ struct owning {
     handle_type_* handle_field() noexcept { return owner_.handle_field(); }
 };
 
-/** A borrowed handle and the executor its verbs run on, completing as @p completion_ says. */
+/** A handle the caller owns and the executor its verbs run on, completing as @p completion_
+ *  says. */
 template <typename handle_type_, uform_completion_t completion_>
-struct borrowing {
+struct caller_owned {
     static constexpr uform_completion_t completion = completion_;
     handle_type_ handle_ = nullptr;
     uform_executor_t executor_ = nullptr;
@@ -382,7 +383,7 @@ inline uform_bytes_view_t bytes_view(std::string_view text) noexcept {
     return {.data = reinterpret_cast<std::uint8_t const*>(text.data()), .length = text.size()};
 }
 
-/** Views @p bytes as the borrowed run every checkpoint buffer arrives in. */
+/** Views @p bytes as the caller's run every checkpoint buffer arrives in. */
 inline uform_bytes_view_t bytes_view(std::span<std::uint8_t const> bytes) noexcept {
     return {.data = bytes.data(), .length = bytes.size()};
 }
@@ -391,8 +392,8 @@ inline uform_bytes_view_t bytes_view(std::span<std::uint8_t const> bytes) noexce
  *  @brief A ragged batch of @p element_type_ laid out as Apache Arrow lays one out: elements end to
  *      end, and one more offset than entries, entry @c i spanning two consecutive offsets.
  *
- *  Borrowed: as an input, the caller keeps both spans alive until the call is final; as an output,
- *  it reads the call's arena until the arena's next call.
+ *  The caller owns both spans: as an input, it keeps them alive until the call is final; as an
+ *  output, it reads the call's arena until the arena's next call.
  */
 template <element element_type_>
 struct tape_view {
@@ -422,8 +423,8 @@ struct tape_view {
  *  @brief Gathers separate items of @p element_type_ into one tape laid out in the caller's
  *      @p offsets and @p elements, for callers whose items are not laid end to end already.
  *
- *  Gathering copies every element once, which a caller already holding a tape skips by lending its
- *  @c tape_view directly. The answer views both spans, so they outlive every call it is lent to.
+ *  Gathering copies every element once, which a caller already holding a tape skips by passing its
+ *  @c tape_view directly. The answer views both spans, so they outlive every call it is passed to.
  */
 template <element element_type_, std::ranges::sized_range items_type_>
 expected<tape_view<element_type_>> gathered(items_type_ const& items, std::span<std::size_t> offsets,
@@ -436,7 +437,7 @@ expected<tape_view<element_type_>> gathered(items_type_ const& items, std::span<
     for (std::span<element_type_ const> const item : items) {
         std::size_t const begin = offsets[position];
         if (item.size() > elements.size() - begin)
-            return {{}, status_t {status_code_t::invalid_argument_k, "The items hold more elements than were lent"}};
+            return {{}, status_t {status_code_t::invalid_argument_k, "The items outgrow the element buffer"}};
         if (!item.empty()) std::memcpy(elements.data() + begin, item.data(), item.size_bytes());
         offsets[++position] = begin + item.size();
     }
@@ -497,7 +498,8 @@ template <typename handler_type_>
 concept progress_handler =
     std::is_nothrow_invocable_r_v<uform_continuation_t, handler_type_&, std::size_t, std::size_t>;
 
-/** A progress handler borrowed for one call as its own state; empty hears nothing. */
+/** A progress handler the caller keeps for one call, passed as its own state; empty hears
+ *  nothing. */
 class progress_t {
     uform_progress_t raw_ {};
 
@@ -518,7 +520,7 @@ class progress_t {
 };
 
 /** Owns one executor: the host threads or device streams every call runs on, apart from any model;
- *  an empty one runs every call on the caller's own thread. */
+ *  an empty one runs every call on the caller's own thread. It outlives every arena it made. */
 class executor_t {
     owner<uform_executor_t, uform_executor_free> owner_;
 
@@ -526,18 +528,14 @@ class executor_t {
     uform_executor_t handle() const noexcept { return owner_.handle(); }
     uform_executor_t* handle_field() noexcept { return owner_.handle_field(); }
 
-    /** Creates an executor of host threads for RAM-resident models, interleaved across the compute
-     *  domains local to the memory domains @p arguments names. */
+    /** Creates an executor of host threads for RAM-resident models, near the one memory domain
+     *  @p arguments names, or interleaved across the machine for none or several. */
     static expected<executor_t> for_ram(uform_executor_for_ram_t arguments = {}) noexcept {
         return opened_<executor_t>(uform_executor_for_ram, arguments, &uform_executor_for_ram_t::executor);
     }
 
-    /** Wraps a ForkUnion pool the caller lends, so libraries in one process share its threads. */
-    static expected<executor_t> on_pool(uform_executor_on_pool_t arguments) noexcept {
-        return opened_<executor_t>(uform_executor_on_pool, arguments, &uform_executor_on_pool_t::executor);
-    }
-
-    /** Opens one submission stream on every device @p arguments names. */
+    /** Opens one submission stream on every device @p arguments names; caller streams answer
+     *  @c status_code_t::unsupported_k . */
     static expected<executor_t> for_vram(uform_executor_for_vram_t arguments = {}) noexcept {
         return opened_<executor_t>(uform_executor_for_vram, arguments, &uform_executor_for_vram_t::executor);
     }
@@ -552,7 +550,8 @@ class executor_t {
 };
 
 /** Owns one arena; every call writing outputs into it rewinds it first, ending the previous
- *  call's views. */
+ *  call's views. It must not outlive the executor that made it, so declare that executor first;
+ *  one made with no executor lives until it is destroyed. */
 class arena_t {
     owner<uform_arena_t, uform_arena_free> owner_;
 

@@ -78,7 +78,7 @@ A trainer has only the executor receivers, `trainer.on(executor)` and `trainer.d
 Loads and `Mesh.bootstrap` address no handle yet, so they are constructors taking the executor they run on.
 
 A `Deferred` keeps its outcome and outputs inline and never moves: the receiver builds it in your variable and submits it there, so it allocates nothing.
-It borrows the model, the executor, the arena and every input it was handed, which Mojo keeps alive for as long as the `Deferred` is.
+The model, the executor, the arena and every input it was handed stay the caller's, and Mojo keeps them alive for as long as the `Deferred` is.
 `wait` blocks in `uform_outcome_wait` until the call is final, then answers the result or raises the failure, as many times as it is asked.
 `status` reads the outcome without blocking, and destroying an unfinished `Deferred` waits for it.
 Inside an `async def`, `await call` answers the same, re-polling the status and yielding to Mojo's runtime while the call is pending; a task re-raises a failure as Mojo's own `Error`, which keeps the message but not the `status`:
@@ -88,7 +88,7 @@ from std.runtime._asyncrt import create_raising_task  # Mojo's runtime entry poi
 
 async def encode_both(first: Model, second: Model, first_executor: Executor, second_executor: Executor,
                       texts: TapeView) raises -> Int:
-    var first_arena = Arena(first_executor)  # borrows first_executor until it is freed
+    var first_arena = Arena(first_executor)  # refers to first_executor until it is freed
     var second_arena = Arena(second_executor)
     var first_call = first.deferred(first_executor).text_encode(texts, Outputs.EMBEDDINGS, first_arena)  # running now
     var second_call = second.deferred(second_executor).text_encode(texts, Outputs.EMBEDDINGS, second_arena)
@@ -126,7 +126,6 @@ There is a constructor per C one, and each fixes a kind that must match the resi
 
 ```mojo
 var threads = Executor.for_ram(library, RamOptions.on(domains), threads=8)  # zero takes 7/8 of the cores
-var shared = Executor.on_pool(library, fork_union_pool)                       # borrows a fu_pool_t
 var streams = Executor.for_vram(library, VramOptions.on(devices))             # one host thread, a stream per device
 threads.drain(Mood.SPINNING)                                                # waits until no call holds it, then keeps spinning
 ```
@@ -141,7 +140,7 @@ Every output whose length only the call knows, embeddings, states, token vectors
 Each call rewinds its arena, so the previous call's views die and a steady loop allocates once; reading a stale one raises `Status.INVALID_ARGUMENT`.
 To keep a result past the next call, pass that call another arena, and give every deferred call its own.
 An arena from a VRAM executor holds device memory, which host accessors refuse with `Status.DEVICE`, and serves only that executor's calls.
-Every arena borrows the executor that made it, so Mojo frees the arena before that executor.
+Every arena refers to the executor that made it, so Mojo frees the arena before that executor.
 
 The engine classifies every input pointer through the driver, so `TapeView.of` takes a host span or a host or device pointer, such as `buffer.unsafe_ptr()` of a MAX `DeviceBuffer`, with its offsets in host memory.
 
@@ -209,13 +208,13 @@ print(stats.step, stats.loss, stats.contrastive_loss)  # world means
 trainer.on(executor).save("checkpoint.safetensors")
 ```
 
-`TrainerStepConfig` also carries the `sides` that make items queries or documents for the late-interaction term and the `choices` and `choice_targets` tapes the byte decoder trains on, each read when the trainer's weight for it is positive.
+`TrainerStepConfig` also holds the `sides` that make items queries or documents for the late-interaction term and the `choices` and `choice_targets` tapes the byte decoder trains on, each read when the trainer's weight for it is positive.
 `save` writes the safetensors checkpoint the model loads read, and every process of the run bootstraps with the same count, directory and job, or `Mesh.bootstrap` raises `Status.CONFIG_MISMATCH`.
 
 ## Errors
 
 Every fallible entry point raises `Error` and nothing else, since Mojo allows one error type per function.
-An `Error` carries a `Status` shared with the C interface, so a fault this binding catches before the boundary reports the status the engine would have reported for the same fault:
+An `Error` holds a `Status` shared with the C interface, so a fault this binding catches before the boundary reports the status the engine would have reported for the same fault:
 
 ```mojo
 try:

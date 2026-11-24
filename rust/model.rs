@@ -1,9 +1,9 @@
 //! The model lifecycle: load an encoder into RAM or VRAM, describe it, and free it.
 //!
-//! Residency is in the constructor's name: [`Model::load_ram`] copies a checkpoint into host
-//! memory and [`Model::load_vram`] onto devices, each with a `_buffer` twin reading the checkpoint
-//! from memory. Quantization is the runtime [`Scalar`] passed at load, as in C, so a model carries
-//! no type parameter. One model serves every modality it was trained on.
+//! Residency is in the constructor's name: [`Model::load_ram`] copies a checkpoint into host memory
+//! and [`Model::load_vram`] onto devices, each with a `_buffer` twin reading the checkpoint from
+//! memory. Quantization is the runtime [`Scalar`] passed at load, as in C, so a model has no type
+//! parameter. One model serves every modality it was trained on.
 //!
 //! Every verb comes from [`ModelVerbs`] and [`EncodeVerbs`](crate::EncodeVerbs), written once over
 //! the receiver: a [`Model`] runs on the calling thread, `model.on(&executor)` blocks on an
@@ -136,7 +136,7 @@ pub struct ModelDescription {
     pub cpu_class: Option<CPUClass>,
     /// The class every replica of a VRAM model runs as; `None` for a RAM model.
     pub gpu_class: Option<GPUClass>,
-    /// Scalars per token vector; zero when the checkpoint carries no token head.
+    /// Scalars per token vector; zero when the checkpoint has no token head.
     pub token_width: usize,
     /// Question types the choice temperatures were calibrated over: zero without the byte decoder,
     /// one when uncalibrated.
@@ -352,8 +352,8 @@ impl Model {
     /// The receiver whose verbs submit their calls to `executor`, answering a
     /// [`Deferred`](crate::Deferred) from the same verbs given owned arguments.
     ///
-    /// The library reads a deferred call's inputs after the verb returns, so lending borrowed texts
-    /// does not compile:
+    /// The library reads a deferred call's inputs after the verb returns, so passing
+    /// texts by reference does not compile:
     ///
     /// ```compile_fail,E0277
     /// use uform::*;
@@ -366,8 +366,8 @@ impl Model {
     /// # Ok::<(), uform::Error>(())
     /// ```
     ///
-    /// Owned texts move into the call, and the arena is borrowed as a blocking call borrows it, and
-    /// so is the waited result:
+    /// Owned texts move into the call, the arena is held by `&mut` as in a blocking call, and the
+    /// waited result refers to it:
     ///
     /// ```no_run
     /// use uform::*;
@@ -489,7 +489,7 @@ pub(crate) type Deferrable<'model, Receiver, Verb> =
 /// thread, and the [`On`] that [`Model::on`] or [`Model::deferred`] makes runs on an executor.
 ///
 /// A blocking receiver answers what the call produced; a deferring one answers a
-/// [`Deferred`](crate::Deferred) that borrows the model. [`EncodeVerbs`](crate::EncodeVerbs)
+/// [`Deferred`](crate::Deferred) that cannot outlive the model. [`EncodeVerbs`](crate::EncodeVerbs)
 /// extends it with the forward passes.
 ///
 /// Rust-only.

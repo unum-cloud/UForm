@@ -137,7 +137,7 @@ static void test_slices_match_world(util::u32_t host, util::u32_t multimem, util
                     mirrored = mirrored || back.ids[back_edge] == gpu * segments_k + row;
                 expect_true(mirrored, "vertex {} attracts {} but not back", gpu * segments_k + row, partner);
                 expect_true(world.lengths[gpu][row] != 0u && world.lengths[partner / segments_k][partner_row] != 0u,
-                            "PAD vertex {} or {} carries an edge", gpu * segments_k + row, partner);
+                            "PAD vertex {} or {} has an edge", gpu * segments_k + row, partner);
             }
     }
 }

@@ -31,7 +31,6 @@ export {
 export type {
   ExecutorForRamConfig,
   ExecutorForVramConfig,
-  ExecutorOnPoolConfig,
   GpuDevice,
   GpuVendor,
   MultimemTier,

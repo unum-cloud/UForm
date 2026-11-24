@@ -64,7 +64,7 @@ static uform_py_field_t const ImageShape_fields[] = {
     {"patch_side", uform_py_field_size_k, offsetof(uform_image_shape_t, patch_side), NULL,
      "The square patch side images tile into, in pixels; 0 leaves images out of the run."},
     {"channels", uform_py_field_size_k, offsetof(uform_image_shape_t, channels), NULL,
-     "Channels every pixel carries; 0 derives four, RGBA."},
+     "Channels every pixel has; 0 derives four, RGBA."},
 };
 
 uform_py_fields_t ImageShapeType = {
@@ -82,7 +82,7 @@ static uform_py_field_t const VideoShape_fields[] = {
     {"frame_stride", uform_py_field_size_k, offsetof(uform_video_shape_t, frame_stride), NULL,
      "Source frames between sampled ones; 0 derives one, every frame."},
     {"channels", uform_py_field_size_k, offsetof(uform_video_shape_t, channels), NULL,
-     "Channels every pixel carries; 0 derives three."},
+     "Channels every pixel has; 0 derives three."},
 };
 
 uform_py_fields_t VideoShapeType = {
@@ -111,11 +111,11 @@ static uform_py_field_t const BatchShape_fields[] = {
     {"max_rows_per_device", uform_py_field_size_k, offsetof(uform_batch_shape_t, max_rows_per_device), NULL,
      "Rows one device's step packs."},
     {"max_segments_per_device", uform_py_field_size_k, offsetof(uform_batch_shape_t, max_segments_per_device), NULL,
-     "Items one device's step carries across all its rows."},
+     "Items one device's step holds across all its rows."},
     {"max_columns_per_row", uform_py_field_size_k, offsetof(uform_batch_shape_t, max_columns_per_row), NULL,
      "Positions one row spans, the sequence length."},
     {"max_bags_per_device", uform_py_field_size_k, offsetof(uform_batch_shape_t, max_bags_per_device), NULL,
-     "Bags one device's step carries; 0 keeps every item its own routing unit."},
+     "Bags one device's step holds; 0 keeps every item its own routing unit."},
     {"max_choices_per_item", uform_py_field_size_k, offsetof(uform_batch_shape_t, max_choices_per_item), NULL,
      "Legal bytes one item offers to choose from at most; 0 makes no choices."},
     {"image", uform_py_field_struct_k, offsetof(uform_batch_shape_t, image), &ImageShapeType,
@@ -130,7 +130,7 @@ uform_py_fields_t BatchShapeType = {
     {PyVarObject_HEAD_INIT(NULL, 0).tp_name = "uform.BatchShape",
      .tp_doc = "BatchShape(*, max_rows_per_device=0, max_segments_per_device=0, max_columns_per_row=0, " //
                "max_bags_per_device=0, max_choices_per_item=0, image=None, video=None, audio=None)\n\n"  //
-               "What one device's step carries at most, whatever the modality mix, fixed at creation.\n" //
+               "What one device's step holds at most, whatever the modality mix, fixed at creation.\n"   //
                "A nested shape takes its own structure or a tuple of its fields in order."},
     BatchShape_fields,
     sizeof(BatchShape_fields) / sizeof(*BatchShape_fields),
@@ -312,9 +312,9 @@ static uform_py_field_t const Edges_fields[] = {
 
 uform_py_fields_t EdgesType = {
     {PyVarObject_HEAD_INIT(NULL, 0).tp_name = "uform.Edges",
-     .tp_doc = "Edges(*, offsets=None, ids=None, weights=None)\n\n"                                           //
-               "One edge set over a step's items, as compressed sparse rows of buffers, borrowed until the\n" //
-               "step is final."},
+     .tp_doc = "Edges(*, offsets=None, ids=None, weights=None)\n\n"                                      //
+               "One edge set over a step's items, as compressed sparse rows of buffers that must stay\n" //
+               "alive and unchanged until the step is final."},
     Edges_fields,
     sizeof(Edges_fields) / sizeof(*Edges_fields),
 };
@@ -355,7 +355,7 @@ static char const doc_Mesh[] =                                                  
     "\n"                                                                                       //
     "One process's place among the processes of a run: the topology every process agreed on\n" //
     "at bootstrap, and the InfiniBand domain joining its NVLink domains. Made once with\n"     //
-    "`bootstrap` and borrowed by every trainer, which holds it until the trainer is freed.";
+    "`bootstrap` and shared by every trainer, which holds it until the trainer is freed.";
 
 static PyObject* Mesh_tp_new(PyTypeObject* type, PyObject* args, PyObject* keywords) {
     PyErr_SetString(PyExc_TypeError, "Mesh is built through Mesh.bootstrap()");
@@ -377,8 +377,8 @@ static int optional_path(PyObject* object, char const* field, uform_bytes_view_t
     return uform_py_path_from_object(object, field, view, decoded);
 }
 
-/** Lends an optional name field, a @c str, as its UTF-8 bytes into @p view, which live as long
- *  as the string; returns 0 or -1. */
+/** Points @p view at the UTF-8 bytes of an optional name field, a @c str, which stay valid as
+ *  long as the string; returns 0 or -1. */
 static int optional_name(PyObject* object, char const* field, uform_bytes_view_t* view) {
     if (!object || object == Py_None) return 0;
     if (!PyUnicode_Check(object)) {
@@ -538,8 +538,7 @@ typedef struct Trainer {
     /** The @c Executor the trainer was created on, held, which its own verbs block on. */
     PyObject* executor;
 
-    /** The @c Mesh the trainer borrows until it is freed, held, or NULL for a run
-     *  of one process. */
+    /** The @c Mesh the trainer holds until it is freed, or NULL for a run of one process. */
     PyObject* mesh;
 } Trainer;
 
@@ -608,7 +607,7 @@ static char const doc_Trainer_init_vram[] =                                     
     "    saved step; one of another geometry raises `ConfigMismatchError`.\n"                        //
     "  depth (int): Transformer blocks stacked.\n"                                                   //
     "  hidden (int): Embedding width, a multiple of 128.\n"                                          //
-    "  batch (BatchShape): What one device's step carries at most.\n"                                //
+    "  batch (BatchShape): What one device's step holds at most.\n"                                  //
     "  objective (Objective, optional): Which losses a step relaxes.\n"                              //
     "  masking (Masking, optional): The masked objective's corruption and weights.\n"                //
     "  contrastive (Contrastive, optional): The contrastive loss's scoring.\n"                       //
@@ -795,7 +794,7 @@ PyTypeObject TrainerStepStatsType = {
     .tp_getset = TrainerStepStats_getset,
 };
 
-/** One edge set's buffers, lent until the step is final. */
+/** One edge set's buffers, held and read in place until the step is final. */
 typedef struct edges_t {
     Py_buffer offsets, ids, weights;
 } edges_t;
@@ -818,7 +817,7 @@ static int edges_buffer(PyObject* object, char const* field, Py_ssize_t item_byt
 }
 
 /**
- *  @brief Lends the edge set @p object - an @c Edges or None - over @p count items into @p view,
+ *  @brief Acquires the edge set @p object - an @c Edges or None - over @p count items into @p view,
  *      checking every offset stays inside its ids and every weight pairs with one.
  *  @return 0 on success, -1 with an exception set otherwise.
  */
@@ -845,7 +844,7 @@ static int edges_from_object(PyObject* object, char const* field, size_t count, 
 }
 
 /**
- *  @brief Lends the @b optional choices and their targets over @p count items: both tapes or
+ *  @brief Acquires the @b optional choices and their targets over @p count items: both tapes or
  *      neither, one entry per item each, the library checking each target entry is as long as
  *      its choice entry.
  *  @return 0 on success, -1 with an exception set otherwise.
@@ -865,7 +864,7 @@ static int choices_from_objects(PyObject* choices_object, PyObject* targets_obje
     return 0;
 }
 
-/** A @c uform_trainer_step call, the inputs it owns or borrows until it is final, and
+/** A @c uform_trainer_step call, the inputs it owns or reads until it is final, and
  *  what it lands. */
 typedef struct step_call_t {
     uform_py_call_t call;
@@ -973,7 +972,7 @@ static char const doc_Trainer_step[] =                                          
     "Args:\n"                                                                                     //
     "  modalities (Sequence[Modality]): The modality of each item.\n"                             //
     "  contents (Sequence[str | bytes] | tuple[buffer, buffer]): UTF-8 text or an encoded file\n" //
-    "    per item, gathered into one tape, or a (data, offsets) pair lent as is.\n"               //
+    "    per item, gathered into one tape, or a (data, offsets) pair read in place.\n"            //
     "  bags (buffer | Sequence[int], optional): The bag of each item; items sharing one land\n"   //
     "    on one device. None keeps every item its own bag.\n"                                     //
     "  temperature_groups (buffer | Sequence[int], optional): The temperature group of each\n"    //
@@ -1077,7 +1076,7 @@ static PyObject* Trainer_step(PyObject* self, PyObject* const* args, Py_ssize_t 
     return uform_py_call_run(&receiver, &step_verb, call);
 }
 
-/** A @c uform_trainer_save call, and the encoded path and handler it borrows until it is final. */
+/** A @c uform_trainer_save call, and the encoded path and handler it holds until it is final. */
 typedef struct save_call_t {
     uform_py_call_t call;
     uform_trainer_save_t arguments;

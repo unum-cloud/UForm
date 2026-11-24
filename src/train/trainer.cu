@@ -369,7 +369,7 @@ struct device_budget_t {
         return stepped;
     if (util::expected_t drained = probe.synchronize(); !drained) return drained;
     // A data source fills every GPU's batches for the next steps and mixes them from the arenas
-    // after the trainer, so the probe allocates the same, and the fit carries them per row; a
+    // after the trainer, so the probe allocates the same, and the fit holds them per row; a
     // held-out source allocates its own.
     std::size_t const sources = config.eval_every && !config.eval_mixture.empty() ? 2 : 1;
     st::basic_vector<multimodal_batch_on_gpu_t> filled;

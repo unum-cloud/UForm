@@ -105,7 +105,7 @@ UFORM_EXPORT void uform_text_encode(uform_text_encode_t* arguments);
 /** The arguments of @c uform_text_choose. */
 typedef struct uform_text_choose_t {
 
-    /** The model to choose with; it must carry the byte decoder, its
+    /** The model to choose with; it must have the byte decoder, its
      *  @c choice_temperature_groups nonzero. */
     uform_model_t model;
 

@@ -122,7 +122,7 @@ using pinned1_t = nk::tensor<value_type_, util::pinned_alloc<value_type_>, 1>;
 /**
  *  @brief Read member @p member 's mixed batch back and assert every segment equals its
  *      @ref epoch_permutation source: destination @c member · S+s pulls world source @c src , whose
- *      member is @c src/S and segment @c src%S ; the mixed segment must carry that source's length,
+ *      member is @c src/S and segment @c src%S ; the mixed segment must have that source's length,
  *      its @c text_k modality, and its tokens.
  *  @param[in,out] mixed The member's mixed batch to read back.
  *  @param[in] member This member's world coordinate ( @c gpu_index_in_colocated_domain ) — its destination
@@ -204,7 +204,7 @@ static void routing_is_a_bijection(util::u32_t member_count, util::u64_t seed, u
 /** Bags per member in the bag-cohesion tier — the latched routing capacity. */
 inline constexpr util::u32_t bags_per_member_k = 3u;
 
-/** The bag id a PAD segment carries — one past the last valid bag, the mixer's no-bag @c end
+/** The bag ID a PAD segment has — one past the last valid bag, the mixer's no-bag @c end
  *  sentinel. */
 inline constexpr util::u32_t pad_bag_k = bags_per_member_k;
 
@@ -527,7 +527,7 @@ static case_result_t test_routes_segments() {
     auto [topology, bootstrap_status] = util::mesh_topology_t::bootstrap(host_domain_index, host_domain_count,
                                                                          &pause_between_polls, member_count);
     if (!expect_true(bootstrap_status, "mesh bootstrap: {}", bootstrap_status.description_)) return {};
-    // The routing world spans every multimem_domain's members; this domain's GPUs carry the world
+    // The routing world spans every multimem_domain's members; this domain's GPUs cover the world
     // coordinates [first, first + member_count) the signatures and the oracle both use.
     util::u32_t const world_member_count = member_count * host_domain_count;
     util::u32_t const first_gpu_index_in_colocated_domain = topology.shape.gpu_index_of_multimem_member(

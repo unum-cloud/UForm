@@ -3,7 +3,7 @@
 Every verb takes one argument structure named after it, mirrored below as an `...Arguments` struct
 laid out exactly as the library reads it and crossed by address. Every output whose length scales
 with the call lands in the `Arena` the verb takes as its last required argument, and the `Encoded`
-result borrows it in turn. `Outputs` names which surfaces of the one forward a call keeps.
+result points into it in turn. `Outputs` names which surfaces of the one forward a call keeps.
 
 The verbs themselves are written once, in `ModelVerbs`; this module holds their crossings.
 
@@ -94,10 +94,10 @@ struct EncodedArguments(Defaultable, ImplicitlyCopyable):
 
 @fieldwise_init
 struct Encoded[origin: MutOrigin](Movable):
-    """What an encode verb wrote into the arena it borrows: the surfaces its `Outputs` named. Binding-only.
+    """What an encode verb wrote into the caller's arena: the surfaces its `Outputs` named. Binding-only.
 
     Parameters:
-        origin: The arena the surfaces live in, which this result borrows.
+        origin: The arena the surfaces live in, which the caller owns and this result keeps alive.
     """
 
     var arena: Pointer[Arena[ImmUntrackedOrigin], Self.origin]
@@ -140,7 +140,7 @@ struct EncodeConfig[stats_origin: MutOrigin = MutUntrackedOrigin](ImplicitlyCopy
     """The knobs every encode verb shares, the verbs over texts, images, clips and recordings alike.
 
     Parameters:
-        stats_origin: The lent report slot's origin, inferred where one is lent.
+        stats_origin: The origin of the caller's report slot, inferred where one is given.
     """
 
     var outputs_scalar: ScalarKind
@@ -169,8 +169,8 @@ struct TextChooseConfig[
     """The question types, the progress handler and the report slot of `text_choose`.
 
     Parameters:
-        groups_origin: The borrowed question types' origin, inferred where some are lent.
-        stats_origin: The lent report slot's origin, inferred where one is lent.
+        groups_origin: The origin of the caller's question types, inferred where some are given.
+        stats_origin: The origin of the caller's report slot, inferred where one is given.
     """
 
     var temperature_groups: Span[UInt32, Self.groups_origin]
@@ -194,15 +194,15 @@ struct TextChooseConfig[
         self.stats = stats
 
 
-def _lent[T: AnyType, origin: MutOrigin, //](slot: Optional[Pointer[T, origin]]) -> Optional[Pointer[T, MutUntrackedOrigin]]:
-    """A lent output slot with its borrow erased, as the C layout names it."""
+def _slot[T: AnyType, origin: MutOrigin, //](slot: Optional[Pointer[T, origin]]) -> Optional[Pointer[T, MutUntrackedOrigin]]:
+    """The caller's output slot with its origin erased, as the C layout names it."""
     if case .Some(pointer) = slot:
         return pointer.unsafe_origin_cast[MutUntrackedOrigin]()
     return None
 
 
 def _array[T: AnyType, origin: ImmOrigin, //](items: Span[T, origin]) -> Optional[Pointer[T, ImmUntrackedOrigin]]:
-    """A borrowed host array with its borrow erased, absent when empty, as the C layout names it."""
+    """The caller's host array with its origin erased, absent when empty, as the C layout names it."""
     if len(items) == 0:
         return None
     return Pointer[T, ImmUntrackedOrigin](unsafe_from_address=Int(items.unsafe_ptr()))
@@ -335,7 +335,7 @@ struct _EncodeCall[
     origin: MutOrigin, inputs_origin: ImmOrigin, stats_origin: MutOrigin, name: StaticString
 ](Call):
     """The crossing of `uform_text_encode`, `uform_image_encode`, `uform_video_encode` or
-    `uform_audio_encode`, which share one layout and borrow the arena their surfaces land in."""
+    `uform_audio_encode`, which share one layout and write their surfaces into the caller's arena."""
 
     comptime Outputs = EncodedArguments
     comptime Result = Encoded[Self.origin]
@@ -377,7 +377,7 @@ struct _EncodeCall[
                 self.arena[]._address,
                 self.config.outputs_scalar,
                 self.config.progress,
-                _lent(self.config.stats),
+                _slot(self.config.stats),
             ),
             verb,
         )
@@ -397,7 +397,7 @@ struct _ImageEncodePixelsCall[
     widths_origin: ImmOrigin,
     stats_origin: MutOrigin,
 ](Call):
-    """The crossing of `uform_image_encode_pixels`, which borrows the arena its surfaces land in."""
+    """The crossing of `uform_image_encode_pixels`, which writes its surfaces into the caller's arena."""
 
     comptime Outputs = EncodedArguments
     comptime Result = Encoded[Self.origin]
@@ -436,7 +436,7 @@ struct _ImageEncodePixelsCall[
                 self.arena[]._address,
                 self.config.outputs_scalar,
                 self.config.progress,
-                _lent(self.config.stats),
+                _slot(self.config.stats),
             ),
             library.symbols().image_encode_pixels,
         )
@@ -452,7 +452,7 @@ struct _ImageEncodePixelsCall[
 struct _AudioEncodeSamplesCall[
     origin: MutOrigin, samples_origin: ImmOrigin, stats_origin: MutOrigin
 ](Call):
-    """The crossing of `uform_audio_encode_samples`, which borrows the arena its surfaces land in."""
+    """The crossing of `uform_audio_encode_samples`, which writes its surfaces into the caller's arena."""
 
     comptime Outputs = EncodedArguments
     comptime Result = Encoded[Self.origin]
@@ -487,7 +487,7 @@ struct _AudioEncodeSamplesCall[
                 self.arena[]._address,
                 self.config.outputs_scalar,
                 self.config.progress,
-                _lent(self.config.stats),
+                _slot(self.config.stats),
             ),
             library.symbols().audio_encode_samples,
         )
@@ -507,7 +507,7 @@ struct _TextChooseCall[
     groups_origin: ImmOrigin,
     stats_origin: MutOrigin,
 ](Call):
-    """The crossing of `uform_text_choose`, which borrows the arena its probabilities land in."""
+    """The crossing of `uform_text_choose`, which writes its probabilities into the caller's arena."""
 
     comptime Outputs = TapeViewArguments
     comptime Result = Tape[Self.origin]
@@ -542,7 +542,7 @@ struct _TextChooseCall[
                 outputs,
                 self.arena[]._address,
                 self.config.progress,
-                _lent(self.config.stats),
+                _slot(self.config.stats),
             ),
             library.symbols().text_choose,
         )

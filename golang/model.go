@@ -133,19 +133,19 @@ func ModelLoadRam(path string, config *ModelLoadRamConfig) (*Model, error) {
 	if err != nil {
 		return nil, err
 	}
-	var lent lent[C.uform_model_t]
-	arguments := open[C.uform_model_load_ram_t](&lent)
+	var call callWithResult[C.uform_model_t]
+	arguments := open[C.uform_model_load_ram_t](&call)
 	*arguments = C.uform_model_load_ram_t{
-		model:        lent.result,
+		model:        call.result,
 		executor:     executor,
-		outcome:      lent.outcome(),
-		path:         lent.text(path),
-		ram:          lent.ram(options.MemoryDomains, options.CPUClassCeiling),
+		outcome:      call.outcome(),
+		path:         call.text(path),
+		ram:          call.ram(options.MemoryDomains, options.CPUClassCeiling),
 		quantization: blocks(options.Quantization),
-		progress:     lent.progress(options.Progress, options.ProgressSteps),
+		progress:     call.progress(options.Progress, options.ProgressSteps),
 	}
 	C.uform_model_load_ram(arguments)
-	return modelOf(block(&lent, nil))
+	return modelOf(block(&call, nil))
 }
 
 // ModelLoadRamBuffer copies a checkpoint held in memory into host memory and packs it for the CPU;
@@ -158,19 +158,19 @@ func ModelLoadRamBuffer(buffer []byte, config *ModelLoadRamConfig) (*Model, erro
 	if err != nil {
 		return nil, err
 	}
-	var lent lent[C.uform_model_t]
-	arguments := open[C.uform_model_load_ram_buffer_t](&lent)
+	var call callWithResult[C.uform_model_t]
+	arguments := open[C.uform_model_load_ram_buffer_t](&call)
 	*arguments = C.uform_model_load_ram_buffer_t{
-		model:        lent.result,
+		model:        call.result,
 		executor:     executor,
-		outcome:      lent.outcome(),
-		buffer:       lent.bytes(buffer),
-		ram:          lent.ram(options.MemoryDomains, options.CPUClassCeiling),
+		outcome:      call.outcome(),
+		buffer:       call.bytes(buffer),
+		ram:          call.ram(options.MemoryDomains, options.CPUClassCeiling),
 		quantization: blocks(options.Quantization),
-		progress:     lent.progress(options.Progress, options.ProgressSteps),
+		progress:     call.progress(options.Progress, options.ProgressSteps),
 	}
 	C.uform_model_load_ram_buffer(arguments)
-	return modelOf(block(&lent, nil))
+	return modelOf(block(&call, nil))
 }
 
 // ModelLoadVram copies a checkpoint file onto the named GPUs and packs it there, replicated on
@@ -183,19 +183,19 @@ func ModelLoadVram(path string, config *ModelLoadVramConfig) (*Model, error) {
 	if err != nil {
 		return nil, err
 	}
-	var lent lent[C.uform_model_t]
-	arguments := open[C.uform_model_load_vram_t](&lent)
+	var call callWithResult[C.uform_model_t]
+	arguments := open[C.uform_model_load_vram_t](&call)
 	*arguments = C.uform_model_load_vram_t{
-		model:        lent.result,
+		model:        call.result,
 		executor:     executor,
-		outcome:      lent.outcome(),
-		path:         lent.text(path),
-		vram:         lent.vram(options.Devices, options.GPUClassCeiling),
+		outcome:      call.outcome(),
+		path:         call.text(path),
+		vram:         call.vram(options.Devices, options.GPUClassCeiling),
 		quantization: blocks(options.Quantization),
-		progress:     lent.progress(options.Progress, options.ProgressSteps),
+		progress:     call.progress(options.Progress, options.ProgressSteps),
 	}
 	C.uform_model_load_vram(arguments)
-	return modelOf(block(&lent, nil))
+	return modelOf(block(&call, nil))
 }
 
 // ModelLoadVramBuffer copies a checkpoint held in memory onto the named GPUs and packs it there.
@@ -207,19 +207,19 @@ func ModelLoadVramBuffer(buffer []byte, config *ModelLoadVramConfig) (*Model, er
 	if err != nil {
 		return nil, err
 	}
-	var lent lent[C.uform_model_t]
-	arguments := open[C.uform_model_load_vram_buffer_t](&lent)
+	var call callWithResult[C.uform_model_t]
+	arguments := open[C.uform_model_load_vram_buffer_t](&call)
 	*arguments = C.uform_model_load_vram_buffer_t{
-		model:        lent.result,
+		model:        call.result,
 		executor:     executor,
-		outcome:      lent.outcome(),
-		buffer:       lent.bytes(buffer),
-		vram:         lent.vram(options.Devices, options.GPUClassCeiling),
+		outcome:      call.outcome(),
+		buffer:       call.bytes(buffer),
+		vram:         call.vram(options.Devices, options.GPUClassCeiling),
 		quantization: blocks(options.Quantization),
-		progress:     lent.progress(options.Progress, options.ProgressSteps),
+		progress:     call.progress(options.Progress, options.ProgressSteps),
 	}
 	C.uform_model_load_vram_buffer(arguments)
-	return modelOf(block(&lent, nil))
+	return modelOf(block(&call, nil))
 }
 
 // Close frees the model, waiting for every deferred call naming it. It is idempotent, and a closed
@@ -252,7 +252,8 @@ type ModelOn struct {
 // Deferred, offering every verb of ModelOn with the same arguments. Binding-only.
 //
 // The library reads a deferred call's inputs until the call is final, so the tapes and slices a
-// verb is handed must not change until then; its arena is borrowed, as a blocking verb borrows it.
+// verb is handed must not change until then; its arena stays in use until then, as with a blocking
+// verb.
 type ModelDeferredOn struct {
 	modelReceiver
 }
@@ -275,28 +276,28 @@ func (on ModelOn) Deferred(executor *Executor) ModelDeferredOn {
 //
 // Calls uform_model_describe.
 func (on ModelOn) Describe() (ModelDescription, error) {
-	var lent lent[ModelDescription]
-	return block(&lent, on.describe(&lent, C.uform_completion_blocking_k))
+	var call callWithResult[ModelDescription]
+	return block(&call, on.describe(&call, C.uform_completion_blocking_k))
 }
 
 // Describe submits ModelOn.Describe.
 func (on ModelDeferredOn) Describe() (*Deferred[ModelDescription], error) {
 	deferred := new(Deferred[ModelDescription])
-	return submitted(deferred, on.describe(&deferred.lent, C.uform_completion_deferred_k))
+	return submitted(deferred, on.describe(&deferred.call, C.uform_completion_deferred_k))
 }
 
-func (receiver modelReceiver) describe(lent *lent[ModelDescription], completion C.uform_completion_t) error {
+func (receiver modelReceiver) describe(call *callWithResult[ModelDescription], completion C.uform_completion_t) error {
 	model, executor, err := receiver.lower()
 	if err != nil {
 		return err
 	}
-	arguments := open[C.uform_model_describe_t](lent)
+	arguments := open[C.uform_model_describe_t](call)
 	*arguments = C.uform_model_describe_t{
 		model:       model,
 		executor:    executor,
-		outcome:     lent.outcome(),
+		outcome:     call.outcome(),
 		completion:  completion,
-		description: (*C.uform_model_description_t)(unsafe.Pointer(lent.result)),
+		description: (*C.uform_model_description_t)(unsafe.Pointer(call.result)),
 	}
 	C.uform_model_describe(arguments)
 	return nil

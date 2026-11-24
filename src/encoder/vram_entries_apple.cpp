@@ -1344,6 +1344,8 @@ nk_allocator_t ue::vram_apple_entries_kit_t::policy(nk_stream_t stream, uform_re
     return policy;
 }
 
+nk_status_t ue::vram_apple_entries_kit_t::select(std::size_t) noexcept { return nk_success_k; }
+
 nk_status_t ue::vram_apple_entries_kit_t::synchronize(nk_stream_t stream) noexcept {
     metal_context_t const* const context = context_of_(stream);
     return context ? drain_(*context, stream) : nk_missing_gpu_k;

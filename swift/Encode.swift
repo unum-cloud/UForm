@@ -397,7 +397,7 @@ extension ModelCall {
         let states = outputs.contains(.states) ? landing.slots(uform_rows_tape_view_t()) : nil
         let tokenVectors = outputs.contains(.tokenVectors) ? landing.slots(uform_rows_tape_view_t()) : nil
         let stats = landing.slots(Arguments.Stats())
-        let write = landing.lend(arena)
+        let write = landing.write(arena)
         arguments.model = model.raw
         arguments.executor = executor?.raw
         arguments.outcome = landing.outcome
@@ -408,7 +408,7 @@ extension ModelCall {
         arguments.token_vectors = tokenVectors
         arguments.arena = arena.raw
         arguments.outputs_scalar = config.outputsScalar.raw
-        arguments.progress = landing.lend(config.progress, steps: config.progressSteps)
+        arguments.progress = landing.progress(config.progress, steps: config.progressSteps)
         arguments.stats = stats
         verb(&arguments)
         return try landing.submitted {
@@ -435,7 +435,7 @@ extension ModelCall {
         }
         let probabilities = landing.slots(uform_tape_view_t())
         let stats = landing.slots(uform_text_encode_stats_t())
-        let write = landing.lend(arena)
+        let write = landing.write(arena)
         var arguments = uform_text_choose_t()
         arguments.model = model.raw
         arguments.executor = executor?.raw
@@ -444,10 +444,10 @@ extension ModelCall {
         arguments.count = texts.count
         arguments.texts = landing.tape(texts.map(\.utf8), .u8)
         arguments.choices = landing.tape(choices, .u8)
-        arguments.temperature_groups = temperatureGroups.flatMap { landing.lend($0) }
+        arguments.temperature_groups = temperatureGroups.flatMap { landing.copy($0) }
         arguments.probabilities = probabilities
         arguments.arena = arena.raw
-        arguments.progress = landing.lend(progress, steps: progressSteps)
+        arguments.progress = landing.progress(progress, steps: progressSteps)
         arguments.stats = stats
         uform_text_choose(&arguments)
         return try landing.submitted {
@@ -492,14 +492,14 @@ extension ModelCall {
         _ arena: Arena,
         _ config: EncodeConfig
     ) throws(UFormError) -> Submission<Encoded> {
-        // The C side reads one height and one width per item behind pointers that carry no count.
+        // The C side reads one height and one width per item behind pointers that have no count.
         guard heights.count == pixels.count, widths.count == pixels.count else {
             throw UFormError(status: .shapeMismatch, message: "the heights and widths must name one per item")
         }
         var arguments = uform_image_encode_pixels_t()
         arguments.pixels = landing.tape(pixels, .u8)
-        arguments.heights = landing.lend(heights)
-        arguments.widths = landing.lend(widths)
+        arguments.heights = landing.copy(heights)
+        arguments.widths = landing.copy(widths)
         return try encode(arguments, count: pixels.count, outputs: outputs, arena: arena, config: config) {
             uform_image_encode_pixels($0)
         }

@@ -15,11 +15,11 @@
  *  @section multimodal_batch_rows Rectangular rows, segments of any modality
  *
  *  A batch is a @b [rows,columns] rectangle of fixed-width rows packing segments back to back; each
- *  segment carries its own @ref unum::uform::encoder::multimodal_batch::segment_modality tag rather
+ *  segment holds its own @ref unum::uform::encoder::multimodal_batch::segment_modality tag rather
  *  than a row band implying it, so a row can hold segments of any modality — thumbnails, a caption,
  *  and an audio clip together. A single loader fills one modality (it owns the whole segment
  *  table), and the @b mixer interleaves modalities across GPUs, so that free mixing is a property
- *  of the @b post-mix batch, not of one loader's fill. Media segments carry their @b raw signals —
+ *  of the @b post-mix batch, not of one loader's fill. Media segments hold their @b raw signals —
  *  pixels, raw waveform frames — and every learnable transform (patch cut, spectral frontend,
  *  projection, embedding lookup) happens inside the differentiated step with fresh weights, never
  *  at packing time.
@@ -49,7 +49,7 @@
  *
  *  @section multimodal_batch_adapters Content is loader-tiled and patch-arranged; the batch only derives position
  *
- *  A token carries two things: its @b content (a patch vector, a raw sample chunk, or a scalar id)
+ *  A token holds two things: its @b content (a patch vector, a raw sample chunk, or a scalar ID)
  *  and its @b position (where it sits in the encoder's shared coordinate space). The content is
  *  stored ready — the loader tiles the 2-D / 3-D modalities into the patch grid (
  *  @ref unum::uform::encoder::multimodal_batch::images ,
@@ -79,8 +79,8 @@
  *  factorization changes only the coordinate the descriptor drives, so @b aspect ratio and @b video
  *  spatial-vs-temporal resolution are positional-encoding choices, not storage ones. One clip
  *  sampled two ways (a dense and a sparse @c frame_stride ) is two segments sharing one coordinate
- *  frame: absolute time on the temporal axis (a tube at real frame @c T carries coord @c T
- *  regardless of sampling density) is what makes those representations commensurable.
+ *  frame: absolute time on the temporal axis (a tube at real frame @c T has coord @c T regardless
+ *  of sampling density) is what makes those representations commensurable.
  *
  *  A corollary the masking cell reuses: tube masking is just a @b key the mask draws
  *  on @c (h,w) and broadcasts over @c t — derived from the coordinates, never a
@@ -114,7 +114,7 @@ inline constexpr token_id_t byte_pad_k = 256u;
 inline constexpr token_id_t byte_mask_k = 257u;
 
 /** One segment's input kind — which raw tensor feeds it, which RoPE pattern it walks, and, under
- *  masking, which reconstruction head scores it. Carried per segment (any row may mix modalities),
+ *  masking, which reconstruction head scores it. Stored per segment (any row may mix modalities),
  *  so the coordinate adapter and the tower route on it. Scoped over @c u8_t — the whole batch is
  *  typed, never a raw tag byte. */
 enum class modality_t : u8_t {
@@ -170,7 +170,7 @@ struct image_batch_shape_t {
      *  disables the modality. */
     u32_t patch_side = 0;
 
-    /** The channel count every image pixel carries — RGBA end to end, the
+    /** The channel count every image pixel has — RGBA end to end, the
      *  innermost content rank. */
     u32_t channels = 4;
 };
@@ -193,7 +193,7 @@ struct video_batch_shape_t {
      *  disables the modality. */
     u32_t patch_side = 0;
 
-    /** The channel count every video pixel carries — independent of image, the
+    /** The channel count every video pixel has — independent of image, the
      *  innermost content rank. */
     u32_t channels = 3;
 
@@ -243,17 +243,17 @@ struct audio_batch_shape_t {
  */
 struct multimodal_batch_shape_t {
 
-    /** How many rows one GPU's step carries, whatever the modality mix. */
+    /** How many rows one GPU's step holds, whatever the modality mix. */
     u32_t max_rows_per_gpu = 0;
 
-    /** How many segments one GPU's step carries, across all its rows — also the pooling axis
+    /** How many segments one GPU's step holds, across all its rows — also the pooling axis
      *  the contrastive anchors live on. */
     u32_t max_segments_per_gpu = 0;
 
     /** How many positions one row spans — what most of the literature calls @c seq_len . */
     u32_t max_columns_per_row = 0;
 
-    /** How many contrastive bags one GPU's step carries — the mixer's routing unit, so a bag's
+    /** How many contrastive bags one GPU's step holds — the mixer's routing unit, so a bag's
      *  segments land together on one member. The @b count is latched capacity while each bag's
      *  segment degree is content (fixed capacity, variable degree). Zero keeps every segment its
      *  own routing unit — the masked pipeline's degenerate case and the default. */
@@ -310,9 +310,9 @@ struct multimodal_batch_shape_t {
     return content.template reshape<2>({rows, content.numel() / rows});
 }
 
-/** A read-only borrow of one @ref multimodal_batch , whatever its residency — what a tower
+/** A read-only view of one @ref multimodal_batch , whatever its residency — what a tower
  *  reads. Each field views the batch tensor of the same name; an absent modality's content
- *  view is empty. */
+ *  view is empty. Valid while the batch lives. */
 struct multimodal_batch_view_t {
     nk::tensor_view<u32_t, 1> segment_offsets {};
     nk::tensor_view<u32_t, 1> segment_lengths {};
@@ -353,13 +353,13 @@ struct multimodal_batch {
 
     /** @b [max_segments_per_gpu] live token counts — stored, not derived: the row-jump gaps
      *  between consecutive segments make adjacent offset differences overestimates. PAD
-     *  segments carry 0. */
+     *  segments hold 0. */
     nk::tensor<u32_t, rebound<u32_t>, 1> segment_lengths {};
 
     /** @b [max_segments_per_gpu] each live segment's @ref modality_t — a row may mix modalities, so
      *  the tag is per segment, not per row. The coordinate adapter dispatches on it, the mixer
-     *  copies it, and the tower routes each segment to its modality's projection. PAD segments
-     *  carry @c text_k . */
+     *  copies it, and the tower routes each segment to its modality's projection. PAD segments hold
+     *  @c text_k . */
     nk::tensor<modality_t, rebound<modality_t>, 1> segment_modality {};
 
     /** @b [max_segments_per_gpu] each live segment's bag — the loader packs a bag's segments
@@ -370,7 +370,7 @@ struct multimodal_batch {
      *  tag is consulted. */
     nk::tensor<u32_t, rebound<u32_t>, 1> segment_bag {};
 
-    /** @b [max_segments_per_gpu] each segment's @ref segment_role_t in its bag; PAD segments carry
+    /** @b [max_segments_per_gpu] each segment's @ref segment_role_t in its bag; PAD segments hold
      *  @c anchor_k , inert. */
     nk::tensor<segment_role_t, rebound<segment_role_t>, 1> segment_role {};
 
@@ -433,7 +433,7 @@ struct multimodal_batch {
 
     /** @b [max_segments_per_gpu,max_choices_per_segment] each choice segment's legal bytes, padded
      *  with @c byte_pad_k ; a segment whose first entry is the pad makes no choice. Its last token
-     *  carries @c byte_mask_k . */
+     *  holds @c byte_mask_k . */
     nk::tensor<token_id_t, rebound<token_id_t>, 2> segment_choices {};
 
     /** @b [max_segments_per_gpu,max_choices_per_segment] each choice's target probability,
@@ -450,7 +450,7 @@ struct multimodal_batch {
      *  segment count (not a per-modality row count) is the only axis with a batch-wide meaning. */
     std::size_t live_segments() const noexcept { return segment_lengths.extent(0); }
 
-    /** Every tensor, borrowed read-only. */
+    /** Every tensor as a read-only view, valid while this batch lives. */
     [[nodiscard]] multimodal_batch_view_t view() const noexcept {
         return {segment_offsets.view(),
                 segment_lengths.view(),
@@ -475,7 +475,7 @@ struct multimodal_batch {
      *  @ref unum::uform::encoder::multimodal_batch::segment_modality , and the
      *  @ref unum::uform::encoder::multimodal_batch::image_shapes /
      *  @ref unum::uform::encoder::multimodal_batch::video_shapes descriptors always exist (they are
-     *  tiny and segment-indexed; audio needs none — its frames carry a position-only coordinate); a
+     *  tiny and segment-indexed; audio needs none — its frames hold a position-only coordinate); a
      *  modality's @b content tensor is gated on its patch side (audio: @c chunk_samples ) and stays
      *  unallocated when zero.
      */

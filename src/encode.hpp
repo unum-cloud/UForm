@@ -9,7 +9,7 @@
  *  Included by @c encode.cpp, whose verbs take decoded inputs, and by @c encode_media.cpp, whose
  *  verbs decode files, so a build without the codecs links the first alone.
  *
- *  A RAM call packs its batch and borrows the tower's scratch from its own arena, which keeps the
+ *  A RAM call packs its batch and reserves the tower's scratch from its own arena, which keeps the
  *  high-water mark. A VRAM call plans in the executor's host pages and packs what the devices read
  *  into its first device's pinned pages; each device copies its run of the slice into its own
  *  scratch, writes its share of the outputs there, and copies it into the arena when the arena
@@ -147,7 +147,7 @@ inline ue::rows_span_t rebased(ue::rows_span_t rows, util::bytes_span_t staging)
 }
 
 /** A RAM call: the host tower on a pool, packing into the call's own arena, which also
- *  lends the scratch. */
+ *  holds the scratch. */
 struct ram_site_t {
     util::pool_view_t pool;
 
@@ -212,14 +212,14 @@ struct vram_shard_t {
 template <vendored_residency_t residency_>
 struct vram_site {
     using entries_kit_t = entries_kit_of<residency_>;
+    static constexpr failure_t unselected_k {uform_status_device_k, "A device failed to become current"};
 
     util::pool_view_t pool;
     chunked_arena_t& staging;
     chunked_arena_t& transfers;
 
-    /** The stream of the device the call's arena lives on, whose shard writes
-     *  the arena directly. */
-    nk_stream_t arena_stream = nullptr;
+    /** The device the call's arena lives on, whose shard writes the arena directly. */
+    vram_device_t const& arena_device;
     encoder_verbs<residency_> const& verbs;
     util::per_gpu_array<vram_shard_t> shards {};
     std::size_t cell_bytes = 0;
@@ -228,6 +228,8 @@ struct vram_site {
                       ue::outputs_t surfaces) noexcept {
         cell_bytes = bytes_per_cell;
         for (vram_shard_t& shard : shards) {
+            if (entries_kit_t::select(static_cast<std::size_t>(shard.device->vendor_ordinal)) != nk_success_k)
+                return unselected_k;
             auto [bytes, status] = verbs.scratch_bytes(shard.replica->tower, tokens, segments,
                                                        shard.device->stream.get());
             if (!status) return tower_failure(status.status_);
@@ -243,7 +245,7 @@ struct vram_site {
                 util::bytes_span_t const shape_bytes = allocate(segments * axes * sizeof(util::u16_t));
                 return nk::as_writable_values<util::u16_t>(shape_bytes).reshape<2>({segments, axes});
             };
-            bool const elsewhere = shard.device->stream.get() != arena_stream;
+            bool const elsewhere = shard.device->ordinal != arena_device.ordinal;
             auto const staging_of = [&](ue::rows_span_t surface, std::size_t rows) noexcept {
                 return elsewhere && !surface.empty() ? allocate(rows * surface.bytes.extent(1)) : util::bytes_span_t {};
             };
@@ -278,6 +280,8 @@ struct vram_site {
             while (last != segments && (packed_offsets[last + 1] - origin <= target || index + 1 == count)) ++last;
             if (last == first) continue;
             vram_shard_t const& shard = shards[index];
+            if (entries_kit_t::select(static_cast<std::size_t>(shard.device->vendor_ordinal)) != nk_success_k)
+                return unselected_k;
             nk_stream_t const stream = shard.device->stream.get();
             auto const copied = [&](util::bytes_span_t into, util::bytes_view_t from) noexcept {
                 return from.empty() || entries_kit_t::copy(into, from, stream) == nk_success_k;
@@ -310,7 +314,7 @@ struct vram_site {
                                          outputs.states.slice(begin, end - begin),
                                          outputs.token_vectors.slice(begin, end - begin),
                                          {}};
-            bool const elsewhere = stream != arena_stream;
+            bool const elsewhere = shard.device->ordinal != arena_device.ordinal;
             ue::outputs_t shard_outputs = landing;
             if (elsewhere)
                 shard_outputs = {rebased(landing.embeddings, shard.embeddings),
@@ -341,17 +345,25 @@ struct vram_site {
      *  @ref finish waits for. */
     failure_t land(util::bytes_span_t target, util::bytes_view_t source) noexcept {
         vram_shard_t const& first = shards[0];
+        if (entries_kit_t::select(static_cast<std::size_t>(first.device->vendor_ordinal)) != nk_success_k)
+            return unselected_k;
         if (entries_kit_t::copy(target, source, first.device->stream.get()) != nk_success_k)
             return {uform_status_device_k, "A device failed to copy into the arena"};
         return {};
     }
 
+    /** Waits for every shard's device, then selects the arena's, where later outputs grow. */
     failure_t finish() noexcept {
         failure_t failure {};
-        for (vram_shard_t const& shard : shards)
-            if (nk_status_t const status = entries_kit_t::synchronize(shard.device->stream.get());
-                status != nk_success_k && !failure.message)
+        for (vram_shard_t const& shard : shards) {
+            nk_status_t status = entries_kit_t::select(static_cast<std::size_t>(shard.device->vendor_ordinal));
+            if (status == nk_success_k) status = entries_kit_t::synchronize(shard.device->stream.get());
+            if (status != nk_success_k && !failure.message)
                 failure = {status_of(status), "A device failed the work queued on it"};
+        }
+        if (entries_kit_t::select(static_cast<std::size_t>(arena_device.vendor_ordinal)) != nk_success_k &&
+            !failure.message)
+            failure = unselected_k;
         return failure;
     }
 };
@@ -405,7 +417,7 @@ inline failure_t validate_tape(uform_tape_view_t const& tape, std::size_t count,
 /** The refusals of a choice beyond its states': the decoder, the choices and the groups. */
 inline failure_t validate_choices(uform_text_choose_t const& arguments) noexcept {
     ue::geometry_t const& geometry = arguments.model->geometry;
-    if (!geometry.masked_vocabulary) return {uform_status_unsupported_k, "The model carries no byte decoder"};
+    if (!geometry.masked_vocabulary) return {uform_status_unsupported_k, "The model has no byte decoder"};
     if (!arguments.probabilities) return {uform_status_invalid_argument_k, "The probabilities must not be null"};
     if (failure_t const refused = validate_tape(arguments.choices, arguments.count, uform_scalar_u8_k); refused.message)
         return refused;
@@ -428,7 +440,7 @@ failure_t validate_call(arguments_type_ const& arguments, uform_tape_view_t cons
     else if (!requested.embeddings && !requested.states && !requested.token_vectors)
         return {uform_status_invalid_argument_k, "Name the embeddings, the states or the token vectors"};
     if (requested.token_vectors && !arguments.model->geometry.token_width)
-        return {uform_status_unsupported_k, "The model carries no token head"};
+        return {uform_status_unsupported_k, "The model has no token head"};
     if (!output_bytes(requested.scalar)) return {uform_status_unsupported_k, "Outputs land as f32, f16 or bf16 only"};
     return validate_tape(tape, arguments.count, element);
 }
@@ -682,8 +694,10 @@ void encode_on_devices(arguments_type_& arguments, packer_type_& packer, encoder
     vram_device_t& lead = devices.devices[0];
     devices.staging.chunks.rewind();
     lead.transfers.rewind();
-    vram_site<residency_> site {devices.decoders.view(), devices.staging.chunks, lead.transfers, memory.stream(),
-                                verbs};
+    // The arena and the pinned pages live on the lead device, where the outputs grow first
+    if (entries_kit_of<residency_>::select(static_cast<std::size_t>(lead.vendor_ordinal)) != nk_success_k)
+        return fail(vram_site<residency_>::unselected_k);
+    vram_site<residency_> site {devices.decoders.view(), devices.staging.chunks, lead.transfers, lead, verbs};
     for (vram_device_t& device : devices.devices)
         for (vram_replica_t const& replica : replicas) {
             bool const serves = replica.ordinal == device.ordinal && (device.capabilities & vendor_of(residency_));
@@ -717,12 +731,11 @@ void encode_call(arguments_type_& arguments, packer_type_& packer, uform_tape_vi
                 if (executor && !std::holds_alternative<ram_executor_t>(executor->executor))
                     return fail({uform_status_device_k, "A RAM model computes on a RAM executor or none"});
                 if (executor) {
-                    ram_site_t site {view_of(std::get<ram_executor_t>(executor->executor).pool), memory, memory, *verbs,
+                    ram_site_t site {std::get<ram_executor_t>(executor->executor).pool.view(), memory, memory, *verbs,
                                      tower};
                     return encode_items(arguments, packer, site, memory, outcome);
                 }
-                auto [caller, status] = util::executor_t::make(1, util::caller_exclusivity_t::caller_inclusive_k);
-                if (!status) return fail({status_of(status.status_), "Failed to set up the caller"});
+                util::ram_executor_t const caller = util::ram_executor_t::on_calling_thread();
                 ram_site_t site {caller.view(), memory, memory, *verbs, tower};
                 return encode_items(arguments, packer, site, memory, outcome);
             }

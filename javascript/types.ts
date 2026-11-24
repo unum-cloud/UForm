@@ -232,17 +232,8 @@ export interface ExecutorForRamConfig {
   /** The newest CPU class to dispatch as, spelled like "intel-haswell", capped by what the CPU
    *  runs; absent sets no ceiling. */
   cpuClassCeiling?: string;
-  /** Threads to spawn; absent takes 7/8 of the cores the domains carry. */
+  /** Threads to spawn; absent takes 7/8 of the cores the domains span. */
   threads?: number;
-}
-
-/** Where the borrowed pool of a RAM executor places its models. */
-export interface ExecutorOnPoolConfig {
-  /** NUMA node IDs of the models it will drive; absent derives every node. */
-  memoryDomains?: number[];
-  /** The newest CPU class to dispatch as, spelled like "intel-haswell", capped by what the CPU
-   *  runs; absent sets no ceiling. */
-  cpuClassCeiling?: string;
 }
 
 /** Which devices a VRAM executor drives, and on which streams. */
@@ -257,7 +248,7 @@ export interface ExecutorForVramConfig {
   /** The newest CPU class the host decoders dispatch as, spelled like "intel-haswell"; absent
    *  sets no ceiling. */
   cpuClassCeiling?: string;
-  /** Borrowed CUDA stream addresses, one per device in `devices` order, which the library refuses
+  /** Caller CUDA stream addresses, one per device in `devices` order, which the library refuses
    *  as unsupported; absent creates its own. */
   streams?: bigint[];
   /** Ceiling on scratch bytes per device; absent lets scratch grow as batches ask. */
@@ -283,7 +274,7 @@ export class Executor implements Disposable {
   /** Reached through the factories. */
   private constructor(seal: symbol, compiled: CompiledExecutor) {
     if (seal !== executorSeal)
-      throw fail(Status.InvalidArgument, "An Executor is made by Executor.forRam, Executor.forVram or Executor.onPool.");
+      throw fail(Status.InvalidArgument, "An Executor is made by Executor.forRam or Executor.forVram.");
     this.compiled = compiled;
   }
 
@@ -298,12 +289,6 @@ export class Executor implements Disposable {
     return new Executor(executorSeal, backend().Executor.forVram(config));
   }
 
-  /** Borrows a ForkUnion `fu_pool_t` by address, which reports `unsupported` until borrowing is
-   *  designed. Calls `uform_executor_on_pool`. */
-  static onPool(pool: bigint, config: ExecutorOnPoolConfig = {}): Executor {
-    return new Executor(executorSeal, backend().Executor.onPool(pool, config));
-  }
-
   /**
    *  Waits until no call holds this executor, then keeps `mood` until its next
    *  call. Calls `uform_executor_drain`.
@@ -313,8 +298,8 @@ export class Executor implements Disposable {
     this.compiled.drain(mood);
   }
 
-  /** Runs every deferred call and joins the threads now; a second `free` does
-   *  nothing. Calls `uform_executor_free`. */
+  /** Runs every deferred call and joins the threads now, once every arena it made is
+   *  freed; a second `free` does nothing. Calls `uform_executor_free`. */
   free(): void {
     this.compiled.free();
   }
@@ -340,7 +325,8 @@ export class Arena implements Disposable {
   readonly compiled: CompiledArena;
 
   /** Makes an arena where `executor` computes, or host pages for calls on the calling
-   *  thread. Calls `uform_arena_init`. */
+   *  thread. It never outlives `executor`: free it first, or declare that executor's `using`
+   *  before it. Calls `uform_arena_init`. */
   constructor(executor?: Executor) {
     this.compiled = new (backend().Arena)(executor?.compiled);
   }

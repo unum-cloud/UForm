@@ -11,15 +11,15 @@
  *  @section javascript_threading Threading
  *
  *  Every verb is a batch and the library fans it out itself, so this layer spawns nothing: it
- *  borrows the caller's @c TypedArray storage, hands the library one tape, and views the outputs it
- *  lands in the caller's @c Arena without copying them. A verb handed no executor runs on the
- *  calling thread, as the C interface's @c NULL executor does.
+ *  reads the caller's @c TypedArray storage in place, hands the library one tape, and views the
+ *  outputs it lands in the caller's @c Arena without copying them. A verb handed no executor runs
+ *  on the calling thread, as the C interface's @c NULL executor does.
  *
  *  Every verb takes the C @c completion beside its executor. A blocking call answers its result; a
  *  deferred one answers a @c CompiledDeferred holding the outcome and strong references to every
- *  JavaScript value the library borrows until the call is final. Its @c wait blocks the calling
+ *  JavaScript value the library points at until the call is final. Its @c wait blocks the calling
  *  thread in @c uform_outcome_wait, and its @c status reads the outcome without blocking, which an
- *  @c await polls between turns of the event loop, so this layer never borrows a thread.
+ *  @c await polls between turns of the event loop, so this layer never occupies a thread.
  *
  *  A JavaScript function runs only on the thread owning its context, which no executor's thread
  *  is, so a progress handler is taken only by a call without an executor, where the library calls
@@ -112,7 +112,7 @@ typedef struct uform_js_arena_t {
     uform_arena_t handle;
 
     /** The executor a GPU arena grows, fills and frees on, held until the arena is freed; @c NULL
-     *  for host pages, which may outlive theirs. */
+     *  for host pages. Every arena is freed before the executor that made it. */
     uform_js_executor_t* executor;
 
     /** The strong reference keeping @c executor's wrapper alive alongside it. */
@@ -151,7 +151,7 @@ typedef struct uform_js_trainer_t {
     /** The library handle, freed by @c free or the collector. */
     uform_trainer_t handle;
 
-    /** The strong reference keeping the borrowed mesh's wrapper alive until the trainer is freed;
+    /** The strong reference keeping the mesh's wrapper alive until the trainer is freed;
      *  @c NULL for a run without peers. */
     napi_ref mesh_reference;
 } uform_js_trainer_t;
@@ -169,10 +169,10 @@ typedef enum uform_js_slot_t {
     /** The @c Arena its outputs land in. */
     uform_js_slot_arena_k,
 
-    /** The first borrowed input, every later slot holding one more. */
+    /** The first input, every later slot holding one more. */
     uform_js_slot_inputs_k,
 
-    /** Slots in every call: the three above and up to eighteen borrowed inputs. */
+    /** Slots in every call: the three above and up to eighteen inputs. */
     uform_js_slots_k = 21,
 } uform_js_slot_t;
 
@@ -195,7 +195,8 @@ typedef struct uform_js_call_t {
     /** Builds the answer of a call that succeeded; @c NULL once the answer was built. */
     uform_js_finish_t finish;
 
-    /** Strong references to the slots a deferred call borrows; @c NULL for an empty slot. */
+    /** Strong references to the slots a deferred call reads or writes; @c NULL for an empty
+     *  slot. */
     napi_ref held[uform_js_slots_k];
 
     /** Heap blocks the call reads, freed once it is final. */
@@ -223,7 +224,7 @@ bool uform_js_throw(napi_env env, uform_status_t status, char const* message);
 bool uform_js_throw_field(napi_env env, char const* field, char const* expectation);
 
 /**
- *  @brief Throws the mapped JavaScript error when @p outcome carries a failure.
+ *  @brief Throws the mapped JavaScript error when @p outcome holds a failure.
  *  @return @c true when the call succeeded, @c false with an exception pending otherwise.
  */
 bool uform_js_succeeded(napi_env env, uform_outcome_t const* outcome);
@@ -241,8 +242,9 @@ bool uform_js_size_from_value(napi_env env, napi_value value, char const* field,
 bool uform_js_double_from_value(napi_env env, napi_value value, char const* field, double* result);
 
 /**
- *  @brief Copies a UTF-8 string into a @c malloc-ed block, so a deferred call can borrow it.
- *  @param[out] view The bytes, without the terminator the block also carries.
+ *  @brief Copies a UTF-8 string into a @c malloc-ed block that stays valid until a deferred
+ *      call is final.
+ *  @param[out] view The bytes, without the terminator the block also holds.
  *  @return The block the caller frees, or @c NULL with an exception pending.
  */
 char* uform_js_string_from_value(napi_env env, napi_value value, char const* field, uform_bytes_view_t* view);
@@ -292,21 +294,21 @@ size_t uform_js_row_bytes(uform_scalar_t scalar, size_t columns);
 bool uform_js_ordinals_from_value(napi_env env, napi_value value, char const* field, int32_t** ordinals, size_t* count);
 
 /**
- *  @brief Borrows the bytes of a numeric @c TypedArray, whatever its element type.
+ *  @brief Reads the bytes of a numeric @c TypedArray in place, whatever its element type.
  *  @return @c true on success, @c false with an exception pending otherwise.
  */
 bool uform_js_bytes_from_value(napi_env env, napi_value value, char const* field, void** data, size_t* bytes);
 
 /**
- *  @brief Borrows a @c TypedArray of exactly @p type, reporting its elements.
+ *  @brief Reads a @c TypedArray of exactly @p type in place, reporting its elements.
  *  @return @c true on success, @c false with an exception pending otherwise.
  */
 bool uform_js_array_from_value(napi_env env, napi_value value, char const* field, napi_typedarray_type type,
                                void** data, size_t* elements);
 
 /**
- *  @brief Borrows a ragged batch: its elements in @p data_value and @c count + 1 offsets read as
- *      @c uform_js_offsets_from_value reads them.
+ *  @brief Reads a ragged batch in place: its elements in @p data_value and @c count + 1 offsets
+ *      read as @c uform_js_offsets_from_value reads them.
  *  @param[in] element_type The @c TypedArray the elements arrive in.
  *  @param[out] count The entries the tape holds, which every batch verb takes as its @c count.
  *  @param[out] tape The view the library reads, over the caller's elements and offsets, or
@@ -318,16 +320,16 @@ bool uform_js_tape_from_value(napi_env env, napi_value data_value, napi_value of
                               uform_tape_view_t* tape);
 
 /**
- *  @brief Reads offsets: a @c BigUint64Array or a @c Uint32Array as wide as @c size_t is lent
- *      as it is, so a deferred call holds its value, and a narrower @c Uint32Array is widened
+ *  @brief Reads offsets: a @c BigUint64Array or a @c Uint32Array as wide as @c size_t is read
+ *      in place, so a deferred call holds its value, and a narrower @c Uint32Array is widened
  *      into a block @p call owns.
- *  @param[out] offsets The lent or widened run, @c NULL when the value is absent.
+ *  @param[out] offsets The caller's run read in place, or its widened copy, @c NULL when absent.
  *  @param[out] count One less than the offsets read, the entries they bound.
  */
 bool uform_js_offsets_from_value(napi_env env, napi_value value, char const* field, uform_js_call_t* call,
                                  size_t const** offsets, size_t* count);
 
-/** Borrows an @b optional @c Uint32Array of exactly @p count entries, one per item;
+/** Reads an @b optional @c Uint32Array of exactly @p count entries in place, one per item;
  *  @c NULL when absent. */
 bool uform_js_per_item_from_value(napi_env env, napi_value value, char const* field, size_t count,
                                   uint32_t const** result);
@@ -471,7 +473,7 @@ napi_value uform_js_trainer_define(napi_env env);
 /** Answers with the library's semantic version. */
 napi_value uform_js_version(napi_env env, napi_callback_info info);
 
-/** Answers with the kernel families this build carries, whatever the machine offers. */
+/** Answers with the kernel families this build includes, whatever the machine offers. */
 napi_value uform_js_capabilities_compiled(napi_env env, napi_callback_info info);
 
 /** Answers with the kernel families this machine can run, and dispatch picks from. */

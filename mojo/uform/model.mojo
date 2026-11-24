@@ -73,7 +73,7 @@ struct ModelDescription(Defaultable, ImplicitlyCopyable):
     var gpu_class: GPUClass
     """The class every replica of a VRAM model runs as; `UNKNOWN` for a RAM model."""
     var token_width: c_size_t
-    """Scalars per token vector; zero when the checkpoint carries no token head."""
+    """Scalars per token vector; zero when the checkpoint has no token head."""
     var choice_temperature_groups: c_size_t
     """Question types the choice temperatures were calibrated over; zero without the byte decoder."""
 
@@ -202,7 +202,7 @@ struct Model(ModelVerbs, Movable):
         Calls `uform_model_load_ram`.
 
         Args:
-            executor: The executor the load runs on; it also lends its engine.
+            executor: The executor the load runs on, whose engine the load also uses.
             path: A safetensors checkpoint, read in full and closed before the load completes.
             ram: The memory domains to place the weights in.
             quantization: `BF16` as the checkpoint stores it, or `E4M3` quantized at load.
@@ -384,7 +384,7 @@ struct Model(ModelVerbs, Movable):
         """The same verbs, blocking on `executor`, `CONTENDED` while another call holds it. Binding-only.
 
         Returns:
-            A receiver borrowing both, which neither may outlive.
+            A receiver pointing at both, which may outlive neither.
         """
         return ModelOn[ImmOrigin(origin_of(self, executor))](
             Pointer[Model, ImmOrigin(origin_of(self, executor))](unsafe_from_address=Int(Pointer(to=self))),
@@ -395,7 +395,7 @@ struct Model(ModelVerbs, Movable):
         """The same verbs, each submitted to `executor` and answering a `Deferred` at once. Binding-only.
 
         Returns:
-            A receiver borrowing both, which neither it nor any `Deferred` it answers may outlive.
+            A receiver pointing at both, which neither it nor any `Deferred` it answers may outlive.
         """
         return ModelDeferredOn[ImmOrigin(origin_of(self, executor))](
             Pointer[Model, ImmOrigin(origin_of(self, executor))](unsafe_from_address=Int(Pointer(to=self))),
@@ -439,7 +439,7 @@ trait ModelVerbs:
         Args:
             texts: UTF-8 texts, one item per entry, in bytes.
             outputs: The surfaces to keep from the forward.
-            arena: The arena to rewind and refill, which the result borrows.
+            arena: The caller's arena to rewind and refill, which the result points into.
             config: The scalar every output lands as, and the report slot.
 
         Raises:
@@ -467,7 +467,7 @@ trait ModelVerbs:
         Args:
             texts: UTF-8 states, one per item, each ending where its choice goes.
             choices: Each item's legal choices, one byte each.
-            arena: The arena to rewind and refill, which the result borrows.
+            arena: The caller's arena to rewind and refill, which the result points into.
             config: The question type of each item, and the report slot.
 
         Raises:
@@ -589,7 +589,7 @@ struct ModelOn[origin: ImmOrigin](ImplicitlyCopyable, ModelVerbs):
     """A model bound to the executor its verbs block on, as `model.on(executor)` answers it. Binding-only.
 
     Parameters:
-        origin: The model and the executor, which this receiver borrows.
+        origin: The model and the executor, which the caller owns and this receiver points at.
     """
 
     var model: Pointer[Model, Self.origin]
@@ -611,10 +611,10 @@ struct ModelDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
     """A model bound to the executor its verbs are submitted to, as `model.deferred(executor)` answers it:
     every verb answers a `Deferred` at once. Binding-only.
 
-    The verbs and their arguments are those of `ModelVerbs`; the arena stays borrowed until final.
+    The verbs and their arguments are those of `ModelVerbs`; the caller's arena stays in use until the call is final.
 
     Parameters:
-        origin: The model and the executor, which this receiver borrows.
+        origin: The model and the executor, which the caller owns and this receiver points at.
     """
 
     var model: Pointer[Model, Self.origin]

@@ -29,7 +29,7 @@ UFORM_EXPORT void uform_text_encode(uform_text_encode_t *arguments) {
 }
 ```
 
-- `submitted<verb>` claims the executor for the call and runs the verb's body: here for a blocking call or a caller-inclusive pool, on pool thread 0 for a deferred one, through `fu_pool_unsafe_for_threads` with a slice that runs the whole call there, over a copy of the arguments held in the executor's `holding_call`. The body is the same verb meeting its own arguments again.
+- `submitted<verb>` claims the executor for the call and runs the verb's body: here for a blocking call or a caller-inclusive pool, on pool thread 0 for a deferred one, through `pool_view_t::unsafe_for_threads` with a slice that runs the whole call there, over a copy of the arguments held in the executor's `holding_call`. The body is the same verb meeting its own arguments again.
 - `call_outcome_t` collects every step's status privately and on unwinding releases the arena; without an executor it stores the final status itself, and with one it hands the status to `end_call`, which lowers the named handles' counts, frees the executor, and only then stores it, so a path that forgot to report finishes `uform_status_internal_k` rather than hanging its waiters.
 - `claim_arena` refuses a null arena, one of another residency or executor, one another call holds, and inputs inside it, then rewinds it for the call's outputs.
 
@@ -84,7 +84,7 @@ The variant libraries link after `uform_host`, so the baseline's copy of any sha
 
 - `uform_host`: the verbs, `geometry.cpp`, the checkpoint reader, and the media planning and resize, joined by the host codecs outside WebAssembly, all compiled at the baseline.
 - `uform_encoder_ram_variants`: the CPU class units, each compiled with the flags its `uform_cpu_class` row computes, its parent's plus those of every delta capability NumKong compiled, and present only when its parent is and some delta compiled.
-- `uform_encoder_vram_nvidia_variants`, `uform_encoder_vram_amd_variants` and `uform_encoder_vram_apple_variants`: the GPU class units and the entries, which compile no device code of their own, since NumKong's libraries carry every generation's kernels.
+- `uform_encoder_vram_nvidia_variants`, `uform_encoder_vram_amd_variants` and `uform_encoder_vram_apple_variants`: the GPU class units and the entries, which compile no device code of their own, since NumKong's libraries include every generation's kernels.
 - `uform_encoder_nvidia` and `uform_encoder_amd`: the device-only bundles of UForm's own kernels, linked into a read-only section through an assembler stub and loaded by name, so nothing registers them with a GPU runtime.
 - `vram_entries_apple.cpp` embeds the source of `vram_kernels_apple.metal` behind NumKong's `types.metal` instead, which each Apple GPU compiles at its first launch, so no Metal toolchain builds it.
 - `uform::train`, `uform::loaders` and `uform::datasets`: the training engine, the mesh and the loaders, built with CUDA alone, with `uform_nvidia_train` serving the verbs of `train.h`.

@@ -11,7 +11,7 @@ cmake --build --preset library
 ctest --test-dir build_library                   # c/test.c and the host suites, on the tiny checkpoint
 ```
 
-`cuda_rocm_library` adds the NVIDIA and AMD residencies, the trainer and the mesh; `wasm32_emscripten` and `wasm32_wasi` build for WebAssembly, which takes decoded media only; `stub_library` builds `src_stub/`, a stand-in answering every verb, whose archives carry the engine's names so one `-L` swaps them.
+`cuda_rocm_library` adds the NVIDIA and AMD residencies, the trainer and the mesh; `wasm32_emscripten` and `wasm32_wasi` build for WebAssembly, which takes decoded media only; `stub_library` builds `src_stub/`, a stand-in answering every verb, whose archives use the engine's names so one `-L` swaps them.
 `find_package(uform)` reads an install as `uform::static`, `uform::shared`, `uform::abi` for the C headers alone and `uform::cpp` for the C++ wrappers, and `pkg-config --libs uform` names the shared library.
 `uform/uform.h` includes `types.h`, `model.h`, `encode.h` and `train.h`, and a caller only encoding may include `encode.h` alone.
 Statuses, scalars, rows, tapes, arenas and the executor contract mirror USearch's `types.h` value for value, so embeddings and failures cross between the two libraries unchanged.
@@ -85,7 +85,7 @@ Every call stores its result in the `uform_outcome_t` it names: a status, and a 
 `uform_completion_blocking_k`, the default, returns with the status final and every output readable.
 `uform_completion_deferred_k` returns once the executor's own thread took the call, and the status reads `uform_status_deferred_k` until the call is final.
 `uform_outcome_status` polls with acquire ordering and `uform_outcome_wait` blocks until final, and these are the only ways to read a status another thread may still store.
-Submission copies the structure, while everything it points to stays borrowed until final.
+Submission copies the structure, while everything it points to must stay allocated and unchanged until the call is final.
 An executor runs one call at a time: a call finding another one holding its executor finishes `uform_status_contended_k` without running, so a caller orders dependent calls by waiting on the first.
 A call lets go of its arena, its handles and its executor before it stores the final status, so whoever reads it final may reuse all three at once.
 A call stops early only when its `uform_progress_t` handler returns `uform_cancel_k`, and then finishes `uform_status_cancelled_k`.
@@ -126,11 +126,10 @@ while (uform_outcome_status(text_encode.outcome) == uform_status_deferred_k ||
 
 An executor owns what a call runs on but a model does not: host threads or device streams, activation scratch, and the pinned buffer staging passes through.
 
-- `uform_executor_for_ram` creates an executor of host threads across the compute domains local to the memory domains of its `uform_ram_options_t`, 7/8 of their cores when `threads` is zero.
-- `uform_executor_on_pool` lends UForm a ForkUnion `fu_pool_t` another library spawned, so UForm, USearch and UStore in one process share one set of threads; the pool must outlive the executor.
-- `uform_executor_for_vram` opens one stream on every device of its `uform_vram_options_t`, named by their position in `uform_gpu_devices`, beside host threads for the decoding the devices cannot do.
+- `uform_executor_for_ram` creates an executor of host threads, near the one memory domain its `uform_ram_options_t` names or across the machine for none or several, 7/8 of those domains' cores when `threads` is zero.
+- `uform_executor_for_vram` opens one stream on every device of its `uform_vram_options_t`, named by their position in `uform_gpu_devices`, beside host threads for the decoding the devices cannot do, and refuses caller streams with `uform_status_unsupported_k`.
 - `uform_executor_drain` waits until no call holds the executor, then applies the `uform_mood_t` its threads keep until the next call: parked sleeps in the kernel, spinning keeps polling.
-- `uform_executor_free` waits the same way, releases what the executor owns and returns what it borrowed.
+- `uform_executor_free` waits the same way, releases what the executor owns and leaves what the caller owns untouched.
 
 ```c
 int32_t const nodes[] = {0}, devices[] = {0, 1};
@@ -162,7 +161,7 @@ A device's position in that listing is the ordinal `uform_vram_options_t::device
 
 ## Arenas
 
-Callers lend memory, never a way to allocate it, and every byte has one owner that picks where it lives once:
+Callers pass memory, never a way to allocate it, and every byte has one owner that picks where it lives once:
 
 - Weights and their packed copies belong to the model, placed by its load's residency.
 - Weights, gradients and optimizer moments under training belong to the trainer, on its executor's devices.
@@ -175,7 +174,7 @@ A call rewinds the arena it is given, invalidating the previous call's outputs, 
 - A `NULL` arena, or inputs inside the arena the call rewinds, report `uform_status_invalid_argument_k`.
 - An arena serves one call at a time, and a second call naming it finishes `uform_status_contended_k`.
 - A call on another residency or device than the arena's reports `uform_status_device_k`.
-- A GPU arena grows on the first stream of the executor that made it, so it serves only that executor and is freed before it.
+- A GPU arena grows on the first device of the executor that made it, so it serves only that executor and is freed before it.
 
 ```c
 uform_arena_t arena = NULL;
@@ -192,7 +191,7 @@ uform_arena_free(arena);
 ### Rows and Tapes
 
 A verb's `count` is its batch axis and nothing else.
-Outputs are views the call writes packed into its arena, so none carries a capacity for the caller to pick.
+Outputs are views the call writes packed into its arena, so none has a capacity for the caller to pick.
 `uform_rows_view_t` holds one row per item as `data`, `stride`, `columns` and `scalar`, field for field USearch's rows, so pooled embeddings feed an index as they are.
 Ragged inputs are `uform_tape_view_t` tapes laid out as Apache Arrow lays them: elements end to end in `data`, and `count + 1` offsets in host memory around them.
 Ragged outputs, such as per-token states, are `uform_rows_tape_view_t`: packed rows and one more offset than items.
@@ -229,7 +228,7 @@ uform_text_encode(&(uform_text_encode_t){
 `uform_text_choose` scores each text's legal choices, one byte each, through one forward of the byte decoder.
 The call appends the mask byte to every text, and a text longer than the model's `context` loses its head, never its end.
 Each item's probabilities are a softmax over its own choices alone, at the calibrated inverse temperature of its `temperature_groups` entry, and land in the arena as one `f32` tape in `choices` order.
-A model whose `choice_temperature_groups` is zero carries no byte decoder and reports `uform_status_unsupported_k`.
+A model whose `choice_temperature_groups` is zero has no byte decoder and reports `uform_status_unsupported_k`.
 
 ```c
 uform_tape_view_t probabilities = {0};
@@ -246,7 +245,7 @@ A checkpoint stores one inverse temperature per question type as `choices.invers
 
 Residency is in the verb name, as in USearch and UStore, so a residency a build lacks has no verb to call:
 
-- __RAM__: `uform_model_load_ram` and `uform_model_load_ram_buffer` place the weights in host memory, on the NUMA nodes `uform_ram_options_t` names, and every build carries them.
+- __RAM__: `uform_model_load_ram` and `uform_model_load_ram_buffer` place the weights in host memory, on the NUMA nodes `uform_ram_options_t` names, and every build includes them.
 - __NVIDIA__: `uform_model_load_vram` and `uform_model_load_vram_buffer` place them on the CUDA devices `uform_vram_options_t` names, in builds with `UFORM_CUDA_ARCH`.
 - __AMD__: the same VRAM verbs place them on ROCm devices, in builds with `UFORM_ROCM_ARCH`.
 
@@ -254,7 +253,7 @@ On NVIDIA, text and JPEG images never leave the device; container demux, PNG and
 `uform_capabilities_compiled` and `uform_capabilities_available` report what the binary was built with and what the machine offers.
 
 `uform_model_describe` reports the model's `dimensions`, `context`, `quantization`, memory usage and the CPU or GPU class it dispatched to.
-It also reports the `cpu_class` a RAM model was packed for or the `gpu_class` a VRAM model runs as, the `token_width` of its token head, and the `choice_temperature_groups` of its byte decoder, each zero when the checkpoint carries no such part.
+It also reports the `cpu_class` a RAM model was packed for or the `gpu_class` a VRAM model runs as, the `token_width` of its token head, and the `choice_temperature_groups` of its byte decoder, each zero when the checkpoint has no such part.
 
 ```c
 uform_model_t model = NULL;
@@ -272,7 +271,7 @@ printf("%zu dimensions on %s\n", description.dimensions, uform_gpu_class_name(de
 
 Training is GPU-only.
 `uform_mesh_bootstrap` joins this process to a run once, through files in a directory every host sees, and after it processes talk only over NVLink and InfiniBand.
-The mesh is the process-wide half of the transport, which every trainer borrows; `uform_mesh_describe` reports the topology every process agreed on, its multimem tier, and the `gpu_class` every GPU of the run dispatches as, the best class its devices load under the executor's ceiling.
+The mesh is the process-wide half of the transport, owned by the caller and used by every trainer made over it; `uform_mesh_describe` reports the topology every process agreed on, its multimem tier, and the `gpu_class` every GPU of the run dispatches as, the best class its devices load under the executor's ceiling.
 Every process bootstraps with the same count, multicast extent, directory, job and GPU class, or the call reports `uform_status_config_mismatch_k`.
 
 `uform_trainer_init_vram` makes a trainer on a VRAM executor, owning one replica of the tower per device, its gradients, the Adafactor moments, the reconstruction heads and the learnable temperatures.
@@ -285,7 +284,7 @@ Beside the masked and pooled contrastive losses, a trainer relaxes two optional 
 
 `uform_pair_loss_form_t` picks how a contrastive term turns a row of scores into forces: `balanced`, `ranked` or SigLIP's `sigmoid`, where `derived` keeps sigmoid for pooled embeddings and ranked for token vectors.
 The step's stats report every loss as its world mean, with `late_interaction_loss` and `choices_loss` beside the contrastive and masked terms, the items `truncated` at a row's width, and the segments `dropped` whole for want of room.
-A training call that fails after a GPU recorded a fault, such as a peer missing a multimem barrier or an InfiniBand round past its deadline, carries that fault as its outcome message.
+A training call that fails after a GPU recorded a fault, such as a peer missing a multimem barrier or an InfiniBand round past its deadline, reports that fault as its outcome message.
 `uform_trainer_save` writes the safetensors checkpoint the model verbs load.
 Every path, the mesh's `directory`, a `resume` checkpoint and a save's `path`, arrives as the operating system's own bytes, not necessarily UTF-8, and one holding a NUL byte is refused with `uform_status_invalid_argument_k`; the mesh's `job` is a UTF-8 name.
 
@@ -330,5 +329,5 @@ if (outcome.status != uform_status_success_k)
 
 Every verb that takes options, outputs or callbacks takes one structure named after it, as `uform_text_encode` takes a `uform_text_encode_t`.
 Fields open in the same order everywhere: the handle, `executor`, `outcome` and `completion`, then inputs, then outputs and the `arena` they land in, then knobs, and last `progress` and `stats`.
-Structures carry no size or version field, so initialize them by designator, which zeroes every field left out, and expect the major version to change whenever one grows.
+Structures have no size or version field, so initialize them by designator, which zeroes every field left out, and expect the major version to change whenever one grows.
 Name lookups and the `_free` family stay positional, and a `_free` of `NULL` is safe.

@@ -35,7 +35,7 @@ using uu::status_code_t;
 using uu::status_t;
 using uu::u8_t;
 
-/** The channels every decoded video pixel carries — interleaved RGB. */
+/** The channels every decoded video pixel has — interleaved RGB. */
 inline constexpr u32_t video_channels_k = 3u;
 
 /** A segment's tube cells
@@ -43,7 +43,7 @@ inline constexpr u32_t video_channels_k = 3u;
  *  contiguously in a batch row in exactly this order. */
 using pixel_tubes_span_t = nk::tensor_span<pixel_t, 6>;
 
-/** The elementary-stream codecs a container can carry; contiguous from @c h264_k so a cast indexes
+/** The elementary-stream codecs a container can hold; contiguous from @c h264_k so a cast indexes
  *  a per-codec table. */
 enum class video_codec_t : u8_t { h264_k = 0, h265_k, vp9_k, av1_k, mpeg2_k, mpeg4_k, vc1_k };
 
@@ -64,7 +64,7 @@ struct demuxed_t {
     /** The elementary-stream codec. */
     video_codec_t codec = video_codec_t::h264_k;
 
-    /** The native frame extent, zero when the input carried none. */
+    /** The native frame extent, zero when the input had none. */
     image_extent_t extent {};
 
     /** The native frame count, indexed or estimated from the duration, zero when unknown. */

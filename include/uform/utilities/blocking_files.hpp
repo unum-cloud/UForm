@@ -57,7 +57,7 @@ enum class file_access_t : u8_t {
  *  terminates it in. */
 inline constexpr std::size_t path_capacity_k = 4096;
 
-/** The largest run one positioned call carries, kept well inside every platform's own limit. */
+/** The largest run one positioned call moves, kept well inside every platform's own limit. */
 inline constexpr std::size_t native_transfer_bytes_k = std::size_t {1} << 30;
 
 #if UFORM_OS_WINDOWS_

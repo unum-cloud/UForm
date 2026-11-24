@@ -8,8 +8,8 @@
  *  The twin of @c vram_entries_nvidia.cpp . Compiled host-only, so no HIP host pass registers a fat
  *  binary with the runtime, and every call goes through the runtime table this unit loads at its
  *  first entry, so nothing links @c libamdhip64 . Each device loads the bundle once, the first time
- *  a stream on it launches, and keeps it for the life of the process. Every entry runs on its
- *  stream's device and leaves the caller's current device as it was.
+ *  a stream on it launches, and keeps it for the life of the process. Every entry runs on the
+ *  current device, the one the executor selected, never one a stream names.
  */
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the module's load stage
 #include <forkunion/types.hpp>   // `fu::standard_yield_t`, `fu::wait_capped_k`
@@ -87,20 +87,13 @@ static device_module_t device_modules_[max_gpus_per_host_k];
     return static_cast<hip_stream_handle_t>(static_cast<void*>(stream)); // vendor-boundary: an opaque stream handle
 }
 
-/** Run @p enqueue on the device of @p stream , the current one for a null stream, and report its
- *  result. */
+/** Run @p enqueue on @p stream and the current device, the selected one, and report its result. */
 template <typename enqueue_type_>
 [[nodiscard]] static nk_status_t on_device_(nk_stream_t stream, enqueue_type_ const& enqueue) noexcept {
     hip_api_t const& runtime = runtime_();
-    int caller = 0, device = 0;
-    if (!runtime || runtime.get_device(&caller) != util::hip_success_k) return nk_device_code_mismatch_k;
-    device = caller;
-    if (stream && runtime.stream_device(native_(stream), &device) != util::hip_success_k)
-        return nk_device_code_mismatch_k;
-    if (device != caller && runtime.set_device(device) != util::hip_success_k) return nk_device_code_mismatch_k;
-    hip_result_t const result = enqueue(runtime, native_(stream), device);
-    if (device != caller) (void)runtime.set_device(caller);
-    return result == util::hip_success_k ? nk_success_k : nk_device_code_mismatch_k;
+    int device = 0;
+    if (!runtime || runtime.get_device(&device) != util::hip_success_k) return nk_device_code_mismatch_k;
+    return enqueue(runtime, native_(stream), device) == util::hip_success_k ? nk_success_k : nk_device_code_mismatch_k;
 }
 
 /** The function of @p kernel on @p device , the current one, loading the bundle there on first
@@ -158,6 +151,12 @@ nk_allocator_t ue::vram_amd_entries_kit_t::policy(nk_stream_t, uform_residency_t
                                    ? nk_allocator_init_pinned_best(&policy, capability_k)
                                    : nk_allocator_init_device_best(&policy, capability_k);
     return status == nk_success_k ? policy : nk_allocator_t {};
+}
+
+nk_status_t ue::vram_amd_entries_kit_t::select(std::size_t vendor_ordinal) noexcept {
+    hip_api_t const& runtime = runtime_();
+    return runtime && runtime.set_device(static_cast<int>(vendor_ordinal)) == util::hip_success_k ? nk_success_k
+                                                                                                  : nk_missing_gpu_k;
 }
 
 nk_status_t ue::vram_amd_entries_kit_t::synchronize(nk_stream_t stream) noexcept {

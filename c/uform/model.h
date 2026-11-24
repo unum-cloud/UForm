@@ -87,7 +87,7 @@ typedef struct uform_model_load_ram_t {
 } uform_model_load_ram_t;
 
 /** Copies a checkpoint file into host memory and packs its products for the CPU. The checkpoint
- *  carries the model's geometry. */
+ *  holds the model's geometry. */
 UFORM_EXPORT void uform_model_load_ram(uform_model_load_ram_t* arguments);
 
 /** The arguments of @c uform_model_load_ram_buffer. */
@@ -211,7 +211,7 @@ typedef struct uform_model_description_t {
      *  of their own. */
     uform_gpu_class_t gpu_class;
 
-    /** Scalars per token vector; zero when the checkpoint carries no token head. */
+    /** Scalars per token vector; zero when the checkpoint has no token head. */
     size_t token_width;
 
     /** Question types the choice temperatures were calibrated over: zero without the byte

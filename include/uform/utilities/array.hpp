@@ -90,6 +90,9 @@ class stack_array {
         return status_code_t::success_k;
     }
 
+    /** Destroys the last element, which must exist. */
+    void pop_back() noexcept { std::launder(pointer_at(--size_))->~value_type(); }
+
     void clear() noexcept {
         for (size_type index = size_; index != 0; --index) std::launder(pointer_at(index - 1))->~value_type();
         size_ = 0;

@@ -34,8 +34,6 @@
 #include <stdbool.h>  // `bool`
 #include <stdint.h>   // `uint8_t`, `uint32_t`
 
-#include <forkunion/forkunion.h> // `fu_pool_new`, `fu_topology_new` - the pool a lender spawns
-
 #include "uform/uform.h"
 
 #if UFORM_OS_WINDOWS_
@@ -434,13 +432,23 @@ static void test_library_probes(void) {
     }
 }
 
-/** Every executor kind: RAM always, VRAM where the build and the machine have one, a borrowed pool
- *  nowhere yet; a drain of an idle executor succeeds, and every free takes @c NULL. */
+/** Every executor kind: RAM always, VRAM where the build and the machine have one, a pool the
+ *  caller owns nowhere yet; a drain of an idle executor succeeds, and every free takes @c NULL. */
 static void test_executors(void) {
     uform_executor_t const executor = create_executor();
     uform_outcome_t outcome = {uform_status_io_k, "a stale message the call must overwrite"};
     uform_executor_drain(&(uform_executor_drain_t) {.executor = executor, .outcome = &outcome});
     expect_(outcome.status == uform_status_success_k && outcome.message == NULL);
+
+    // One named memory domain spawns the threads near it; node 0 is the one every machine has.
+    int32_t const first_domain[] = {0};
+    uform_executor_t placed = NULL;
+    uform_executor_for_ram(&(uform_executor_for_ram_t) {.executor = &placed,
+                                                        .outcome = &outcome,
+                                                        .ram = {first_domain, 1, uform_cpu_class_unknown_k},
+                                                        .threads = 2});
+    expect_(outcome.status == uform_status_success_k && placed != NULL);
+    uform_executor_free(placed);
 
     uform_executor_t gpu = NULL;
     uform_executor_for_vram(&(uform_executor_for_vram_t) {.executor = &gpu, .outcome = &outcome});
@@ -448,15 +456,16 @@ static void test_executors(void) {
     expect_((outcome.status == uform_status_success_k) == (gpu != NULL));
     uform_executor_free(gpu);
 
-    // A borrowed stream is refused before any device is looked for, so every build answers alike.
-    void* const borrowed[] = {&outcome};
+    // A caller stream is refused before any device is looked for, so every build answers alike.
+    void* const caller_streams[] = {&outcome};
     gpu = NULL;
-    uform_executor_for_vram(&(uform_executor_for_vram_t) {.executor = &gpu, .outcome = &outcome, .streams = borrowed});
+    uform_executor_for_vram(
+        &(uform_executor_for_vram_t) {.executor = &gpu, .outcome = &outcome, .streams = caller_streams});
     expect_(outcome.status == uform_status_unsupported_k && gpu == NULL);
     uform_executor_for_vram(&(uform_executor_for_vram_t) {.executor = &gpu,
                                                           .outcome = &outcome,
                                                           .vram = {.devices = NULL, .devices_count = 1},
-                                                          .streams = borrowed});
+                                                          .streams = caller_streams});
     expect_(outcome.status == uform_status_invalid_argument_k);
 
     uform_executor_free(NULL);
@@ -725,7 +734,7 @@ static void test_heads(void) {
     uform_executor_free(executor);
 }
 
-/** CRC-32 of @p length bytes, as PNG chunks carry it. */
+/** CRC-32 of @p length bytes, as PNG chunks store it. */
 static uint32_t crc32_of(uint8_t const* bytes, size_t length, uint32_t crc) {
     crc = ~crc;
     for (size_t position = 0; position != length; ++position) {
@@ -1130,18 +1139,18 @@ static void test_held_calls(void) {
     expect_(contender.outcome.status == uform_status_contended_k);
     encode_texts(model, executor, uform_completion_deferred_k, &texts, &contender, silent);
     expect_(contender.outcome.status == uform_status_contended_k);
-    text_outputs_t borrower = {.arena = deferred.arena};
-    encode_texts(model, NULL, uform_completion_blocking_k, &texts, &borrower, silent);
-    expect_(borrower.outcome.status == uform_status_contended_k);
-    expect_(borrower.embeddings.data == NULL);
+    text_outputs_t same_arena = {.arena = deferred.arena};
+    encode_texts(model, NULL, uform_completion_blocking_k, &texts, &same_arena, silent);
+    expect_(same_arena.outcome.status == uform_status_contended_k);
+    expect_(same_arena.embeddings.data == NULL);
 
     atomic_store(&gate.opened, 1);
     time_t const landing_deadline = time(NULL) + wait_limit_seconds;
     while (uform_outcome_status(&deferred.outcome) == uform_status_deferred_k && time(NULL) < landing_deadline) {}
     expect_(deferred.outcome.status == uform_status_success_k);
     expect_(same_outputs(&blocking, &deferred, texts.count));
-    encode_texts(model, NULL, uform_completion_blocking_k, &texts, &borrower, silent);
-    expect_(!borrower.outcome.message);
+    encode_texts(model, NULL, uform_completion_blocking_k, &texts, &same_arena, silent);
+    expect_(!same_arena.outcome.message);
 
     uform_arena_free(deferred.arena);
     uform_arena_free(blocking.arena);
@@ -1150,53 +1159,6 @@ static void test_held_calls(void) {
 }
 
 #endif
-
-/** An executor over a pool its lender spawned encodes what an owned one does, and a null
- *  pool is refused. */
-static void test_executor_on_pool(void) {
-    fu_topology_t topology = NULL;
-    fu_pool_t pool = NULL;
-    expect_(fu_topology_new(&topology) == fu_success_k);
-    expect_(fu_pool_new("uform_test", fu_capabilities_all_k, &pool) == fu_success_k);
-    size_t const threads = (fu_comptime_capabilities() & fu_capability_os_threads_k) ? 2 : 1;
-    expect_(fu_pool_spawn(topology, pool, threads, fu_caller_inclusive_k) == fu_success_k);
-
-    uform_outcome_t outcome = {0};
-    uform_executor_t lent = NULL;
-    uform_executor_on_pool(&(uform_executor_on_pool_t) {.executor = &lent, .outcome = &outcome, .pool = pool});
-    expect_at(!outcome.message, __FILE__, __LINE__, outcome.message);
-    expect_(lent != NULL);
-
-    uform_executor_t const owned = create_executor();
-    uform_model_description_t description = {0};
-    uform_model_t const model = load_model(owned, &description);
-    size_t const lengths[] = {3, 40, 17, 1};
-    texts_t texts;
-    fill_texts(&texts, 4, lengths);
-    text_outputs_t on_owned = {.arena = create_arena(owned)};
-    text_outputs_t on_lent = {.arena = create_arena(lent)};
-    uform_progress_t const silent = {0};
-
-    encode_texts(model, owned, uform_completion_blocking_k, &texts, &on_owned, silent);
-    expect_at(!on_owned.outcome.message, __FILE__, __LINE__, on_owned.outcome.message);
-    encode_texts(model, lent, uform_completion_blocking_k, &texts, &on_lent, silent);
-    expect_at(!on_lent.outcome.message, __FILE__, __LINE__, on_lent.outcome.message);
-    expect_(same_outputs(&on_owned, &on_lent, texts.count));
-
-    uform_arena_free(on_lent.arena);
-    uform_arena_free(on_owned.arena);
-    uform_model_free(model);
-    uform_executor_free(owned);
-    uform_executor_free(lent);
-    fu_pool_delete(pool);
-    fu_topology_delete(topology);
-
-    uform_outcome_t refused = {0};
-    uform_executor_t none = NULL;
-    uform_executor_on_pool(&(uform_executor_on_pool_t) {.executor = &none, .outcome = &refused, .pool = NULL});
-    expect_(refused.status != uform_status_success_k);
-    expect_(none == NULL);
-}
 
 /** An arena keeps its high-water mark, so a repeated call lands where the last did; inputs inside
  *  it are refused; a running call holds it, refusing another call meanwhile, until final; and it
@@ -1577,7 +1539,6 @@ int main(int argc, char* argv[]) {
 #if !UFORM_TEST_STUB
     start_test_case("test_held_calls"), test_held_calls(), finish_test_case(NULL);
 #endif
-    start_test_case("test_executor_on_pool"), test_executor_on_pool(), finish_test_case(NULL);
     start_test_case("test_arenas"), test_arenas(), finish_test_case(NULL);
     start_test_case("test_progress"), test_progress(), finish_test_case(NULL);
     start_test_case("test_refusals"), test_refusals(), finish_test_case(NULL);

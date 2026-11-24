@@ -374,7 +374,7 @@ type TrainerInitVramConfig struct {
 	Choices Choices
 	// Schedule is the learning-rate schedule.
 	Schedule Schedule
-	// Mesh is borrowed until the trainer is closed; nil runs this process alone.
+	// Mesh must stay open until the trainer is closed; nil runs this process alone.
 	Mesh *Mesh
 	// Seed is the base of every keyed draw.
 	Seed uint64
@@ -445,7 +445,7 @@ type TrainerStepConfig struct {
 	Arena *Arena
 	// OutputsScalar is the scalar the embeddings land as.
 	OutputsScalar Scalar
-	// Stats is the report the step overwrites, borrowed until it is final; nil skips it.
+	// Stats is the report the step overwrites, kept by the caller until it is final; nil skips it.
 	Stats *TrainerStepStats
 }
 
@@ -480,12 +480,12 @@ func (edges Edges) check(count uint) error {
 	return nil
 }
 
-// edges lends one edge set until the call is final.
+// edges pins one edge set until the call is final.
 func (call *call) edges(edges Edges) C.uform_edges_view_t {
 	return C.uform_edges_view_t{
-		offsets: (*C.size_t)(call.lend(unsafe.Pointer(unsafe.SliceData(edges.Offsets)), len(edges.Offsets))),
+		offsets: (*C.size_t)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(edges.Offsets)), len(edges.Offsets))),
 		ids:     call.uint32s(edges.IDs),
-		weights: (*C.float)(call.lend(unsafe.Pointer(unsafe.SliceData(edges.Weights)), len(edges.Weights))),
+		weights: (*C.float)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(edges.Weights)), len(edges.Weights))),
 	}
 }
 
@@ -493,7 +493,7 @@ func (call *call) edges(edges Edges) C.uform_edges_view_t {
 
 // region: Mesh
 
-// Mesh is one process's place among the processes of a run, made once and borrowed by every
+// Mesh is one process's place among the processes of a run, made once and referred to by every
 // trainer, which must be closed first.
 //
 // Mirrors uform_mesh_t; Close calls uform_mesh_free.
@@ -511,23 +511,23 @@ func MeshBootstrap(executor *Executor, config *MeshOptions) (*Mesh, error) {
 	if err != nil {
 		return nil, err
 	}
-	var lent lent[C.uform_mesh_t]
-	arguments := open[C.uform_mesh_bootstrap_t](&lent)
+	var call callWithResult[C.uform_mesh_t]
+	arguments := open[C.uform_mesh_bootstrap_t](&call)
 	*arguments = C.uform_mesh_bootstrap_t{
-		mesh:     lent.result,
+		mesh:     call.result,
 		executor: handle,
-		outcome:  lent.outcome(),
+		outcome:  call.outcome(),
 		options: C.uform_mesh_options_t{
 			host_domain_index:        C.size_t(options.HostDomainIndex),
 			host_domain_count:        C.size_t(options.HostDomainCount),
 			gpus_per_multimem_domain: C.size_t(options.GPUsPerMultimemDomain),
-			directory:                lent.text(options.Directory),
-			job:                      lent.text(options.Job),
+			directory:                call.text(options.Directory),
+			job:                      call.text(options.Job),
 			timeout_seconds:          C.double(options.TimeoutSeconds),
 		},
 	}
 	C.uform_mesh_bootstrap(arguments)
-	mesh, err := block(&lent, nil)
+	mesh, err := block(&call, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -541,15 +541,15 @@ func (mesh *Mesh) Describe() (MeshDescription, error) {
 	if mesh == nil || mesh.handle == nil {
 		return MeshDescription{}, fail(StatusUninitialized, "the mesh is closed or was never joined")
 	}
-	var lent lent[MeshDescription]
-	arguments := open[C.uform_mesh_describe_t](&lent)
+	var call callWithResult[MeshDescription]
+	arguments := open[C.uform_mesh_describe_t](&call)
 	*arguments = C.uform_mesh_describe_t{
 		mesh:        mesh.handle,
-		outcome:     lent.outcome(),
-		description: (*C.uform_mesh_description_t)(unsafe.Pointer(lent.result)),
+		outcome:     call.outcome(),
+		description: (*C.uform_mesh_description_t)(unsafe.Pointer(call.result)),
 	}
 	C.uform_mesh_describe(arguments)
-	return block(&lent, nil)
+	return block(&call, nil)
 }
 
 // Close leaves the mesh. It is idempotent, and every trainer made over the mesh must be closed
@@ -603,14 +603,14 @@ func TrainerInitVram(executor *Executor, config *TrainerInitVramConfig) (*Traine
 	if options.Mesh != nil {
 		mesh = options.Mesh.handle
 	}
-	var lent lent[C.uform_trainer_t]
-	arguments := open[C.uform_trainer_init_vram_t](&lent)
+	var call callWithResult[C.uform_trainer_t]
+	arguments := open[C.uform_trainer_init_vram_t](&call)
 	contrastive := options.Contrastive
 	*arguments = C.uform_trainer_init_vram_t{
-		trainer:          lent.result,
+		trainer:          call.result,
 		executor:         handle,
-		outcome:          lent.outcome(),
-		resume:           lent.text(options.Resume),
+		outcome:          call.outcome(),
+		resume:           call.text(options.Resume),
 		depth:            C.size_t(options.Depth),
 		hidden:           C.size_t(options.Hidden),
 		batch:            *(*C.uform_batch_shape_t)(unsafe.Pointer(&options.Batch)),
@@ -621,9 +621,9 @@ func TrainerInitVram(executor *Executor, config *TrainerInitVramConfig) (*Traine
 		schedule:         *(*C.uform_schedule_t)(unsafe.Pointer(&options.Schedule)),
 		mesh:             mesh,
 		seed:             C.uint64_t(options.Seed),
-		progress:         lent.progress(options.Progress, options.ProgressSteps),
+		progress:         call.progress(options.Progress, options.ProgressSteps),
 		contrastive: C.uform_contrastive_t{
-			matryoshka_dimensions:       (*C.size_t)(lent.lend(unsafe.Pointer(unsafe.SliceData(contrastive.MatryoshkaDimensions)), len(contrastive.MatryoshkaDimensions))),
+			matryoshka_dimensions:       (*C.size_t)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(contrastive.MatryoshkaDimensions)), len(contrastive.MatryoshkaDimensions))),
 			matryoshka_dimensions_count: C.size_t(len(contrastive.MatryoshkaDimensions)),
 			temperature_groups:          C.size_t(contrastive.TemperatureGroups),
 			inverse_temperature:         C.float(contrastive.InverseTemperature),
@@ -635,7 +635,7 @@ func TrainerInitVram(executor *Executor, config *TrainerInitVramConfig) (*Traine
 		},
 	}
 	C.uform_trainer_init_vram(arguments)
-	return trainerOf(block(&lent, nil))
+	return trainerOf(block(&call, nil))
 }
 
 // Close frees the trainer, waiting for every deferred call naming it. It is idempotent.
@@ -687,14 +687,14 @@ func (on TrainerOn) Deferred(executor *Executor) TrainerDeferredOn {
 //
 // Calls uform_trainer_step.
 func (on TrainerOn) Step(modalities []Modality, contents Tape, config *TrainerStepConfig) (Rows, error) {
-	var lent lent[Rows]
-	return block(&lent, on.step(&lent, C.uform_completion_blocking_k, modalities, contents, config))
+	var call callWithResult[Rows]
+	return block(&call, on.step(&call, C.uform_completion_blocking_k, modalities, contents, config))
 }
 
 // Step submits TrainerOn.Step.
 func (on TrainerDeferredOn) Step(modalities []Modality, contents Tape, config *TrainerStepConfig) (*Deferred[Rows], error) {
 	deferred := new(Deferred[Rows])
-	return submitted(deferred, on.step(&deferred.lent, C.uform_completion_deferred_k, modalities, contents, config))
+	return submitted(deferred, on.step(&deferred.call, C.uform_completion_deferred_k, modalities, contents, config))
 }
 
 // Save writes the weights and the step to a safetensors checkpoint at path, which ModelLoadVram
@@ -702,22 +702,22 @@ func (on TrainerDeferredOn) Step(modalities []Modality, contents Tape, config *T
 //
 // Calls uform_trainer_save.
 func (on TrainerOn) Save(path string, config *TrainerSaveConfig) error {
-	var lent lent[struct{}]
-	_, err := block(&lent, on.save(&lent, C.uform_completion_blocking_k, path, config))
+	var call callWithResult[struct{}]
+	_, err := block(&call, on.save(&call, C.uform_completion_blocking_k, path, config))
 	return err
 }
 
 // Save submits TrainerOn.Save.
 func (on TrainerDeferredOn) Save(path string, config *TrainerSaveConfig) (*Deferred[struct{}], error) {
 	deferred := new(Deferred[struct{}])
-	return submitted(deferred, on.save(&deferred.lent, C.uform_completion_deferred_k, path, config))
+	return submitted(deferred, on.save(&deferred.call, C.uform_completion_deferred_k, path, config))
 }
 
 // endregion: Receivers
 
 // region: Calls
 
-func (receiver trainerReceiver) step(lent *lent[Rows], completion C.uform_completion_t, modalities []Modality,
+func (receiver trainerReceiver) step(call *callWithResult[Rows], completion C.uform_completion_t, modalities []Modality,
 	contents Tape, config *TrainerStepConfig) error {
 	options := configOf(config)
 	trainer, executor, outputsArena, err := receiver.lowerInto(options.Arena)
@@ -743,53 +743,53 @@ func (receiver trainerReceiver) step(lent *lent[Rows], completion C.uform_comple
 			return err
 		}
 	}
-	arguments := open[C.uform_trainer_step_t](lent)
+	arguments := open[C.uform_trainer_step_t](call)
 	var embeddings *C.uform_rows_view_t
 	if options.Arena != nil {
-		embeddings, lent.result.count = &lent.result.raw, count
+		embeddings, call.result.count = &call.result.raw, count
 	}
 	*arguments = C.uform_trainer_step_t{
 		trainer:            trainer,
 		executor:           executor,
-		outcome:            lent.outcome(),
+		outcome:            call.outcome(),
 		completion:         completion,
 		count:              C.size_t(count),
-		modalities:         (*C.uform_modality_t)(lent.lend(unsafe.Pointer(unsafe.SliceData(modalities)), len(modalities))),
-		contents:           contents.lower(&lent.call),
-		bags:               lent.uint32s(options.Bags),
-		temperature_groups: lent.uint32s(options.TemperatureGroups),
-		sides:              (*C.uform_late_interaction_side_t)(lent.lend(unsafe.Pointer(unsafe.SliceData(options.Sides)), len(options.Sides))),
-		choices:            options.Choices.lower(&lent.call),
-		choice_targets:     options.ChoiceTargets.lower(&lent.call),
+		modalities:         (*C.uform_modality_t)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(modalities)), len(modalities))),
+		contents:           contents.lower(&call.call),
+		bags:               call.uint32s(options.Bags),
+		temperature_groups: call.uint32s(options.TemperatureGroups),
+		sides:              (*C.uform_late_interaction_side_t)(call.pinSlice(unsafe.Pointer(unsafe.SliceData(options.Sides)), len(options.Sides))),
+		choices:            options.Choices.lower(&call.call),
+		choice_targets:     options.ChoiceTargets.lower(&call.call),
 		relations: C.uform_relations_view_t{
-			attract: lent.edges(relations.Attract),
-			repel:   lent.edges(relations.Repel),
-			ignore:  lent.edges(relations.Ignore),
+			attract: call.edges(relations.Attract),
+			repel:   call.edges(relations.Repel),
+			ignore:  call.edges(relations.Ignore),
 		},
 		embeddings:     embeddings,
 		arena:          outputsArena,
 		outputs_scalar: C.uform_scalar_t(options.OutputsScalar),
-		stats:          (*C.uform_trainer_step_stats_t)(lent.optional(unsafe.Pointer(options.Stats))),
+		stats:          (*C.uform_trainer_step_stats_t)(call.optional(unsafe.Pointer(options.Stats))),
 	}
 	C.uform_trainer_step(arguments)
 	return nil
 }
 
-func (receiver trainerReceiver) save(lent *lent[struct{}], completion C.uform_completion_t, path string,
+func (receiver trainerReceiver) save(call *callWithResult[struct{}], completion C.uform_completion_t, path string,
 	config *TrainerSaveConfig) error {
 	options := configOf(config)
 	trainer, executor, err := receiver.lower()
 	if err != nil {
 		return err
 	}
-	arguments := open[C.uform_trainer_save_t](lent)
+	arguments := open[C.uform_trainer_save_t](call)
 	*arguments = C.uform_trainer_save_t{
 		trainer:    trainer,
 		executor:   executor,
-		outcome:    lent.outcome(),
+		outcome:    call.outcome(),
 		completion: completion,
-		path:       lent.text(path),
-		progress:   lent.progress(options.Progress, options.ProgressSteps),
+		path:       call.text(path),
+		progress:   call.progress(options.Progress, options.ProgressSteps),
 	}
 	C.uform_trainer_save(arguments)
 	return nil

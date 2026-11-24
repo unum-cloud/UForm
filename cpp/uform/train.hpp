@@ -88,7 +88,7 @@ struct trainer_step_config_t {
 };
 
 /** A trainer and its verbs, completed as @p receiver_type_ says: the owning handle and @c on block,
- *  while @c deferred answers deferred calls, whose every input stays borrowed until it is final. */
+ *  while @c deferred answers deferred calls, whose every input stays the caller's until final. */
 template <typename receiver_type_>
 class trainer {
     static constexpr uform_completion_t completion_k = receiver_type_::completion;
@@ -115,15 +115,15 @@ class trainer {
     }
 
     /** The same handle, whose verbs block on @p executor. */
-    trainer<borrowing<uform_trainer_t, uform_completion_blocking_k>> on(executor_t const& executor) const noexcept {
-        return trainer<borrowing<uform_trainer_t, uform_completion_blocking_k>>(
+    trainer<caller_owned<uform_trainer_t, uform_completion_blocking_k>> on(executor_t const& executor) const noexcept {
+        return trainer<caller_owned<uform_trainer_t, uform_completion_blocking_k>>(
             {receiver_.handle(), executor.handle()});
     }
 
     /** The same handle, whose verbs submit to @p executor, each answering a @c deferred call. */
-    trainer<borrowing<uform_trainer_t, uform_completion_deferred_k>> deferred(
+    trainer<caller_owned<uform_trainer_t, uform_completion_deferred_k>> deferred(
         executor_t const& executor) const noexcept {
-        return trainer<borrowing<uform_trainer_t, uform_completion_deferred_k>>(
+        return trainer<caller_owned<uform_trainer_t, uform_completion_deferred_k>>(
             {receiver_.handle(), executor.handle()});
     }
 
@@ -203,8 +203,8 @@ class trainer {
 /** Owns one training run on a VRAM executor's devices; destruction waits for its deferred calls. */
 using trainer_t = trainer<owning<uform_trainer_t, uform_trainer_free>>;
 
-/** A borrowed trainer and its executor, completing its verbs as @p completion_ says. */
+/** A trainer the caller owns and its executor, completing its verbs as @p completion_ says. */
 template <uform_completion_t completion_>
-using trainer_on = trainer<borrowing<uform_trainer_t, completion_>>;
+using trainer_on = trainer<caller_owned<uform_trainer_t, completion_>>;
 
 } // namespace unum::uform

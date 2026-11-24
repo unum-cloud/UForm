@@ -69,10 +69,10 @@ struct transformer_block_config_t {
     /** Feed-forward expansion; the SwiGLU inner width is @c ffn_expansion · hidden . */
     u32_t ffn_expansion = 4u;
 
-    /** Most packed tokens one call carries. */
+    /** Most packed tokens one call holds. */
     u32_t max_tokens = 0;
 
-    /** Most packed segments (documents) one call carries. */
+    /** Most packed segments (documents) one call holds. */
     u32_t max_segments = 0;
 
     /** Longest single segment. */
@@ -94,7 +94,7 @@ struct rope_shape_t {
     u32_t width = 32u;
 };
 
-/** Borrowed rotary state: the three per-axis precomputed angle grids — model property, shared by
+/** Rotary state as views: the three per-axis precomputed angle grids — model property, shared by
  *  every block, threaded per call. Per-token coordinates travel separately as the tower's derived
  *  scratch, and the shape is never stored beside the angles: each axis's channel width is twice its
  *  grid's pair extent, so @ref shape derives it. */
@@ -129,7 +129,7 @@ struct rope_angles_t {
     [[nodiscard]] static expected<rope_angles_t> make(gpu_arena_t& arena, u32_t max_positions, rope_shape_t shape,
                                                       f32_t base) noexcept;
 
-    /** The kernel-facing bundle every block borrows. */
+    /** The kernel-facing bundle every block reads, valid while these grids live. */
     [[nodiscard]] rope_angles_view_t view() const noexcept {
         rope_angles_view_t bundle;
         bundle.temporal = f32r2_view_t {angles_.data() + axis_offsets_[0], max_positions_, shape_.temporal / 2u};
@@ -165,7 +165,7 @@ struct tower_scalars_t {
  *  @brief Learnable RMSNorm forward over strided BFloat16 rows: @c y = x · rsqrt(mean(x²)+eps) · γ
  *      , saving the Float32 @c 1/rms per row for the backward.
  *
- *  The @c rmsnorm_* and @c rmscast_* kernels carry @b external linkage so both this block and the
+ *  The @c rmsnorm_* and @c rmscast_* kernels have @b external linkage so both this block and the
  *  encoder tower launch the same symbols through @ref launch_kernel : one definition each, no
  *  wrapper, no extra file. RMSNorm is a shared primitive, so the names take no @c transformer_
  *  prefix; the block's unit QK-norm is a different operator (no learnable scale, per-head-vector)
@@ -234,7 +234,7 @@ __global__ void dropout_kernel(bf16r1_span_t values, u32r1_view_t data_epoch, u3
 
 /** The transients every block of a stack shares: blocks run one after another on one stream and no
  *  transient outlives the block that wrote it, so a stack's footprint is one scratch plus the
- *  per-block stashes, weights and packs. Owned by the stack, borrowed by each
+ *  per-block stashes, weights and packs. Owned by the stack, read by each
  *  @c transformer_block_bf16_t . */
 struct transformer_scratch_t {
 
@@ -330,8 +330,8 @@ struct transformer_block_bf16_t {
      *  @param[out] output Same-shaped Float32 destination; may not alias @p input .
      *  @param[in] segment_offsets @b [segments+1] flat segment START positions (gapped
      *      at row jumps).
-     *  @param[in] segment_lengths @b [segments] live token count per segment; PAD segments carry 0.
-     *  @param[in] angles Borrowed rotary angle grids.
+     *  @param[in] segment_lengths @b [segments] live token count per segment; PAD segments hold 0.
+     *  @param[in] angles Rotary angle grids, read only during the call.
      *  @param[in] coords @b [tokens,3] the tower-derived per-token @b (t,h,w) coordinates.
      */
     [[nodiscard]] expected_t forward(f32r2_view_t input, f32r2_span_t output, u32r1_view_t segment_offsets,
@@ -391,7 +391,7 @@ struct transformer_block_bf16_t {
     /** The NumKong kernels of the arena's device class: every product and element-wise verb. */
     gpu_numerics_t numerics_ {};
 
-    /** The shared transients — borrowed, owned by the stack. */
+    /** The shared transients, owned by the stack. */
     transformer_scratch_t* scratch_ = nullptr;
 
     /** Product roles, indexing @ref packed_weights_ and @ref packed_weights_transposed_ . */
@@ -453,7 +453,7 @@ struct transformer_block_e4m3_t {
      *  @param[in] product The role, one of the @c product_*_k constants.
      *  @param[in] activations @b [tokens,in] the per-token-quantized operand.
      *  @param[in] token_scales @b [tokens] per-token scales, or empty when the
-     *      operand carries none.
+     *      operand has none.
      *  @param[in] residual @b [tokens,out] added after the scales, or empty.
      *  @param[out] values @b [tokens,out] the BFloat16 result.
      *  @param[in,out] stream The stream every launch enqueues on.

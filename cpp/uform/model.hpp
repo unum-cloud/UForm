@@ -40,7 +40,7 @@ namespace unum::uform {
  *      @c expected, while @c deferred submits to an executor and answers a @c deferred call.
  *
  *  Each verb is written once, filling its C struct with the result as its output. Every input,
- *  handler, report and arena a deferred call names stays borrowed until it is final.
+ *  handler, report and arena a deferred call names stays the caller's until it is final.
  */
 template <typename receiver_type_>
 class model {
@@ -68,13 +68,14 @@ class model {
     }
 
     /** The same handle, whose verbs block on @p executor. */
-    model<borrowing<uform_model_t, uform_completion_blocking_k>> on(executor_t const& executor) const noexcept {
-        return model<borrowing<uform_model_t, uform_completion_blocking_k>>({receiver_.handle(), executor.handle()});
+    model<caller_owned<uform_model_t, uform_completion_blocking_k>> on(executor_t const& executor) const noexcept {
+        return model<caller_owned<uform_model_t, uform_completion_blocking_k>>({receiver_.handle(), executor.handle()});
     }
 
     /** The same handle, whose verbs submit to @p executor, each answering a @c deferred call. */
-    model<borrowing<uform_model_t, uform_completion_deferred_k>> deferred(executor_t const& executor) const noexcept {
-        return model<borrowing<uform_model_t, uform_completion_deferred_k>>({receiver_.handle(), executor.handle()});
+    model<caller_owned<uform_model_t, uform_completion_deferred_k>> deferred(
+        executor_t const& executor) const noexcept {
+        return model<caller_owned<uform_model_t, uform_completion_deferred_k>>({receiver_.handle(), executor.handle()});
     }
 
     /** Reports the model's geometry, placement, classes and heads in one call. */
@@ -305,8 +306,8 @@ class model {
  *  deferred calls. */
 using model_t = model<owning<uform_model_t, uform_model_free>>;
 
-/** A borrowed model and its executor, completing its verbs as @p completion_ says. */
+/** A model the caller owns and its executor, completing its verbs as @p completion_ says. */
 template <uform_completion_t completion_>
-using model_on = model<borrowing<uform_model_t, completion_>>;
+using model_on = model<caller_owned<uform_model_t, completion_>>;
 
 } // namespace unum::uform

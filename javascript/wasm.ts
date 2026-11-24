@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date October 18, 2026
  *  @brief The WebAssembly backend and the browser entry point: the same API as the Node addon, over
- *      the Emscripten build of the C library that `uform.mjs` and `uform.wasm` carry.
+ *      the Emscripten build of the C library that `uform.mjs` and `uform.wasm` contain.
  *
  *      Calls run blocking on the calling thread with a `NULL` executor, which is all one
  *      single-threaded module offers, so executors only order calls and a deferred receiver
@@ -12,7 +12,7 @@
  *      pointers, `size_t` and enumerations are four bytes. Outputs are copied out of the arena
  *      before the call returns, since a later heap growth would invalidate any view into it, and
  *      the copies are detached when the arena next rewinds, as the addon's views are. Encoded
- *      media need host decoders this build does not carry, so those verbs, the VRAM residency, the
+ *      media need host decoders this build does not ship, so those verbs, the VRAM residency, the
  *      mesh and the trainer report `unsupported`; decode in the page and use the pixels and
  *      samples verbs instead.
  *
@@ -261,7 +261,7 @@ function wasmBackend(module: WasmModule): Compiled {
   /** Spells a class through `spell`, or answers `null` for the unknown class. */
   const className = (spell: (code: number) => number, code: number) => (code ? text(spell(code)) : null);
 
-  /** Throws the failure an outcome at `address` carries. */
+  /** Throws the failure an outcome at `address` holds. */
   function check(frame: Frame, address: number): void {
     const status = frame.load(address + outcomeLayout.at.status);
     if (status === 0) return;
@@ -294,9 +294,6 @@ function wasmBackend(module: WasmModule): Compiled {
     }
     static forVram(): CompiledExecutor {
       throw fail(Status.Unsupported, "The WebAssembly build has no VRAM residency.");
-    }
-    static onPool(): CompiledExecutor {
-      throw fail(Status.Unsupported, "The WebAssembly build computes on the calling thread alone.");
     }
     drain(): void {}
     free(): void {}
@@ -482,7 +479,7 @@ function wasmBackend(module: WasmModule): Compiled {
     }
   }
 
-  /** Refuses a verb that needs host decoders the browser build does not carry. */
+  /** Refuses a verb that needs host decoders the browser build does not include. */
   function undecodable(): never {
     throw fail(Status.Unsupported, "The WebAssembly build decodes no media; pass decoded pixels or samples instead.");
   }
@@ -776,7 +773,6 @@ export {
 export type {
   ExecutorForRamConfig,
   ExecutorForVramConfig,
-  ExecutorOnPoolConfig,
   GpuDevice,
   GpuVendor,
   MultimemTier,

@@ -64,7 +64,7 @@
 
 #include "uform/utilities/safetensors_format.hpp" // `checkpoint_to_load_t`, `checkpoint_to_save_t` — the calibrated copy
 #include "uform/utilities/types.hpp"              // `divide_round_up`
-#include "uform/utilities/ram_device.hpp"         // `executor_t`, `pool_view_t`, `topology_t`
+#include "uform/utilities/ram_device.hpp"         // `ram_executor_t`, `pool_view_t`, `topology_t`
 
 #include "arguments.hpp" // `flag_t`, `parse_or_exit`, `stop_requested`, `verb_phase_t`
 
@@ -72,9 +72,9 @@ namespace fu = ashvardanian::forkunion;
 namespace st = ashvardanian::smashtable;
 namespace util = unum::uform::utilities;
 using util::caller_exclusivity_t;
-using util::executor_t;
 using util::expected;
 using util::pool_view_t;
+using util::ram_executor_t;
 using util::topology_t;
 using namespace unum::uform::tools;
 
@@ -240,7 +240,7 @@ enum class encoded_t { ok_k, skipped_k, failed_k, stopped_k };
 
 /** Load one COCO-SM language's @p entries into @p split : its images under @p images the first
  *  time, and every later time the check that they name the same files in the same order, so the
- *  image embeddings carry over. */
+ *  image embeddings are kept. */
 [[nodiscard]] static bool load_coco_sm_(std::string_view images, yyjson_val* entries, split_t& split) noexcept {
     bool const first = !split.files.count();
     bool loaded = yyjson_arr_size(entries) && (first || yyjson_arr_size(entries) == split.files.count());
@@ -480,9 +480,9 @@ static constexpr std::size_t score_block_rows_k = 64;
     if (nk_capabilities_enabled_cpu(&capabilities) != nk_success_k) return false;
     auto [topology, make_topology_status] = topology_t::make();
     if (!make_topology_status) return false;
-    auto [pool, make_pool_status] = executor_t::make(topology,
-                                                     encoder.threads ? encoder.threads : topology.logical_cores_count(),
-                                                     caller_exclusivity_t::caller_inclusive_k);
+    auto [pool, make_pool_status] = ram_executor_t::make(
+        topology, encoder.threads ? encoder.threads : topology.logical_cores_count(),
+        caller_exclusivity_t::caller_inclusive_k);
     if (!make_pool_status) return false;
     std::size_t text_hits[3] = {}, media_hits[3] = {};
     if (!count_hits_(pool.view(), capabilities, captions, media, encoder.dimensions, owner_offsets.data(),

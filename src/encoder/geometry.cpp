@@ -88,9 +88,8 @@ expected<geometry_t> geometry_t::from(checkpoint_to_load_t const& checkpoint) no
     if (read) read = read_(checkpoint, "audio_sample_rate", geometry.audio_sample_rate);
     if (!read) return result_t::fail(std::move(read));
     if (geometry.image_channels > pixel_channels_max_k || geometry.video_channels > pixel_channels_max_k)
-        return result_t::fail(status_code_t::invalid_argument_k,
-                              "pixels carry at most {} channels (image {}, video {})", pixel_channels_max_k,
-                              geometry.image_channels, geometry.video_channels);
+        return result_t::fail(status_code_t::invalid_argument_k, "pixels have at most {} channels (image {}, video {})",
+                              pixel_channels_max_k, geometry.image_channels, geometry.video_channels);
     std::span<f32_t> const image_mean = std::span {geometry.image_pixel_mean}.first(geometry.image_channels);
     std::span<f32_t> const image_std = std::span {geometry.image_pixel_std}.first(geometry.image_channels);
     std::span<f32_t> const video_mean = std::span {geometry.video_pixel_mean}.first(geometry.video_channels);

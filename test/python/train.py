@@ -92,7 +92,7 @@ def test_step_report_starts_empty():
 
 
 def test_training_enums_spell_the_header():
-    """The training enums carry the C values and names."""
+    """The training enums mirror the C values and names."""
     assert [member.name for member in uform.Modality] == ["TEXT", "IMAGE", "VIDEO", "AUDIO"]
     assert [member.name for member in uform.Objective] == ["MASKED", "CONTRASTIVE", "JOINT"]
     assert [member.name for member in uform.Negatives] == ["AMBIENT", "NAMED"]

@@ -22,14 +22,19 @@ namespace ue = unum::uform::encoder;
 
 uform_model_handle_t::~uform_model_handle_t() noexcept {
     std::visit(
-        [&](auto const* verbs) noexcept {
+        [&]<vendored_residency_t residency_>(encoder_verbs<residency_> const* verbs) noexcept {
             if (!verbs) return;
             if (void* const* const tower = std::get_if<void*>(&towers)) {
                 if (*tower) verbs->destroy(*tower);
                 return;
             }
-            for (uf::vram_replica_t& replica : std::get<util::per_gpu_array<uf::vram_replica_t>>(towers))
-                if (replica.tower) verbs->destroy(replica.tower);
+            if constexpr (residency_ != vendored_residency_t::ram_k && gpu_vendor_compiled(vendor_of(residency_)))
+                for (uf::vram_replica_t& replica : std::get<util::per_gpu_array<uf::vram_replica_t>>(towers)) {
+                    if (!replica.tower) continue;
+                    [[maybe_unused]] nk_status_t const selected = entries_kit_of<residency_>::select(
+                        static_cast<std::size_t>(replica.vendor_ordinal));
+                    verbs->destroy(replica.tower);
+                }
         },
         tables);
 }
@@ -52,8 +57,7 @@ static bool propagate_load_failure(util::status_t status, load_stage_t stage, uf
     case util::status_code_t::invalid_argument_k:
         switch (stage) {
         case load_stage_t::reading_k: return fail(uform_status_malformed_k, "The checkpoint is not a safetensors file");
-        case load_stage_t::measuring_k:
-            return fail(uform_status_malformed_k, "The checkpoint carries no usable geometry");
+        case load_stage_t::measuring_k: return fail(uform_status_malformed_k, "The checkpoint has no usable geometry");
         case load_stage_t::packing_k:
             return fail(uform_status_malformed_k, "The checkpoint misses or misshapes a tensor");
         }
@@ -139,7 +143,7 @@ static bool host_ceiling(uform_executor_t executor, uform_cpu_class_t ceiling_cl
         return propagate_error(uform_status_device_k, outcome, "A RAM load needs a RAM executor or none");
     if (ram && ceiling_class == uform_cpu_class_unknown_k) return ceiling = ram->ceiling, true;
     auto [class_ceiling, status] = pick_cpu_ceiling(ceiling_class);
-    if (!status) return propagate_error(status_of(status.status_), outcome, "No compiled class fits the ceiling");
+    if (!status) return propagate_error(status.status_, outcome, "No compiled class fits the ceiling");
     ceiling = class_ceiling;
     if (ram) {
         ceiling.compute &= ram->ceiling.compute;
@@ -193,9 +197,13 @@ static bool load_replicas(uform_model_handle_t& model, util::checkpoint_to_load_
             return propagate_error(uform_status_config_mismatch_k, outcome, "The devices differ in class");
         verbs = picked;
         model.tables = verbs;
+        if constexpr (gpu_vendor_compiled(vendor_of(residency_))) // a build without the vendor picks no verbs
+            if (entries_kit_of<residency_>::select(static_cast<std::size_t>(device.vendor_ordinal)) != nk_success_k)
+                return propagate_error(uform_status_device_k, outcome, "A device failed to become current");
         void* const tower = pack_tower(model, checkpoint, *verbs, device.stream.get(), outcome);
         if (!tower) return false;
-        if (replicas.push_back(vram_replica_t {device.ordinal, tower}) != util::status_code_t::success_k)
+        if (replicas.push_back(vram_replica_t {device.ordinal, device.vendor_ordinal, tower}) !=
+            util::status_code_t::success_k)
             return verbs->destroy(tower),
                    propagate_error(uform_status_out_of_memory_k, outcome, "Failed to list the replicas");
         if (ticks(++placed, devices.devices.size()) == continuation_t::cancel_k)
@@ -238,7 +246,7 @@ static util::expected<util::checkpoint_to_load_t> map_checkpoint(uform_bytes_vie
     return util::checkpoint_to_load_t::make(text_of(path));
 }
 
-/** Views the checkpoint image @p buffer , borrowed only until the towers are packed. */
+/** Views the checkpoint image @p buffer , which must stay allocated until the towers are packed. */
 static util::expected<util::checkpoint_to_load_t> view_checkpoint(uform_bytes_view_t buffer) noexcept {
     return util::checkpoint_to_load_t::view(std::as_bytes(std::span<util::u8_t const> {buffer.data, buffer.length}));
 }

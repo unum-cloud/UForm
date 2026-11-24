@@ -6,7 +6,7 @@
  *      host_domain's facts and reconciling them over a shared filesystem into one agreed world.
  *
  *  Five cases, the first four proving an operation that must @b succeed — the integer accessors
- *  are one-line divisions and carry no test:
+ *  are one-line divisions and have no test:
  *
  *      - @ref test_exchange_round_trips — the durable primitive every wiring phase reuses:
  *        @c publish_text writes atomically and @c await_text reads the bytes back verbatim.
@@ -77,7 +77,7 @@ static sz::string_t facts_payload(sz::string_view_t job, util::u32_t index, util
 }
 
 /** A merged manifest in the wire format `build_manifest_` emits — what the lead publishes for
- *  every follower to adopt; every row carries @p device_name so a follower's self-row agrees
+ *  every follower to adopt; every row holds @p device_name so a follower's self-row agrees
  *  with its probe. */
 static sz::string_t manifest_payload(sz::string_view_t job, util::u32_t multimem, util::u32_t rows, util::u32_t devices,
                                      sz::string_view_t device_name) {
@@ -116,7 +116,7 @@ static bool probe_local_device_name(sz::string_t& name) {
 
 /** The durable exchange round-trips a payload byte-for-byte: `publish_text` writes it
  *  atomically (temp + rename, no leftover), `await_text` reads it whole, and a second publish
- *  replaces the first — the primitive every wiring phase carries its coordinates over.
+ *  replaces the first — the primitive every wiring phase sends its coordinates over.
  *  Hand-built topology, no GPU. */
 static void test_exchange_round_trips() {
     scratch_directory_t const scratch;
@@ -218,7 +218,7 @@ static case_result_t test_single_box_world(util::u32_t local_devices) {
     expect_true(topology.host_domain_count() == 1, "world should hold one host_domain: got {}",
                 topology.host_domain_count());
     expect_true(topology.is_lead(), "the sole host_domain should lead");
-    expect_true(topology.self().device_count == local_devices, "self facts should carry the probed device count: {}",
+    expect_true(topology.self().device_count == local_devices, "self facts should report the probed device count: {}",
                 topology.self().device_count);
     expect_true(topology.exchange_directory.empty(), "a single-box world should not touch the filesystem");
     expect_true(!fs::exists(base / "single_box"), "a single-box world should create no exchange files");

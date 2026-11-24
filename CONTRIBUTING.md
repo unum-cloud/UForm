@@ -95,14 +95,14 @@ The pre-commit hook refuses a namespace no directory backs and a nameless one.
 - __Ranges.__
   Past the C boundary a range is a `std::span`, a NumKong `tensor_view` or `tensor_span`, or a `tape_view`; a pointer with a count is a C ABI or vendor shape only.
   A ragged list of numbers, like the row groups of each picked shard, is a `tape_view`, never a span of vectors.
-  A list of strings an interface reads, like shard paths or column names, is a StringZilla `sz::strings_view_t`, which borrows an Arrow tape and a span of `sz::string_view_t` alike, so the caller keeps whichever it holds.
+  A list of strings an interface reads, like shard paths or column names, is a StringZilla `sz::strings_view_t`, which views an Arrow tape and a span of `sz::string_view_t` alike, so the caller keeps whichever it holds.
   Owners behind those views stay plain: an `st::basic_vector` of `sz::string_t` or of `sz::string_view_t` is fine as a member or a local.
   Structs read inside kernels keep pointer and count members, marked `device-boundary`, where a view would change the register budget.
 
 ### Naming
 
 - `_t` marks concrete types and the aliases that materialize a template, and `_k` marks constants and enumerators.
-- Class, alias and variable templates carry neither suffix: `ram_tower`, `encoder_class_tables`, `vram_tower_of`.
+- Class, alias and variable templates take neither suffix: `ram_tower`, `encoder_class_tables`, `vram_tower_of`.
 - Template parameters end in one underscore, as `typename tower_type_` and `vendored_residency_t residency_` do, and so do private and protected data members, so neither shadows the public names around it.
 - Identifiers are whole words, like `index`, `count`, `threads` and `segments`.
 - One word names one concept: memory is allocated or reserved, a contiguous region is a buffer, a chunk or a plane, and the hook refuses `carve`, `slab`, `seam` and `slot`.
@@ -142,7 +142,7 @@ Nothing in the library throws, and every function under `include/uform/` and `sr
 A fallible host function returns `expected<value_type_>`, or `expected_t` when it has no value, both from `include/uform/utilities/types.hpp`, and fails through `expected::fail(status, format, arguments...)`.
 `status_t` takes every value from `uform_status_t`, so a failure crosses the C ABI as a cast.
 Errors are checked with an explicit `if` and `return`, and a two-way structured binding reads `[thing, status]`, never a participle.
-A helper that lets a vendor's exceptions reach its caller, as cuDF's readers do, carries a `vendor-boundary` marker on its signature, as does any other line a vendor API forces past these rules.
+A helper that lets a vendor's exceptions reach its caller, as cuDF's readers do, has a `vendor-boundary` marker on its signature, as does any other line a vendor API forces past these rules.
 
 The library under `include/uform/` and `src/` holds none of these standard types:
 
@@ -167,9 +167,17 @@ Tensors index by rank, `tensor[row, column]`, and slice through the same subscri
 ### Threads and Placement
 
 Host threads and the machine's topology come from ForkUnion's C ABI in `forkunion/forkunion.h`, wrapped once by `include/uform/utilities/ram_device.hpp`, and nothing else calls a `fu_*` function.
-There `topology_t` harvests the machine through `fu_topology_new`, `executor_t` spawns a pool through `fu_pool_new` and `fu_pool_spawn` and deletes it in its destructor, and `lent_pool_t` wraps a pool another library lends through `uform_executor_on_pool`, dispatching on it but never deleting it.
-Engines, loaders, tools and tests dispatch through the `pool_view_t` either one hands out, `for_n` for tasks of similar cost and `for_n_dynamic` for uneven ones, and a dispatch finding the pool busy answers `status_t::contended_k` rather than waiting.
-The hook refuses a ForkUnion pool or topology class under `include/uform/`, and a `std::thread` in a CUDA source, where one host thread drives every device through its streams and events.
+There `topology_t` harvests the machine through `fu_topology_new`, and `ram_executor_t` holds its threads as `threads_t`, a `std::variant` of a `fu_pool_t` or ForkUnion's `fu::dummy_pool_t`.
+It spawns the pool through `fu_pool_new` and `fu_pool_spawn` and deletes it in its destructor, while `ram_executor_t::on_calling_thread()` holds the `fu::dummy_pool_t`: no pool, no thread and no topology probe.
+Engines, loaders, tools and tests dispatch through the `pool_view_t` it hands out, `for_n` for tasks of similar cost and `for_n_dynamic` for uneven ones, and a dispatch finding the pool busy answers `status_code_t::contended_k` rather than waiting.
+A `pool_view_t` holds a copy of `threads_t` and visits it once per dispatch, never inside a loop.
+A call without an executor runs on `on_calling_thread()`, and its scratch is the arena the call names.
+The hook refuses a ForkUnion pool or topology class under `include/uform/`, a `fu_pool_new`, `fu_pool_spawn` or `fu_topology_new` outside `ram_device.hpp`, and a `std::thread` in a CUDA source, where one host thread drives every device through its streams and events.
+The binary's root spawns one pool and passes its `pool_view_t` to every loader and data source, which never spawn one.
+KvikIO is set up at one site, sized from the cores the root's pools left idle.
+An executor spawns its threads near the memory domain the caller names, and the library never names cores of its own.
+A VRAM executor owns one stream per device, created with it and destroyed by it, a caller's `streams` answer `uform_status_unsupported_k`, and every per-device step makes its device current first.
+A GPU verb without an executor answers `uform_status_device_k`, since such a call has no device memory for its scratch.
 
 Shared words follow the Atomics rule above, and `src/lib.hpp` alone picks the primitives for each CPU class.
 `waiter_for_cpu_class` pairs a class with its waiter: PAUSE on the AVX2 and AVX-512 cores, TPAUSE on the WAITPKG Xeons, YIELD on the older Arm cores, WFE on the Armv9.2 ones, WFET only where a monoversioned preset vouches for it, WRS on RISC-V, `pause_short` on Power and `memory.atomic.wait` on WebAssembly.
@@ -185,7 +193,7 @@ Engines receive these as template parameters and never spell a class, an instruc
 - Docblock text sits two spaces past its asterisk, and a tag's continuation hangs four columns past its `@`.
 - Declarations are documented with `/** */`, never with a bare `//` line above them, and every docblock has an empty line above it.
 - A block with no tag is prose that opens on the `/**` line and closes on its last; a block with a tag gets `/**` and `*/` lines of its own.
-- A `@brief` separates a summary from what follows, so a block with nothing after the summary carries no tag, and a summary runs three lines at most.
+- A `@brief` separates a summary from what follows, so a block with nothing after the summary has no tag, and a summary runs three lines at most.
 - Every `@param` states its direction: `@param[in]`, `@param[out]` or `@param[in,out]`.
 - A closing `@par Statuses:` block lists only the statuses a verb's contract adds, while resource failures, cancellation, deferral and defects are covered once by the categories in the `uform_status_t` docblock.
 - Docblocks mark code with `@c`, `@p`, `@b` and `@ref`, never Markdown emphasis, and a `//` comment names code in backticks, never through a Doxygen command.
@@ -227,7 +235,7 @@ Each header lists a verb's refusals under `@par Statuses` in this order and in t
 
 ### Statuses
 
-Statuses 0 to 19 carry the same numbers and meanings in every Unum library: success 0, deferred 1, out_of_memory 2, shape_mismatch 3, unsupported_layout 4, unknown_kind 5, read_only 6, io 7, device 8, malformed 9, internal 10, overflow 11, uninitialized 12, config_mismatch 13, contended 14, cancelled 15, unsupported 16, invalid_argument 17, not_found 18, already_exists 19.
+Statuses 0 to 19 keep the same numbers and meanings in every Unum library: success 0, deferred 1, out_of_memory 2, shape_mismatch 3, unsupported_layout 4, unknown_kind 5, read_only 6, io 7, device 8, malformed 9, internal 10, overflow 11, uninitialized 12, config_mismatch 13, contended 14, cancelled 15, unsupported 16, invalid_argument 17, not_found 18, already_exists 19.
 A library leaves out the ones it cannot answer but never renumbers the rest, and numbers its own statuses from 20.
 Every enum the C interface names, statuses included, has a `uform_*_name` answering "unrecognized" for a value it does not know and a `uform_*_from_name(view, &out)` answering `invalid_argument` for a name it does not know, leaving `out` as it was.
 CPU and GPU class values are ABI: each class keeps the number USearch gives the same hardware, written explicitly, with unused numbers reserved rather than reused.
@@ -345,6 +353,24 @@ A comment that explains the line pins it just as well, and a bare `//` on a memb
 | an exported operation and its table entry                        | verb; trampoline                      | …                                             |
 | a fixed-shape collection a verb fills                            | outputs                               | landing, lander                               |
 | a member of a plan, cursor or walk                               | what it holds and when it holds it    | bits, current, state, data, flags, tmp, scratch |
+
+### Hardening
+
+`.githooks/pre-commit` holds the rules here that a check on added lines can hold.
+
+- A `NULL` executor runs the call on the calling thread. It creates no pool, thread, ring, SPDK queue pair or stream and probes no topology; its scratch and blocking queues live for that call only. Name an executor for calls that allocate nothing once warm.
+- No static, global, shared or thread-local pool, executor, queue set, stream or handle exists, stateless ones included: whoever needs one creates it and frees it.
+- An executor owns its streams, created with it; a call without one uses the null legacy stream or is refused, and no second origin sits beside the owner.
+- Every arena is freed before its executor; a binding enforces the order by lifetime where its language can and documents it otherwise, never by reference counts.
+- A C struct change lands with every binding that lays the struct out by hand, checked field by field in review.
+- Tests never restate a struct's layout that the compiler already pins, so no binding asserts a mirror's size or offsets.
+- No handler is called from several threads at once: a progress handler runs on one thread; a handler that ever is must be safe to call concurrently in every binding.
+- Every executor is equal; a handle owns its media, cache and epochs, never an executor, so no engine compares executor addresses to pick a path; the C layer may refuse an arena or plan used on another executor than its own.
+- Names say who owns a thing and until when a view is valid; no identifier in any language hands a thing over.
+- A fix lands on every residency and vendor that has the bug, or its message names the ones left and why.
+- A commit message names only what its diff shows.
+- A wave never re-wraps or rewords comments it does not otherwise touch.
+- A commit touching `.cu`, `.cuh`, `.hip` or `.metal` names the box that built and ran it, or says none did.
 
 ## Test Suites
 
@@ -498,7 +524,7 @@ The C++ suites test the templates in `include/uform/`, as those are the cells, a
 
 ## Flags and Constants
 
-Every CMake option carries the `UFORM_` prefix, and every `UFORM_BUILD_*` switch is off and every `UFORM_*_ARCH` empty by default, so a build names only what it wants:
+Every CMake option takes the `UFORM_` prefix, and every `UFORM_BUILD_*` switch is off and every `UFORM_*_ARCH` empty by default, so a build names only what it wants:
 
 - `UFORM_BUILD_SHARED`: `uform_static` and `uform_shared` in the default build and the install; without it they build only for the targets that link them.
 - `UFORM_BUILD_STUB`: `uform_static_stub` and `uform_shared_stub` from `src_stub/`, which the bindings then link instead.
@@ -530,7 +556,7 @@ A namespace-scope `_k` constant names an invariant or the default a zero field d
 
 ## Data Scripts
 
-Every script in `scripts/data/` carries a PEP 723 header, so it runs on its own as `uv run scripts/data/<name>.py`.
+Every script in `scripts/data/` has a PEP 723 header, so it runs on its own as `uv run scripts/data/<name>.py`.
 Datasets land under `UFORM_DATA_ROOT`, or under the untracked `data/` at the repository root when it is unset.
 Their tests run as [Test Suites](#test-suites) describes, in a pytest session of their own.
 
@@ -560,18 +586,18 @@ A view the library hands back lives until the next call on its arena.
 The library describes where the memory sits, and the caller checks it; the binding neither copies the view to be safe nor checks its residency on the caller's behalf.
 
 Every array a verb reads shares the call's one count, so mismatched shapes cannot be expressed.
-Where a binding's own types carry two lengths, like a slice of keys beside a matrix of values, it checks once that they agree before the call crosses into the library, and nowhere else.
+Where a binding's own types hold two lengths, like a slice of keys beside a matrix of values, it checks once that they agree before the call crosses into the library, and nowhere else.
 
 Each verb has one body, which fills the C struct and calls the library with no layers in between.
 What it returns is read from the struct's output slot, a trampoline receives the handler itself as its state with no hub around it, and whether a call blocks or defers follows from the type of the receiver it is called on, never from a flag.
 Verbs are never shared through a base class; a trait whose default methods hold the one body per verb is fine, like Rust's and Mojo's, since each receiver supplies only its handle, and C++ writes each handle and its receivers as one class template over what the receiver holds, so the handle carries the verbs as Rust's `&Handle` does.
 
 A typed binding takes the scalar as a type parameter of each call, like USearch's `search::<f32>`, rather than letting a handle's type fix one.
-A deferred Rust call owns what it lends the library until the call is final, since the borrow checker cannot see the library holding it.
+A deferred Rust call owns what the library reads until the call is final, since the borrow checker cannot see the library holding it.
 A C++ wrapper over the C interface is a full typed binding: it has a deferred receiver, `noexcept` callback types and per-call scalar templates.
 
 A dynamic binding publishes every field of every report the library fills.
-A type the binding hands to C by cast, like a slice of parts lent as the C array, is a transparent wrapper over the C struct, like Rust's `#[repr(transparent)]` newtype, so the cast is sound by construction and nothing asserts its size or alignment.
+A type the binding hands to C by cast, like a slice of parts read as the C array, is a transparent wrapper over the C struct, like Rust's `#[repr(transparent)]` newtype, so the cast is sound by construction and nothing asserts its size or alignment.
 Tests never restate a struct's layout that the compiler already pins: no `offset_of!`, `size_of`, `MemoryLayout` or `Marshal.SizeOf` asserts against the C structs; `offsetof` tables that declare members are declarations, not tests.
 Tests of how names print and parse, and of an engine run again through the binding, stay.
 A binding test asserts a status, or the exception or error type mapped from it, and never the wording of a message or note, in any language: no pytest `match=`, no comparison of `error.message`, `err.Error()` or a note's text, and no substring search in them, since engines refine their notes over time.
@@ -581,7 +607,7 @@ A deferred call allocates nothing in C++, Rust or Mojo: C++ and Mojo construct i
 A callback crosses as the C struct it lowers to, built by one generic constructor per handler shape with a trampoline made per handler type, never a trait object, a box or an enum.
 An arena never outlives the executor that made it: Rust's `Arena<'executor>` and Mojo's arena origin enforce the order, and the other bindings document it.
 
-`.githooks/pre-commit` refuses locks in binding sources, throwing callback types, caught unwinds and kept exceptions.
+`.githooks/pre-commit` refuses locks and reference counts in binding sources, layout asserts in binding sources and tests, throwing callback types, caught unwinds and kept exceptions.
 
 ## Commits
 
@@ -590,7 +616,7 @@ An arena never outlives the executor that made it: Rust's `Arena<'executor>` and
 - The title reads `<Verb>: <Summary>`, where the verb is one of `Add`, `Break`, `Chore`, `Docs`, `Fix`, `Improve` or `Make`.
 - The summary opens with a capital letter, unless it opens with a code identifier, which keeps its own case.
 - The title runs to at most 80 characters, and a body line to at most 100 columns, unless it holds a URL or is indented code.
-- The message carries no AI-assistant attribution, since authorship is the human who committed.
+- The message has no AI-assistant attribution, since authorship is the human who committed.
 
 Git's merge, `fixup!` and `squash!` titles are exempt from the title rules.
 A `Release: vX.Y.Z` title is exempt too, but its commit must stamp every version site, and no other commit may change `VERSION`.
@@ -683,7 +709,7 @@ It mirrors the headers as one module each, `types`, `model`, `encode` and `train
 A binding has no life of its own: the C executor owns every thread and stream, so a binding starts no threads and keeps no queues or caches.
 A receiver chooses where a verb runs while the verb stays the same: the model runs it on the calling thread, `on(executor)` blocks on an executor, and `deferred(executor)` submits it and answers a deferred call.
 A deferred call polls through `uform_outcome_status` and waits through `uform_outcome_wait`, and releasing one rides the language's own lifetime construct, which waits first.
-Every output verb takes an arena made through `uform_arena_init` and answers views borrowing it, which the next call on that arena invalidates.
+Every output verb takes an arena made through `uform_arena_init` and answers views into it, which the next call on that arena invalidates.
 Enums cross through the C `_name` and `_from_name` functions rather than tables of the binding's own.
 
 Each binding reaches the C ABI through a CMake build and compiles nothing of `src/` itself:

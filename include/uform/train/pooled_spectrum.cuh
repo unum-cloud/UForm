@@ -79,7 +79,7 @@ struct spectrum_gradient_range_t {
  *      gradient spike gate, as one function object baked at @ref make , each call a pure enqueue.
  *
  *  Holds one state per local rank, a reserved window of the main-owned @ref multimem_domain_t
- *  whose replicas carry the Gram and the gradient energy, and the gateway's InfiniBand all-reduces
+ *  whose replicas hold the Gram and the gradient energy, and the gateway's InfiniBand all-reduces
  *  wired through the main-owned @ref colocated_domain_t . Ranks are enqueued in order @c 0..gpus-1
  *  within a step, and every rank issues its domain barriers in the same order as every other
  *  consumer's.
@@ -205,7 +205,8 @@ struct distributed_pooled_spectrum_t {
     /** One scratch per local rank. */
     per_gpu_array<spectrum_rank_t> ranks_ {};
 
-    /** The main-owned level-1 surface, borrowed; its replicas carry the Gram and the energy. */
+    /** The level-1 surface @c main owns, which outlives this object; its replicas hold the Gram and
+     *  the energy. */
     multimem_domain_t* domain_ = nullptr;
 
     /** This consumer's window of the domain payload: the Gram, then the energy. */

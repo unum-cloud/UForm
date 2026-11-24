@@ -457,13 +457,13 @@ util::expected<distributed_adafactor_t> distributed_adafactor_t::make(
             return result_t::fail(std::move(probed));
     }
 
-    // The gateway's borrowed world buffer must fit this optimizer's gradient; the unread tail
-    // beyond it is harmless, since the reduce is elementwise.
+    // The gateway's world buffer, owned by the composition root, must fit this optimizer's
+    // gradient; the unread tail beyond it is harmless, since the reduce is elementwise.
     if (!single_domain && domain.member_offset() == 0) {
         std::size_t const gradient_scalars = optimizer.ranks_[0].state.gradient_scalars();
         if (world_reduce.payload().extent(0) < gradient_scalars)
             return result_t::fail(util::status_code_t::invalid_argument_k,
-                                  "the borrowed world all-reduce is too small: payload {} < gradient {} scalars",
+                                  "the shared world all-reduce is too small: payload {} < gradient {} scalars",
                                   world_reduce.payload().extent(0), gradient_scalars);
     }
     return result_t {std::move(optimizer)};

@@ -57,7 +57,6 @@ from uform.types import (
     ExecutorDrain,
     ExecutorForRam,
     ExecutorForVram,
-    ExecutorOnPool,
     FromName,
     GPUClass,
     GPUDevice,
@@ -108,7 +107,7 @@ def _resolve[
     `get_symbol` answers `Optional` where `get_function` aborts the process, which is what lets a
     stale library name the symbol it is missing instead of dying without a message.
     """
-    comptime assert __fn_type_is_cabi[Signature](), 'the signature must carry abi("C")'
+    comptime assert __fn_type_is_cabi[Signature](), 'the signature must declare abi("C")'
     if case .Some(address) = handle.get_symbol[NoneType](name):
         return Pointer(to=address).unsafe_bitcast[Signature]()[]
     raise Error(Status.SYMBOL_MISSING, name)
@@ -172,8 +171,6 @@ struct Symbols:
 
     var executor_for_ram: ExecutorForRam
     """`uform_executor_for_ram`."""
-    var executor_on_pool: ExecutorOnPool
-    """`uform_executor_on_pool`."""
     var executor_for_vram: ExecutorForVram
     """`uform_executor_for_vram`."""
     var executor_drain: ExecutorDrain
@@ -258,7 +255,7 @@ struct Symbols:
         """Resolves every entry point at once, so no call ever pays for a `dlsym`.
 
         Args:
-            handle: The opened library, borrowed only while the addresses are read out.
+            handle: The opened library, which the caller owns, read only during the call.
 
         Raises:
             With `SYMBOL_MISSING`, on the first symbol the loaded library does not export.
@@ -285,7 +282,6 @@ struct Symbols:
         self.gpu_devices = _resolve[GPUDevices](handle, "uform_gpu_devices")
 
         self.executor_for_ram = _resolve[ExecutorForRam](handle, "uform_executor_for_ram")
-        self.executor_on_pool = _resolve[ExecutorOnPool](handle, "uform_executor_on_pool")
         self.executor_for_vram = _resolve[ExecutorForVram](handle, "uform_executor_for_vram")
         self.executor_drain = _resolve[ExecutorDrain](handle, "uform_executor_drain")
         self.executor_free = _resolve[Release](handle, "uform_executor_free")
@@ -349,7 +345,7 @@ struct _Loaded:
 struct Library(ImplicitlyCopyable):
     """A reference to the loaded engine, cheap to copy and shared by everything it creates.
 
-    Every handle carries one, which is what keeps the shared object mapped for as long as anything
+    Every handle holds one, which is what keeps the shared object mapped for as long as anything
     can still call into it. It is a loader reference and nothing more: an executor never retains a
     model, and a model never retains an executor.
     """
@@ -369,7 +365,7 @@ struct Library(ImplicitlyCopyable):
 
     @inline(.always)
     def symbols(self) -> ref[origin_of(self.shared[].symbols)] Symbols:
-        """The resolved entry points, borrowed rather than copied on every call.
+        """The resolved entry points, referenced in place rather than copied on every call.
 
         Returns:
             A reference that stays valid for as long as this `Library` is held.

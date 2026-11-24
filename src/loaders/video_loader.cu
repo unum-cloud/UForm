@@ -8,7 +8,7 @@
  *  Two firewalls live here. The NVDEC path ( libnvcuvid via the FFmpeg @c nv-codec-headers dynamic
  *  loader ) and the host demux ( libavformat ) are C APIs that never throw across this boundary:
  *  every call is checked and folded into @ref expected_t . Container parsing is the one host-bound,
- *  parallel stage, so it runs over the borrowed CPU pool — the pool's @b only job here. The NVDEC
+ *  parallel stage, so it runs over the run's CPU pool — the pool's @b only job here. The NVDEC
  *  decode is @b not a thread-per-engine fan-out: a @b single host thread drives an @b interleaved
  *  small-chunk feed across the @c engine_count engines, so decode work stays submitted to every
  *  physical engine at once while the silicon runs it asynchronously — the GPU is the master, the
@@ -192,7 +192,7 @@ static __global__ void nv12_to_interleaved_rgb_kernel_(util::pixel_t const* nv12
  *  segment. Its frames live in the clip's shared decode-group buffer at @c frames_offset (all of
  *  the clip's frames at this segment's @c (pr · P,pc · P) spatial target); the segment subsamples
  *  that buffer temporally by @c frame_stride and lands its tubes at @c (dest_row,dest_column_begin)
- *  in the batch grid. A dropped/short segment carries @c length==0 and contributes nothing. */
+ *  in the batch grid. A dropped/short segment holds @c length==0 and contributes nothing. */
 struct tile_job_t {
 
     /** Element offset of this job's decode-group buffer in the shared frame scratch — the group
@@ -664,7 +664,7 @@ struct decode_group_t {
 /** The host repack scan's whole output: the per-segment grid geometry (offsets/lengths/modality),
  *  the per-job tile placement and spatial factors, the output-element prefix, and the per-clip
  *  decode groups — everything the device uploads, the decode drive, and the tile stage read. Owns
- *  its scratch so one scan fills it and the later stages borrow spans into it. */
+ *  its scratch so one scan fills it and the later stages read spans into it. */
 struct cursor_plan_t {
 
     /** Segment start columns @b [max_segments+1] — element @c max_segments is the packed total. */
@@ -876,9 +876,9 @@ struct cursor_plan_t {
 }
 
 /** The interleaved decode drive's shared inputs — the engine table, the per-clip demux results, and
- *  the per-group decode targets the drive publishes onto an engine before feeding it. A borrow
- *  bundle: every span of scratch the caller keeps alive across the whole drive. The decode unit is
- *  a @ref decode_group_t — one clip decoded once per distinct spatial target, its frames shared by
+ *  the per-group decode targets the drive publishes onto an engine before feeding it. A bundle of
+ *  views: every span of scratch the caller keeps alive across the whole drive. The decode unit is a
+ *  @ref decode_group_t — one clip decoded once per distinct spatial target, its frames shared by
  *  that clip's representations. */
 struct decode_jobs_t {
 
@@ -1149,7 +1149,7 @@ util::expected_t nvdec_session_t::decode_into(util::pool_view_t pool, column_vie
         return util::expected_t::fail(util::status_code_t::unsupported_k, "batch cannot hold {} segments (cap {})",
                                       job_count, max_segments);
 
-    // Stage 1: parallel host demux over the borrowed pool — the one host-bound, embarrassingly
+    // Stage 1: parallel host demux over the run's pool — the one host-bound, embarrassingly
     // parallel step. A clip that fails to demux keeps an empty stream, contributes nothing,
     // and stays PAD-zero.
     st::basic_vector<demuxed_t> demuxed;
@@ -1295,7 +1295,7 @@ util::expected_t video_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, nv
     std::size_t const columns_per_row = batches[0].videos.extent(1);
     std::size_t const max_segments = batches[0].segment_lengths.extent(0);
     if (rows == 0 || columns_per_row == 0)
-        return util::expected_t::fail(util::status_code_t::unsupported_k, "Batch carries no video");
+        return util::expected_t::fail(util::status_code_t::unsupported_k, "Batch has no video");
 
     // The loader's single flat `video_batch_shape_t` is the one representation (the shape is the
     // single source of a step's geometry) — a size-1 span today, cross-product-ready for a future

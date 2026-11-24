@@ -90,7 +90,7 @@ The receiver decides where a verb runs and how it completes, while the verb and 
 - `model.on(executor).text_encode(..)` blocks on the executor, failing `status_code_t::contended_k` while another call holds it.
 - `model.deferred(executor).text_encode(..)` submits the call and answers a `deferred`.
 
-`model<receiver>` writes every verb once for all three: `model_t` owns the model and loads it, while `on` and `deferred` answer a `model_on<completion>` that borrows it with the executor, and `trainer<receiver>` does the same for a trainer.
+`model<receiver>` writes every verb once for all three: `model_t` owns the model and loads it, while `on` and `deferred` answer a `model_on<completion>` that refers to it and the executor, and `trainer<receiver>` does the same for a trainer.
 A blocking verb answers a `status_t` when it outputs nothing else and an `expected<T>` otherwise, so nothing about asynchrony reaches a caller who never asks for it.
 Each class spells that choice once, as its `deferrable<T>`, which names a `deferred<T>` under a deferred receiver.
 
@@ -139,18 +139,19 @@ One executor serves any number of models of its residency.
 
 ```cpp
 auto [threads, threads_status] = uf::executor_t::for_ram({.threads = 8});         // eight threads, where zero takes 7/8 of the cores
-std::int32_t const domains[] = {0, 1};
-auto [numa, numa_status] = uf::executor_t::for_ram({.ram = {.memory_domains = domains, .memory_domains_count = 2}});
+std::int32_t const domains[] = {1};
+auto [numa, numa_status] = uf::executor_t::for_ram({.ram = {.memory_domains = domains, .memory_domains_count = 1}});
 auto [serial, serial_status] = uf::executor_t::for_ram({.ram = {.cpu_class_ceiling = uform_cpu_class_serial_k}});
 std::int32_t const devices[] = {0, 1};
 auto [streams, streams_status] = uf::executor_t::for_vram({.vram = {.devices = devices, .devices_count = 2}});
-auto [shared, shared_status] = uf::executor_t::on_pool({.pool = pool}); // borrows a lent pool's threads
 uf::executor_t local;                                                   // owns nothing, runs on the calling thread
 
 uf::status_t const drained = threads.drain(uform_mood_spinning_k);     // waits until no call holds it, then keeps spinning
 ```
 
 Every factory takes the C argument struct by designator, so a field left out is zero, which the library derives.
+Naming one memory domain spawns the threads near it, while none or several interleave them across the machine.
+`for_vram` opens one stream per device, which the executor destroys, and refuses caller streams with `uform_status_unsupported_k`.
 `uf::gpu_devices(devices)` fills a span of `uform_gpu_device_t` and answers how many GPUs the process can drive, and a device's position there is the ordinal `for_vram` and `load_vram` name it by, while `uf::version_name()` spells the linked library's version.
 An executor runs one call at a time, so two threads that genuinely overlap take one apiece.
 Destroying an executor waits until no call holds it.
@@ -172,6 +173,7 @@ for (uf::tape_view<char> const batch : batches) {
 ```
 
 Destroying an arena waits for the calls writing into it, and a call naming an arena that serves another call finishes with `status_code_t::contended_k`.
+An arena never outlives the executor that made it, so declare the executor before the arena and scope exit destroys the arena first, and an arena from `arena_t::make()` lives until it is destroyed.
 
 ## Encoding
 
@@ -184,8 +186,8 @@ One verb per input form, each spelled as in C, and each taking its inputs, the `
 - `audio_encode(files, ..)` takes WAV, FLAC, MP3 or Opus recordings.
 - `audio_encode_samples(samples, sample_rate, ..)` takes mono `float` samples as a `tape_view<float>`.
 
-A `tape_view` is the elements and `count + 1` offsets, lent to the library without a copy once the SDK checks the offsets stay inside the elements.
-Separate items gather into memory the caller lends with one copy, through `gathered<char>(items, offsets, elements)`, which answers the view every verb takes, or `status_code_t::invalid_argument_k` when either span is too short:
+A `tape_view` is the elements and `count + 1` offsets, which the library reads without a copy once the SDK checks the offsets stay inside the elements.
+Separate items gather into memory the caller owns with one copy, through `gathered<char>(items, offsets, elements)`, which answers the view every verb takes, or `status_code_t::invalid_argument_k` when either span is too short:
 
 ```cpp
 std::string_view const joined = "first documentthe second";
@@ -279,7 +281,7 @@ uf::status_t const saved = trainer.on(executor).save(uf::bytes_view("checkpoint.
 `trainer_step_config_t` gathers a step's per-item inputs: `bags`, `temperature_groups`, `sides`, the `choices` and `choice_targets` tapes `text_choose` takes and answers, the `relations` edge sets, and an optional `arena` for the pooled embeddings the loss scored.
 The SDK checks every per-item span and tape against the step's items before the call, and leaves the edge sets to the library.
 `step` answers the pooled embeddings when its config names an arena, and an empty `written_rows_t` otherwise.
-A trainer borrows its mesh, so the mesh outlives every trainer made over it, and `mesh.describe()` answers a `uform_mesh_description_t`.
+A trainer refers to its mesh, so the mesh outlives every trainer made over it, and `mesh.describe()` answers a `uform_mesh_description_t`.
 
 ## Errors
 
@@ -310,7 +312,7 @@ A handler is a `noexcept` callable, so no fault unwinds through the library.
   `status` polls through `uform_outcome_status`, `wait()` blocks through `uform_outcome_wait`, and `co_await wait(loop)` re-polls through the caller's scheduler, since the library has no wake-up.
 - __No life of its own.__
   The SDK starts no threads and keeps no queues, counts or caches; destroying a `deferred` waits for the call first.
-- __Arenas are lent and reused, never shared.__
+- __Arenas belong to the caller and are reused, never shared.__
   Every output verb takes an arena and answers views into it, valid until the arena's next call.
 - __Nothing costs anything until it is used.__
   A blocking call keeps its outcome and outputs on the stack, a deferred one inside the `deferred` it answers, and awaiting posts two words to the caller's loop, so the SDK allocates nothing on any path.

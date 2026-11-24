@@ -51,7 +51,7 @@ type Encoded struct {
 	TokenVectors RowsTape
 }
 
-// kept lends the surfaces outputs names inside encoded, sized for count items, and nil for the
+// kept points the surfaces outputs names into encoded, sized for count items, and nil for the
 // rest.
 func kept(outputs EncodeOutputs, encoded *Encoded, count uint) (*C.uform_rows_view_t, *C.uform_rows_tape_view_t, *C.uform_rows_tape_view_t) {
 	var embeddings *C.uform_rows_view_t
@@ -128,7 +128,7 @@ type TextEncodeConfig struct {
 	Progress ProgressCallback
 	// ProgressSteps is the reports the call makes at most; zero derives ten.
 	ProgressSteps uint
-	// Stats is the report the call overwrites, borrowed until it is final; nil skips it.
+	// Stats is the report the call overwrites, kept by the caller until it is final; nil skips it.
 	Stats *TextEncodeStats
 }
 
@@ -140,7 +140,7 @@ type ImageEncodeConfig struct {
 	Progress ProgressCallback
 	// ProgressSteps is the reports the call makes at most; zero derives ten.
 	ProgressSteps uint
-	// Stats is the report the call overwrites, borrowed until it is final; nil skips it.
+	// Stats is the report the call overwrites, kept by the caller until it is final; nil skips it.
 	Stats *ImageEncodeStats
 }
 
@@ -152,7 +152,7 @@ type VideoEncodeConfig struct {
 	Progress ProgressCallback
 	// ProgressSteps is the reports the call makes at most; zero derives ten.
 	ProgressSteps uint
-	// Stats is the report the call overwrites, borrowed until it is final; nil skips it.
+	// Stats is the report the call overwrites, kept by the caller until it is final; nil skips it.
 	Stats *VideoEncodeStats
 }
 
@@ -164,7 +164,7 @@ type AudioEncodeConfig struct {
 	Progress ProgressCallback
 	// ProgressSteps is the reports the call makes at most; zero derives ten.
 	ProgressSteps uint
-	// Stats is the report the call overwrites, borrowed until it is final; nil skips it.
+	// Stats is the report the call overwrites, kept by the caller until it is final; nil skips it.
 	Stats *AudioEncodeStats
 }
 
@@ -179,7 +179,7 @@ type TextChooseConfig struct {
 	Progress ProgressCallback
 	// ProgressSteps is the reports the call makes at most; zero derives ten.
 	ProgressSteps uint
-	// Stats is the report the call overwrites, borrowed until it is final; nil skips it.
+	// Stats is the report the call overwrites, kept by the caller until it is final; nil skips it.
 	Stats *TextEncodeStats
 }
 
@@ -193,15 +193,15 @@ type TextChooseConfig struct {
 // Calls uform_text_encode.
 func (on ModelOn) TextEncode(texts Tape, outputs EncodeOutputs, outputsScalar Scalar, arena *Arena,
 	config *TextEncodeConfig) (Encoded, error) {
-	var lent lent[Encoded]
-	return block(&lent, on.textEncode(&lent, C.uform_completion_blocking_k, texts, outputs, outputsScalar, arena, config))
+	var call callWithResult[Encoded]
+	return block(&call, on.textEncode(&call, C.uform_completion_blocking_k, texts, outputs, outputsScalar, arena, config))
 }
 
 // TextEncode submits ModelOn.TextEncode.
 func (on ModelDeferredOn) TextEncode(texts Tape, outputs EncodeOutputs, outputsScalar Scalar, arena *Arena,
 	config *TextEncodeConfig) (*Deferred[Encoded], error) {
 	deferred := new(Deferred[Encoded])
-	return submitted(deferred, on.textEncode(&deferred.lent, C.uform_completion_deferred_k, texts, outputs, outputsScalar, arena, config))
+	return submitted(deferred, on.textEncode(&deferred.call, C.uform_completion_deferred_k, texts, outputs, outputsScalar, arena, config))
 }
 
 // TextChoose scores each item's legal choices, one byte each, after its UTF-8 state in texts,
@@ -210,14 +210,14 @@ func (on ModelDeferredOn) TextEncode(texts Tape, outputs EncodeOutputs, outputsS
 //
 // Calls uform_text_choose.
 func (on ModelOn) TextChoose(texts, choices Tape, arena *Arena, config *TextChooseConfig) (TapeView, error) {
-	var lent lent[TapeView]
-	return block(&lent, on.textChoose(&lent, C.uform_completion_blocking_k, texts, choices, arena, config))
+	var call callWithResult[TapeView]
+	return block(&call, on.textChoose(&call, C.uform_completion_blocking_k, texts, choices, arena, config))
 }
 
 // TextChoose submits ModelOn.TextChoose.
 func (on ModelDeferredOn) TextChoose(texts, choices Tape, arena *Arena, config *TextChooseConfig) (*Deferred[TapeView], error) {
 	deferred := new(Deferred[TapeView])
-	return submitted(deferred, on.textChoose(&deferred.lent, C.uform_completion_deferred_k, texts, choices, arena, config))
+	return submitted(deferred, on.textChoose(&deferred.call, C.uform_completion_deferred_k, texts, choices, arena, config))
 }
 
 // ImageEncode decodes and encodes JPEG, PNG or WebP files; an undecodable file fails the call with
@@ -226,15 +226,15 @@ func (on ModelDeferredOn) TextChoose(texts, choices Tape, arena *Arena, config *
 // Calls uform_image_encode.
 func (on ModelOn) ImageEncode(images Tape, outputs EncodeOutputs, outputsScalar Scalar, arena *Arena,
 	config *ImageEncodeConfig) (Encoded, error) {
-	var lent lent[Encoded]
-	return block(&lent, on.imageEncode(&lent, C.uform_completion_blocking_k, images, outputs, outputsScalar, arena, config))
+	var call callWithResult[Encoded]
+	return block(&call, on.imageEncode(&call, C.uform_completion_blocking_k, images, outputs, outputsScalar, arena, config))
 }
 
 // ImageEncode submits ModelOn.ImageEncode.
 func (on ModelDeferredOn) ImageEncode(images Tape, outputs EncodeOutputs, outputsScalar Scalar, arena *Arena,
 	config *ImageEncodeConfig) (*Deferred[Encoded], error) {
 	deferred := new(Deferred[Encoded])
-	return submitted(deferred, on.imageEncode(&deferred.lent, C.uform_completion_deferred_k, images, outputs, outputsScalar, arena, config))
+	return submitted(deferred, on.imageEncode(&deferred.call, C.uform_completion_deferred_k, images, outputs, outputsScalar, arena, config))
 }
 
 // ImageEncodePixels encodes decoded images of interleaved 8-bit RGB, item i holding heights[i] rows
@@ -243,15 +243,15 @@ func (on ModelDeferredOn) ImageEncode(images Tape, outputs EncodeOutputs, output
 // Calls uform_image_encode_pixels.
 func (on ModelOn) ImageEncodePixels(pixels Tape, heights, widths []uint32, outputs EncodeOutputs,
 	outputsScalar Scalar, arena *Arena, config *ImageEncodeConfig) (Encoded, error) {
-	var lent lent[Encoded]
-	return block(&lent, on.imageEncodePixels(&lent, C.uform_completion_blocking_k, pixels, heights, widths, outputs, outputsScalar, arena, config))
+	var call callWithResult[Encoded]
+	return block(&call, on.imageEncodePixels(&call, C.uform_completion_blocking_k, pixels, heights, widths, outputs, outputsScalar, arena, config))
 }
 
 // ImageEncodePixels submits ModelOn.ImageEncodePixels.
 func (on ModelDeferredOn) ImageEncodePixels(pixels Tape, heights, widths []uint32, outputs EncodeOutputs,
 	outputsScalar Scalar, arena *Arena, config *ImageEncodeConfig) (*Deferred[Encoded], error) {
 	deferred := new(Deferred[Encoded])
-	return submitted(deferred, on.imageEncodePixels(&deferred.lent, C.uform_completion_deferred_k, pixels, heights, widths, outputs, outputsScalar, arena, config))
+	return submitted(deferred, on.imageEncodePixels(&deferred.call, C.uform_completion_deferred_k, pixels, heights, widths, outputs, outputsScalar, arena, config))
 }
 
 // VideoEncode decodes and encodes MP4 or WebM clips.
@@ -259,15 +259,15 @@ func (on ModelDeferredOn) ImageEncodePixels(pixels Tape, heights, widths []uint3
 // Calls uform_video_encode.
 func (on ModelOn) VideoEncode(videos Tape, outputs EncodeOutputs, outputsScalar Scalar, arena *Arena,
 	config *VideoEncodeConfig) (Encoded, error) {
-	var lent lent[Encoded]
-	return block(&lent, on.videoEncode(&lent, C.uform_completion_blocking_k, videos, outputs, outputsScalar, arena, config))
+	var call callWithResult[Encoded]
+	return block(&call, on.videoEncode(&call, C.uform_completion_blocking_k, videos, outputs, outputsScalar, arena, config))
 }
 
 // VideoEncode submits ModelOn.VideoEncode.
 func (on ModelDeferredOn) VideoEncode(videos Tape, outputs EncodeOutputs, outputsScalar Scalar, arena *Arena,
 	config *VideoEncodeConfig) (*Deferred[Encoded], error) {
 	deferred := new(Deferred[Encoded])
-	return submitted(deferred, on.videoEncode(&deferred.lent, C.uform_completion_deferred_k, videos, outputs, outputsScalar, arena, config))
+	return submitted(deferred, on.videoEncode(&deferred.call, C.uform_completion_deferred_k, videos, outputs, outputsScalar, arena, config))
 }
 
 // AudioEncode decodes and encodes WAV, FLAC, MP3 or Opus recordings, resampled to mono.
@@ -275,15 +275,15 @@ func (on ModelDeferredOn) VideoEncode(videos Tape, outputs EncodeOutputs, output
 // Calls uform_audio_encode.
 func (on ModelOn) AudioEncode(recordings Tape, outputs EncodeOutputs, outputsScalar Scalar, arena *Arena,
 	config *AudioEncodeConfig) (Encoded, error) {
-	var lent lent[Encoded]
-	return block(&lent, on.audioEncode(&lent, C.uform_completion_blocking_k, recordings, outputs, outputsScalar, arena, config))
+	var call callWithResult[Encoded]
+	return block(&call, on.audioEncode(&call, C.uform_completion_blocking_k, recordings, outputs, outputsScalar, arena, config))
 }
 
 // AudioEncode submits ModelOn.AudioEncode.
 func (on ModelDeferredOn) AudioEncode(recordings Tape, outputs EncodeOutputs, outputsScalar Scalar, arena *Arena,
 	config *AudioEncodeConfig) (*Deferred[Encoded], error) {
 	deferred := new(Deferred[Encoded])
-	return submitted(deferred, on.audioEncode(&deferred.lent, C.uform_completion_deferred_k, recordings, outputs, outputsScalar, arena, config))
+	return submitted(deferred, on.audioEncode(&deferred.call, C.uform_completion_deferred_k, recordings, outputs, outputsScalar, arena, config))
 }
 
 // AudioEncodeSamples encodes decoded mono ScalarF32 recordings sharing one sampleRate, resampled
@@ -292,50 +292,50 @@ func (on ModelDeferredOn) AudioEncode(recordings Tape, outputs EncodeOutputs, ou
 // Calls uform_audio_encode_samples.
 func (on ModelOn) AudioEncodeSamples(samples Tape, sampleRate uint32, outputs EncodeOutputs, outputsScalar Scalar,
 	arena *Arena, config *AudioEncodeConfig) (Encoded, error) {
-	var lent lent[Encoded]
-	return block(&lent, on.audioEncodeSamples(&lent, C.uform_completion_blocking_k, samples, sampleRate, outputs, outputsScalar, arena, config))
+	var call callWithResult[Encoded]
+	return block(&call, on.audioEncodeSamples(&call, C.uform_completion_blocking_k, samples, sampleRate, outputs, outputsScalar, arena, config))
 }
 
 // AudioEncodeSamples submits ModelOn.AudioEncodeSamples.
 func (on ModelDeferredOn) AudioEncodeSamples(samples Tape, sampleRate uint32, outputs EncodeOutputs,
 	outputsScalar Scalar, arena *Arena, config *AudioEncodeConfig) (*Deferred[Encoded], error) {
 	deferred := new(Deferred[Encoded])
-	return submitted(deferred, on.audioEncodeSamples(&deferred.lent, C.uform_completion_deferred_k, samples, sampleRate, outputs, outputsScalar, arena, config))
+	return submitted(deferred, on.audioEncodeSamples(&deferred.call, C.uform_completion_deferred_k, samples, sampleRate, outputs, outputsScalar, arena, config))
 }
 
 // endregion: Verbs
 
 // region: Calls
 
-func (receiver modelReceiver) textEncode(lent *lent[Encoded], completion C.uform_completion_t, texts Tape,
+func (receiver modelReceiver) textEncode(call *callWithResult[Encoded], completion C.uform_completion_t, texts Tape,
 	outputs EncodeOutputs, outputsScalar Scalar, arena *Arena, config *TextEncodeConfig) error {
 	options := configOf(config)
 	model, executor, outputsArena, err := receiver.lowerInto(arena)
 	if err != nil {
 		return err
 	}
-	arguments := open[C.uform_text_encode_t](lent)
-	embeddings, states, tokenVectors := kept(outputs, lent.result, texts.Entries())
+	arguments := open[C.uform_text_encode_t](call)
+	embeddings, states, tokenVectors := kept(outputs, call.result, texts.Entries())
 	*arguments = C.uform_text_encode_t{
 		model:          model,
 		executor:       executor,
-		outcome:        lent.outcome(),
+		outcome:        call.outcome(),
 		completion:     completion,
 		count:          C.size_t(texts.Entries()),
-		texts:          texts.lower(&lent.call),
+		texts:          texts.lower(&call.call),
 		embeddings:     embeddings,
 		states:         states,
 		token_vectors:  tokenVectors,
 		arena:          outputsArena,
 		outputs_scalar: C.uform_scalar_t(outputsScalar),
-		progress:       lent.progress(options.Progress, options.ProgressSteps),
-		stats:          (*C.uform_text_encode_stats_t)(lent.optional(unsafe.Pointer(options.Stats))),
+		progress:       call.progress(options.Progress, options.ProgressSteps),
+		stats:          (*C.uform_text_encode_stats_t)(call.optional(unsafe.Pointer(options.Stats))),
 	}
 	C.uform_text_encode(arguments)
 	return nil
 }
 
-func (receiver modelReceiver) textChoose(lent *lent[TapeView], completion C.uform_completion_t, texts, choices Tape,
+func (receiver modelReceiver) textChoose(call *callWithResult[TapeView], completion C.uform_completion_t, texts, choices Tape,
 	arena *Arena, config *TextChooseConfig) error {
 	options := configOf(config)
 	model, executor, outputsArena, err := receiver.lowerInto(arena)
@@ -347,55 +347,55 @@ func (receiver modelReceiver) textChoose(lent *lent[TapeView], completion C.ufor
 		(len(options.TemperatureGroups) != 0 && uint(len(options.TemperatureGroups)) != texts.Entries()) {
 		return fail(StatusShapeMismatch, "every item needs its choices and, if any, one group")
 	}
-	arguments := open[C.uform_text_choose_t](lent)
-	lent.result.count = texts.Entries()
+	arguments := open[C.uform_text_choose_t](call)
+	call.result.count = texts.Entries()
 	*arguments = C.uform_text_choose_t{
 		model:              model,
 		executor:           executor,
-		outcome:            lent.outcome(),
+		outcome:            call.outcome(),
 		completion:         completion,
 		count:              C.size_t(texts.Entries()),
-		texts:              texts.lower(&lent.call),
-		choices:            choices.lower(&lent.call),
-		temperature_groups: lent.uint32s(options.TemperatureGroups),
-		probabilities:      &lent.result.raw,
+		texts:              texts.lower(&call.call),
+		choices:            choices.lower(&call.call),
+		temperature_groups: call.uint32s(options.TemperatureGroups),
+		probabilities:      &call.result.raw,
 		arena:              outputsArena,
-		progress:           lent.progress(options.Progress, options.ProgressSteps),
-		stats:              (*C.uform_text_encode_stats_t)(lent.optional(unsafe.Pointer(options.Stats))),
+		progress:           call.progress(options.Progress, options.ProgressSteps),
+		stats:              (*C.uform_text_encode_stats_t)(call.optional(unsafe.Pointer(options.Stats))),
 	}
 	C.uform_text_choose(arguments)
 	return nil
 }
 
-func (receiver modelReceiver) imageEncode(lent *lent[Encoded], completion C.uform_completion_t, images Tape,
+func (receiver modelReceiver) imageEncode(call *callWithResult[Encoded], completion C.uform_completion_t, images Tape,
 	outputs EncodeOutputs, outputsScalar Scalar, arena *Arena, config *ImageEncodeConfig) error {
 	options := configOf(config)
 	model, executor, outputsArena, err := receiver.lowerInto(arena)
 	if err != nil {
 		return err
 	}
-	arguments := open[C.uform_image_encode_t](lent)
-	embeddings, states, tokenVectors := kept(outputs, lent.result, images.Entries())
+	arguments := open[C.uform_image_encode_t](call)
+	embeddings, states, tokenVectors := kept(outputs, call.result, images.Entries())
 	*arguments = C.uform_image_encode_t{
 		model:          model,
 		executor:       executor,
-		outcome:        lent.outcome(),
+		outcome:        call.outcome(),
 		completion:     completion,
 		count:          C.size_t(images.Entries()),
-		images:         images.lower(&lent.call),
+		images:         images.lower(&call.call),
 		embeddings:     embeddings,
 		states:         states,
 		token_vectors:  tokenVectors,
 		arena:          outputsArena,
 		outputs_scalar: C.uform_scalar_t(outputsScalar),
-		progress:       lent.progress(options.Progress, options.ProgressSteps),
-		stats:          (*C.uform_image_encode_stats_t)(lent.optional(unsafe.Pointer(options.Stats))),
+		progress:       call.progress(options.Progress, options.ProgressSteps),
+		stats:          (*C.uform_image_encode_stats_t)(call.optional(unsafe.Pointer(options.Stats))),
 	}
 	C.uform_image_encode(arguments)
 	return nil
 }
 
-func (receiver modelReceiver) imageEncodePixels(lent *lent[Encoded], completion C.uform_completion_t, pixels Tape,
+func (receiver modelReceiver) imageEncodePixels(call *callWithResult[Encoded], completion C.uform_completion_t, pixels Tape,
 	heights, widths []uint32, outputs EncodeOutputs, outputsScalar Scalar, arena *Arena, config *ImageEncodeConfig) error {
 	options := configOf(config)
 	model, executor, outputsArena, err := receiver.lowerInto(arena)
@@ -406,109 +406,109 @@ func (receiver modelReceiver) imageEncodePixels(lent *lent[Encoded], completion 
 	if uint(len(heights)) != pixels.Entries() || uint(len(widths)) != pixels.Entries() {
 		return fail(StatusShapeMismatch, "every item needs one height and one width")
 	}
-	arguments := open[C.uform_image_encode_pixels_t](lent)
-	embeddings, states, tokenVectors := kept(outputs, lent.result, pixels.Entries())
+	arguments := open[C.uform_image_encode_pixels_t](call)
+	embeddings, states, tokenVectors := kept(outputs, call.result, pixels.Entries())
 	*arguments = C.uform_image_encode_pixels_t{
 		model:          model,
 		executor:       executor,
-		outcome:        lent.outcome(),
+		outcome:        call.outcome(),
 		completion:     completion,
 		count:          C.size_t(pixels.Entries()),
-		pixels:         pixels.lower(&lent.call),
-		heights:        lent.uint32s(heights),
-		widths:         lent.uint32s(widths),
+		pixels:         pixels.lower(&call.call),
+		heights:        call.uint32s(heights),
+		widths:         call.uint32s(widths),
 		embeddings:     embeddings,
 		states:         states,
 		token_vectors:  tokenVectors,
 		arena:          outputsArena,
 		outputs_scalar: C.uform_scalar_t(outputsScalar),
-		progress:       lent.progress(options.Progress, options.ProgressSteps),
-		stats:          (*C.uform_image_encode_stats_t)(lent.optional(unsafe.Pointer(options.Stats))),
+		progress:       call.progress(options.Progress, options.ProgressSteps),
+		stats:          (*C.uform_image_encode_stats_t)(call.optional(unsafe.Pointer(options.Stats))),
 	}
 	C.uform_image_encode_pixels(arguments)
 	return nil
 }
 
-func (receiver modelReceiver) videoEncode(lent *lent[Encoded], completion C.uform_completion_t, videos Tape,
+func (receiver modelReceiver) videoEncode(call *callWithResult[Encoded], completion C.uform_completion_t, videos Tape,
 	outputs EncodeOutputs, outputsScalar Scalar, arena *Arena, config *VideoEncodeConfig) error {
 	options := configOf(config)
 	model, executor, outputsArena, err := receiver.lowerInto(arena)
 	if err != nil {
 		return err
 	}
-	arguments := open[C.uform_video_encode_t](lent)
-	embeddings, states, tokenVectors := kept(outputs, lent.result, videos.Entries())
+	arguments := open[C.uform_video_encode_t](call)
+	embeddings, states, tokenVectors := kept(outputs, call.result, videos.Entries())
 	*arguments = C.uform_video_encode_t{
 		model:          model,
 		executor:       executor,
-		outcome:        lent.outcome(),
+		outcome:        call.outcome(),
 		completion:     completion,
 		count:          C.size_t(videos.Entries()),
-		videos:         videos.lower(&lent.call),
+		videos:         videos.lower(&call.call),
 		embeddings:     embeddings,
 		states:         states,
 		token_vectors:  tokenVectors,
 		arena:          outputsArena,
 		outputs_scalar: C.uform_scalar_t(outputsScalar),
-		progress:       lent.progress(options.Progress, options.ProgressSteps),
-		stats:          (*C.uform_video_encode_stats_t)(lent.optional(unsafe.Pointer(options.Stats))),
+		progress:       call.progress(options.Progress, options.ProgressSteps),
+		stats:          (*C.uform_video_encode_stats_t)(call.optional(unsafe.Pointer(options.Stats))),
 	}
 	C.uform_video_encode(arguments)
 	return nil
 }
 
-func (receiver modelReceiver) audioEncode(lent *lent[Encoded], completion C.uform_completion_t, recordings Tape,
+func (receiver modelReceiver) audioEncode(call *callWithResult[Encoded], completion C.uform_completion_t, recordings Tape,
 	outputs EncodeOutputs, outputsScalar Scalar, arena *Arena, config *AudioEncodeConfig) error {
 	options := configOf(config)
 	model, executor, outputsArena, err := receiver.lowerInto(arena)
 	if err != nil {
 		return err
 	}
-	arguments := open[C.uform_audio_encode_t](lent)
-	embeddings, states, tokenVectors := kept(outputs, lent.result, recordings.Entries())
+	arguments := open[C.uform_audio_encode_t](call)
+	embeddings, states, tokenVectors := kept(outputs, call.result, recordings.Entries())
 	*arguments = C.uform_audio_encode_t{
 		model:          model,
 		executor:       executor,
-		outcome:        lent.outcome(),
+		outcome:        call.outcome(),
 		completion:     completion,
 		count:          C.size_t(recordings.Entries()),
-		recordings:     recordings.lower(&lent.call),
+		recordings:     recordings.lower(&call.call),
 		embeddings:     embeddings,
 		states:         states,
 		token_vectors:  tokenVectors,
 		arena:          outputsArena,
 		outputs_scalar: C.uform_scalar_t(outputsScalar),
-		progress:       lent.progress(options.Progress, options.ProgressSteps),
-		stats:          (*C.uform_audio_encode_stats_t)(lent.optional(unsafe.Pointer(options.Stats))),
+		progress:       call.progress(options.Progress, options.ProgressSteps),
+		stats:          (*C.uform_audio_encode_stats_t)(call.optional(unsafe.Pointer(options.Stats))),
 	}
 	C.uform_audio_encode(arguments)
 	return nil
 }
 
-func (receiver modelReceiver) audioEncodeSamples(lent *lent[Encoded], completion C.uform_completion_t, samples Tape,
+func (receiver modelReceiver) audioEncodeSamples(call *callWithResult[Encoded], completion C.uform_completion_t, samples Tape,
 	sampleRate uint32, outputs EncodeOutputs, outputsScalar Scalar, arena *Arena, config *AudioEncodeConfig) error {
 	options := configOf(config)
 	model, executor, outputsArena, err := receiver.lowerInto(arena)
 	if err != nil {
 		return err
 	}
-	arguments := open[C.uform_audio_encode_samples_t](lent)
-	embeddings, states, tokenVectors := kept(outputs, lent.result, samples.Entries())
+	arguments := open[C.uform_audio_encode_samples_t](call)
+	embeddings, states, tokenVectors := kept(outputs, call.result, samples.Entries())
 	*arguments = C.uform_audio_encode_samples_t{
 		model:          model,
 		executor:       executor,
-		outcome:        lent.outcome(),
+		outcome:        call.outcome(),
 		completion:     completion,
 		count:          C.size_t(samples.Entries()),
-		samples:        samples.lower(&lent.call),
+		samples:        samples.lower(&call.call),
 		sample_rate:    C.uint32_t(sampleRate),
 		embeddings:     embeddings,
 		states:         states,
 		token_vectors:  tokenVectors,
 		arena:          outputsArena,
 		outputs_scalar: C.uform_scalar_t(outputsScalar),
-		progress:       lent.progress(options.Progress, options.ProgressSteps),
-		stats:          (*C.uform_audio_encode_stats_t)(lent.optional(unsafe.Pointer(options.Stats))),
+		progress:       call.progress(options.Progress, options.ProgressSteps),
+		stats:          (*C.uform_audio_encode_stats_t)(call.optional(unsafe.Pointer(options.Stats))),
 	}
 	C.uform_audio_encode_samples(arguments)
 	return nil

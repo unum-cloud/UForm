@@ -7,10 +7,10 @@
  *
  *  Compiled host-only, so no NVCC host pass registers a fatbin with the CUDA runtime, and every
  *  call goes through the driver table this unit loads at its first entry, so nothing links
- *  @c libcuda . Each device loads the bundle once, into the context of the first stream that
- *  launches on it, and keeps it for the life of the process, as the runtime keeps a registered
- *  fatbin; a later stream on that device must share the context. Every entry runs inside its
- *  stream's context and leaves the caller's current context as it was.
+ *  @c libcuda . Each device loads the bundle once, into its primary context at the first launch on
+ *  it, and keeps it for the life of the process, as the runtime keeps a registered fatbin. Every
+ *  entry runs in the current context, the primary context of the device the executor selected,
+ *  where the executor also opened its stream for that device.
  */
 #include <bit> // `std::bit_cast` — device addresses
 
@@ -93,18 +93,13 @@ static device_module_t device_modules_[max_gpus_per_host_k];
     return static_cast<cuda_stream_handle_t>(static_cast<void*>(stream)); // vendor-boundary: an opaque stream handle
 }
 
-/** Run @p enqueue in the context of @p stream , the current one for a null stream, and
- *  report its result. */
+/** Run @p enqueue on @p stream in the current context, the selected device's, and report its
+ *  result. */
 template <typename enqueue_type_>
 [[nodiscard]] static nk_status_t in_context_(nk_stream_t stream, enqueue_type_ const& enqueue) noexcept {
     cuda_api_t const& driver = driver_();
-    cuda_context_handle_t context = nullptr;
-    if (!driver || (stream && (driver.stream_context(native_(stream), &context) != util::cuda_success_k ||
-                               driver.push_context(context) != util::cuda_success_k)))
-        return nk_device_code_mismatch_k;
-    cuda_result_t const result = enqueue(driver, native_(stream));
-    if (stream) driver.pop_context(&context);
-    return result == util::cuda_success_k ? nk_success_k : nk_device_code_mismatch_k;
+    if (!driver) return nk_device_code_mismatch_k;
+    return enqueue(driver, native_(stream)) == util::cuda_success_k ? nk_success_k : nk_device_code_mismatch_k;
 }
 
 /** The function of @p kernel in the current context's device, loading the bundle there
@@ -169,6 +164,12 @@ nk_allocator_t ue::vram_nvidia_entries_kit_t::policy(nk_stream_t, uform_residenc
                                    ? nk_allocator_init_pinned_best(&policy, capability_k)
                                    : nk_allocator_init_device_best(&policy, capability_k);
     return status == nk_success_k ? policy : nk_allocator_t {};
+}
+
+nk_status_t ue::vram_nvidia_entries_kit_t::select(std::size_t vendor_ordinal) noexcept {
+    return util::cuda_set_device(driver_(), static_cast<int>(vendor_ordinal)) == util::cuda_success_k
+               ? nk_success_k
+               : nk_missing_gpu_k;
 }
 
 nk_status_t ue::vram_nvidia_entries_kit_t::synchronize(nk_stream_t stream) noexcept {

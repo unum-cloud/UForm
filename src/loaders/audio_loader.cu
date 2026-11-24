@@ -30,7 +30,7 @@ using namespace ul;
  *  Thread 0 packs each clip's @ref media_cells frames into half rows (two clips share a row, at its
  *  start and its middle), and records @c segment_offsets / @c segment_lengths and @c audio_k into
  *  @p segment_modality . Audio is 1-D, so there is no shape descriptor. A segment that overflows
- *  the rectangle is dropped (zero length) and counted into @p dropped ; PAD segments carry zero
+ *  the rectangle is dropped (zero length) and counted into @p dropped ; PAD segments hold zero
  *  length, the repeated cursor, and @c text_k .
  *
  *  __grid_size__ @c [1,1,1] , one thread live; no dynamic shared memory.
@@ -123,7 +123,7 @@ util::expected_t ul::decode_audios(util::pool_view_t pool, column_view_t tape, u
         return util::expected_t::fail(util::status_code_t::device_k, "Clip byte staging synchronization failed");
     column_view_t const staged_tape {util::bytes_view_t {encoded}, std::span<util::u64_t const> {encoded_offsets}};
 
-    // Decode + resample to mono Float32 across the borrowed pool, into a pinned waveform landing
+    // Decode + resample to mono Float32 across the run's pool, into a pinned waveform landing
     // already carrying the grid's cell layout: clip `c` fills the half row at cell `c·clip_cells`
     // (a clip is exactly `clip_samples`).
     std::size_t const waveform_samples = job_count * static_cast<std::size_t>(clip_samples);
@@ -229,7 +229,7 @@ util::expected_t audio_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, au
     std::size_t const rows = first_grid.extent(0);
     std::size_t const columns = first_grid.extent(1);
     if (rows == 0 || columns == 0)
-        return util::expected_t::fail(util::status_code_t::unsupported_k, "The batch carries no audio");
+        return util::expected_t::fail(util::status_code_t::unsupported_k, "The batch has no audio");
 
     // The loader's single flat `audio_batch_shape_t` is the one representation (the shape is the
     // single source of geometry) — a size-1 span today, cross-product-ready for a future multi-rate

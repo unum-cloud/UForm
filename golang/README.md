@@ -149,16 +149,17 @@ One executor serves any number of models of its residency.
 
 ```go
 threads, err := uform.ExecutorForRam(nil, uform.CPUClassUnknown, 8)                  // eight threads, where zero takes 7/8 of the cores
-domains, err := uform.ExecutorForRam([]int32{0, 1}, uform.CPUClassUnknown, 0)        // threads interleaved across two NUMA nodes
+nearby, err := uform.ExecutorForRam([]int32{1}, uform.CPUClassUnknown, 0)            // threads spawned near NUMA node 1
 serial, err := uform.ExecutorForRam(nil, uform.CPUClassSerial, 0)                    // dispatches as the portable floor
 streams, err := uform.ExecutorForVram([]int32{0, 1}, uform.GPUClassUnknown, nil, uform.CPUClassUnknown, nil, 0)
-shared, err := uform.ExecutorOnPool(nil, uform.CPUClassUnknown, pool)                // borrows a lent pool's threads
 var local *uform.Executor                                                            // owns nothing, runs on the calling goroutine
 
 err = threads.Drain(uform.MoodSpinning) // waits until no call holds it, then keeps spinning
 ```
 
 The class arguments are ceilings: calls dispatch as the best class under them the hardware runs, and the zero class sets none.
+Naming one memory domain spawns the threads near it, while none or several interleave them across the machine.
+`ExecutorForVram` opens one stream per device, which `Close` destroys, and refuses caller streams with `StatusUnsupported`.
 `uform.GPUDevices(devices)` fills a slice of `GPUDevice` and answers how many GPUs the process can drive, and a device's position there is the ordinal `ExecutorForVram` and `ModelLoadVram` name it by.
 An executor runs one call at a time, so two goroutines that genuinely overlap take one apiece.
 `Close` waits until no call holds the executor, and a closed one refuses every later verb with `StatusUninitialized`.
@@ -196,7 +197,7 @@ One verb per input form, each spelled as in C, and each taking its inputs, the `
 - `AudioEncode(files, ..)` takes WAV, FLAC, MP3 or Opus recordings.
 - `AudioEncodeSamples(samples, sampleRate, ..)` takes mono `float32` samples.
 
-A `Tape` lends the elements and `count + 1` offsets to the library without a copy: `BytesTape(data, offsets)` for texts and files, and `SamplesTape(data, offsets)` for recordings.
+A `Tape` passes the elements and `count + 1` offsets to the library without a copy: `BytesTape(data, offsets)` for texts and files, and `SamplesTape(data, offsets)` for recordings.
 `TapeOf(items)` gathers separate strings or byte slices into a fresh tape with one copy, and `SamplesOf(recordings)` does so for samples:
 
 ```go
@@ -219,7 +220,7 @@ config := &uform.TextEncodeConfig{
 encoded, err := model.TextEncode(texts, uform.EncodeOutputsEmbeddings, uform.ScalarF32, arena, config)
 ```
 
-`Rows` reports its `Count`, `Columns`, `Stride` and `Scalar`, and `uform.RowValues[float32](rows, i)` borrows one row's values, refused with `StatusInvalidArgument` when the rows hold another scalar type.
+`Rows` reports its `Count`, `Columns`, `Stride` and `Scalar`, and `uform.RowValues[float32](rows, i)` views one row's values, refused with `StatusInvalidArgument` when the rows hold another scalar type.
 `RowsTape` adds the `Offsets` and an `Item` per input.
 A handler answering false stops the call, which fails with `StatusCancelled` and publishes nothing.
 
@@ -288,7 +289,7 @@ err = trainer.On(executor).Save("checkpoint.safetensors", nil)
 `Relations` holds three `Edges` sets as compressed sparse rows, whose offsets and weights the binding checks against the step's items before the call.
 A step's `Sides` give each item a `LateInteractionSide`, and its `Choices` and `ChoiceTargets` give each choice item its legal bytes and their target probabilities as tapes, the shapes `TextChoose` takes and answers.
 `Step` answers the pooled embeddings the loss scored when its config names an `Arena`, and `Rows` of zero `Count` otherwise.
-A trainer borrows its mesh, so the mesh outlives every trainer made over it, and `mesh.Describe()` answers a `MeshDescription` whose `MultimemTier` and `GPUClass` describe the run.
+A trainer refers to its mesh, so the mesh outlives every trainer made over it, and `mesh.Describe()` answers a `MeshDescription` whose `MultimemTier` and `GPUClass` describe the run.
 
 ## Errors
 
@@ -321,7 +322,7 @@ A panic inside a progress handler crashes the process, since it cannot unwind th
   `Status` polls through `uform_outcome_status` and `Wait` blocks through `uform_outcome_wait`, and refusals answer before anything is submitted.
 - __No life of its own.__
   The binding starts no goroutines and keeps no queues, locks or counts; releasing a `Deferred` rides `Close`, which waits for the call first, or the collector's cleanup, which frees it only once final.
-- __Arenas are lent and reused, never shared.__
+- __Arenas belong to the caller and are reused, never shared.__
   Every output whose length scales with the call lands in an arena the caller passes, and its views end at the arena's next call.
 - __One pinned frame per call.__
   A call's outcome, argument struct, callback handles and result share one allocation holding no unpinned Go pointer, since cgo pins only heap objects.

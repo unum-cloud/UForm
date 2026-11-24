@@ -95,13 +95,13 @@ struct masked_tokens_config_t {
     /** Embedding width — must match the tower's. */
     u32_t hidden = 0;
 
-    /** Most token positions one call carries — the @c normalized / @c normalized_grad extent. */
+    /** Most token positions one call holds — the @c normalized / @c normalized_grad extent. */
     u32_t max_tokens = 0;
 
     /** λ — the objective's weight inside the composite loss, folded into the gradient scale. */
     f32_t weight = 1.0f;
 
-    /** Most segments one call carries, the answer rows @c masked_tokens_t::choose gathers; zero
+    /** Most segments one call holds, the answer rows @c masked_tokens_t::choose gathers; zero
      *  allocates none and makes no choice. */
     u32_t max_segments = 0;
 };
@@ -132,7 +132,7 @@ struct masked_patches_config_t {
     /** Scalars per patch vector: image @c 3·p² , video @c tube_time·3·th·tw . */
     u32_t patch_pixels = 0;
 
-    /** Most patches one call carries — the @c normalized / patch-table extent. */
+    /** Most patches one call holds — the @c normalized / patch-table extent. */
     u32_t max_patches = 0;
 
     /** Fraction of patches masked and scored — 0.75 image, 0.90 video. */
@@ -161,7 +161,7 @@ struct masked_frames_config_t {
      *  head's fan-out @c hidden → @c chunk_samples . */
     u32_t chunk_samples = 0;
 
-    /** Most frames one call carries — the @c normalized / frame-table extent. */
+    /** Most frames one call holds — the @c normalized / frame-table extent. */
     u32_t max_frames = 0;
 
     /** Fraction of frames masked and scored, each frame drawn independently. */
@@ -206,7 +206,7 @@ struct masked_tokens_t {
      *  this routes on the tag rather than trusting media positions to hold PAD). A text segment's
      *  tokens are walked left-to-right, where geometric spans continue at @c 1-1/token_mean_span
      *  and open at @c token_mask_probability/token_mean_span ; a covered position is shown MASK / a
-     *  random byte / its clean self per the recipe fractions, and carries a loss weight of one. PAD
+     *  random byte / its clean self per the recipe fractions, and takes a loss weight of one. PAD
      *  is never eligible; uncovered positions copy clean with weight zero. A segment with bytes the
      *  walk leaves uncovered gets one span from a keyed anchor, so every text row is scored.
      *
@@ -217,7 +217,7 @@ struct masked_tokens_t {
      *      live token counts (a segment never crosses its row).
      *  @param[in] segment_modality @b [segments] per-segment routing tag; only @c text_k segments corrupt.
      *  @param[in] segment_choices @b [segments,choices] each segment's legal bytes, empty when the
-     *      batch carries none; a choice segment stays clean.
+     *      batch has none; a choice segment stays clean.
      */
     [[nodiscard]] expected_t corrupt(tokens_view_t clean, tokens_span_t distorted, u32r1_span_t loss_weights,
                                      u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
