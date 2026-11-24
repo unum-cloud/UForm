@@ -57,7 +57,6 @@ from uform.types import (
     ExecutorDrain,
     ExecutorForRam,
     ExecutorForVram,
-    ExecutorOnPool,
     FromName,
     GPUClass,
     GPUDevice,
@@ -172,8 +171,6 @@ struct Symbols:
 
     var executor_for_ram: ExecutorForRam
     """`uform_executor_for_ram`."""
-    var executor_on_pool: ExecutorOnPool
-    """`uform_executor_on_pool`."""
     var executor_for_vram: ExecutorForVram
     """`uform_executor_for_vram`."""
     var executor_drain: ExecutorDrain
@@ -258,7 +255,7 @@ struct Symbols:
         """Resolves every entry point at once, so no call ever pays for a `dlsym`.
 
         Args:
-            handle: The opened library, borrowed only while the addresses are read out.
+            handle: The opened library, which the caller owns, read only during the call.
 
         Raises:
             With `SYMBOL_MISSING`, on the first symbol the loaded library does not export.
@@ -285,7 +282,6 @@ struct Symbols:
         self.gpu_devices = _resolve[GPUDevices](handle, "uform_gpu_devices")
 
         self.executor_for_ram = _resolve[ExecutorForRam](handle, "uform_executor_for_ram")
-        self.executor_on_pool = _resolve[ExecutorOnPool](handle, "uform_executor_on_pool")
         self.executor_for_vram = _resolve[ExecutorForVram](handle, "uform_executor_for_vram")
         self.executor_drain = _resolve[ExecutorDrain](handle, "uform_executor_drain")
         self.executor_free = _resolve[Release](handle, "uform_executor_free")

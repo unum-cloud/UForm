@@ -236,15 +236,6 @@ export interface ExecutorForRamConfig {
   threads?: number;
 }
 
-/** Where the borrowed pool of a RAM executor places its models. */
-export interface ExecutorOnPoolConfig {
-  /** NUMA node IDs of the models it will drive; absent derives every node. */
-  memoryDomains?: number[];
-  /** The newest CPU class to dispatch as, spelled like "intel-haswell", capped by what the CPU
-   *  runs; absent sets no ceiling. */
-  cpuClassCeiling?: string;
-}
-
 /** Which devices a VRAM executor drives, and on which streams. */
 export interface ExecutorForVramConfig {
   /** Device ordinals, positions in {@link gpuDevices}, to drive; absent takes one free device. */
@@ -283,7 +274,7 @@ export class Executor implements Disposable {
   /** Reached through the factories. */
   private constructor(seal: symbol, compiled: CompiledExecutor) {
     if (seal !== executorSeal)
-      throw fail(Status.InvalidArgument, "An Executor is made by Executor.forRam, Executor.forVram or Executor.onPool.");
+      throw fail(Status.InvalidArgument, "An Executor is made by Executor.forRam or Executor.forVram.");
     this.compiled = compiled;
   }
 
@@ -296,12 +287,6 @@ export class Executor implements Disposable {
   /** Opens one stream per device for VRAM-resident models. Calls `uform_executor_for_vram`. */
   static forVram(config: ExecutorForVramConfig = {}): Executor {
     return new Executor(executorSeal, backend().Executor.forVram(config));
-  }
-
-  /** Borrows a ForkUnion `fu_pool_t` by address, which reports `unsupported` until borrowing is
-   *  designed. Calls `uform_executor_on_pool`. */
-  static onPool(pool: bigint, config: ExecutorOnPoolConfig = {}): Executor {
-    return new Executor(executorSeal, backend().Executor.onPool(pool, config));
   }
 
   /**

@@ -103,7 +103,6 @@ There is a constructor per C one, and each fixes a kind that must match the resi
 
 ```mojo
 var threads = Executor.for_ram(library, RamOptions.on(domains), threads=8)  # zero takes 7/8 of the cores
-var shared = Executor.on_pool(library, fork_union_pool)                       # borrows a fu_pool_t
 var streams = Executor.for_vram(library, VramOptions.on(devices))             # one host thread, a stream per device
 threads.drain(Mood.SPINNING)                                                # waits until no call holds it, then keeps spinning
 ```

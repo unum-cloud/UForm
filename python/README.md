@@ -64,7 +64,6 @@ A trainer runs `step` and `save` blocking on the executor it was created on, and
 `uform.Executor.for_ram(threads=0, *, memory_domains=None, cpu_class_ceiling=None)` creates an executor of host threads, and `uform.Executor.for_vram(devices=None, *, scratch_limit=0, gpu_class_ceiling=None)` opens one stream per device.
 A device is named by its position in `uform.gpu_devices()`, which lists every GPU the process can drive as a `uform.GPUDevice`, NVIDIA devices first, then AMD, then Apple.
 A `uform.CPUClass` or `uform.GPUClass` ceiling dispatches as the best class under it the hardware runs, and `None` sets no ceiling.
-`uform.Executor.on_pool(pool)` mirrors the C verb that borrows a ForkUnion pool, and raises `UnsupportedError` until borrowing is designed.
 An executor runs one call at a time, and a call finding another one holding it raises `ContendedError` once waited for. A deferred call on the executor's own threads finishes while Python only awaits it, and its progress callbacks run on those threads, holding the GIL while they do.
 `executor.drain(uform.Mood.PARKED)` waits until no call holds the executor and its devices are idle, then applies the mood.
 In a `with` block, it waits for its calls and closes on exit.

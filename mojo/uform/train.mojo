@@ -505,7 +505,7 @@ struct TrainerInitVramConfig[mesh_origin: ImmOrigin = ImmUntrackedOrigin](Copyab
     """The geometry, objective and starting point of a run, `uform_trainer_init_vram_t`.
 
     Parameters:
-        mesh_origin: The borrowed mesh's origin, which the trainer then keeps alive.
+        mesh_origin: The origin of the caller's mesh, which the trainer then keeps alive.
     """
 
     var resume: String
@@ -591,7 +591,7 @@ struct Edges[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Default
     """One edge set over a step's items as compressed sparse rows; empty offsets name no edges.
 
     Parameters:
-        origin: The borrowed offsets, IDs and weights, kept alive for as long as the edges are used.
+        origin: The caller's offsets, IDs and weights, kept alive for as long as the edges are used.
     """
 
     var offsets: Span[c_size_t, Self.origin]
@@ -627,7 +627,7 @@ struct Relations[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Def
     follows the run's negatives.
 
     Parameters:
-        origin: The borrowed edge sets, kept alive for as long as the relations are used.
+        origin: The caller's edge sets, kept alive for as long as the relations are used.
     """
 
     var attract: Edges[Self.origin]
@@ -975,8 +975,8 @@ struct _TrainerSaveCall(Call):
 
 
 struct Mesh(Movable):
-    """One process's place among the processes of a run, borrowed by every trainer over the same executor;
-    released when it goes out of scope, after every trainer borrowing it."""
+    """One process's place among the processes of a run, shared by every trainer over the same executor;
+    released when it goes out of scope, after every trainer pointing at it."""
 
     var library: Library
     """The loaded engine, held so the release can still reach `uform_mesh_free`."""
@@ -1059,7 +1059,7 @@ struct Trainer[mesh_origin: ImmOrigin = ImmUntrackedOrigin](Movable):
     `trainer.deferred(executor)` submits there and answers a `Deferred`.
 
     Parameters:
-        mesh_origin: The mesh it borrows, kept alive for as long as the trainer is.
+        mesh_origin: The caller's mesh it points at, kept alive for as long as the trainer is.
     """
 
     var library: Library
@@ -1222,7 +1222,7 @@ struct TrainerOn[origin: ImmOrigin](ImplicitlyCopyable, TrainVerbs):
     """A trainer bound to the executor its verbs block on, as `trainer.on(executor)` answers it. Binding-only.
 
     Parameters:
-        origin: The trainer and the executor, which this receiver borrows.
+        origin: The trainer and the executor, which the caller owns and this receiver points at.
     """
 
     var library: Library
@@ -1248,7 +1248,7 @@ struct TrainerDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
     Binding-only.
 
     Parameters:
-        origin: The trainer and the executor, which this receiver borrows.
+        origin: The trainer and the executor, which the caller owns and this receiver points at.
     """
 
     var library: Library
@@ -1300,8 +1300,8 @@ struct TrainerDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
             )
         ),
     ]:
-        """Submits `TrainVerbs.step` with its embeddings; every input stays borrowed until final.
-        Calls `uform_trainer_step`."""
+        """Submits `TrainVerbs.step` with its embeddings; every input must stay allocated and unchanged
+        until the call is final. Calls `uform_trainer_step`."""
         return {
             self.library,
             _step_call[origin_of(arena)](modalities, contents, Pointer(to=arena), config),
@@ -1344,7 +1344,8 @@ struct TrainerDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
             )
         ),
     ]:
-        """Submits `TrainVerbs.step`; every input stays borrowed until final. Calls `uform_trainer_step`."""
+        """Submits `TrainVerbs.step`; every input must stay allocated and unchanged until the call is final.
+        Calls `uform_trainer_step`."""
         return {
             self.library,
             _step_call[MutUntrackedOrigin](
@@ -1359,7 +1360,8 @@ struct TrainerDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
     ](self, path: StringSlice[path_origin], progress: Progress = Progress()) -> Deferred[
         _TrainerSaveCall, ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[path_origin]()))
     ]:
-        """Submits `TrainVerbs.save`; the path stays borrowed until final. Calls `uform_trainer_save`."""
+        """Submits `TrainVerbs.save`; the path must stay allocated and unchanged until the call is final.
+        Calls `uform_trainer_save`."""
         return {self.library, _TrainerSaveCall(BytesView.of(path).arguments(), progress), self.trainer, self.executor}
 
 

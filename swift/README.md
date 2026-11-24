@@ -97,8 +97,7 @@ try hostThreads.drain(mood: .parked)
 ```
 
 Each factory takes every argument its C constructor has, and only those.
-A thread count of zero takes 7/8 of the cores the memory domains carry, and `forVram` takes no thread count at all, since the submitting thread drives one stream per device.
-`Executor.onPool(memoryDomains:cpuClassCeiling:pool:)` mirrors the C verb that borrows a ForkUnion pool, and reports `unsupported` until the library wires borrowed pools.
+A thread count of zero takes 7/8 of the cores the memory domains span, and `forVram` takes no thread count at all, since the submitting thread drives one stream per device.
 `drain(mood:)` waits until no call holds the executor and its devices are idle, then picks whether its threads park or spin.
 
 ## Arenas

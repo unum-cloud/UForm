@@ -182,14 +182,6 @@ pub struct uform_executor_for_ram_t {
 }
 
 #[repr(C)]
-pub struct uform_executor_on_pool_t {
-    pub executor: *mut uform_executor_t,
-    pub outcome: *mut uform_outcome_t,
-    pub ram: uform_ram_options_t,
-    pub pool: *mut c_void,
-}
-
-#[repr(C)]
 pub struct uform_executor_for_vram_t {
     pub executor: *mut uform_executor_t,
     pub outcome: *mut uform_outcome_t,
@@ -236,7 +228,6 @@ unsafe extern "C" {
     pub fn uform_outcome_status(outcome: *mut uform_outcome_t) -> uform_status_t;
 
     pub fn uform_executor_for_ram(arguments: *mut uform_executor_for_ram_t);
-    pub fn uform_executor_on_pool(arguments: *mut uform_executor_on_pool_t);
     pub fn uform_executor_for_vram(arguments: *mut uform_executor_for_vram_t);
     pub fn uform_executor_drain(arguments: *mut uform_executor_drain_t);
     pub fn uform_executor_free(executor: uform_executor_t);
@@ -1410,33 +1401,8 @@ impl Executor {
         check(outcome).map(|()| executor)
     }
 
-    /// Creates a RAM executor over a borrowed ForkUnion pool, so UForm, USearch and UStore in one
-    /// process share one set of threads while each keeps its own scratch.
-    ///
-    /// Calls `uform_executor_on_pool`.
-    ///
-    /// # Safety `pool` must address a live ForkUnion `fu_pool_t` that outlives the executor.
-    pub unsafe fn on_pool(
-        memory_domains: &[i32],
-        cpu_class_ceiling: Option<CPUClass>,
-        pool: *mut c_void,
-    ) -> Result<Self> {
-        unsafe {
-            let mut handle = ptr::null_mut();
-            let mut outcome = uform_outcome_t::default();
-            uform_executor_on_pool(&mut uform_executor_on_pool_t {
-                executor: &mut handle,
-                outcome: &mut outcome,
-                ram: ram_options(memory_domains, cpu_class_ceiling),
-                pool,
-            });
-            let executor = Executor::adopt(handle);
-            check(outcome).map(|()| executor)
-        }
-    }
-
-    /// Opens one submission stream on every named device, all of them driven by the host thread
-    /// running the call - which is why this takes no thread count.
+    /// Drives every named device, all of them from the host thread running the call - which is why
+    /// this takes no thread count.
     ///
     /// `devices` are positions in what [`gpu_devices`] lists, and all of them dispatch as the best
     /// class they all load at or under `gpu_class_ceiling`, where `None` sets no ceiling. The host
@@ -1679,15 +1645,16 @@ impl Completion for Deferring {
     type Answer<'handle, Verb: Calling> = Result<Deferred<'handle, Verb>>;
 
     fn answer<'handle, Verb: Calling>(verb: Verb) -> Self::Answer<'handle, Verb> {
-        let lent = Box::into_raw(Box::new(Lent { outcome: uform_outcome_t::default(), arguments: None, verb }));
-        // Safety: the box is fresh and reached through `lent` alone, and the arguments point into
-        // its fields, where they stay until the box is freed.
+        let submission =
+            Box::into_raw(Box::new(Submission { outcome: uform_outcome_t::default(), arguments: None, verb }));
+        // Safety: the box is fresh and reached through `submission` alone, and the arguments point
+        // into its fields, where they stay until the box is freed.
         unsafe {
-            let outcome = ptr::addr_of_mut!((*lent).outcome);
-            match (*lent).verb.arguments(outcome, uform_completion_deferred_k) {
-                Ok(arguments) => Verb::call((*lent).arguments.insert(arguments)),
+            let outcome = ptr::addr_of_mut!((*submission).outcome);
+            match (*submission).verb.arguments(outcome, uform_completion_deferred_k) {
+                Ok(arguments) => Verb::call((*submission).arguments.insert(arguments)),
                 Err(refusal) => {
-                    drop(Box::from_raw(lent));
+                    drop(Box::from_raw(submission));
                     return Err(refusal);
                 }
             }
@@ -1966,11 +1933,9 @@ mod tests {
         assert!(share.upgrade().is_none(), "the last GPU arena frees its executor");
     }
 
-    /// A pool that lends no threads and streams that do not pair with the devices are refused.
+    /// Streams that do not pair with the devices are refused.
     #[test]
     fn executors_refuse_malformed_placements() {
-        let pooled = unsafe { Executor::on_pool(&[], None, ptr::null_mut()) };
-        assert_eq!(pooled.unwrap_err().status, Status::InvalidArgument);
         let mismatched = unsafe { Executor::for_vram(&[0, 1], None, &[], None, &[ptr::null_mut()], 0) };
         assert_eq!(mismatched.unwrap_err().status, Status::ShapeMismatch);
     }

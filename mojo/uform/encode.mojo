@@ -3,7 +3,7 @@
 Every verb takes one argument structure named after it, mirrored below as an `...Arguments` struct
 laid out exactly as the library reads it and crossed by address. Every output whose length scales
 with the call lands in the `Arena` the verb takes as its last required argument, and the `Encoded`
-result borrows it in turn. `Outputs` names which surfaces of the one forward a call keeps.
+result points into it in turn. `Outputs` names which surfaces of the one forward a call keeps.
 
 The verbs themselves are written once, in `ModelVerbs`; this module holds their crossings.
 
@@ -94,10 +94,10 @@ struct EncodedArguments(Defaultable, ImplicitlyCopyable):
 
 @fieldwise_init
 struct Encoded[origin: MutOrigin](Movable):
-    """What an encode verb wrote into the arena it borrows: the surfaces its `Outputs` named. Binding-only.
+    """What an encode verb wrote into the caller's arena: the surfaces its `Outputs` named. Binding-only.
 
     Parameters:
-        origin: The arena the surfaces live in, which this result borrows.
+        origin: The arena the surfaces live in, which the caller owns and this result keeps alive.
     """
 
     var arena: Pointer[Arena, Self.origin]
@@ -140,7 +140,7 @@ struct EncodeConfig[stats_origin: MutOrigin = MutUntrackedOrigin](ImplicitlyCopy
     """The knobs every encode verb shares, the verbs over texts, images, clips and recordings alike.
 
     Parameters:
-        stats_origin: The lent report slot's origin, inferred where one is lent.
+        stats_origin: The origin of the caller's report slot, inferred where one is given.
     """
 
     var outputs_scalar: ScalarKind
@@ -169,8 +169,8 @@ struct TextChooseConfig[
     """The question types, the progress handler and the report slot of `text_choose`.
 
     Parameters:
-        groups_origin: The borrowed question types' origin, inferred where some are lent.
-        stats_origin: The lent report slot's origin, inferred where one is lent.
+        groups_origin: The origin of the caller's question types, inferred where some are given.
+        stats_origin: The origin of the caller's report slot, inferred where one is given.
     """
 
     var temperature_groups: Span[UInt32, Self.groups_origin]
@@ -335,7 +335,7 @@ struct _EncodeCall[
     origin: MutOrigin, inputs_origin: ImmOrigin, stats_origin: MutOrigin, name: StaticString
 ](Call):
     """The crossing of `uform_text_encode`, `uform_image_encode`, `uform_video_encode` or
-    `uform_audio_encode`, which share one layout and borrow the arena their surfaces land in."""
+    `uform_audio_encode`, which share one layout and write their surfaces into the caller's arena."""
 
     comptime Outputs = EncodedArguments
     comptime Result = Encoded[Self.origin]

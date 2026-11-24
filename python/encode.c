@@ -398,7 +398,8 @@ static char const doc_Model_text_encode[] =                                     
     "\n"                                                                                                //
     "Args:\n"                                                                                           //
     "  texts (Sequence[str | bytes] | tuple[buffer, buffer]): The texts, gathered into one tape,\n"     //
-    "    or a (data, offsets) pair of a byte buffer and count + 1 size_t offsets, lent as is.\n"        //
+    "    or a (data, offsets) pair of a byte buffer and count + 1 size_t offsets, read in place.\n"     //
+    "    The pair must stay alive and unchanged until the call is final.\n"                             //
     "  arena (Arena): Where the outputs land, rewound by the call.\n"                                   //
     "  outputs (Outputs, optional): Any union of `Outputs.EMBEDDINGS`, `Outputs.STATES` and\n"          //
     "    `Outputs.TOKEN_VECTORS`; a model without a token head raises `UnsupportedError` for\n"         //

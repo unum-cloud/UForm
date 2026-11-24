@@ -105,7 +105,6 @@ let threads = Executor::for_ram(&[], None, 8)?;                      // eight th
 let domains = Executor::for_ram(&[0, 1], None, 0)?;                  // threads interleaved across two NUMA nodes
 let serial = Executor::for_ram(&[], Some(CPUClass::Serial), 0)?;        // dispatches as the portable floor
 let streams = unsafe { Executor::for_vram(&[0, 1], None, &[], None, &[], 0)? }; // one stream per device, scratch grown as asked
-let shared = unsafe { Executor::on_pool(&[], None, pool, 0)? };         // borrows a ForkUnion pool's threads
 let local = Executor::default();                                        // owns nothing, runs on the calling thread
 
 threads.drain(Mood::Spinning)?;                                         // waits until no call holds it, then keeps spinning
@@ -113,7 +112,7 @@ threads.drain(Mood::Spinning)?;                                         // waits
 
 The second argument is a `CPUClass` or `GPUClass` ceiling: calls dispatch as the best class under it the hardware runs, and `None` sets no ceiling.
 `gpu_devices(&mut devices)` fills a slice of `GPUDevice` and answers how many GPUs the process can drive, and a device's position there is the ordinal `for_vram` and `load_vram` name it by.
-`for_vram` and `on_pool` are `unsafe`, since the streams or the pool they borrow must outlive the executor; `on_pool` mirrors the C verb and answers `Status::Unsupported` until borrowing is designed, as `for_vram` does for borrowed streams.
+`for_vram` is `unsafe`, since the caller destroys its own streams only after dropping the executor, and an empty slice orders each device's work on its per-thread default stream.
 An executor runs one call at a time, so two threads that genuinely overlap take one apiece; an executor is `Send` but not `Sync`, while models stay freely shared.
 Dropping an executor drains it, unless a GPU arena it made still holds it, which then does so on its own drop.
 

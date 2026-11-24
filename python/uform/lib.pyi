@@ -288,18 +288,6 @@ class Executor:
         ...
 
     @classmethod
-    def on_pool(
-        cls,
-        pool: int,
-        /,
-        *,
-        memory_domains: Sequence[int] | None = None,
-        cpu_class_ceiling: CPUClass | None = None,
-    ) -> Executor:
-        """Borrows a ForkUnion pool; raises `UnsupportedError` until borrowing is designed. Calls `uform_executor_on_pool`."""
-        ...
-
-    @classmethod
     def for_vram(
         cls,
         devices: Sequence[int] | None = None,
@@ -872,7 +860,10 @@ class MeshOptions(_Fields):
 
 @final
 class Edges(_Fields):
-    """One edge set over a step's items, as compressed sparse rows of buffers borrowed until the step is final."""
+    """One edge set over a step's items, as compressed sparse rows of buffers.
+
+    The buffers must stay alive and unchanged until the step is final.
+    """
 
     offsets: Final[Buffer | None]
     ids: Final[Buffer | None]

@@ -178,11 +178,8 @@ struct ExecutorTests {
         try executor.drain(mood: .spinning)
         _ = try Arena(on: executor)
         _ = try Arena()
-        var pool = 0
-        // The stub lends any non-null pool; the C suite borrows a real ForkUnion one.
-        _ = try Executor.onPool(pool: &pool)
         #expect(failureStatus(of: try Executor.forVram(devices: [0])) == .device)
-        // The streams cross behind a pointer that carries no count, so the binding counts them.
+        // The streams cross behind a pointer that has no count, so the binding counts them.
         #expect(failureStatus(of: try Executor.forVram(devices: [0, 1], streams: [nil])) == .shapeMismatch)
     }
 }

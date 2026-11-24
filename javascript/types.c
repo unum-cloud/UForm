@@ -374,7 +374,7 @@ bool uform_js_offsets_from_value(napi_env env, napi_value value, char const* fie
         (type != napi_biguint64_array && type != napi_uint32_array))
         return uform_js_throw_field(env, field, "must be a BigUint64Array or a Uint32Array");
     if (!elements) return uform_js_throw_field(env, field, "must hold one more offset than entries");
-    if (uform_js_typedarray_unit_bytes(type) == sizeof(size_t)) { // as wide as `size_t`, so lent as it is
+    if (uform_js_typedarray_unit_bytes(type) == sizeof(size_t)) { // as wide as `size_t`, so read in place
         *offsets = (size_t const*)data;
         *count = elements - 1;
         return true;
@@ -647,27 +647,6 @@ static napi_value uform_js_executor_for_ram(napi_env env, napi_callback_info inf
     return uform_js_executor_adopt(env, &outcome, handle);
 }
 
-/** <tt>onPool(pool, {memoryDomains, cpuClassCeiling})</tt> → an executor borrowing
- *  a ForkUnion pool. */
-static napi_value uform_js_executor_on_pool(napi_env env, napi_callback_info info) {
-    napi_value arguments[2];
-    uform_outcome_t outcome = {uform_status_success_k, NULL};
-    uform_executor_t handle = NULL;
-    uform_executor_on_pool_t on_pool = {.executor = &handle, .outcome = &outcome};
-    int32_t* ordinals = NULL;
-    if (!uform_js_arguments(env, info, 2, arguments, NULL) ||
-        !uform_js_pointer_from_value(env, arguments[0], "pool", &on_pool.pool) ||
-        !uform_js_cpu_class_from_value(env, uform_js_property(env, arguments[1], "cpuClassCeiling"),
-                                       &on_pool.ram.cpu_class_ceiling) ||
-        !uform_js_ordinals_from_value(env, uform_js_property(env, arguments[1], "memoryDomains"), "memoryDomains",
-                                      &ordinals, &on_pool.ram.memory_domains_count))
-        return NULL;
-    on_pool.ram.memory_domains = ordinals;
-    uform_executor_on_pool(&on_pool);
-    free(ordinals);
-    return uform_js_executor_adopt(env, &outcome, handle);
-}
-
 /** <tt>forVram({devices, gpuClassCeiling, memoryDomains, cpuClassCeiling, streams, scratchLimit})</tt>
  *  → a stream per device and host decoders over NUMA nodes. */
 static napi_value uform_js_executor_for_vram(napi_env env, napi_callback_info info) {
@@ -790,7 +769,6 @@ napi_value uform_js_executor_define(napi_env env) {
         {"free", NULL, uform_js_executor_release, NULL, NULL, NULL, napi_default_method, NULL},
         {"forRam", NULL, uform_js_executor_for_ram, NULL, NULL, NULL, napi_static, NULL},
         {"forVram", NULL, uform_js_executor_for_vram, NULL, NULL, NULL, napi_static, NULL},
-        {"onPool", NULL, uform_js_executor_on_pool, NULL, NULL, NULL, napi_static, NULL},
     };
     return uform_js_class_define(env, "Executor", sizeof(properties) / sizeof(properties[0]), properties);
 }

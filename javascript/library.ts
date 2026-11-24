@@ -260,7 +260,6 @@ export interface CompiledTrainerConstructor {
 export interface CompiledExecutorConstructor {
   forRam(config?: object): CompiledExecutor;
   forVram(config?: object): CompiledExecutor;
-  onPool(pool: bigint, config?: object): CompiledExecutor;
 }
 
 /** Everything a backend publishes. */

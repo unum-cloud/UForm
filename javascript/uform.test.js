@@ -109,7 +109,6 @@ test("executors: RAM spawns, while VRAM without a device and a null pool refuse"
   executor.free();
   throwsStatus(() => new Arena(executor), Status.InvalidArgument);
   throwsStatus(() => Executor.forVram({ devices: [0] }), Status.Device);
-  throwsStatus(() => Executor.onPool(0n), Status.InvalidArgument);
   assert.throws(() => new Executor(Symbol(), {}), (error) => error.code === Status.InvalidArgument);
 });
 

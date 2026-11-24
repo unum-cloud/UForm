@@ -295,9 +295,6 @@ function wasmBackend(module: WasmModule): Compiled {
     static forVram(): CompiledExecutor {
       throw fail(Status.Unsupported, "The WebAssembly build has no VRAM residency.");
     }
-    static onPool(): CompiledExecutor {
-      throw fail(Status.Unsupported, "The WebAssembly build computes on the calling thread alone.");
-    }
     drain(): void {}
     free(): void {}
   }
@@ -776,7 +773,6 @@ export {
 export type {
   ExecutorForRamConfig,
   ExecutorForVramConfig,
-  ExecutorOnPoolConfig,
   GpuDevice,
   GpuVendor,
   MultimemTier,

@@ -531,8 +531,6 @@ comptime GPUDevices = Verb[GPUDevicesArguments]
 """`uform_gpu_devices`."""
 comptime ExecutorForRam = Verb[ExecutorForRamArguments]
 """`uform_executor_for_ram`."""
-comptime ExecutorOnPool = Verb[ExecutorOnPoolArguments]
-"""`uform_executor_on_pool`."""
 comptime ExecutorForVram = Verb[ExecutorForVramArguments]
 """`uform_executor_for_vram`."""
 comptime ExecutorDrain = Verb[ExecutorDrainArguments]
@@ -566,10 +564,10 @@ struct BytesViewArguments(ImplicitlyCopyable, TrivialRegisterPassable):
 
 @fieldwise_init
 struct BytesView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
-    """A borrowed run of bytes and its length, never null-terminated: every path, buffer and name.
+    """A run of the caller's bytes and its length, never null-terminated: every path, buffer and name.
 
     Parameters:
-        origin: The borrowed storage, which the view keeps alive for as long as it is used.
+        origin: The caller's storage, which the view keeps alive for as long as it is used.
     """
 
     var data: Pointer[UInt8, Self.origin]
@@ -618,7 +616,7 @@ struct TapeView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Size
     device memory; the offsets always live in host memory, since they drive host-side dispatch.
 
     Parameters:
-        origin: The borrowed elements and offsets, which the view keeps alive for as long as it is used.
+        origin: The caller's elements and offsets, which the view keeps alive for as long as it is used.
     """
 
     var data: Pointer[NoneType, Self.origin]
@@ -715,10 +713,10 @@ struct RowsTapeViewArguments(Defaultable, ImplicitlyCopyable):
 
 @fieldwise_init
 struct Rows[origin: MutOrigin](ImplicitlyCopyable, Sized):
-    """Rows a call wrote into the arena it borrows, one per item, packed, `uform_rows_view_t` read in place.
+    """Rows a call wrote into the caller's arena, one per item, packed, `uform_rows_view_t` read in place.
 
     Parameters:
-        origin: The arena the rows live in, which this result borrows.
+        origin: The arena the rows live in, which the caller owns and this result keeps alive.
     """
 
     var arena: Pointer[Arena, Self.origin]
@@ -788,7 +786,7 @@ struct RowsTape[origin: MutOrigin](ImplicitlyCopyable, Sized):
     tokens left after truncation, `uform_rows_tape_view_t` read in place.
 
     Parameters:
-        origin: The arena the rows live in, which this result borrows.
+        origin: The arena the rows live in, which the caller owns and this result keeps alive.
     """
 
     var arena: Pointer[Arena, Self.origin]
@@ -842,10 +840,10 @@ struct RowsTape[origin: MutOrigin](ImplicitlyCopyable, Sized):
 
 @fieldwise_init
 struct Tape[origin: MutOrigin](ImplicitlyCopyable, Sized):
-    """A ragged run of values a call wrote into the arena it borrows, `uform_tape_view_t` read in place.
+    """A ragged run of values a call wrote into the caller's arena, `uform_tape_view_t` read in place.
 
     Parameters:
-        origin: The arena the values live in, which this result borrows.
+        origin: The arena the values live in, which the caller owns and this result keeps alive.
     """
 
     var arena: Pointer[Arena, Self.origin]
@@ -929,7 +927,7 @@ struct RamOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
     """The host memory domains a RAM-resident model and executor place their bytes in, one NUMA node each.
 
     Parameters:
-        origin: The borrowed node ID array, kept alive for as long as the options are used.
+        origin: The caller's node ID array, kept alive for as long as the options are used.
     """
 
     var memory_domains: Optional[Pointer[Int32, Self.origin]]
@@ -980,7 +978,7 @@ struct VramOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
     """The devices a VRAM-resident model, trainer and executor place their bytes in.
 
     Parameters:
-        origin: The borrowed ordinal array, kept alive for as long as the options are used.
+        origin: The caller's ordinal array, kept alive for as long as the options are used.
     """
 
     var devices: Optional[Pointer[Int32, Self.origin]]
@@ -1040,16 +1038,6 @@ struct ExecutorForRamArguments(ImplicitlyCopyable):
     var outcome: Optional[Pointer[Outcome, MutUntrackedOrigin]]
     var ram: RamOptionsArguments
     var threads: c_size_t
-
-
-@fieldwise_init
-struct ExecutorOnPoolArguments(ImplicitlyCopyable):
-    """`uform_executor_on_pool_t`, laid out as the ABI declares it."""
-
-    var executor: Optional[Pointer[Address, MutUntrackedOrigin]]
-    var outcome: Optional[Pointer[Outcome, MutUntrackedOrigin]]
-    var ram: RamOptionsArguments
-    var pool: Address
 
 
 @fieldwise_init
@@ -1136,8 +1124,9 @@ struct Executor:
 
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
-            ram: The memory domains of the models it will drive; copied, not borrowed.
-            threads: Threads to spawn; zero takes 7/8 of the cores those domains carry.
+            ram: The memory domains of the models it will drive, copied at creation, so the caller may free
+                them once the call returns.
+            threads: Threads to spawn; zero takes 7/8 of the cores those domains span.
 
         Raises:
             `Error` if the domains cannot be resolved or the OS refuses the threads.
@@ -1159,37 +1148,6 @@ struct Executor:
         return Self(library=library, address=created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0])
 
     @staticmethod
-    def on_pool[
-        ram_origin: ImmOrigin, //
-    ](library: Library, pool: Address, ram: RamOptions[ram_origin] = RamOptions()) raises Error -> Self:
-        """Schedules onto a borrowed ForkUnion pool, so UForm, USearch and UStore in one process share one
-        set of threads. Calls `uform_executor_on_pool`.
-
-        Args:
-            library: The loaded engine, kept so the shared object stays mapped.
-            pool: A live ForkUnion `fu_pool_t`, which must outlive the executor.
-            ram: The memory domains of the models it will drive; copied, not borrowed.
-
-        Raises:
-            `Error` if the pool or the domains are refused.
-        """
-        var created = stack_allocation[1, Address]()
-        created[unsafe_offset=0] = NULL_ADDRESS
-        var outcome = stack_allocation[1, Outcome]()
-        outcome[unsafe_offset=0] = Outcome()
-        _cross(
-            ExecutorOnPoolArguments(
-                created.unsafe_origin_cast[MutUntrackedOrigin](),
-                outcome.unsafe_origin_cast[MutUntrackedOrigin](),
-                ram.arguments(),
-                pool,
-            ),
-            library.symbols().executor_on_pool,
-        )
-        library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "uform_executor_on_pool")
-        return Self(library=library, address=created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0])
-
-    @staticmethod
     def for_vram[
         vram_origin: ImmOrigin, ram_origin: ImmOrigin, //
     ](
@@ -1199,14 +1157,17 @@ struct Executor:
         streams: Address = NULL_ADDRESS,
         scratch_limit: Int = 0,
     ) raises Error -> Self:
-        """Opens one submission stream on every named device, all driven by the thread running the call,
-        and host threads for the decoding the devices cannot do. Calls `uform_executor_for_vram`.
+        """Drives every named device from the thread running the call, and spawns host threads for
+        the decoding the devices cannot do. Calls `uform_executor_for_vram`.
 
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
-            vram: The devices of the models it will drive; copied, not borrowed.
-            ram: The memory domains and CPU class of its host decoders; copied, not borrowed.
-            streams: Borrowed CUDA streams, one per device; any but `NULL_ADDRESS` reports `UNSUPPORTED`.
+            vram: The devices of the models it will drive, copied at creation, so the caller may free them
+                once the call returns.
+            ram: The memory domains and CPU class of its host decoders, copied at creation, so the caller
+                may free them once the call returns.
+            streams: CUDA or HIP streams, one per device, which the caller destroys after the executor;
+                `NULL_ADDRESS` orders each device's work on its per-thread default stream.
             scratch_limit: Ceiling on scratch bytes per device; zero lets scratch grow as batches ask.
 
         Raises:
@@ -1475,13 +1436,13 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
 
     `status` reads `DEFERRED` until then, without blocking, and `wait` blocks until the call is
     final and answers its result or raises its failure, as many times as it is asked. The result is
-    the view a blocking call answers, borrowing the same arena. Dropping an unfinished one waits the
+    the view a blocking call answers, into the same arena. Dropping an unfinished one waits the
     same way, so nothing the engine still writes is ever freed under it. The origins keep the model,
-    the executor, the arena and every borrowed input alive for as long as this is.
+    the executor, the arena and every input alive for as long as this is.
 
     Parameters:
         C: The verb's crossing, which names the result.
-        origin: The union of everything the call borrows.
+        origin: The union of everything the call points at, which the caller owns.
     """
 
     var library: Library

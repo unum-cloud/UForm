@@ -664,28 +664,9 @@ public final class Executor: @unchecked Sendable {
         return try landing.read { () throws(UFormError) in Executor(raw: try created(executor)) }
     }
 
-    /// Creates a RAM executor over a borrowed ForkUnion `fu_pool_t`, which must outlive it.
-    /// Reports `unsupported` until the library wires borrowed pools. A `cpuClassCeiling` caps as
-    /// `forRam` does. Calls `uform_executor_on_pool`.
-    public static func onPool(
-        memoryDomains: [Int32] = [],
-        cpuClassCeiling: CPUClass? = nil,
-        pool: UnsafeMutableRawPointer
-    ) throws(UFormError) -> Executor {
-        let landing = Landing()
-        let executor = landing.slots(uform_executor_t?.none)
-        var arguments = uform_executor_on_pool_t(
-            executor: executor,
-            outcome: landing.outcome,
-            ram: landing.ram(memoryDomains, cpuClassCeiling),
-            pool: pool
-        )
-        uform_executor_on_pool(&arguments)
-        return try landing.read { () throws(UFormError) in Executor(raw: try created(executor)) }
-    }
-
-    /// Opens one submission stream on every named device; an empty list derives one free device.
-    /// Borrowed `streams`, one per device in `devices` order, report `unsupported`. A zero
+    /// Drives every named device; an empty list derives one free device. `streams`, one per device
+    /// in `devices` order, which the caller destroys after freeing the executor, order each
+    /// device's work, and nil or a nil entry orders it on the per-thread default stream. A zero
     /// `scratchLimit` lets per-device scratch grow as batches ask. A `gpuClassCeiling`
     /// dispatches every device as the best class all of them load at or under it; nil sets no
     /// ceiling. The host decoders take 7/8 of the cores local to `memoryDomains` and dispatch
