@@ -97,7 +97,7 @@ export class Rows extends ArenaView {
     return this.live(this.#data);
   }
 
-  /** Borrows row `row` without copying. Binding-only. */
+  /** Views row `row` without copying. Binding-only. */
   row(row: number): ArrayBufferView {
     if (!Number.isInteger(row) || row < 0 || row >= this.rows)
       throw fail(Status.InvalidArgument, `No row ${row} in a run of ${this.rows}.`);
@@ -128,7 +128,7 @@ export class States extends ArenaView {
     return this.live(this.#offsets);
   }
 
-  /** Borrows the rows of item `item` without copying. Binding-only. */
+  /** Views the rows of item `item` without copying. Binding-only. */
   item(item: number): ArrayBufferView {
     const offsets = this.offsets;
     if (!Number.isInteger(item) || item < 0 || item + 1 >= offsets.length)
@@ -188,7 +188,7 @@ export class Probabilities extends ArenaView {
     return this.live(this.#offsets);
   }
 
-  /** Borrows the probabilities of item `item` without copying. Binding-only. */
+  /** Views the probabilities of item `item` without copying. Binding-only. */
   item(item: number): Float32Array {
     const offsets = this.offsets;
     if (!Number.isInteger(item) || item < 0 || item + 1 >= offsets.length)
@@ -215,21 +215,20 @@ export interface Chosen {
   stats: EncodeStats;
 }
 
-/**
- *  A ragged batch packed as the C interface reads it: elements end to end, and `count + 1` offsets
+/** A ragged batch packed as the C interface reads it: elements end to end, and `count + 1` offsets
  *  into them. Mirrors `uform_tape_view_t`.
  *
- *  Every verb taking an array of entries also takes a packed tape, which the Node addon lends to
- *  the call as it is when its offsets are a `BigUint64Array`; an array of entries is first gathered
- *  into one tape, the one copy that path makes. A `Probabilities` answer is itself a tape, so it
- *  trains a step's `choiceTargets` as it lands.
- */
+ *  Every verb taking an array of entries also takes a packed tape, which the Node addon reads in
+ *  place when its offsets are a `BigUint64Array`, so it must stay unchanged until the call is
+ *  final; an array of entries is first gathered into one tape, the one copy that path makes. A
+ *  `Probabilities` answer is itself a tape, so it trains a step's `choiceTargets` as it lands. */
 export interface Tape<Elements extends Uint8Array | Float32Array> {
   data: Elements;
   offsets: Offsets;
 }
 
-/** Lends a packed tape as it is, refusing anything that is neither one nor an array of entries. */
+/** Passes a packed tape through as it is, refusing anything that is neither one nor an array of
+ *  entries. */
 function packed<Elements extends Uint8Array | Float32Array>(tape: Tape<Elements>): Tape<Elements> {
   const offsets = tape?.offsets;
   if (!ArrayBuffer.isView(tape?.data) || !(offsets instanceof BigUint64Array || offsets instanceof Uint32Array))
@@ -254,7 +253,7 @@ function tapeOf<Entry, Elements extends Uint8Array | Float32Array>(
 }
 
 /** Lays UTF-8 texts or byte runs end to end, so text and every encoded-file verb share one tape, or
- *  lends a packed tape as it is. */
+ *  passes a packed tape through as it is. */
 export function bytesTape(entries: readonly (string | Uint8Array)[] | Tape<Uint8Array>): Tape<Uint8Array> {
   if (!Array.isArray(entries)) return packed(entries as Tape<Uint8Array>);
   const encoder = new TextEncoder();
@@ -298,7 +297,8 @@ function pixelsTape(images: readonly Pixels[]): Tape<Uint8Array> & { heights: Ui
   return { ...tape, heights, widths };
 }
 
-/** Lays mono recordings or other runs of floats end to end, or lends a packed tape as it is. */
+/** Lays mono recordings or other runs of floats end to end, or passes a packed tape through as it
+ *  is. */
 export function samplesTape(recordings: readonly Float32Array[] | Tape<Float32Array>): Tape<Float32Array> {
   if (!Array.isArray(recordings)) return packed(recordings as Tape<Float32Array>);
   for (const recording of recordings)

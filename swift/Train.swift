@@ -29,7 +29,7 @@ public struct Modality: Hashable, Sendable, CustomStringConvertible {
     public var description: String { String(cString: uform_modality_name(raw)) }
 
     /// Reads a spelling back, and nil for one no modality
-    /// carries. Calls `uform_modality_from_name`.
+    /// holds. Calls `uform_modality_from_name`.
     public init?(name: String) {
         guard let raw = parsed(name, uform_modality_from_name) else { return nil }
         self.raw = raw
@@ -54,7 +54,7 @@ public struct Objective: Hashable, Sendable, CustomStringConvertible {
     public var description: String { String(cString: uform_objective_name(raw)) }
 
     /// Reads a spelling back, and nil for one no objective
-    /// carries. Calls `uform_objective_from_name`.
+    /// holds. Calls `uform_objective_from_name`.
     public init?(name: String) {
         guard let raw = parsed(name, uform_objective_from_name) else { return nil }
         self.raw = raw
@@ -76,7 +76,7 @@ public struct Negatives: Hashable, Sendable, CustomStringConvertible {
     /// The policy as the library spells it. Calls `uform_negatives_name`.
     public var description: String { String(cString: uform_negatives_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no policy carries. Calls `uform_negatives_from_name`.
+    /// Reads a spelling back, and nil for one no policy holds. Calls `uform_negatives_from_name`.
     public init?(name: String) {
         guard let raw = parsed(name, uform_negatives_from_name) else { return nil }
         self.raw = raw
@@ -99,7 +99,7 @@ public struct MultimemTier: Hashable, Sendable, CustomStringConvertible {
     public var description: String { String(cString: uform_multimem_tier_name(raw)) }
 
     /// Reads a spelling back, and nil for one no tier
-    /// carries. Calls `uform_multimem_tier_from_name`.
+    /// holds. Calls `uform_multimem_tier_from_name`.
     public init?(name: String) {
         guard let raw = parsed(name, uform_multimem_tier_from_name) else { return nil }
         self.raw = raw
@@ -126,7 +126,7 @@ public struct PairLossForm: Hashable, Sendable, CustomStringConvertible {
     /// The form as the library spells it. Calls `uform_pair_loss_form_name`.
     public var description: String { String(cString: uform_pair_loss_form_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no form carries. Calls
+    /// Reads a spelling back, and nil for one no form holds. Calls
     /// `uform_pair_loss_form_from_name`.
     public init?(name: String) {
         guard let raw = parsed(name, uform_pair_loss_form_from_name) else { return nil }
@@ -153,7 +153,7 @@ public struct LateInteractionSide: Hashable, Sendable, CustomStringConvertible {
     /// The side as the library spells it. Calls `uform_late_interaction_side_name`.
     public var description: String { String(cString: uform_late_interaction_side_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no side carries. Calls
+    /// Reads a spelling back, and nil for one no side holds. Calls
     /// `uform_late_interaction_side_from_name`.
     public init?(name: String) {
         guard let raw = parsed(name, uform_late_interaction_side_from_name) else { return nil }
@@ -228,7 +228,8 @@ public struct MeshDescription: Sendable {
     }
 }
 
-/// One process's place among the processes of a run, made once and borrowed by every trainer.
+/// One process's place among the processes of a run, made once and kept alive by every trainer over
+/// it.
 public final class Mesh: @unchecked Sendable {
     /// The native handle, released by `deinit`.
     let raw: uform_mesh_t
@@ -258,8 +259,8 @@ public final class Mesh: @unchecked Sendable {
                 host_domain_index: options.hostDomainIndex,
                 host_domain_count: options.hostDomainCount,
                 gpus_per_multimem_domain: options.gpusPerMultimemDomain,
-                directory: landing.lend(options.directory),
-                job: landing.lend(options.job),
+                directory: landing.copy(options.directory),
+                job: landing.copy(options.job),
                 timeout_seconds: options.timeoutSeconds
             )
         )
@@ -283,7 +284,7 @@ public final class Mesh: @unchecked Sendable {
 public struct ImageShape: Sendable {
     /// The square patch side images tile into, in pixels.
     public var patchSide: Int
-    /// Channels every pixel carries; zero derives four.
+    /// Channels every pixel has; zero derives four.
     public var channels: Int
 
     /// Takes every field by name; a zero derives as its field documents.
@@ -301,7 +302,7 @@ public struct VideoShape: Sendable {
     public var tubeFrames: Int
     /// Source frames between sampled ones; zero derives one.
     public var frameStride: Int
-    /// Channels every pixel carries; zero derives three.
+    /// Channels every pixel has; zero derives three.
     public var channels: Int
 
     /// Takes every field by name; a zero derives as its field documents.
@@ -327,16 +328,16 @@ public struct AudioShape: Sendable {
     }
 }
 
-/// What one device's step carries at most, whatever the modality
+/// What one device's step holds at most, whatever the modality
 /// mix. Mirrors `uform_batch_shape_t`.
 public struct BatchShape: Sendable {
     /// Rows one device's step packs.
     public var maxRowsPerDevice: Int
-    /// Items one device's step carries across all its rows.
+    /// Items one device's step holds across all its rows.
     public var maxSegmentsPerDevice: Int
     /// Positions one row spans, the sequence length.
     public var maxColumnsPerRow: Int
-    /// Bags one device's step carries; zero keeps every item its own routing unit.
+    /// Bags one device's step holds; zero keeps every item its own routing unit.
     public var maxBagsPerDevice: Int
     /// Legal bytes one item offers to choose from at most; zero makes no choices.
     public var maxChoicesPerItem: Int
@@ -642,7 +643,7 @@ public final class Trainer: @unchecked Sendable {
     let raw: uform_trainer_t
     /// The VRAM executor the trainer was made on, which every verb names.
     let executor: Executor
-    /// The mesh it borrows until freed.
+    /// The mesh it keeps alive until freed.
     let mesh: Mesh?
 
     private init(raw: uform_trainer_t, executor: Executor, mesh: Mesh?) {
@@ -681,14 +682,14 @@ public final class Trainer: @unchecked Sendable {
         arguments.executor = executor.raw
         arguments.outcome = landing.outcome
         arguments.completion = landing.completion
-        arguments.resume = landing.lend(resume)
+        arguments.resume = landing.copy(resume)
         arguments.depth = depth
         arguments.hidden = hidden
         arguments.batch = batch.raw
         arguments.objective = objective.raw
         arguments.masking = masking.raw
         arguments.contrastive = uform_contrastive_t(
-            matryoshka_dimensions: landing.lend(contrastive.matryoshkaDimensions),
+            matryoshka_dimensions: landing.copy(contrastive.matryoshkaDimensions),
             matryoshka_dimensions_count: contrastive.matryoshkaDimensions.count,
             temperature_groups: contrastive.temperatureGroups,
             inverse_temperature: contrastive.inverseTemperature,
@@ -708,7 +709,7 @@ public final class Trainer: @unchecked Sendable {
         )
         arguments.mesh = mesh?.raw
         arguments.seed = seed
-        arguments.progress = landing.lend(progress, steps: progressSteps)
+        arguments.progress = landing.progress(progress, steps: progressSteps)
         uform_trainer_init_vram(&arguments)
         return try landing.read { () throws(UFormError) in
             Trainer(raw: try created(trainer), executor: executor, mesh: mesh)
@@ -734,7 +735,7 @@ public final class Trainer: @unchecked Sendable {
     /// scored there, as `outputsScalar`. `sides` places each item in the late-interaction loss, nil
     /// leaving every item out, `choices` names each item's legal bytes as `textChoose` takes them,
     /// and `choiceTargets` their target probabilities, an entry as long as the item's choices. Each
-    /// list of items is gathered into one tape, the one copy this form makes before lending it as
+    /// list of items is gathered into one tape, the one copy this form makes before passing it as
     /// the packed form does. Calls `uform_trainer_step`.
     public func step(
         modalities: [Modality],
@@ -763,7 +764,7 @@ public final class Trainer: @unchecked Sendable {
     }
 
     /// Applies one optimizer step over tapes already packed as `data` and its `count + 1`
-    /// Apache Arrow `offsets`, lent to the library in place, without a copy, until the step
+    /// Apache Arrow `offsets`, which the library reads in place, without a copy, until the step
     /// returns. Calls `uform_trainer_step`.
     public func step(
         modalities: [Modality],
@@ -837,7 +838,7 @@ public struct TrainerOn: Sendable {
         )
     }
 
-    /// Calls `uform_trainer_step`, lending the packed tapes in place until the step returns.
+    /// Calls `uform_trainer_step`, reading the packed tapes in place until the step returns.
     public func step(
         modalities: [Modality],
         contents: (data: [UInt8], offsets: [Int]),
@@ -852,7 +853,7 @@ public struct TrainerOn: Sendable {
     ) throws(UFormError) -> TrainerStep {
         try checkStep(modalities.count, contents, bags, temperatureGroups, sides, relations, choices, choiceTargets)
         let call = TrainerCall(trainer: trainer, executor: executor, landing: Landing())
-        // The step blocks, so the tapes' own storage outlives the call it is lent to.
+        // The step blocks, so the tapes' own storage outlives the call that reads it.
         var submission: Submission<TrainerStep>?
         var failure: UFormError?
         withTape(contents, .u8) { contents in
@@ -891,8 +892,8 @@ public struct TrainerOn: Sendable {
 /// there.
 ///
 /// A deferred step copies its tapes and lists, so the caller's arrays may go at once. The trainer,
-/// the executor and the arena are borrowed as a blocking call borrows them, since releasing any of
-/// them waits for the calls naming it.
+/// the executor and the arena stay the caller's, as in a blocking call, and releasing any of them
+/// waits for the calls naming it.
 public struct TrainerDeferredOn: Sendable {
     /// The trainer every verb addresses.
     let trainer: Trainer
@@ -942,7 +943,7 @@ public struct TrainerDeferredOn: Sendable {
         try checkStep(modalities.count, contents, bags, temperatureGroups, sides, relations, choices, choiceTargets)
         let landing = Landing(uform_completion_deferred_k)
         let call = TrainerCall(trainer: trainer, executor: executor, landing: landing)
-        let tapes = (landing.lend(contents, .u8), landing.lend(choices, .u8), landing.lend(choiceTargets, .f32))
+        let tapes = (landing.copy(contents, .u8), landing.copy(choices, .u8), landing.copy(choiceTargets, .f32))
         return Deferred(
             try call.step(
                 modalities: modalities,
@@ -991,13 +992,13 @@ struct TrainerCall {
         let count = modalities.count
         let stats = landing.slots(uform_trainer_step_stats_t())
         let embeddings = arena.map { _ in landing.slots(uform_rows_view_t()) }
-        let write = arena.map { landing.lend($0) }
-        func lent(_ edges: Edges?) -> uform_edges_view_t {
+        let write = arena.map { landing.write($0) }
+        func edgesView(_ edges: Edges?) -> uform_edges_view_t {
             guard let edges else { return uform_edges_view_t() }
             return uform_edges_view_t(
-                offsets: landing.lend(edges.offsets),
-                ids: landing.lend(edges.ids),
-                weights: edges.weights.flatMap { landing.lend($0) }
+                offsets: landing.copy(edges.offsets),
+                ids: landing.copy(edges.ids),
+                weights: edges.weights.flatMap { landing.copy($0) }
             )
         }
         var arguments = uform_trainer_step_t()
@@ -1006,17 +1007,17 @@ struct TrainerCall {
         arguments.outcome = landing.outcome
         arguments.completion = landing.completion
         arguments.count = count
-        arguments.modalities = landing.lend(modalities.map(\.raw))
+        arguments.modalities = landing.copy(modalities.map(\.raw))
         arguments.contents = tapes.0
-        arguments.bags = bags.flatMap { landing.lend($0) }
-        arguments.temperature_groups = temperatureGroups.flatMap { landing.lend($0) }
-        arguments.sides = sides.flatMap { landing.lend($0.map(\.raw)) }
+        arguments.bags = bags.flatMap { landing.copy($0) }
+        arguments.temperature_groups = temperatureGroups.flatMap { landing.copy($0) }
+        arguments.sides = sides.flatMap { landing.copy($0.map(\.raw)) }
         arguments.choices = tapes.1
         arguments.choice_targets = tapes.2
         arguments.relations = uform_relations_view_t(
-            attract: lent(relations.attract),
-            repel: lent(relations.repel),
-            ignore: lent(relations.ignore)
+            attract: edgesView(relations.attract),
+            repel: edgesView(relations.repel),
+            ignore: edgesView(relations.ignore)
         )
         arguments.embeddings = embeddings
         arguments.arena = arena?.raw
@@ -1037,8 +1038,8 @@ struct TrainerCall {
             executor: executor.raw,
             outcome: landing.outcome,
             completion: landing.completion,
-            path: landing.lend(path),
-            progress: landing.lend(progress, steps: progressSteps)
+            path: landing.copy(path),
+            progress: landing.progress(progress, steps: progressSteps)
         )
         uform_trainer_save(&arguments)
         return try landing.submitted {}
@@ -1046,7 +1047,7 @@ struct TrainerCall {
 }
 
 /// Refuses a step whose per-item lists do not name one entry per item, since the C side reads
-/// them behind pointers that carry no count.
+/// them behind pointers that have no count.
 private func checkStep(
     _ count: Int,
     _ contents: (data: [UInt8], offsets: [Int]),
@@ -1091,22 +1092,22 @@ private func bounds(_ offsets: [Int], _ count: Int, _ elements: Int) -> Bool {
 
 extension Landing {
     /// Copies a packed `tape` into the landing, so a deferred call may read it after the verb
-    /// returns; nil lends an empty tape.
-    fileprivate func lend<Element: BitwiseCopyable>(
+    /// returns; nil answers an empty tape.
+    fileprivate func copy<Element: BitwiseCopyable>(
         _ tape: (data: [Element], offsets: [Int])?,
         _ scalar: Scalar
     ) -> uform_tape_view_t {
         guard let tape else { return uform_tape_view_t() }
         return uform_tape_view_t(
-            data: lend(tape.data).map(UnsafeRawPointer.init),
-            offsets: lend(tape.offsets),
+            data: copy(tape.data).map(UnsafeRawPointer.init),
+            offsets: copy(tape.offsets),
             scalar: scalar.raw
         )
     }
 }
 
-/// Runs `body` with `tape` lent in place over its arrays' own storage, valid only until `body`
-/// returns; nil lends an empty tape.
+/// Runs `body` with a view of `tape` over its arrays' own storage, valid only until `body`
+/// returns; nil passes an empty tape.
 private func withTape<Element: BitwiseCopyable>(
     _ tape: (data: [Element], offsets: [Int])?,
     _ scalar: Scalar,

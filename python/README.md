@@ -14,7 +14,7 @@ Every verb is a batch over buffer-protocol inputs, and every output whose length
 pip install uform
 ```
 
-The wheels carry the CPU library.
+The wheels include the CPU library.
 A build from source compiles the C library and the extension through `scikit-build-core`, and the suites run against the stub library alone:
 
 ```sh
@@ -45,7 +45,7 @@ print(f"{captions[cosines.argmax()]!r} describes the photo best")
 
 ## Receivers & Deferred Calls
 
-A receiver carries what every C argument structure puts before its inputs: the executor and the completion.
+A receiver holds what every C argument structure puts before its inputs: the executor and the completion.
 The model runs a verb on the calling thread, `model.on(executor)` answers a `uform.On` whose verbs block on that executor, and `model.deferred(executor)` answers a `uform.DeferredOn` whose verbs submit there and answer a `uform.Deferred`.
 The receiver's type alone chooses the completion, so all three offer the same verbs with the same arguments.
 In a coroutine, `await` a deferred call; anywhere else, `wait()` blocks the thread with its state detached:
@@ -96,7 +96,7 @@ One verb per input form, each spelled as in C:
 - `audio_encode_samples(samples, sample_rate, arena)` takes 1-D `float32` buffers.
 
 A batch is a sequence of separate objects, `str` or bytes-like for texts and bytes-like for files, gathered into one tape with one copy.
-A `(data, offsets)` tuple of buffers, the data and `count + 1` `size_t` offsets, is lent to the library as a tape without a copy:
+A `(data, offsets)` tuple of buffers, the data and `count + 1` `size_t` offsets, is read in place as a tape without a copy, and both buffers must stay alive and unchanged until the call is final:
 
 ```python
 data = b"first documentthe second"
@@ -172,7 +172,7 @@ Paths, like the mesh's `directory`, cross as `os.fsencode` gives their bytes, wh
 
 ## Errors
 
-Every failure raises a subclass of `uform.Error`, itself a `RuntimeError`, and each carries the status the C ABI reported as its `status` attribute, a `uform.Status` member:
+Every failure raises a subclass of `uform.Error`, itself a `RuntimeError`, and each holds the status the C ABI reported as its `status` attribute, a `uform.Status` member:
 
 ```python
 try:
@@ -213,8 +213,8 @@ Arguments the binding refuses raise at the call, while the library's refusals of
   `status` polls through `uform_outcome_status`, `wait` blocks through `uform_outcome_wait`, and `await` polls `status` between turns of the running event loop, sleeping 1 µs to 1 ms, so no thread waits.
 - __No life of its own.__
   The binding starts no threads and keeps no queues or caches; releasing a `Deferred` rides reference counting, which waits for the call first.
-- __Arenas are lent and reused, never shared.__
-  Every output verb takes an arena and answers views borrowing it; a view lasts until the next call on that arena rewinds it, and the library refuses an arena another call holds.
+- __Arenas belong to the caller and are reused, never shared.__
+  Every output verb takes an arena and answers views into it; a view lasts until the next call on that arena rewinds it, and the library refuses an arena another call holds.
 - __Nothing costs anything until it is used.__
   Blocking calls take no deferred-table entry, a surface `outputs` leaves out is never computed, and an arena allocates only when a call writes into it.
 - __Blocking calls stay as simple as the language allows.__

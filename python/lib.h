@@ -22,7 +22,7 @@
  *  model runs it on the calling thread, a trainer blocks on the executor it was created on, an
  *  @c On blocks on its executor, and a @c DeferredOn submits it there and answers a @c Deferred. A
  *  verb fills one call structure, kept on the stack while it blocks and inside its @c Deferred once
- *  submitted, so one body serves every receiver and nothing the library borrows ever moves. A
+ *  submitted, so one body serves every receiver and nothing the library points at ever moves. A
  *  report or description is the output slot the library writes into, so a deferred call answers it
  *  as a blocking one does. The binding starts no threads, takes no locks and re-checks nothing the
  *  library refuses, an arena serving two calls included; it counts only the GPU arenas an executor
@@ -36,9 +36,10 @@
  *
  *  Every input arrives through PEP 3118, so NumPy is never a build-time or a runtime dependency. A
  *  batch of separate objects is gathered into one tape the call owns, and a @c (data, offsets) pair
- *  of buffers is lent to the library as a tape without a copy. Every output whose length scales
- *  with the call lands in the @c Arena the caller passes and leaves as zero-copy results over it. A
- *  result views its arena until the next call on that arena rewinds it, as a C view does.
+ *  of buffers is read in place as a tape without a copy, so both must stay alive and unchanged
+ *  until the call is final. Every output whose length scales with the call lands in the @c Arena
+ *  the caller passes and leaves as zero-copy results over it. A result views its arena until the
+ *  next call on that arena rewinds it, as a C view does.
  *
  *  @section python_naming Naming
  *
@@ -84,7 +85,7 @@ typedef struct uform_py_argument_t {
     /** The keyword spelling, which also names the argument in every refusal. */
     char const* name;
 
-    /** Where the borrowed value lands. */
+    /** Where the value lands, a reference the caller's arguments own. */
     PyObject** value;
 } uform_py_argument_t;
 
@@ -203,7 +204,7 @@ int uform_py_register_enums(PyObject* module);
 
 /**
  *  @brief Reads a member of @p mirrored from an `int`, refusing a `bool`, text and values
- *      no member carries.
+ *      no member holds.
  *  @return 0 on success, -1 with an exception set otherwise.
  */
 int uform_py_enum_from_object(PyObject* object, char const* field, uform_py_enum_t const* mirrored, int* value);
@@ -288,7 +289,7 @@ int uform_py_fields_ready(uform_py_fields_t* fields);
  */
 int uform_py_fields_write(PyObject* object, char const* field, uform_py_fields_t const* fields, void* target);
 
-/** The value of field @p index of @p object, borrowed. */
+/** The value of field @p index of @p object, a reference @p object owns. */
 static inline PyObject* uform_py_fields_value(PyObject* object, size_t index) {
     return ((Fields*)object)->values[index];
 }
@@ -304,7 +305,7 @@ typedef struct uform_py_receiver_t {
      *  outlive the call. */
     PyObject* origin;
 
-    /** The model or trainer the verb addresses, borrowed from @c origin. */
+    /** The model or trainer the verb addresses, a reference @c origin owns. */
     PyObject* target;
 
     /** The executor the call runs on; NULL runs it on the calling thread. */
@@ -373,7 +374,7 @@ typedef struct uform_py_verb_t {
 } uform_py_verb_t;
 
 /** A deferred call owning everything the library touches until it is final, the object being the
- *  allocation, so nothing it lends ever moves. */
+ *  allocation, so nothing the library points at ever moves. */
 typedef struct Deferred {
 
     /** The object header, sized in bytes of the verb's call. */
@@ -437,7 +438,7 @@ uform_progress_t uform_py_progress_registered(PyObject* callable, size_t steps);
 #pragma region Shared Helpers
 
 /**
- *  @brief Raises the class @p outcome 's status maps to when it carries a failure.
+ *  @brief Raises the class @p outcome 's status maps to when it holds a failure.
  *  @return -1 with an exception set when @p outcome failed, 0 otherwise.
  */
 int uform_py_raise_on_outcome(uform_outcome_t const* outcome);
@@ -484,7 +485,7 @@ int uform_py_size_from_object(PyObject* object, char const* field, size_t* value
 int uform_py_ordinals_from_object(PyObject* object, char const* field, int32_t** ordinals, size_t* count);
 
 /**
- *  @brief Borrows a filesystem path from a @c str, @c bytes, or @c os.PathLike, as the
+ *  @brief Reads a filesystem path from a @c str, @c bytes, or @c os.PathLike, as the
  *      OS's own bytes that @c os.fsencode gives, not necessarily UTF-8; an embedded NUL
  *      raises @c ValueError.
  *  @param[out] decoded A new reference the caller must release once @p path is spent.
@@ -518,8 +519,8 @@ typedef enum uform_py_element_t {
     uform_py_element_pixels_k,
 } uform_py_element_t;
 
-/** A batch as the library reads it, gathered into one block the call owns, or lent from a
- *  pair of buffers. */
+/** A batch as the library reads it, gathered into one block the call owns, or read in place from
+ *  a pair of buffers the caller owns. */
 typedef struct uform_py_tape_t {
 
     /** What the library reads. */
@@ -531,17 +532,18 @@ typedef struct uform_py_tape_t {
     /** For pixels, the @c count heights followed by the @c count widths, inside @c gathered. */
     uint32_t* extents;
 
-    /** The @c PyMem block holding the offsets, the extents and the elements; NULL when lent. */
+    /** The @c PyMem block holding the offsets, the extents and the elements; NULL when read in
+     *  place. */
     void* gathered;
 
-    /** The lent buffers, zeroed when gathered. */
+    /** The caller's buffers read in place, zeroed when gathered. */
     Py_buffer data, offsets;
 } uform_py_tape_t;
 
 /**
  *  @brief Reads a batch of @p element entries: a sequence of separate objects, gathered with one
  *      copy, or, for every element but pixels, a @c (data, offsets) tuple whose offsets buffer
- *      holds @c size_t words, lent.
+ *      holds @c size_t words, read in place.
  *  @return 0 on success, -1 with an exception set otherwise; release @p tape either way.
  */
 int uform_py_tape_from_object(PyObject* object, char const* field, uform_py_element_t element, uform_py_tape_t* tape);
@@ -549,7 +551,8 @@ int uform_py_tape_from_object(PyObject* object, char const* field, uform_py_elem
 /** Releases whatever @c uform_py_tape_from_object acquired; a zeroed tape is a no-op. */
 void uform_py_tape_release(uform_py_tape_t* tape);
 
-/** A run of @c uint32_t words, lent from a buffer of format 'I' or gathered from integers. */
+/** A run of @c uint32_t words, read in place from a buffer of format 'I' or gathered from
+ *  integers. */
 typedef struct uform_py_words_t {
     uint32_t const* data;
     uint32_t* gathered;

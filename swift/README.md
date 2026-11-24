@@ -69,7 +69,7 @@ let images = try await call.value  // or: try call.wait()
 ```
 
 A `Deferred` owns its outcome, its outputs and copies of its inputs until the call is final, so the caller's arrays may go at once.
-It borrows the model, the executor and the arena as a blocking call does, since releasing any of them waits for the calls naming it.
+The model, the executor and the arena stay the caller's, as in a blocking call, and releasing any of them waits for the calls naming it.
 `status` reads `deferred` until then, through `uform_outcome_status`, and `wait()` blocks through `uform_outcome_wait` and answers the result or throws the failure, the same every time it is asked.
 `value` polls `status` from the awaiting task, sleeping between reads, and then reads the result in the caller's isolation, so an `async` caller suspends rather than blocks.
 Releasing an unfinished one waits for it first.
@@ -151,7 +151,7 @@ try model.audioEncode([wav], arena: arena)                                      
 try model.audioEncodeSamples([samples], sampleRate: 16_000, arena: arena)             // mono Float samples
 ```
 
-`EncodeConfig` carries the rest: `outputsScalar`, `f32` by default, and a `progress` handler with its `progressSteps`.
+`EncodeConfig` holds the rest: `outputsScalar`, `f32` by default, and a `progress` handler with its `progressSteps`.
 Rows of `f32`, `bf16` and `f16` read as `Float`, and `withUnsafeBytes` hands any scalar on as stored, such as to a USearch index.
 
 ```swift
@@ -166,7 +166,7 @@ A handler never runs on two threads at once, but may run on whichever thread adv
 
 `textChoose` scores each text's legal choices, one byte each, through one forward of the byte decoder, a softmax over that item's choices alone at its question type's calibrated inverse temperature.
 The call appends the mask byte, and a text longer than the context loses its head, never its end.
-A model whose `choiceTemperatureGroups` is zero carries no byte decoder and refuses with `unsupported`.
+A model whose `choiceTemperatureGroups` is zero has no byte decoder and refuses with `unsupported`.
 
 ```swift
 let chosen = try model.textChoose(
@@ -192,7 +192,7 @@ print(description.cpuClass, description.tokenWidth, description.choiceTemperatur
 
 `quantization` is the scalar the transformer blocks run in: `bf16` as the checkpoint stores it, or `e4m3` quantized at load.
 Every RAM load and executor takes a `cpuClassCeiling`, and every VRAM one a `gpuClassCeiling`, dispatching as the best class under it the hardware runs; nil sets no ceiling.
-`describe()` reports the class the model runs as, nil on the other residency, the `tokenWidth` of its token head, and its `choiceTemperatureGroups`, each zero when the checkpoint carries no such head.
+`describe()` reports the class the model runs as, nil on the other residency, the `tokenWidth` of its token head, and its `choiceTemperatureGroups`, each zero when the checkpoint has no such head.
 `gpuDevices()` lists every GPU the process can drive, and a device's position in it is the ordinal `devices` names it by.
 
 ```swift
@@ -223,7 +223,7 @@ try trainer.save(path: "checkpoint.safetensors")
 `Contrastive` and `LateInteraction` each take a `PairLossForm`, and a positive `LateInteraction.weight` trains the token head over the items whose `sides` name them a query, a document or both.
 A positive `Choices.weight` trains calibrated choices, which needs `BatchShape.maxChoicesPerItem`, over the legal bytes each step's `choices` names, as `textChoose` takes them, and their `choiceTargets`.
 The step reports both terms as `lateInteractionLoss` and `choicesLoss`.
-A step over arrays of items gathers each into one tape, its one copy, while a step over `(data, offsets)` tapes lends their storage to the library in place.
+A step over arrays of items gathers each into one tape, its one copy, while a step over `(data, offsets)` tapes has the library read their storage in place.
 The same types read a spelling back with `init?(name:)`, answering nil for a name the library's table would quietly read as its default.
 
 ## Errors
@@ -251,10 +251,10 @@ do {
   `status` polls through `uform_outcome_status`, `wait()` blocks through `uform_outcome_wait`, and `try await call.value` polls with sleeps between reads, so an `async` caller suspends.
 - __No life of its own.__
   The binding starts no threads, keeps no queues and caches nothing; releasing a `Deferred` rides its `deinit`, which waits for the call first.
-- __Arenas are lent and reused, never shared.__
-  Every output verb takes an arena and answers views borrowing it; a view remembers which call wrote it and traps once a later one did.
+- __Arenas belong to the caller and are reused, never shared.__
+  Every output verb takes an arena and answers views into it; a view remembers which call wrote it and traps once a later one did.
 - __Statuses and modes are enums.__
-  `Status`, `Scalar`, `Mood`, `CPUClass`, `GPUClass`, `GPUVendor`, `Modality`, `Objective`, `Negatives`, `MultimemTier`, `PairLossForm` and `LateInteractionSide` carry their C enumerators and spell themselves through the C name functions, never strings.
+  `Status`, `Scalar`, `Mood`, `CPUClass`, `GPUClass`, `GPUVendor`, `Modality`, `Objective`, `Negatives`, `MultimemTier`, `PairLossForm` and `LateInteractionSide` mirror their C enumerators and spell themselves through the C name functions, never strings.
 - __Nothing costs anything until it is used.__
   Blocking calls take no deferred-table entry, a surface `outputs` leaves out is never computed, and an arena allocates only when a call writes into it.
 - __What this binding does not expose.__

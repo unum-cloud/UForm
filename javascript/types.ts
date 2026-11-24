@@ -232,7 +232,7 @@ export interface ExecutorForRamConfig {
   /** The newest CPU class to dispatch as, spelled like "intel-haswell", capped by what the CPU
    *  runs; absent sets no ceiling. */
   cpuClassCeiling?: string;
-  /** Threads to spawn; absent takes 7/8 of the cores the domains carry. */
+  /** Threads to spawn; absent takes 7/8 of the cores the domains span. */
   threads?: number;
 }
 
@@ -248,8 +248,9 @@ export interface ExecutorForVramConfig {
   /** The newest CPU class the host decoders dispatch as, spelled like "intel-haswell"; absent
    *  sets no ceiling. */
   cpuClassCeiling?: string;
-  /** Borrowed CUDA stream addresses, one per device in `devices` order, which the library refuses
-   *  as unsupported; absent creates its own. */
+  /** CUDA or HIP stream addresses, one per device in `devices` order, which the caller destroys
+   *  after closing the executor; absent orders each device's work on its per-thread default
+   *  stream. */
   streams?: bigint[];
   /** Ceiling on scratch bytes per device; absent lets scratch grow as batches ask. */
   scratchLimit?: number;

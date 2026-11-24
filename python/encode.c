@@ -10,7 +10,7 @@
  *  out costs nothing past the final norm. Every verb is written once and reached through three
  *  receivers: the model runs it on the calling thread, an @c On blocks on its executor, and a
  *  @c DeferredOn submits it and answers a @c Deferred. The call owns the tape its inputs were
- *  gathered into, or holds the buffers they were lent from, until it is final.
+ *  gathered into, or holds the caller's buffers it reads in place, until it is final.
  */
 #include "lib.h"
 
@@ -190,7 +190,7 @@ PyTypeObject AudioEncodeStatsType = {
 
 #pragma region Calls
 
-/** One encode call, the inputs it owns or borrows until it is final, and the outputs it lands. */
+/** One encode call, the inputs it owns or reads until it is final, and the outputs it lands. */
 typedef struct encode_call_t {
     uform_py_call_t call;
     union {
@@ -458,7 +458,7 @@ static char const doc_Model_image_encode[] =                                    
     "\n"                                                                                         //
     "Args:\n"                                                                                    //
     "  files (Sequence[bytes-like] | tuple[buffer, buffer]): The encoded files, or a (data,\n"   //
-    "    offsets) pair lent as is.\n"                                                            //
+    "    offsets) pair read in place.\n"                                                         //
     "  arena (Arena): Where the outputs land, rewound by the call.\n"                            //
     "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"               //
     "  stats (ImageEncodeStats, optional): Overwritten with this call's report.";
@@ -546,7 +546,7 @@ static char const doc_Model_video_encode[] =                                    
     "\n"                                                                                       //
     "Args:\n"                                                                                  //
     "  files (Sequence[bytes-like] | tuple[buffer, buffer]): The encoded clips, or a (data,\n" //
-    "    offsets) pair lent as is.\n"                                                          //
+    "    offsets) pair read in place.\n"                                                       //
     "  arena (Arena): Where the outputs land, rewound by the call.\n"                          //
     "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"             //
     "  stats (VideoEncodeStats, optional): Overwritten with this call's report.";
@@ -588,7 +588,7 @@ static char const doc_Model_audio_encode[] =                                    
     "\n"                                                                                       //
     "Args:\n"                                                                                  //
     "  files (Sequence[bytes-like] | tuple[buffer, buffer]): The encoded recordings, or a\n"   //
-    "    (data, offsets) pair lent as is.\n"                                                   //
+    "    (data, offsets) pair read in place.\n"                                                //
     "  arena (Arena): Where the outputs land, rewound by the call.\n"                          //
     "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"             //
     "  stats (AudioEncodeStats, optional): Overwritten with this call's report.";
@@ -630,7 +630,7 @@ static char const doc_Model_audio_encode_samples[] =                            
     "\n"                                                                                             //
     "Args:\n"                                                                                        //
     "  samples (Sequence[buffer] | tuple[buffer, buffer]): 1-D float32 buffers, gathered into one\n" //
-    "    tape, or a (data, offsets) pair lent as is, its offsets counted in samples.\n"              //
+    "    tape, or a (data, offsets) pair read in place, its offsets counted in samples.\n"           //
     "  sample_rate (int): Samples per second shared by every recording.\n"                           //
     "  arena (Arena): Where the outputs land, rewound by the call.\n"                                //
     "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"                   //
@@ -680,7 +680,7 @@ static PyObject* Model_audio_encode_samples(PyObject* self, PyObject* const* arg
     return uform_py_call_run(&receiver, &audio_encode_samples_verb.verb, call);
 }
 
-/** A @c uform_text_choose call, the inputs it owns or borrows until it is final, and the
+/** A @c uform_text_choose call, the inputs it owns or reads until it is final, and the
  *  probabilities it lands. */
 typedef struct choose_call_t {
     uform_py_call_t call;

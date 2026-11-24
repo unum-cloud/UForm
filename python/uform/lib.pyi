@@ -297,7 +297,7 @@ class Executor:
         memory_domains: Sequence[int] | None = None,
         cpu_class_ceiling: CPUClass | None = None,
     ) -> Executor:
-        """Opens one submission stream on every named device. Calls `uform_executor_for_vram`."""
+        """Drives every named device on its per-thread default stream. Calls `uform_executor_for_vram`."""
         ...
 
     def drain(self, mood: Mood = ...) -> None:
@@ -426,7 +426,7 @@ class ModelDescription:
 
     @property
     def token_width(self) -> int:
-        """Scalars per token vector; 0 when the checkpoint carries no token head."""
+        """Scalars per token vector; 0 when the checkpoint has no token head."""
         ...
 
     @property
@@ -711,7 +711,7 @@ class AudioShape(_Fields):
 
 @final
 class BatchShape(_Fields):
-    """What one device's step carries at most, whatever the modality mix, fixed at creation."""
+    """What one device's step holds at most, whatever the modality mix, fixed at creation."""
 
     max_rows_per_device: Final[int]
     max_segments_per_device: Final[int]
@@ -924,7 +924,7 @@ class MeshDescription:
 
 @final
 class Mesh:
-    """One process's place among the processes of a run, borrowed by every trainer."""
+    """One process's place among the processes of a run, shared by every trainer."""
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
     @classmethod

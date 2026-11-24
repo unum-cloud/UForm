@@ -101,7 +101,7 @@ test("names come from the C tables", () => {
   assert.strictEqual(uform.Objective.Joint, "joint");
 });
 
-test("executors: RAM spawns, while VRAM without a device and a null pool refuse", () => {
+test("executors: RAM spawns, while VRAM without a device refuses", () => {
   const executor = Executor.forRam({ threads: 2 });
   executor.drain(uform.Mood.Spinning);
   throwsStatus(() => executor.drain("dozing"), Status.InvalidArgument);
@@ -187,11 +187,11 @@ test("receivers choose completion and the verb stays: blocking and deferred agre
   assert.strictEqual(call.status, Status.Success);
   assert.deepStrictEqual(Array.from(awaited.embeddings.data), reference.hello);
   assert.strictEqual(call.wait(), awaited);
-  // A packed tape whose offsets are as wide as `size_t` is lent, so the deferred call
+  // A packed tape whose offsets are as wide as `size_t` is read in place, so the deferred call
   // holds both arrays.
   const tape = { data: new TextEncoder().encode("hello"), offsets: BigUint64Array.of(0n, 5n) };
-  const lent = await model.deferred(executor).textEncode(tape, arena);
-  assert.deepStrictEqual(Array.from(lent.embeddings.data), reference.hello);
+  const packed = await model.deferred(executor).textEncode(tape, arena);
+  assert.deepStrictEqual(Array.from(packed.embeddings.data), reference.hello);
 
   const waited = model.deferred(executor).describe().wait();
   assert.strictEqual(waited.dimensions, dimensions);

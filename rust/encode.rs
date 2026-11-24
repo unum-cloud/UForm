@@ -3,7 +3,7 @@
 //!
 //! Every verb runs the same tower and keeps whichever surfaces its [`Outputs`] name: one pooled
 //! embedding per item, one final-norm state or one token-head vector per token left after
-//! truncation, or any mix from one forward. All land in the arena the verb borrows, written as the
+//! truncation, or any mix from one forward. All land in the arena the verb takes, written as the
 //! config's `outputs_scalar`.
 //!
 //! Models are tokenizer-free: text arrives as UTF-8 bytes and every byte is a token. Separate items
@@ -228,7 +228,7 @@ impl fmt::Debug for Outputs {
     }
 }
 
-/// What an encode verb wrote into the arena it borrows: the surfaces its [`Outputs`] named.
+/// What an encode verb wrote into its arena: the surfaces its [`Outputs`] named.
 ///
 /// Rust-only.
 pub struct Encoded<'arena> {
@@ -241,7 +241,7 @@ pub struct Encoded<'arena> {
     pub token_vectors: Option<RowsTape<'arena>>,
 }
 
-/// The output views a verb lends the library, and which of them it asked for.
+/// The output views a verb owns and the library fills, and which of them it asked for.
 struct Surfaces {
     outputs: Outputs,
     embeddings: Exported<uform_rows_view_t>,
@@ -251,7 +251,7 @@ struct Surfaces {
 }
 
 /// The C `embeddings`, `states` and `token_vectors` pointers of one call, null where skipped.
-struct LentSurfaces {
+struct SurfacePointers {
     embeddings: *mut uform_rows_view_t,
     states: *mut uform_rows_tape_view_t,
     token_vectors: *mut uform_rows_tape_view_t,
@@ -269,7 +269,7 @@ impl Surfaces {
     }
 
     /// The output pointers for a call over `count` items.
-    fn lend(&mut self, count: usize) -> LentSurfaces {
+    fn pointers(&mut self, count: usize) -> SurfacePointers {
         self.count = count;
         let outputs = self.outputs;
         fn kept<View>(kept: bool, view: &mut View) -> *mut View {
@@ -278,7 +278,7 @@ impl Surfaces {
                 false => ptr::null_mut(),
             }
         }
-        LentSurfaces {
+        SurfacePointers {
             embeddings: kept(outputs.contains(Outputs::EMBEDDINGS), &mut self.embeddings.0),
             states: kept(outputs.contains(Outputs::STATES), &mut self.states.0),
             token_vectors: kept(outputs.contains(Outputs::TOKEN_VECTORS), &mut self.token_vectors.0),
@@ -364,8 +364,8 @@ pub struct AudioEncodeStats {
 
 /// The scalar and the knobs of [`EncodeVerbs::text_encode`]; a bare [`Scalar`] is the whole config.
 ///
-/// A blocking call lends its handler and stats; a deferred one owns them, and
-/// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
+/// A blocking call uses the caller's handler and stats only during the call; a deferred one owns
+/// them, and [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
 ///
 /// Mirrors `uform_text_encode_t`.
 pub struct TextEncodeConfig<Progress, Stats> {
@@ -389,8 +389,8 @@ impl<'config> From<Scalar> for TextEncodeConfig<&'config mut ProgressCallback<'c
 /// The scalar and the knobs of [`EncodeVerbs::image_encode`]; a bare [`Scalar`] is
 /// the whole config.
 ///
-/// A blocking call lends its handler and stats; a deferred one owns them, and
-/// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
+/// A blocking call uses the caller's handler and stats only during the call; a deferred one owns
+/// them, and [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
 ///
 /// Mirrors `uform_image_encode_t`.
 pub struct ImageEncodeConfig<Progress, Stats> {
@@ -415,8 +415,8 @@ impl<'config> From<Scalar>
 /// The scalar and the knobs of [`EncodeVerbs::image_encode_pixels`]; a bare [`Scalar`] is
 /// the whole config.
 ///
-/// A blocking call lends its handler and stats; a deferred one owns them, and
-/// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
+/// A blocking call uses the caller's handler and stats only during the call; a deferred one owns
+/// them, and [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
 ///
 /// Mirrors `uform_image_encode_pixels_t`.
 pub struct ImageEncodePixelsConfig<Progress, Stats> {
@@ -441,8 +441,8 @@ impl<'config> From<Scalar>
 /// The scalar and the knobs of [`EncodeVerbs::video_encode`]; a bare [`Scalar`] is
 /// the whole config.
 ///
-/// A blocking call lends its handler and stats; a deferred one owns them, and
-/// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
+/// A blocking call uses the caller's handler and stats only during the call; a deferred one owns
+/// them, and [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
 ///
 /// Mirrors `uform_video_encode_t`.
 pub struct VideoEncodeConfig<Progress, Stats> {
@@ -467,8 +467,8 @@ impl<'config> From<Scalar>
 /// The scalar and the knobs of [`EncodeVerbs::audio_encode`]; a bare [`Scalar`] is
 /// the whole config.
 ///
-/// A blocking call lends its handler and stats; a deferred one owns them, and
-/// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
+/// A blocking call uses the caller's handler and stats only during the call; a deferred one owns
+/// them, and [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
 ///
 /// Mirrors `uform_audio_encode_t`.
 pub struct AudioEncodeConfig<Progress, Stats> {
@@ -493,8 +493,8 @@ impl<'config> From<Scalar>
 /// The scalar and the knobs of [`EncodeVerbs::audio_encode_samples`]; a bare [`Scalar`] is
 /// the whole config.
 ///
-/// A blocking call lends its handler and stats; a deferred one owns them, and
-/// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
+/// A blocking call uses the caller's handler and stats only during the call; a deferred one owns
+/// them, and [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
 ///
 /// Mirrors `uform_audio_encode_samples_t`.
 pub struct AudioEncodeSamplesConfig<Progress, Stats> {
@@ -519,8 +519,8 @@ impl<'config> From<Scalar>
 /// The question types and the knobs of [`EncodeVerbs::text_choose`]; [`TextChooseConfig::default`]
 /// puts every item in group zero.
 ///
-/// A blocking call lends its handler and stats; a deferred one owns them, and
-/// [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
+/// A blocking call uses the caller's handler and stats only during the call; a deferred one owns
+/// them, and [`Deferred::wait_with_inputs`](crate::Deferred::wait_with_inputs) hands them back.
 ///
 /// Mirrors `uform_text_choose_t`.
 pub struct TextChooseConfig<
@@ -563,7 +563,7 @@ impl<Progress: 'static, Stats: 'static> Accepts<AudioEncodeSamplesConfig<Progres
 /// [`Model::deferred`](crate::Model::deferred) makes runs on an executor.
 ///
 /// Every verb takes its inputs, the [`Outputs`] to keep, a config every bare [`Scalar`]
-/// converts into, and last the [`Arena`] its [`Encoded`] result borrows. A blocking receiver
+/// converts into, and last the [`Arena`] its [`Encoded`] result refers to. A blocking receiver
 /// answers what the call produced; a deferring one answers a [`Deferred`](crate::Deferred) and
 /// takes owned inputs.
 ///
@@ -820,7 +820,7 @@ impl<
 
     fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments> {
         let batch = self.texts.tape(&mut self.gathered)?;
-        let lent = self.surfaces.lend(batch.count);
+        let pointers = self.surfaces.pointers(batch.count);
         let progress = lower_progress(&mut self.config.progress, self.config.progress_steps);
         Ok(uform_text_encode_t {
             model: self.handles.handle,
@@ -829,9 +829,9 @@ impl<
             completion,
             count: batch.count,
             texts: batch.tape,
-            embeddings: lent.embeddings,
-            states: lent.states,
-            token_vectors: lent.token_vectors,
+            embeddings: pointers.embeddings,
+            states: pointers.states,
+            token_vectors: pointers.token_vectors,
             arena: self.arena.handle,
             outputs_scalar: self.config.outputs_scalar as uform_scalar_t,
             progress,
@@ -941,7 +941,7 @@ impl<
 
     fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments> {
         let batch = self.images.tape(&mut self.gathered)?;
-        let lent = self.surfaces.lend(batch.count);
+        let pointers = self.surfaces.pointers(batch.count);
         let progress = lower_progress(&mut self.config.progress, self.config.progress_steps);
         Ok(uform_image_encode_t {
             model: self.handles.handle,
@@ -950,9 +950,9 @@ impl<
             completion,
             count: batch.count,
             images: batch.tape,
-            embeddings: lent.embeddings,
-            states: lent.states,
-            token_vectors: lent.token_vectors,
+            embeddings: pointers.embeddings,
+            states: pointers.states,
+            token_vectors: pointers.token_vectors,
             arena: self.arena.handle,
             outputs_scalar: self.config.outputs_scalar as uform_scalar_t,
             progress,
@@ -1003,7 +1003,7 @@ impl<
         if heights.len() != batch.count || widths.len() != batch.count {
             return Err(fail(Status::ShapeMismatch, "every item needs one height and one width"));
         }
-        let lent = self.surfaces.lend(batch.count);
+        let pointers = self.surfaces.pointers(batch.count);
         let progress = lower_progress(&mut self.config.progress, self.config.progress_steps);
         Ok(uform_image_encode_pixels_t {
             model: self.handles.handle,
@@ -1014,9 +1014,9 @@ impl<
             pixels: batch.tape,
             heights: heights.as_ptr(),
             widths: widths.as_ptr(),
-            embeddings: lent.embeddings,
-            states: lent.states,
-            token_vectors: lent.token_vectors,
+            embeddings: pointers.embeddings,
+            states: pointers.states,
+            token_vectors: pointers.token_vectors,
             arena: self.arena.handle,
             outputs_scalar: self.config.outputs_scalar as uform_scalar_t,
             progress,
@@ -1059,7 +1059,7 @@ impl<
 
     fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments> {
         let batch = self.videos.tape(&mut self.gathered)?;
-        let lent = self.surfaces.lend(batch.count);
+        let pointers = self.surfaces.pointers(batch.count);
         let progress = lower_progress(&mut self.config.progress, self.config.progress_steps);
         Ok(uform_video_encode_t {
             model: self.handles.handle,
@@ -1068,9 +1068,9 @@ impl<
             completion,
             count: batch.count,
             videos: batch.tape,
-            embeddings: lent.embeddings,
-            states: lent.states,
-            token_vectors: lent.token_vectors,
+            embeddings: pointers.embeddings,
+            states: pointers.states,
+            token_vectors: pointers.token_vectors,
             arena: self.arena.handle,
             outputs_scalar: self.config.outputs_scalar as uform_scalar_t,
             progress,
@@ -1113,7 +1113,7 @@ impl<
 
     fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments> {
         let batch = self.recordings.tape(&mut self.gathered)?;
-        let lent = self.surfaces.lend(batch.count);
+        let pointers = self.surfaces.pointers(batch.count);
         let progress = lower_progress(&mut self.config.progress, self.config.progress_steps);
         Ok(uform_audio_encode_t {
             model: self.handles.handle,
@@ -1122,9 +1122,9 @@ impl<
             completion,
             count: batch.count,
             recordings: batch.tape,
-            embeddings: lent.embeddings,
-            states: lent.states,
-            token_vectors: lent.token_vectors,
+            embeddings: pointers.embeddings,
+            states: pointers.states,
+            token_vectors: pointers.token_vectors,
             arena: self.arena.handle,
             outputs_scalar: self.config.outputs_scalar as uform_scalar_t,
             progress,
@@ -1168,7 +1168,7 @@ impl<
 
     fn arguments(&mut self, outcome: *mut uform_outcome_t, completion: uform_completion_t) -> Result<Self::Arguments> {
         let batch = self.samples.tape(&mut self.gathered)?;
-        let lent = self.surfaces.lend(batch.count);
+        let pointers = self.surfaces.pointers(batch.count);
         let progress = lower_progress(&mut self.config.progress, self.config.progress_steps);
         Ok(uform_audio_encode_samples_t {
             model: self.handles.handle,
@@ -1178,9 +1178,9 @@ impl<
             count: batch.count,
             samples: batch.tape,
             sample_rate: self.sample_rate,
-            embeddings: lent.embeddings,
-            states: lent.states,
-            token_vectors: lent.token_vectors,
+            embeddings: pointers.embeddings,
+            states: pointers.states,
+            token_vectors: pointers.token_vectors,
             arena: self.arena.handle,
             outputs_scalar: self.config.outputs_scalar as uform_scalar_t,
             progress,
@@ -1220,7 +1220,7 @@ mod tests {
         Model::load_ram_buffer(&testing::checkpoint()).unwrap()
     }
 
-    /// CRC-32 of `bytes`, as PNG chunks carry it.
+    /// CRC-32 of `bytes`, as PNG chunks store it.
     fn crc32(bytes: &[u8]) -> u32 {
         !bytes.iter().fold(!0u32, |crc, &byte| {
             (0..8).fold(crc ^ u32::from(byte), |crc, _| (crc >> 1) ^ (0xEDB8_8320 & 0u32.wrapping_sub(crc & 1)))
@@ -1399,21 +1399,22 @@ mod tests {
         assert_eq!(states.offsets().unwrap(), [0, 5]);
     }
 
-    /// A borrowed tape reaches the library as it is, and lands what the same items gathered land.
+    /// A `(data, offsets)` tape reaches the library as it is, and lands what the same items
+    /// gathered land.
     #[test]
-    fn borrowed_tapes_match_gathered_items() {
+    fn uncopied_tapes_match_gathered_items() {
         let model = model();
-        let (mut gathered, mut borrowed) = (Arena::new().unwrap(), Arena::new().unwrap());
+        let (mut gathered, mut uncopied) = (Arena::new().unwrap(), Arena::new().unwrap());
         let image = png();
         let items = vec![image.clone(), image.clone()];
         let joined = items.concat();
         let tape = (joined.as_slice(), [0usize, image.len(), 2 * image.len()]);
         let from_items = model.image_encode(&items, Outputs::EMBEDDINGS, Scalar::F32, &mut gathered).unwrap();
-        let from_tape = model.image_encode(tape, Outputs::EMBEDDINGS, Scalar::F32, &mut borrowed).unwrap();
+        let from_tape = model.image_encode(tape, Outputs::EMBEDDINGS, Scalar::F32, &mut uncopied).unwrap();
         assert_eq!(embeddings_of(&from_items), embeddings_of(&from_tape));
 
         let past_the_end = (b"first".as_slice(), [0usize, 6]);
-        let refusal = model.video_encode(past_the_end, Outputs::EMBEDDINGS, Scalar::F32, &mut borrowed);
+        let refusal = model.video_encode(past_the_end, Outputs::EMBEDDINGS, Scalar::F32, &mut uncopied);
         assert_eq!(refusal.err().map(|error| error.status), Some(Status::ShapeMismatch));
     }
 

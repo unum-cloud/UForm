@@ -43,7 +43,7 @@ private func checkpoint() throws -> String {
 /// A model over the checkpoint.
 private func model() throws -> Model { try Model.loadRam(path: try checkpoint()) }
 
-/// CRC-32 of `bytes`, as PNG chunks carry it.
+/// CRC-32 of `bytes`, as PNG chunks store it.
 private func crc32(_ bytes: [UInt8]) -> UInt32 {
     ~bytes.reduce(~UInt32(0)) { crc, byte in
         (0 ..< 8).reduce(crc ^ UInt32(byte)) { crc, _ in (crc >> 1) ^ (0xEDB8_8320 & (0 &- (crc & 1))) }
@@ -153,7 +153,7 @@ struct VocabularyTests {
         #expect(GPUClass(name: "amd-cdna4") == .amdCDNA4)
     }
 
-    /// Every listed device carries a vendor, and a machine without GPUs lists none
+    /// Every listed device has a vendor, and a machine without GPUs lists none
     /// rather than failing.
     @Test func gpuDevicesListWhatTheProcessDrives() throws {
         #expect(try gpuDevices().allSatisfy { $0.vendor != .unknown && $0.gpuClass != nil })
@@ -357,7 +357,7 @@ struct EncodeTests {
             failureStatus(of: try model.imageEncodePixels(pixels, heights: [2], widths: [2], arena: arena))
                 == .shapeMismatch
         )
-        // The heights and widths cross behind pointers that carry no count, so the
+        // The heights and widths cross behind pointers that have no count, so the
         // binding counts them.
         #expect(
             failureStatus(of: try model.imageEncodePixels(pixels, heights: [], widths: [], arena: arena))
@@ -450,7 +450,7 @@ struct DeferredTests {
     }
 
     /// A call made from the handler of a call holding the executor finishes `contended` without
-    /// running, and the holding call carries on.
+    /// running, and the holding call continues.
     @Test func aHeldExecutorRefusesOtherCalls() throws {
         let model = try model()
         let executor = try Executor.forRam()
@@ -561,7 +561,7 @@ struct TrainTests {
         #expect(refused == .device)
     }
 
-    /// The receivers carry the trainer's own verbs, blocking or deferred; without a GPU no trainer
+    /// The receivers expose the trainer's own verbs, blocking or deferred; without a GPU no trainer
     /// exists, so only their shapes are checked here.
     @Test func receiversCarryTheTrainersVerbs() {
         let blocking: (Trainer, Executor) throws(UFormError) -> TrainerStep = { trainer, executor throws(UFormError) in

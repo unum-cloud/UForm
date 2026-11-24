@@ -82,7 +82,7 @@ export interface ModelDescription {
   /** The GPU class every replica of a VRAM model runs as, like "nvidia-hopper"; `null` for
    *  a RAM model. */
   gpuClass: string | null;
-  /** Scalars per token vector; zero when the checkpoint carries no token head. */
+  /** Scalars per token vector; zero when the checkpoint has no token head. */
   tokenWidth: number;
   /** Question types the choice temperatures were calibrated over: zero without the byte
    *  decoder, one uncalibrated. */
@@ -162,11 +162,9 @@ export class ModelOn {
   }
 }
 
-/**
- *  The verbs of one model, submitted to one executor and answered as {@link Deferred} calls:
- *  `model.deferred(executor)`. A verb borrows its arena until final, and waits into the same views
- *  a blocking call answers.
- */
+/** The verbs of one model, submitted to one executor and answered as {@link Deferred} calls:
+ *  `model.deferred(executor)`. A verb writes into the caller's arena until it is final, and waits
+ *  into the same views a blocking call answers. */
 export class ModelDeferredOn {
   readonly #model: CompiledModel;
   /** The executor every verb is submitted to. */
@@ -248,7 +246,7 @@ export class ModelDeferredOn {
 /** The token the loads hold, which is what a direct `new Model` cannot produce. */
 const modelSeal = Symbol("Model");
 
-/** Reads a checkpoint held in memory as the bytes a backend borrows. */
+/** Views a checkpoint held in memory as the bytes a backend reads. */
 function bufferOf(buffer: ArrayBuffer | ArrayBufferView): ArrayBufferView {
   if (buffer instanceof ArrayBuffer) return new Uint8Array(buffer);
   if (ArrayBuffer.isView(buffer)) return buffer;

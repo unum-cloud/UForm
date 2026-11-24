@@ -92,7 +92,7 @@ static napi_value uform_js_mesh_describe(napi_env env, napi_callback_info info) 
     return uform_js_object(env, sizeof(names) / sizeof(names[0]), names, values);
 }
 
-/** @c free() - leaves the mesh now; every trainer borrowing it must be freed first; idempotent. */
+/** @c free() - leaves the mesh now; every trainer holding it must be freed first; idempotent. */
 static napi_value uform_js_mesh_release(napi_env env, napi_callback_info info) {
     uform_js_mesh_t* const mesh = (uform_js_mesh_t*)uform_js_self(env, info, 0, NULL, NULL);
     if (!mesh) return NULL;
@@ -381,8 +381,7 @@ static napi_value uform_js_finish_step(napi_env env, uform_js_call_t* call, napi
     return object;
 }
 
-/** Reads one edge set: its widened offsets, its borrowed ids, and its @b optional
- *  borrowed weights. */
+/** Reads one edge set: its offsets widened, and its IDs and @b optional weights in place. */
 static bool uform_js_edges_from_value(napi_env env, napi_value const* arguments, uform_js_call_t* call,
                                       uform_edges_view_t* edges) {
     size_t count = 0, ids_count = 0, weights_count = 0;

@@ -108,7 +108,7 @@ static char const doc_Error[] =                                                 
     "Attributes:\n"                                                                            //
     "  status (Status): The status the raised subclass mirrors, such as\n"                     //
     "    `Status.SHAPE_MISMATCH`.\n"                                                           //
-    "  args (tuple): The detail the status cannot carry, as on any exception.";
+    "  args (tuple): The detail the status cannot express, as on any exception.";
 
 int uform_py_register_error_types(PyObject* module) {
     ErrorType = PyErr_NewExceptionWithDoc("uform.Error", (char*)doc_Error, PyExc_RuntimeError, NULL);
@@ -172,7 +172,7 @@ uform_py_enum_t uform_py_gpu_vendor = {.name = "GPUVendor",
                                        .last = uform_gpu_vendor_apple_k,
                                        .spell = spell_gpu_vendor};
 
-/** The spelling of @p value, or NULL when no member carries it. */
+/** The spelling of @p value, or NULL when no member holds it. */
 static char const* enum_spelling(uform_py_enum_t const* mirrored, long value) {
     if (value < mirrored->first || value > mirrored->last) return NULL;
     char const* const spelled = mirrored->spell((int)value);
@@ -636,7 +636,7 @@ int uform_py_callable_from_object(PyObject* object, char const* field, PyObject*
  *  @brief Re-enters Python for one progress report, from the thread running the call.
  *
  *  Reports are serialized, but a deferred call runs on the executor's thread 0, not on its caller,
- *  so the GIL is taken here rather than assumed. A handler answering None carries on and a falsy
+ *  so the GIL is taken here rather than assumed. A handler answering None continues and a falsy
  *  one cancels; one that raises reports through the unraisable hook and cancels.
  */
 static uform_continuation_t progress_trampoline(size_t completed, size_t total, void* state) {
@@ -1162,7 +1162,7 @@ static char const doc_Executor_for_ram[] =                                      
     "\n"                                                                                          //
     "Args:\n"                                                                                     //
     "  threads (int, optional): Threads to spawn; 0 takes 7/8 of the cores the domains\n"         //
-    "    carry.\n"                                                                                //
+    "    span.\n"                                                                                 //
     "  memory_domains (Sequence[int], optional): NUMA node IDs of the models it will\n"           //
     "    drive; None derives every node the process may allocate on.\n"                           //
     "  cpu_class_ceiling (CPUClass, optional): The newest class to dispatch as, capped by what\n" //
@@ -1213,9 +1213,9 @@ static char const doc_Executor_for_vram[] =                                     
     "for_vram(devices=None, *, scratch_limit=0, gpu_class_ceiling=None, "                          //
     "memory_domains=None, cpu_class_ceiling=None) -> Executor\n"                                   //
     "\n"                                                                                           //
-    "Opens one submission stream on every named device, all of them driven by the host\n"          //
-    "thread running the call, and spawns the host threads that decode what the devices\n"          //
-    "cannot.\n"                                                                                    //
+    "Drives every named device from the host thread running the call, ordering each one's\n"       //
+    "work on its per-thread default stream, and spawns the host threads that decode what\n"        //
+    "the devices cannot.\n"                                                                        //
     "Calls `uform_executor_for_vram`.\n"                                                           //
     "\n"                                                                                           //
     "Args:\n"                                                                                      //
@@ -1413,7 +1413,7 @@ static struct {
 };
 
 /** Hands the tensor a consumed capsule holds back to its producer, and frees the extents
- *  its view borrowed. */
+ *  its view pointed at. */
 static void dlpack_capsule_release(PyObject* capsule) {
     PyMem_Free(PyCapsule_GetContext(capsule));
     if (PyCapsule_IsValid(capsule, "used_dltensor_versioned")) {
@@ -1455,7 +1455,7 @@ static int dlpack_acquire(PyObject* object, int device_allowed, Py_buffer* view)
     Py_XDECREF(keywords);
     Py_XDECREF(arguments);
     Py_DECREF(exporter);
-    if (!capsule) { // a producer refusing this export may still lend the buffer protocol
+    if (!capsule) { // a producer refusing this export may still support the buffer protocol
         PyErr_Clear();
         return 0;
     }
@@ -2075,9 +2075,9 @@ static int tape_offsets_acquire(PyObject* candidate, uform_py_tape_t* tape) {
     return 0;
 }
 
-/** Lends the data of a pair whose offsets @p tape already holds; returns 0 or -1 with
+/** Acquires the data of a pair whose offsets @p tape already holds; returns 0 or -1 with
  *  an exception set. */
-static int tape_lend(PyObject* data, char const* field, uform_py_element_t element, uform_py_tape_t* tape) {
+static int tape_data_acquire(PyObject* data, char const* field, uform_py_element_t element, uform_py_tape_t* tape) {
     if (buffer_acquire(data, 1, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT, &tape->data) != 0) return -1;
     char const* const expected = element_format(element);
     if ((size_t)tape->data.itemsize != element_bytes(element) || (expected && buffer_format(&tape->data) != *expected))
@@ -2188,7 +2188,7 @@ int uform_py_tape_from_object(PyObject* object, char const* field, uform_py_elem
     }
     if (element != uform_py_element_pixels_k && PyTuple_Check(object) && PyTuple_GET_SIZE(object) == 2 &&
         tape_offsets_acquire(PyTuple_GET_ITEM(object, 1), tape))
-        return tape_lend(PyTuple_GET_ITEM(object, 0), field, element, tape);
+        return tape_data_acquire(PyTuple_GET_ITEM(object, 0), field, element, tape);
     PyObject* const sequence = PySequence_Fast(object, "expected a sequence");
     if (!sequence) return -1;
     int const gathered = tape_gather(sequence, field, element, tape);

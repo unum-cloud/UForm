@@ -23,11 +23,9 @@ export type Completion = 0 | 1;
 /** Hears a long call's advance; answering `false` stops it with `cancelled`. */
 export type ProgressCallback = (completed: number, total: number) => boolean | void;
 
-/**
- *  The `count + 1` offsets of a tape: a `BigUint64Array`, which the Node addon lends as `size_t`
- *  without a copy, or a `Uint32Array`, which it widens and the WebAssembly module, whose `size_t`
- *  is 32 bits wide, lends as it is.
- */
+/** The `count + 1` offsets of a tape: a `BigUint64Array`, which the Node addon reads in place as
+ *  `size_t`, or a `Uint32Array`, which it widens and the WebAssembly module, whose `size_t` is 32
+ *  bits wide, reads in place. */
 export type Offsets = BigUint64Array | Uint32Array;
 
 /** The threads or streams a verb runs on. */

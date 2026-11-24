@@ -53,7 +53,7 @@ def _anchor[origin: Origin]() -> ref[origin] NoneType:
 struct Status(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     """Why a call into the engine failed, the `uform_status_t` vocabulary verbatim.
 
-    An `Error` never carries `SUCCESS` or `DEFERRED`: only a `Deferred` reports the latter, and only
+    An `Error` never holds `SUCCESS` or `DEFERRED`: only a `Deferred` reports the latter, and only
     until its call is final. `Library.status_name` spells each one as the engine does.
     """
 
@@ -456,12 +456,12 @@ struct GPUDevice(Copyable, Defaultable, Movable):
 
 @fieldwise_init
 struct Continuation(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
-    """Whether the call a progress handler is watching carries on or unwinds, `uform_continuation_t`."""
+    """Whether the call a progress handler is watching continues or unwinds, `uform_continuation_t`."""
 
     var code: c_int
     """The raw `uform_continuation_t` value the ABI exchanges."""
     comptime CONTINUE = Self(0)
-    """Carry on to the next unit of work."""
+    """Continue to the next unit of work."""
     comptime CANCEL = Self(1)
     """Stop, and finish the call with `CANCELLED`."""
 
@@ -577,20 +577,20 @@ struct BytesView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
 
     @staticmethod
     def of[text_origin: ImmOrigin, //](text: StringSlice[text_origin]) -> BytesView[text_origin]:
-        """Borrows a string's bytes, with no terminator manufactured."""
+        """Points at a string's bytes, with no terminator manufactured."""
         return BytesView[text_origin](
             Pointer[UInt8, text_origin](unsafe_from_address=Int(text.unsafe_ptr())), text.byte_length()
         )
 
     @staticmethod
     def of[bytes_origin: ImmOrigin, //](bytes: Span[UInt8, bytes_origin]) -> BytesView[bytes_origin]:
-        """Borrows a run of raw bytes, such as a checkpoint held in memory."""
+        """Points at a run of raw bytes, such as a checkpoint held in memory."""
         return BytesView[bytes_origin](
             Pointer[UInt8, bytes_origin](unsafe_from_address=Int(bytes.unsafe_ptr())), len(bytes)
         )
 
     def arguments(self) -> BytesViewArguments:
-        """The C layout, erased only inside a verb so the borrow lives through the call."""
+        """The C layout, erased only inside a verb so the storage outlives the call."""
         return BytesViewArguments(Int(self.data), c_size_t(self.length))
 
 
@@ -609,7 +609,7 @@ struct TapeViewArguments(Defaultable, ImplicitlyCopyable):
 
 @fieldwise_init
 struct TapeView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Sized):
-    """A borrowed ragged batch laid out as Apache Arrow lays one out: elements end to end, and one more
+    """A ragged batch the caller owns, laid out as Apache Arrow lays one out: elements end to end, and one more
     offset than entries around them.
 
     Entry `i` spans elements `offsets[i]` up to `offsets[i + 1]`. The elements may live in host or
@@ -676,7 +676,7 @@ struct TapeView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Size
         )
 
     def arguments(self) -> TapeViewArguments:
-        """The C layout, erased only inside a verb so the borrow lives through the call."""
+        """The C layout, erased only inside a verb so the storage outlives the call."""
         return TapeViewArguments(Int(self.data), self.offsets.unsafe_origin_cast[ImmUntrackedOrigin](), self.scalar)
 
 
@@ -747,7 +747,7 @@ struct Rows[origin: MutOrigin](ImplicitlyCopyable, Sized):
     def row[
         dtype: DType
     ](ref self, row: Int) raises Error -> Span[Scalar[dtype], origin_of(self)]:
-        """One row's values, or its packed bytes for a sub-byte kind, borrowed from the arena.
+        """One row's values, or its packed bytes for a sub-byte kind, read in place from the arena.
 
         Raises:
             `Error` with `DEVICE` over device memory, `INVALID_ARGUMENT` once a later call rewound the arena, or when the rows hold
@@ -782,7 +782,7 @@ struct Rows[origin: MutOrigin](ImplicitlyCopyable, Sized):
 
 @fieldwise_init
 struct RowsTape[origin: MutOrigin](ImplicitlyCopyable, Sized):
-    """A ragged run of rows a call wrote into the arena it borrows, as many per item as the item had
+    """A ragged run of rows a call wrote into the caller's arena, as many per item as the item had
     tokens left after truncation, `uform_rows_tape_view_t` read in place.
 
     Parameters:
@@ -949,7 +949,7 @@ struct RamOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
     ](memory_domains: Span[Int32, domains_origin], cpu_class_ceiling: CPUClass = CPUClass.UNKNOWN) -> RamOptions[
         domains_origin
     ]:
-        """Names the NUMA nodes explicitly, borrowing the caller's array for the call."""
+        """Names the NUMA nodes explicitly, pointing at the caller's array, read only during the call."""
         return RamOptions[domains_origin](
             Pointer[Int32, domains_origin](unsafe_from_address=Int(memory_domains.unsafe_ptr())),
             len(memory_domains),
@@ -957,7 +957,7 @@ struct RamOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
         )
 
     def arguments(self) -> RamOptionsArguments:
-        """The C layout, erased only inside a verb so the borrow lives through the call."""
+        """The C layout, erased only inside a verb so the storage outlives the call."""
         var domains: Optional[Pointer[Int32, ImmUntrackedOrigin]] = None
         if case .Some(named) = self.memory_domains:
             domains = named.unsafe_origin_cast[ImmUntrackedOrigin]()
@@ -1000,7 +1000,7 @@ struct VramOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
     ](devices: Span[Int32, devices_origin], gpu_class_ceiling: GPUClass = GPUClass.UNKNOWN) -> VramOptions[
         devices_origin
     ]:
-        """Names the device ordinals explicitly, borrowing the caller's array for the call."""
+        """Names the device ordinals explicitly, pointing at the caller's array, read only during the call."""
         return VramOptions[devices_origin](
             Pointer[Int32, devices_origin](unsafe_from_address=Int(devices.unsafe_ptr())),
             len(devices),
@@ -1008,7 +1008,7 @@ struct VramOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
         )
 
     def arguments(self) -> VramOptionsArguments:
-        """The C layout, erased only inside a verb so the borrow lives through the call."""
+        """The C layout, erased only inside a verb so the storage outlives the call."""
         var devices: Optional[Pointer[Int32, ImmUntrackedOrigin]] = None
         if case .Some(named) = self.devices:
             devices = named.unsafe_origin_cast[ImmUntrackedOrigin]()
@@ -1177,16 +1177,16 @@ struct Executor:
         created[unsafe_offset=0] = NULL_ADDRESS
         var outcome = stack_allocation[1, Outcome]()
         outcome[unsafe_offset=0] = Outcome()
-        var borrowed: Optional[Pointer[Address, ImmUntrackedOrigin]] = None
+        var stream_handles: Optional[Pointer[Address, ImmUntrackedOrigin]] = None
         if streams != NULL_ADDRESS:
-            borrowed = Pointer[Address, ImmUntrackedOrigin](unsafe_from_address=streams)
+            stream_handles = Pointer[Address, ImmUntrackedOrigin](unsafe_from_address=streams)
         _cross(
             ExecutorForVramArguments(
                 created.unsafe_origin_cast[MutUntrackedOrigin](),
                 outcome.unsafe_origin_cast[MutUntrackedOrigin](),
                 vram.arguments(),
                 ram.arguments(),
-                borrowed,
+                stream_handles,
                 c_size_t(scratch_limit),
             ),
             library.symbols().executor_for_vram,
@@ -1371,7 +1371,7 @@ struct CallSlots[Outputs: ImplicitlyCopyable & Defaultable & Deinitable](Implici
 
 
 trait Call(Deinitable, Movable):
-    """One verb crossing into the engine: what it lends until final, and how its outputs become a result.
+    """One verb crossing into the engine: what the engine reads until final, and how its outputs become a result.
 
     Each receiver routes the same `Call`: the model and `model.on(executor)` block on it, and
     `model.deferred(executor)` wraps it in a `Deferred`, which is what keeps the verbs symmetric.
@@ -1382,7 +1382,7 @@ trait Call(Deinitable, Movable):
     comptime Result: Movable & Deinitable
     """What a successful call answers."""
     comptime symbol: StaticString
-    """The C entry point, carried into every error."""
+    """The C entry point, kept in every error."""
 
     def submit(
         mut self,
@@ -1450,7 +1450,7 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
     var slots: OwnedPointer[CallSlots[Self.C.Outputs]]
     """The outcome and outputs the engine writes, on the heap since they outlive the verb."""
     var call: Optional[Self.C]
-    """What the call lends the engine, until a wait concludes it."""
+    """The crossing whose inputs the engine reads, until a wait concludes it."""
     var answer: Optional[Self.C.Result]
     """The result, once a wait found the call succeeded."""
     var failure: Optional[Error]
@@ -1478,7 +1478,7 @@ struct Deferred[C: Call, origin: ImmOrigin](Movable):
         self.generation = self.call.value().served(self.status())
 
     def __deinit__(deinit self):
-        """Waits until the call is final, then frees what it lent. Calls `uform_outcome_wait`."""
+        """Waits until the call is final, then frees the inputs it kept alive for the call. Calls `uform_outcome_wait`."""
         if self.call:
             var slots = Pointer[CallSlots[Self.C.Outputs], MutAnyOrigin](
                 unsafe_from_address=Int(Pointer(to=self.slots[]))

@@ -1,8 +1,8 @@
 //! Shared vocabulary of every UForm verb: statuses, scalars, tapes, rows, executors and arenas.
 //!
-//! An [`On`] is the receiver every verb runs through: it borrows a model or a trainer and an
-//! executor, and its completion decides whether a verb answers what the call produced or a
-//! [`Deferred`] once the call is submitted.
+//! An [`On`] is the receiver every verb runs through: it refers to a model or a trainer and an
+//! executor, which both outlive it, and its completion decides whether a verb answers what the
+//! call produced or a [`Deferred`] once the call is submitted.
 //!
 //! File: rust/types.rs
 //! Author: Ash Vardanian
@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 // region: Raw Declarations
 
-/// A borrowed run of bytes, never null-terminated by contract.
+/// A run of bytes the caller owns, never null-terminated by contract.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct uform_bytes_view_t {
@@ -36,7 +36,7 @@ pub struct uform_bytes_view_t {
 }
 
 impl From<&[u8]> for uform_bytes_view_t {
-    /// Borrows the bytes as the view the C interface accepts; it must not outlive them.
+    /// Points the view the C interface accepts at the bytes; it must not outlive them.
     fn from(bytes: &[u8]) -> Self {
         uform_bytes_view_t { data: bytes.as_ptr(), length: bytes.len() }
     }
@@ -85,7 +85,7 @@ impl Default for uform_rows_view_t {
     }
 }
 
-/// A borrowed ragged batch: elements end to end, and one more offset than entries.
+/// A ragged batch the caller owns: elements end to end, and one more offset than entries.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct uform_tape_view_t {
@@ -306,13 +306,13 @@ pub trait Completion: Sized {
     fn answer<'handle, Verb: Calling>(verb: Verb) -> Self::Answer<'handle, Verb>;
 }
 
-/// The inputs a completion takes: a blocking receiver takes borrows and owned values alike, while a
-/// deferring one takes only what it owns, since the library reads its inputs after the verb
-/// returns. Both borrow the arena, which no call reads as an input.
+/// The inputs a completion takes: a blocking receiver takes references and owned values alike,
+/// while a deferring one takes only what it owns, since the library reads its inputs after the
+/// verb returns. Both take the arena by `&mut`, which no call reads as an input.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "a deferred receiver needs owned inputs",
-    label = "the library would still read this borrow after the verb returns",
+    label = "the library would still read this reference after the verb returns",
     note = "pass texts, files and samples in a `Vec` or an array of owned or `'static` items, a tape as \
             `(Vec<_>, Vec<usize>)`, a `PathBuf`, `String` or `'static` path, and a config owning its handler \
             and stats"
@@ -351,7 +351,7 @@ unsafe impl Element for u8 {
     const SCALAR: Scalar = Scalar::U8;
 }
 
-/// A borrowed tape and the batch axis it spans.
+/// A tape the library reads without a copy, and the batch axis it spans.
 #[doc(hidden)]
 pub struct Batch {
     pub(crate) tape: uform_tape_view_t,
@@ -373,7 +373,7 @@ impl<Value> Default for Gathered<Value> {
 }
 
 /// A ragged batch a verb reads its items from: separate items, gathered into `gathered`, or a tape
-/// of data and offsets, borrowed as it is.
+/// of data and offsets, read in place.
 #[doc(hidden)]
 pub trait TapeView<Value: Element> {
     /// The tape and its count, refused when the offsets do not fit the data.
@@ -448,7 +448,7 @@ impl<Value: Element, Tape: TapeView<Value> + ?Sized> TapeView<Value> for &Tape {
 
 /// Every value the C status word takes besides success, numbered alike.
 ///
-/// An [`Error`] never carries [`Status::Deferred`], which only [`Deferred::status`] reports.
+/// An [`Error`] never holds [`Status::Deferred`], which only [`Deferred::status`] reports.
 ///
 /// Mirrors `uform_status_t`.
 #[repr(i32)]
@@ -541,7 +541,7 @@ impl FromStr for Status {
 pub struct Error {
     /// The identity of the failure, shared with the C interface.
     pub status: Status,
-    /// The detail the status alone cannot carry.
+    /// The detail the status alone cannot express.
     pub message: &'static str,
 }
 
@@ -571,7 +571,7 @@ pub(crate) fn fail(status: Status, message: &'static str) -> Error {
     Error { status, message }
 }
 
-/// Borrows a static null-terminated string the library owns.
+/// Reads a static null-terminated string the library owns.
 ///
 /// Every such string is ASCII by construction, so its bytes are read as UTF-8 unchecked.
 pub(crate) unsafe fn static_string(raw: *const c_char) -> &'static str {
@@ -1020,18 +1020,18 @@ pub fn gpu_devices(devices: &mut [GPUDevice]) -> Result<usize> {
 
 // region: Rows
 
-/// Borrows `length` values a finished call wrote into a host arena; a call that wrote none may
+/// Views `length` values a finished call wrote into a host arena; a call that wrote none may
 /// leave a null base, which an empty run never reads.
 fn exported_slice<'arena, Value>(data: *const Value, length: usize) -> Result<&'arena [Value]> {
     match (data.is_null(), length) {
         (_, 0) => Ok(&[]),
         (true, _) => Err(fail(Status::Internal, "the library exported rows without a base")),
-        // Safety: the arena borrowed beside the view holds a finished call's output in host memory.
+        // Safety: the arena the view borrows holds a finished call's output in host memory.
         (false, length) => Ok(unsafe { core::slice::from_raw_parts(data, length) }),
     }
 }
 
-/// Rows a call wrote into the arena it borrows, one per item, packed.
+/// Rows a call wrote into its arena, one per item, packed.
 ///
 /// Mirrors `uform_rows_view_t`.
 pub struct Rows<'arena> {
@@ -1087,7 +1087,7 @@ impl<'arena> Rows<'arena> {
     }
 }
 
-/// Rows a call wrote into the arena it borrows, as many per item as the item had tokens left
+/// Rows a call wrote into its arena, as many per item as the item had tokens left
 /// after truncation, end to end, with one more offset than items.
 ///
 /// Mirrors `uform_rows_tape_view_t`.
@@ -1135,7 +1135,7 @@ impl<'arena> RowsTape<'arena> {
     }
 }
 
-/// Values a call wrote into the arena it borrows, a ragged run per item, end to end, with one more
+/// Values a call wrote into its arena, a ragged run per item, end to end, with one more
 /// offset than items.
 ///
 /// Mirrors `uform_tape_view_t`.
@@ -1209,7 +1209,7 @@ pub(crate) fn vram_options(devices: &[i32], gpu_class_ceiling: Option<GPUClass>)
     }
 }
 
-/// Borrows a path as the bytes the C interface exchanges: the OS's own bytes on Unix, not
+/// Views a path as the bytes the C interface exchanges: the OS's own bytes on Unix, not
 /// necessarily UTF-8, and UTF-8 where the OS keeps paths in another encoding.
 pub(crate) fn path_view(path: &Path) -> Result<uform_bytes_view_t> {
     #[cfg(unix)]
@@ -1234,14 +1234,14 @@ pub(crate) fn path_view(path: &Path) -> Result<uform_bytes_view_t> {
 /// It runs on whichever thread advanced the work, never on two at once, so it owes `Send` and may
 /// be `FnMut`. A panic inside it aborts the process, as it cannot unwind through the library.
 ///
-/// A config's progress slot takes any such handler: a blocking call lends `&mut` one, and a
-/// deferred call owns one, boxed or not, and hands it back from
+/// A config's progress slot takes any such handler: a blocking call uses a `&mut` one only during
+/// the call, and a deferred call owns one, boxed or not, and hands it back from
 /// [`Deferred::wait_with_inputs`].
 ///
 /// Mirrors `uform_progress_callback_t`.
 pub type ProgressCallback<'a> = dyn FnMut(usize, usize) -> ControlFlow<()> + Send + 'a;
 
-/// # Safety `state` must address the `Handler` lent to the call.
+/// # Safety `state` must address a `Handler` that stays allocated until the call is final.
 unsafe extern "C" fn progress_trampoline<Handler: FnMut(usize, usize) -> ControlFlow<()>>(
     completed: usize,
     total: usize,
@@ -1253,8 +1253,8 @@ unsafe extern "C" fn progress_trampoline<Handler: FnMut(usize, usize) -> Control
     }
 }
 
-/// Lends an optional handler and its step count as the progress every reporting verb takes, the
-/// state pointing at the handler itself; `None` lends nulls.
+/// Lowers an optional handler and its step count to the progress every reporting verb takes, the
+/// state pointing at the handler itself; `None` lowers to nulls.
 pub(crate) fn lower_progress<Handler: FnMut(usize, usize) -> ControlFlow<()>>(
     handler: &mut Option<Handler>,
     steps: usize,
@@ -1269,8 +1269,8 @@ pub(crate) fn lower_progress<Handler: FnMut(usize, usize) -> ControlFlow<()>>(
     }
 }
 
-/// Lends an optional output slot, borrowed or owned, as the pointer the library overwrites; `None`
-/// lends null.
+/// Lowers an optional output slot, a reference or owned, to the pointer the library overwrites;
+/// `None` lowers to null.
 pub(crate) fn output_slot<Value, Slot: BorrowMut<Value>>(slot: &mut Option<Slot>) -> *mut Value {
     slot.as_mut().map_or(ptr::null_mut(), |slot| ptr::from_mut(slot.borrow_mut()))
 }
@@ -1382,7 +1382,7 @@ impl Executor {
     /// Creates an executor of host threads for RAM-resident models, interleaved across the compute
     /// domains local to `memory_domains`, which is the same list the models were loaded with.
     ///
-    /// Zero `threads` takes 7/8 of the cores those domains carry, and its calls dispatch as the
+    /// Zero `threads` takes 7/8 of the cores those domains span, and its calls dispatch as the
     /// newest class the CPU runs at or under `cpu_class_ceiling`, where `None` sets no ceiling.
     ///
     /// Calls `uform_executor_for_ram`.
@@ -1407,13 +1407,15 @@ impl Executor {
     /// `devices` are positions in what [`gpu_devices`] lists, and all of them dispatch as the best
     /// class they all load at or under `gpu_class_ceiling`, where `None` sets no ceiling. The host
     /// decoders take 7/8 of the cores local to `memory_domains` and dispatch under
-    /// `cpu_class_ceiling` likewise. `streams` is empty, or holds one CUDA stream per device in
-    /// `devices` order, which the library refuses with [`Status::Unsupported`]. Zero
+    /// `cpu_class_ceiling` likewise. `streams` is empty, or holds one CUDA or HIP stream per device
+    /// in `devices` order; an empty slice or a null entry orders that device's work on its
+    /// per-thread default stream, and the executor creates and destroys no stream. Zero
     /// `scratch_limit` lets scratch grow as batches ask.
     ///
     /// Calls `uform_executor_for_vram`.
     ///
-    /// # Safety Every stream must be a live CUDA stream on its device that outlives the executor.
+    /// # Safety Every stream must be a live stream on its device, which the caller destroys only
+    /// after dropping the executor.
     pub unsafe fn for_vram(
         devices: &[i32],
         gpu_class_ceiling: Option<GPUClass>,
@@ -1487,7 +1489,7 @@ impl Drop for ExecutorShare {
 /// An executor places it where it computes, host pages or its GPU's memory, decided once, and
 /// nothing is allocated until a call writes into it. Every call rewinds and refills it,
 /// invalidating the previous call's outputs, so a steady loop allocates once. Every verb, blocking
-/// or deferred, borrows it as `&mut Arena` and answers outputs that borrow it in turn. An arena
+/// or deferred, takes it as `&mut Arena` and answers outputs that refer to it in turn. An arena
 /// from a VRAM executor holds device memory, so the host accessors of its outputs refuse with
 /// [`Status::Device`]. It grows, fills and frees on the first stream of the executor that made it,
 /// so it serves only calls on that executor and holds the executor until it drops.
@@ -1502,7 +1504,7 @@ pub struct Arena {
 }
 
 // Safety: an arena serves one call at a time, which the `&mut` every verb takes already enforces,
-// and a shared borrow only asks the library where it lives.
+// and a shared reference only asks the library where it lives.
 unsafe impl Send for Arena {}
 unsafe impl Sync for Arena {}
 
@@ -1581,18 +1583,18 @@ impl Drop for Arena {
     }
 }
 
-/// A view the library wrote into an arena the verb or result borrows.
+/// A view the library wrote into the arena of the verb or result.
 #[derive(Default)]
 pub(crate) struct Exported<View>(pub(crate) View);
 
-// Safety: the pointees live in the arena borrowed beside the view, and its borrows are `Send`.
+// Safety: the pointees live in the arena held beside the view, and references to it are `Send`.
 unsafe impl<View> Send for Exported<View> {}
 
 // endregion: Arenas
 
 // region: Receivers
 
-/// A model or a trainer borrowed with the executor its calls run on and how they complete.
+/// A reference to a model or a trainer, with the executor its calls run on and how they complete.
 ///
 /// Neither the receiver nor a [`Deferred`] it submits outlives the handle or the executor.
 ///
@@ -1658,7 +1660,7 @@ impl Completion for Deferring {
                     return Err(refusal);
                 }
             }
-            Ok(Deferred { lent: NonNull::new_unchecked(lent), receiver: PhantomData })
+            Ok(Deferred { submission: NonNull::new_unchecked(submission), receiver: PhantomData })
         }
     }
 }
@@ -1671,28 +1673,28 @@ impl Accepts<String> for Deferring {}
 impl Accepts<&'static str> for Deferring {}
 impl Accepts<&'static Path> for Deferring {}
 
-/// One deferred call and everything it lends the library, at one heap address until it is final.
-struct Lent<Verb: Calling> {
+/// One deferred call and all the library reads or writes, at one heap address until it is final.
+struct Submission<Verb: Calling> {
     /// The outcome the library finishes.
     outcome: uform_outcome_t,
     /// The argument struct, pointing into `outcome` and `verb`, filled once the box is in place.
     arguments: Option<Verb::Arguments>,
-    /// The inputs, the outputs and the arena borrow.
+    /// The inputs, the outputs and the `&mut` arena.
     verb: Verb,
 }
 
 /// A submitted call, which owns its outcome, argument struct and inputs in one box the library
-/// reads until the call is final, and borrows its arena as a blocking call does.
+/// reads until the call is final, and holds its arena by `&mut` as a blocking call does.
 ///
 /// [`Deferred::status`] polls without blocking, and [`Deferred::wait`] blocks until the call is
 /// final and hands back what it produced, while `.await` polls it from async code. Dropping an
-/// unfinished one waits for it, then frees the box. `'handle` is the borrow of the [`On`] that
+/// unfinished one waits for it, then frees the box. `'handle` is the lifetime of the [`On`] that
 /// submitted it.
 ///
 /// Rust-only; waiting and dropping call `uform_outcome_wait`.
 #[must_use = "a deferred call's outcome is seen only through `status` or `wait`"]
 pub struct Deferred<'handle, Verb: Calling> {
-    lent: NonNull<Lent<Verb>>,
+    submission: NonNull<Submission<Verb>>,
     receiver: PhantomData<&'handle ()>,
 }
 
@@ -1703,7 +1705,7 @@ impl<Verb: Calling> Deferred<'_, Verb> {
     /// Calls `uform_outcome_status`.
     pub fn status(&self) -> core::result::Result<(), Status> {
         // Safety: the outcome lives in the box this `Deferred` owns until it is final.
-        Status::from_raw(unsafe { uform_outcome_status(ptr::addr_of_mut!((*self.lent.as_ptr()).outcome)) })
+        Status::from_raw(unsafe { uform_outcome_status(ptr::addr_of_mut!((*self.submission.as_ptr()).outcome)) })
     }
 
     /// Blocks until the call is final, then hands back what it produced.
@@ -1718,12 +1720,12 @@ impl<Verb: Calling> Deferred<'_, Verb> {
     ///
     /// Calls `uform_outcome_wait`.
     pub fn wait_with_inputs(self) -> (Result<Verb::Output>, Verb::Inputs) {
-        let lent = ManuallyDrop::new(self).lent.as_ptr();
+        let submission = ManuallyDrop::new(self).submission.as_ptr();
         // Safety: once the outcome is final the library touches the box no more, so it
         // is freed here.
-        let Lent { outcome, verb, .. } = unsafe {
-            uform_outcome_wait(ptr::addr_of_mut!((*lent).outcome));
-            *Box::from_raw(lent)
+        let Submission { outcome, verb, .. } = unsafe {
+            uform_outcome_wait(ptr::addr_of_mut!((*submission).outcome));
+            *Box::from_raw(submission)
         };
         verb.finish(check(outcome))
     }
@@ -1731,11 +1733,11 @@ impl<Verb: Calling> Deferred<'_, Verb> {
 
 impl<Verb: Calling> Drop for Deferred<'_, Verb> {
     fn drop(&mut self) {
-        let lent = self.lent.as_ptr();
+        let submission = self.submission.as_ptr();
         // Safety: once the outcome is final the library touches the box no more, and this owned it.
         unsafe {
-            uform_outcome_wait(ptr::addr_of_mut!((*lent).outcome));
-            drop(Box::from_raw(lent));
+            uform_outcome_wait(ptr::addr_of_mut!((*submission).outcome));
+            drop(Box::from_raw(submission));
         }
     }
 }
@@ -1884,16 +1886,16 @@ mod tests {
         assert_eq!((batch.count, batch.tape.scalar), (2, Scalar::F32 as i32));
     }
 
-    /// A borrowed tape reaches the library as it is, so offsets that would read past its data are
-    /// refused before the call.
+    /// A `(data, offsets)` tape reaches the library as it is, so offsets that would read past its
+    /// data are refused before the call.
     #[test]
-    fn borrowed_tapes_are_checked_before_the_call() {
+    fn uncopied_tapes_are_checked_before_the_call() {
         let mut gathered = Gathered::default();
         let data = b"firstsecond".as_slice();
         let batch = TapeView::<u8>::tape(&(data, [0usize, 5, 11]), &mut gathered).unwrap();
         assert_eq!(batch.count, 2);
         assert_eq!(batch.tape.data, data.as_ptr().cast());
-        assert!(gathered.data.is_empty(), "a borrowed tape gathers nothing");
+        assert!(gathered.data.is_empty(), "an uncopied tape gathers nothing");
 
         let refusals = [
             ([0usize, 5, 12].as_slice(), Status::ShapeMismatch),

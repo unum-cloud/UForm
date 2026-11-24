@@ -6,9 +6,8 @@
 //! consumes what it leaves there, never a shared build tree.
 //!
 //! One implementation of the C interface is linked, never two. Each names a CMake target and the
-//! directory it lands in; all of them answer the same verbs, and the engine and the stand-in
-//! even carry the same archive name, so choosing between them is a search path rather than a
-//! different link line.
+//! directory it lands in; all of them answer the same verbs, and the engine and the stand-in even
+//! share an archive name, so choosing between them is a search path, never a second link line.
 //!
 //! File: build.rs
 //! Author: Ash Vardanian

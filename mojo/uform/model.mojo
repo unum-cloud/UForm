@@ -72,7 +72,7 @@ struct ModelDescription(Defaultable, ImplicitlyCopyable):
     var gpu_class: GPUClass
     """The class every replica of a VRAM model runs as; `UNKNOWN` for a RAM model."""
     var token_width: c_size_t
-    """Scalars per token vector; zero when the checkpoint carries no token head."""
+    """Scalars per token vector; zero when the checkpoint has no token head."""
     var choice_temperature_groups: c_size_t
     """Question types the choice temperatures were calibrated over; zero without the byte decoder."""
 

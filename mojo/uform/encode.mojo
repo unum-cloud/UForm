@@ -194,15 +194,15 @@ struct TextChooseConfig[
         self.stats = stats
 
 
-def _lent[T: AnyType, origin: MutOrigin, //](slot: Optional[Pointer[T, origin]]) -> Optional[Pointer[T, MutUntrackedOrigin]]:
-    """A lent output slot with its borrow erased, as the C layout names it."""
+def _slot[T: AnyType, origin: MutOrigin, //](slot: Optional[Pointer[T, origin]]) -> Optional[Pointer[T, MutUntrackedOrigin]]:
+    """The caller's output slot with its origin erased, as the C layout names it."""
     if case .Some(pointer) = slot:
         return pointer.unsafe_origin_cast[MutUntrackedOrigin]()
     return None
 
 
 def _array[T: AnyType, origin: ImmOrigin, //](items: Span[T, origin]) -> Optional[Pointer[T, ImmUntrackedOrigin]]:
-    """A borrowed host array with its borrow erased, absent when empty, as the C layout names it."""
+    """The caller's host array with its origin erased, absent when empty, as the C layout names it."""
     if len(items) == 0:
         return None
     return Pointer[T, ImmUntrackedOrigin](unsafe_from_address=Int(items.unsafe_ptr()))
@@ -377,7 +377,7 @@ struct _EncodeCall[
                 self.arena[]._address,
                 self.config.outputs_scalar,
                 self.config.progress,
-                _lent(self.config.stats),
+                _slot(self.config.stats),
             ),
             verb,
         )
@@ -397,7 +397,7 @@ struct _ImageEncodePixelsCall[
     widths_origin: ImmOrigin,
     stats_origin: MutOrigin,
 ](Call):
-    """The crossing of `uform_image_encode_pixels`, which borrows the arena its surfaces land in."""
+    """The crossing of `uform_image_encode_pixels`, which writes its surfaces into the caller's arena."""
 
     comptime Outputs = EncodedArguments
     comptime Result = Encoded[Self.origin]
@@ -436,7 +436,7 @@ struct _ImageEncodePixelsCall[
                 self.arena[]._address,
                 self.config.outputs_scalar,
                 self.config.progress,
-                _lent(self.config.stats),
+                _slot(self.config.stats),
             ),
             library.symbols().image_encode_pixels,
         )
@@ -452,7 +452,7 @@ struct _ImageEncodePixelsCall[
 struct _AudioEncodeSamplesCall[
     origin: MutOrigin, samples_origin: ImmOrigin, stats_origin: MutOrigin
 ](Call):
-    """The crossing of `uform_audio_encode_samples`, which borrows the arena its surfaces land in."""
+    """The crossing of `uform_audio_encode_samples`, which writes its surfaces into the caller's arena."""
 
     comptime Outputs = EncodedArguments
     comptime Result = Encoded[Self.origin]
@@ -487,7 +487,7 @@ struct _AudioEncodeSamplesCall[
                 self.arena[]._address,
                 self.config.outputs_scalar,
                 self.config.progress,
-                _lent(self.config.stats),
+                _slot(self.config.stats),
             ),
             library.symbols().audio_encode_samples,
         )
@@ -507,7 +507,7 @@ struct _TextChooseCall[
     groups_origin: ImmOrigin,
     stats_origin: MutOrigin,
 ](Call):
-    """The crossing of `uform_text_choose`, which borrows the arena its probabilities land in."""
+    """The crossing of `uform_text_choose`, which writes its probabilities into the caller's arena."""
 
     comptime Outputs = TapeViewArguments
     comptime Result = Tape[Self.origin]
@@ -542,7 +542,7 @@ struct _TextChooseCall[
                 outputs,
                 self.arena[]._address,
                 self.config.progress,
-                _lent(self.config.stats),
+                _slot(self.config.stats),
             ),
             library.symbols().text_choose,
         )

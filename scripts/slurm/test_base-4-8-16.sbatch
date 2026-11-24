@@ -58,6 +58,6 @@ if [[ -x "${env_binary}" ]]; then
 fi
 
 # Line-buffered so a hung run shows how far it got instead of a silent block-buffered void; the optional
-# UFORM_TEST_ONLY=tokens|omni|sweep fast lane rides through --export like the rest of the contract.
+# UFORM_TEST_ONLY=tokens|omni|sweep fast subset rides through --export like the rest of the contract.
 srun --ntasks="${host_domain_count}" --ntasks-per-node=1 --gpu-bind=none \
     stdbuf -oL "${UFORM_TEST_BINARY:-build_cuda/uform_test_base}"

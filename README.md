@@ -45,7 +45,7 @@ A few convictions shape the whole stack:
 - __Non-autoregressive generation__ — emitting the entire output in one forward pass instead of token-by-token pushes single-GPU throughput up by one or two orders of magnitude for tasks that can be handled with such models — from ≈100 tokens/s to up to ≈10'000.
 
 This repository is the full training and inference stack, tuned for NVIDIA Hopper and Blackwell GPUs: custom CUDA kernels, a C++ trainer, and GPU-accelerated loaders & decoders for IO-heavy modalities.
-Neither training nor inference carries a __PyTorch or JAX dependency__.
+Neither training nor inference has a __PyTorch or JAX dependency__.
 There is not even NCCL or NVSHMEM, no dynamic memory allocations on the hot paths, locks, mutexes, or even need for multiple threads.
 
 ## Quickstart
@@ -112,7 +112,7 @@ $$
 
 Where TCR lifts the whole eigenspectrum, the Lipschitz term pulls down its top, so no single high-gain axis dominates and the code stays smooth and well-conditioned.
 Unlike global TCR it is per-rank-local — the spectral norm of a rank-local Gram is itself rank-local — so it needs no cross-GPU collective.
-Together the two roughly quadruple the pooled embedding's active subspace at the Tiny tier, and the gain carries through to downstream retrieval.
+Together the two roughly quadruple the pooled embedding's active subspace at the Tiny tier, and the gain reaches downstream retrieval.
 
 ### Encoders Strike Back
 
@@ -186,7 +186,7 @@ As the batch grows into the tens of thousands, false negatives become statistica
 
 Two loader-side properties keep the step cheap.
 The text towers pack many short documents into a single 4096-byte row and pool one embedding per packed segment, so a large contrastive batch of short inputs never balloons the step's sequence budget — the GPU stays saturated whether the corpus is sentences or full passages.
-And each entry can carry _several positives and explicit hard negatives_, which the sharded loss gathers as extra band columns, converging faster than a pipeline restricted to one positive and in-batch negatives alone.
+And each entry can hold _several positives and explicit hard negatives_, which the sharded loss gathers as extra band columns, converging faster than a pipeline restricted to one positive and in-batch negatives alone.
 
 ### ColBERT-Style Late-Interaction Rerankers
 
@@ -229,7 +229,7 @@ This easily supersedes single-process PyTorch `DataLoader`s by \~25× even for t
 Each modality goes from raw bytes to a masked batch on-device, and every item — a caption, an image, a clip — becomes a variable-width __segment__ packed onto one shared `[rows, columns]` grid and tagged by modality, so a single uniform encoder ingests them all:
 
 - __Tokens__ — byte-tokenized, bucket-stratified, packed, and span-masked in CUDA; paired sentences average a few hundred bytes, so packing many into one 4 KB row keeps the batch dense without wasting context on padding.
-- __Images__ — JPEG decoded on the GPU by nvJPEG, PNG and WebP on host threads, into __4-channel RGBA__ (alpha is 255 where the codec carries none), then cropped and resized by one NPP batch, __2D patchified__ and MAE-masked.
+- __Images__ — JPEG decoded on the GPU by nvJPEG, PNG and WebP on host threads, into __4-channel RGBA__ (alpha is 255 where the codec has none), then cropped and resized by one NPP batch, __2D patchified__ and MAE-masked.
 - __Video__ — decoded by NVDEC, NV12 → planar RGB, then __3D tube-extracted__ and tube-masked into a `[3, T, H, W]` tensor.
 - __Audio__ — decoded from WAV, FLAC, MP3 or Opus by a pool of libavcodec workers, then chunked into __raw waveform frames__ on the GPU — the mel / STFT frontend is a learnable layer of the encoder, not a fixed loader transform — and masked like the rest.
 - __Code__ – ...
@@ -242,7 +242,7 @@ First-party NVIDIA libraries do the decode and IO:
 - __[cuFile](https://developer.nvidia.com/gpudirect-storage)__ — streams compressed bytes from disk straight to device memory on GDS-capable mounts, with a buffered fallback.
 - __[cuDF](https://github.com/rapidsai/cudf)__ — GPU-side Parquet reads through its KvikIO layer, on explicit per-loader streams.
 
-And the host-side C++ libraries that carry bytes up to the device line:
+And the host-side C++ libraries that move bytes up to the device line:
 
 - __[NumKong](https://github.com/ashvardanian/NumKong)__ — the `nk::` tensor and span types every host- and device-side buffer is shaped against.
 - __[ForkUnion](https://github.com/ashvardanian/ForkUnion)__ — a lock-free CPU thread pool that fans out host-side decode and file IO without `std::thread`.
@@ -257,7 +257,7 @@ No variable-size dynamic allocations on the hot path, no shared pointers, no `st
 
 Cross-rank collectives live _inside_ that captured graph, written directly in `multimem.*` PTX.
 An all-reduce is two instructions: `multimem.ld_reduce` reads a vector and sums it across every peer in the NVLink fabric in a single op, and `multimem.st` writes the result back to every peer in a single op — the switch itself performs the reduction, so there is no ring, no tree, and no communicator object.
-Ranks synchronize with an in-kernel arrive-and-wait barrier — a `multimem.red.add` on a multicast-shared counter carried on a monotonic epoch, so a graph replay never races a stale reset — and the vectorized paths cover BFloat16 (`v4.bf16x2`) and Float32 (`v4.f32`).
+Ranks synchronize with an in-kernel arrive-and-wait barrier — a `multimem.red.add` on a multicast-shared counter kept on a monotonic epoch, so a graph replay never races a stale reset — and the vectorized paths cover BFloat16 (`v4.bf16x2`) and Float32 (`v4.f32`).
 
 The whole forward, backward, gradient all-reduce, and optimizer step is therefore one graph the host launches once and replays — no phase decomposition, no host barrier, no CPU-side scheduling between collectives.
 We call this path the __Multicast World__; it needs Compute Capability 9.0+ with NVLink multicast (Hopper or Blackwell) and is validated against single-rank references across world sizes 2 and 4.
@@ -281,7 +281,7 @@ Activation memory is one block's intermediates plus one residual stream per bloc
 
 __Inference is BF16 or E4M3 (FP8), fixed per model at load time.__
 The compute mode is the one `quantization` scalar a load names — `bf16` as the checkpoint stores it, or `e4m3` quantized at load — not a per-layer toggle; an E4M3 model runs its transformer blocks in Float8, while the entries, the attention pool and the projection head stay BFloat16.
-Each load packs its weights for one CPU or GPU class, the hardware's own or one the caller pins, so a single binary carries tuned variants from Haswell to Diamond Rapids on x86, from Graviton2 to Vera on Arm, and from Ampere to Blackwell and CDNA3 to CDNA5 on GPUs.
+Each load packs its weights for one CPU or GPU class, the hardware's own or one the caller pins, so a single binary includes tuned variants from Haswell to Diamond Rapids on x86, from Graviton2 to Vera on Arm, and from Ampere to Blackwell and CDNA3 to CDNA5 on GPUs.
 [NumKong](https://github.com/ashvardanian/NumKong) runs every matrix product and every attention, forward and backward — BF16 and E4M3 alike, against weights packed once per step — and [CUB](https://github.com/NVIDIA/cccl) supplies the device-wide scans and reductions inside the custom kernels.
 
 ### Adafactor Optimizer
@@ -292,7 +292,7 @@ Lion is hyperparameter-economical — two betas, no second-moment state — but 
 On a unit-RMSNorm encoder that is fatal: the variance-destroying low-rank direction costs the optimizer no more than an informative one, so the pooled embedding slides into rank collapse.
 A controlled ablation reproduced exactly that — Lion drove the pooled embedding to effective rank ≈1 and pooled-embedding cosine ≈0.99 across two seeds and stalled at the unigram floor, while AdamW on identical data and init grew the rank and converged; a from-identical-init lockstep ruled out a kernel bug.
 
-AdamW recovers magnitude with a per-parameter variance estimate, but carries two moments per parameter and adds $\beta_2$ and $\varepsilon$ to tune per modality and per schedule.
+AdamW recovers magnitude with a per-parameter variance estimate, but keeps two moments per parameter and adds $\beta_2$ and $\varepsilon$ to tune per modality and per schedule.
 Adafactor is the middle ground: it keeps a _factored_ second moment — per-row $[N]$ plus per-col $[D]$ statistics, $O(N + D)$ instead of the full $O(N \cdot D)$ variance — so it is magnitude-aware like AdamW at about half the optimizer state, under a single learning rate that covers every tensor from the byte embedding to the 1-D norms.
 In our optimizer × pooled-embedding-regularizer sweep it matched AdamW's validation loss and produced the lowest activation off-diagonal covariance of any variant — the decorrelation cosine retrieval depends on — trailing AdamW only slightly on bitext retrieval.
 
@@ -309,7 +309,7 @@ All models share weights, not just structure, along a two-axis lineage:
 - __Specializing capability__ — a reranker is initialized from the masked-pretraining base, and an embedder from the reranker.
 
 The same recipe is reused across every scale and task; only the head and the objective change.
-Checkpoints are saved in the Hugging Face [SafeTensors](https://github.com/safetensors/safetensors) format, and each checkpoint directory carries a `README.md` recording the commit, hardware, config tier, modality, recipe, datasets, warm-start source, and training command.
+Checkpoints are saved in the Hugging Face [SafeTensors](https://github.com/safetensors/safetensors) format, and each checkpoint directory holds a `README.md` recording the commit, hardware, config tier, modality, recipe, datasets, warm-start source, and training command.
 
 ### Uniform Byte Models
 
@@ -433,7 +433,7 @@ UForm compiles in one of two shapes, picked by `UFORM_MULTIVERSIONED`.
   One binary runs well across diverse machines, because each CPU and each GPU picks its own class at runtime.
   This is the default, and the shape of the Python wheels, the Rust crate and the JavaScript and Swift packages.
 - __Monoversioned builds are for throughput.__
-  For common hardware and data-center deployments, the binary carries only the best code for one machine.
+  For common hardware and data-center deployments, the binary includes only the best code for one machine.
   These are the leanest binaries: they start fast and take little memory and disk.
   Outside that machine they refuse cleanly with `uform_status_unsupported_k`, never crashing and never falling back to slower code in silence.
 - __The switches.__

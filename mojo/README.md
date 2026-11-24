@@ -75,7 +75,7 @@ print(call.wait().embeddings().value().row[DType.float32](0)[0])
 A trainer has only the executor receivers, `trainer.on(executor)` and `trainer.deferred(executor)`, since its verbs run on the devices it was made over.
 Loads and `Mesh.bootstrap` address no handle yet, so they are constructors taking the executor they run on.
 
-A `Deferred` owns its outcome and outputs until the call is final, and borrows the model, the executor, the arena and every input it was handed, which Mojo keeps alive for as long as the `Deferred` is.
+A `Deferred` owns its outcome and outputs until the call is final; the model, the executor, the arena and every input it was handed stay the caller's, and Mojo keeps them alive for as long as the `Deferred` is.
 Mojo has no runtime of its own to await on, so `wait` is the whole interface: it blocks in `uform_outcome_wait` until the call is final, then answers the result or raises the failure, as many times as it is asked.
 `status` reads the outcome without blocking, and destroying an unfinished `Deferred` waits for it.
 
@@ -184,13 +184,13 @@ print(stats.step, stats.loss, stats.contrastive_loss)  # world means
 trainer.on(executor).save("checkpoint.safetensors")
 ```
 
-`TrainerStepConfig` also carries the `sides` that make items queries or documents for the late-interaction term and the `choices` and `choice_targets` tapes the byte decoder trains on, each read when the trainer's weight for it is positive.
+`TrainerStepConfig` also holds the `sides` that make items queries or documents for the late-interaction term and the `choices` and `choice_targets` tapes the byte decoder trains on, each read when the trainer's weight for it is positive.
 `save` writes the safetensors checkpoint the model loads read, and every process of the run bootstraps with the same count, directory and job, or `Mesh.bootstrap` raises `Status.CONFIG_MISMATCH`.
 
 ## Errors
 
 Every fallible entry point raises `Error` and nothing else, since Mojo allows one error type per function.
-An `Error` carries a `Status` shared with the C interface, so a fault this binding catches before the boundary reports the status the engine would have reported for the same fault:
+An `Error` holds a `Status` shared with the C interface, so a fault this binding catches before the boundary reports the status the engine would have reported for the same fault:
 
 ```mojo
 try:

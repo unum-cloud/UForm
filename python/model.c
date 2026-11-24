@@ -107,7 +107,7 @@ static char const doc_Model_load_ram[] =                                        
     "quantization=Scalar.BF16, progress=None, progress_steps=0) -> Model\n"                        //
     "\n"                                                                                           //
     "Copies a safetensors checkpoint into host memory and packs its products for the CPU; the\n"   //
-    "checkpoint carries the model's geometry.\n"                                                   //
+    "checkpoint holds the model's geometry.\n"                                                     //
     "Calls `uform_model_load_ram`.\n"                                                              //
     "\n"                                                                                           //
     "Args:\n"                                                                                      //

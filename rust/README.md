@@ -72,7 +72,7 @@ The receiver decides where a verb runs and how it completes, while the verb and 
 
 `ModelVerbs` and `EncodeVerbs` write every verb once for all three, and `TrainVerbs` does so for a trainer's two receivers.
 A blocking verb returns its `Result` directly, so nothing about asynchrony reaches a caller who never asks for it.
-An `On` borrows the model and the executor, so neither it nor a `Deferred` it submits can outlive them.
+An `On` refers to the model and the executor, so neither it nor a `Deferred` it submits can outlive them.
 
 ```rust
 let texts = vec![String::from("a cat on a mat"), String::from("a dog in the fog")];
@@ -83,14 +83,14 @@ if call.status() == Err(Status::Deferred) {
 let encoded = call.await?;                                    // or: call.wait()?
 ```
 
-A `Deferred` owns the inputs the library reads until the call is final, and borrows the model and the arena, as a blocking call does.
+A `Deferred` owns the inputs the library reads until the call is final, and refers to the model and the arena, as a blocking call does.
 `status` answers `Ok(())` once the call succeeded, `Err(Status::Deferred)` while it is not final, and its failure otherwise.
 Inside an `async` block, `.await` polls the call's status until it is final, so other tasks run meanwhile, while `wait` blocks the thread without spinning.
 The crate starts no thread, so waiting off-thread goes through a scoped thread, as `std::thread::scope(|scope| scope.spawn(move || call.wait()).join())` does.
 Dropping an unfinished `Deferred` waits for the call, and `wait_with_inputs` hands back the inputs it owned beside what it produced.
 
 The library reads a deferred call's inputs after the verb returns, so a deferred receiver takes owned inputs: items in a `Vec` or an array of owned or `'static` values, a tape as `(Vec<_>, Vec<usize>)`, a `PathBuf`, `String` or `'static` path, and a config owning its progress handler, boxed or not, and its stats by value, with `'static` lists.
-Lending `&Vec<String>` fails to compile with "a deferred receiver needs owned inputs", and a config borrowing a local fails as "does not live long enough".
+Passing `&Vec<String>` fails to compile with "a deferred receiver needs owned inputs", and a config referring to a local fails as "does not live long enough".
 A deferred call allocates one box holding its outcome, argument struct and inputs until it is final.
 An executor without threads of its own may hold a deferred call until its `wait`, its next `drain` or blocking call, or the drop of what it names, so `drain` it before an `.await` there.
 A call finding another one holding its executor finishes at once with `Status::Contended`.
@@ -121,7 +121,7 @@ Dropping an executor drains it, unless a GPU arena it made still holds it, which
 Every output whose length only the call knows, the embeddings, the states and their offsets, lands in an `Arena` you pass, and the verb answers views over it without copying.
 `Arena::new_in(&executor)` places it where that executor computes, decided once, and `Arena::new()` makes host pages for the calling thread.
 Each call rewinds its arena, so the previous call's views die and a steady loop allocates once.
-Every call, blocking or deferred, borrows the arena as `&mut Arena` and its result borrows it in turn, so the borrow checker refuses a stale view at compile time.
+Every call, blocking or deferred, takes the arena as `&mut Arena` and its result refers to it in turn, so the borrow checker refuses a stale view at compile time.
 To keep a result past the next call, pass that call another arena; an arena serves one call at a time, so each deferred call needs its own.
 An arena from a VRAM executor holds device memory, which host accessors refuse with `Status::Device`, while `as_ptr` still hands the rows to another library, such as a USearch VRAM index.
 
@@ -147,7 +147,7 @@ One verb per input form, each spelled as in C, and each taking its inputs, the `
 - `audio_encode_samples(samples, sample_rate, ..)` takes mono `f32` samples.
 
 A batch is a slice, array or `Vec` of separate items, `&str`, `String`, `&[u8]` or `Vec<u8>`, or `&[f32]` and `Vec<f32>` for samples, gathered into one tape with one copy.
-A `(data, offsets)` pair, the data and `count + 1` offsets, is lent to the library as a tape without a copy, once the binding checks the offsets stay inside the data:
+The library reads a `(data, offsets)` pair, the data and `count + 1` offsets, as a tape without a copy, once the binding checks the offsets stay inside the data:
 
 ```rust
 let tape = (b"first documentthe second".as_slice(), [0usize, 14, 24]);
@@ -199,8 +199,8 @@ let model = Model::load_vram(ModelLoadVramConfig {
 let description = model.describe()?;                          // geometry, placement, classes and heads
 ```
 
-A description reports the `cpu_class` or `gpu_class` the model dispatched as, and the heads the checkpoint carries: a nonzero `token_width` for token vectors, and a nonzero `choice_temperature_groups` for choices.
-`Model` carries no type parameter: quantization is the runtime `Scalar` passed at load, as in C.
+A description reports the `cpu_class` or `gpu_class` the model dispatched as, and the heads the checkpoint holds: a nonzero `token_width` for token vectors, and a nonzero `choice_temperature_groups` for choices.
+`Model` has no type parameter: quantization is the runtime `Scalar` passed at load, as in C.
 
 ## Training
 
@@ -242,11 +242,11 @@ trainer.on(&executor).save("checkpoint.safetensors")?;
 A step's `sides` give each item a `LateInteractionSide`, and its `choices` and `choice_targets` give each choice item its legal bytes and their target probabilities as `(data, offsets)` tapes, the shapes `text_choose` takes and answers, checked the same way.
 Paths cross as the OS's bytes on Unix, not necessarily UTF-8, while the mesh's `job` is a name and a `&str`.
 `step` answers the pooled embeddings the loss scored when its config names an arena, and `None` otherwise.
-A trainer borrows its mesh, so the mesh outlives every trainer made over it, and `mesh.describe()` answers a `MeshDescription` whose `multimem_tier` is a `MultimemTier` and whose `gpu_class` is the `GPUClass` every GPU of the run dispatches as.
+A trainer refers to its mesh, so the mesh outlives every trainer made over it, and `mesh.describe()` answers a `MeshDescription` whose `multimem_tier` is a `MultimemTier` and whose `gpu_class` is the `GPUClass` every GPU of the run dispatches as.
 
 ## Errors
 
-Every fallible call returns `uform::Result`, whose `Error` carries a `Status` and a static `message`, so nothing allocates on the failure path.
+Every fallible call returns `uform::Result`, whose `Error` holds a `Status` and a static `message`, so nothing allocates on the failure path.
 A failure the binding catches before the call crosses the boundary reports the status the library would have used.
 
 ```rust
@@ -257,7 +257,7 @@ match model.on(&executor).text_encode(&texts, Outputs::EMBEDDINGS, Scalar::F32, 
 }
 ```
 
-`Status` carries the C enumerators' values and leaves success to `Result`, so an `Error` never carries `Status::Deferred`, which only `Deferred::status` reports.
+`Status` mirrors the C enumerators' values and leaves success to `Result`, so an `Error` never holds `Status::Deferred`, which only `Deferred::status` reports.
 `Status`, `Scalar`, `Mood`, `CPUClass`, `GPUClass`, `GPUVendor`, `Modality`, `Objective`, `Negatives`, `MultimemTier`, `PairLossForm` and `LateInteractionSide` print through `Display` and parse through `FromStr` the names the C tables own, such as `"shape-mismatch"` or `"intel-haswell"`.
 A panic inside a progress handler aborts the process, since it cannot unwind through the library.
 
@@ -272,10 +272,10 @@ A panic inside a progress handler aborts the process, since it cannot unwind thr
   `status` polls through `uform_outcome_status`, `wait` blocks through `uform_outcome_wait`, and a `Deferred` is `IntoFuture`, so `.await` polls the status word, since the library has no wake-up.
 - __No life of its own.__
   The binding starts no threads and keeps no queues or caches; releasing a `Deferred` rides `Drop`, which waits for the call first.
-- __Arenas are lent and reused, never shared.__
-  Every output verb takes an arena and answers views borrowing it, so the borrow checker retires stale views at compile time.
+- __Arenas belong to the caller and are reused, never shared.__
+  Every output verb takes an arena and answers views that refer to it, so the borrow checker retires stale views at compile time.
 - __Nothing costs anything until it is used.__
   Blocking calls take no deferred-table entry and allocate no box, a surface `Outputs` leaves out is never computed, and an arena allocates only when a call writes into it.
-- __A deferred receiver refuses borrowed inputs at compile time.__
-  The `Accepts` bound admits only owned inputs, so a borrow the library would read after the verb returns never compiles.
+- __A deferred receiver refuses references as inputs at compile time.__
+  The `Accepts` bound admits only owned inputs, so a reference the library would read after the verb returns never compiles.
 - __Suites run against the stub library__, and against the real one with the tiny checkpoint.

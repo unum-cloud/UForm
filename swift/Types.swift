@@ -13,12 +13,12 @@ import UFormC
 /// What went wrong, in the vocabulary the library and every binding share - one constant per
 /// `uform_status_*_k`, carrying the C enumerator itself.
 ///
-/// A `UFormError` never carries `success` or `deferred`; a `Deferred` call reports both.
+/// A `UFormError` never holds `success` or `deferred`; a `Deferred` call reports both.
 public struct Status: Hashable, Sendable, CustomStringConvertible {
     /// The C enumerator.
     let raw: uform_status_t
 
-    /// The call succeeded and carries no message.
+    /// The call succeeded and has no message.
     public static let success = Status(raw: uform_status_success_k)
     /// The call was submitted deferred and is not final yet.
     public static let deferred = Status(raw: uform_status_deferred_k)
@@ -55,7 +55,7 @@ public struct Status: Hashable, Sendable, CustomStringConvertible {
     /// The status as the library spells it, like `invalid-argument`. Calls `uform_status_name`.
     public var description: String { String(cString: uform_status_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no status carries. Calls `uform_status_from_name`.
+    /// Reads a spelling back, and nil for one no status holds. Calls `uform_status_from_name`.
     public init?(name: String) {
         guard let raw = parsed(name, uform_status_from_name) else { return nil }
         self.raw = raw
@@ -64,7 +64,7 @@ public struct Status: Hashable, Sendable, CustomStringConvertible {
     init(raw: uform_status_t) { self.raw = raw }
 }
 
-/// One failed call: a status every caller can branch on, and the detail the status cannot carry.
+/// One failed call: a status every caller can branch on, and the detail the status cannot express.
 public struct UFormError: Swift.Error, CustomStringConvertible, Equatable, Sendable {
     /// The failure identity, shared with every other SDK.
     public let status: Status
@@ -139,7 +139,7 @@ public struct Scalar: Hashable, Sendable, CustomStringConvertible {
     /// The kind as the library spells it. Calls `uform_scalar_name`.
     public var description: String { String(cString: uform_scalar_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no kind carries. Calls `uform_scalar_from_name`.
+    /// Reads a spelling back, and nil for one no kind holds. Calls `uform_scalar_from_name`.
     public init?(name: String) {
         guard let raw = parsed(name, uform_scalar_from_name) else { return nil }
         self.raw = raw
@@ -161,7 +161,7 @@ public struct Mood: Hashable, Sendable, CustomStringConvertible {
     /// The mood as the library spells it. Calls `uform_mood_name`.
     public var description: String { String(cString: uform_mood_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no mood carries. Calls `uform_mood_from_name`.
+    /// Reads a spelling back, and nil for one no mood holds. Calls `uform_mood_from_name`.
     public init?(name: String) {
         guard let raw = parsed(name, uform_mood_from_name) else { return nil }
         self.raw = raw
@@ -220,7 +220,7 @@ public struct CPUClass: Hashable, Sendable, CustomStringConvertible {
     /// The class as the library spells it, like `intel-haswell`. Calls `uform_cpu_class_name`.
     public var description: String { String(cString: uform_cpu_class_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no class carries. Calls `uform_cpu_class_from_name`.
+    /// Reads a spelling back, and nil for one no class holds. Calls `uform_cpu_class_from_name`.
     public init?(name: String) {
         guard let raw = parsed(name, uform_cpu_class_from_name) else { return nil }
         self.raw = raw
@@ -269,7 +269,7 @@ public struct GPUClass: Hashable, Sendable, CustomStringConvertible {
     /// The class as the library spells it, like `nvidia-hopper`. Calls `uform_gpu_class_name`.
     public var description: String { String(cString: uform_gpu_class_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no class carries. Calls `uform_gpu_class_from_name`.
+    /// Reads a spelling back, and nil for one no class holds. Calls `uform_gpu_class_from_name`.
     public init?(name: String) {
         guard let raw = parsed(name, uform_gpu_class_from_name) else { return nil }
         self.raw = raw
@@ -301,7 +301,7 @@ public struct GPUVendor: Hashable, Sendable, CustomStringConvertible {
     /// The vendor as the library spells it. Calls `uform_gpu_vendor_name`.
     public var description: String { String(cString: uform_gpu_vendor_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no vendor carries. Calls
+    /// Reads a spelling back, and nil for one no vendor holds. Calls
     /// `uform_gpu_vendor_from_name`.
     public init?(name: String) {
         guard let raw = parsed(name, uform_gpu_vendor_from_name) else { return nil }
@@ -368,9 +368,9 @@ public func gpuDevices() throws(UFormError) -> [GPUDevice] {
 
 // MARK: - Progress
 
-/// Whether the call a progress handler is watching carries on or unwinds.
+/// Whether the call a progress handler is watching continues or unwinds.
 public enum Continuation: Sendable {
-    /// Carry on to the next unit of work.
+    /// Continue to the next unit of work.
     case `continue`
     /// Stop, and report `cancelled`.
     case cancel
@@ -412,8 +412,9 @@ final class Landing {
     private var slots: [UnsafeMutableRawPointer] = []
     /// The callback states the call reads.
     private var anchors: [AnyObject] = []
-    /// The arena lent to the call, until `rewind` learns whether the call took it.
-    private var lent: ArenaWrite?
+    /// The arena the call writes into, which the caller owns, until `rewind` learns whether the
+    /// call took it.
+    private var arenaWrite: ArenaWrite?
 
     init(_ completion: uform_completion_t = uform_completion_blocking_k) {
         self.completion = completion
@@ -441,16 +442,16 @@ final class Landing {
 
     /// Copies trivial `values` into the landing, answering nil for none, as the C side reads
     /// an empty list.
-    func lend<Element>(_ values: [Element]) -> UnsafePointer<Element>? {
+    func copy<Element>(_ values: [Element]) -> UnsafePointer<Element>? {
         guard let first = values.first else { return nil }
-        let copy = slots(first, count: values.count)
-        _ = UnsafeMutableBufferPointer(start: copy, count: values.count).update(fromContentsOf: values)
-        return UnsafePointer(copy)
+        let stored = slots(first, count: values.count)
+        _ = UnsafeMutableBufferPointer(start: stored, count: values.count).update(fromContentsOf: values)
+        return UnsafePointer(stored)
     }
 
-    /// Lends the UTF-8 bytes of a path or a name, never terminated, by contract, copied once into
-    /// the landing so a deferred call may read them.
-    func lend(_ text: String) -> uform_bytes_view_t {
+    /// Copies the UTF-8 bytes of a path or a name, never terminated, by contract, once into the
+    /// landing so a deferred call may read them.
+    func copy(_ text: String) -> uform_bytes_view_t {
         let utf8 = text.utf8
         guard !utf8.isEmpty else { return uform_bytes_view_t(data: nil, length: 0) }
         let bytes = slots(UInt8(0), count: utf8.count)
@@ -458,21 +459,21 @@ final class Landing {
         return uform_bytes_view_t(data: bytes, length: utf8.count)
     }
 
-    /// Lends the host placement every RAM load and executor takes; nil `cpuClassCeiling` sets no
+    /// Builds the host placement every RAM load and executor takes; nil `cpuClassCeiling` sets no
     /// ceiling.
     func ram(_ memoryDomains: [Int32], _ cpuClassCeiling: CPUClass?) -> uform_ram_options_t {
         uform_ram_options_t(
-            memory_domains: lend(memoryDomains),
+            memory_domains: copy(memoryDomains),
             memory_domains_count: memoryDomains.count,
             cpu_class_ceiling: cpuClassCeiling?.raw ?? uform_cpu_class_unknown_k
         )
     }
 
-    /// Lends the device placement every VRAM load and executor takes; nil `gpuClassCeiling` sets
+    /// Builds the device placement every VRAM load and executor takes; nil `gpuClassCeiling` sets
     /// no ceiling.
     func vram(_ devices: [Int32], _ gpuClassCeiling: GPUClass?) -> uform_vram_options_t {
         uform_vram_options_t(
-            devices: lend(devices),
+            devices: copy(devices),
             devices_count: devices.count,
             gpu_class_ceiling: gpuClassCeiling?.raw ?? uform_gpu_class_unknown_k
         )
@@ -499,9 +500,9 @@ final class Landing {
         return uform_tape_view_t(data: UnsafeRawPointer(data), offsets: UnsafePointer(offsets), scalar: scalar.raw)
     }
 
-    /// Lends an optional handler and its report count as the progress every reporting verb takes;
-    /// nil lends a null callback.
-    func lend(_ progress: Progress?, steps: Int) -> uform_progress_t {
+    /// Builds the progress every reporting verb takes from an optional handler and its report
+    /// count; the landing keeps the handler until the call is final, and nil sets a null callback.
+    func progress(_ progress: Progress?, steps: Int) -> uform_progress_t {
         guard let progress else { return uform_progress_t(callback: nil, state: nil, steps: steps) }
         let state = ProgressState(progress)
         anchors.append(state)
@@ -512,21 +513,21 @@ final class Landing {
         )
     }
 
-    /// Lends `arena` to the call, answering the stamp its views carry once `rewind` advances the
-    /// arena to it.
-    func lend(_ arena: Arena) -> ArenaWrite {
+    /// Marks `arena`, which the caller owns, as the one the call writes into, answering the stamp
+    /// its views hold once `rewind` advances the arena to it.
+    func write(_ arena: Arena) -> ArenaWrite {
         let write = ArenaWrite(arena: arena, generation: arena.generation &+ 1)
-        lent = write
+        arenaWrite = write
         return write
     }
 
-    /// Advances the lent arena once the library took the call, after a blocking one returns or
+    /// Advances the call's arena once the library took the call, after a blocking one returns or
     /// right after a deferred one is submitted, so the views earlier calls wrote there stop
     /// reading. Failed calls advance it too, and only a `contended` one, which never touched the
     /// arena, does not.
     func rewind() {
-        guard let write = lent else { return }
-        lent = nil
+        guard let write = arenaWrite else { return }
+        arenaWrite = nil
         if uform_outcome_status(outcome) != uform_status_contended_k { write.arena.generation &+= 1 }
     }
 
@@ -574,8 +575,8 @@ func created<Handle>(_ slot: UnsafeMutablePointer<Handle?>) throws(UFormError) -
 /// A call submitted to an executor, which finishes there while the caller does other work.
 ///
 /// It owns the call's outcome, outputs and copied inputs until the call is final. The handles it
-/// names, the arena among them, it borrows as a blocking call does. Releasing an unfinished one
-/// waits for it first.
+/// names, the arena among them, stay the caller's, as in a blocking call. Releasing an unfinished
+/// one waits for it first.
 public final class Deferred<Value> {
     /// The landing and the result reader.
     private let submission: Submission<Value>
@@ -644,7 +645,7 @@ public final class Executor: @unchecked Sendable {
 
     /// Creates an executor of host threads for RAM-resident models, interleaved across the compute
     /// domains local to `memoryDomains`; an empty list derives every node the process may allocate
-    /// on. Zero `threads` takes 7/8 of the cores those domains carry. A `cpuClassCeiling`
+    /// on. Zero `threads` takes 7/8 of the cores those domains span. A `cpuClassCeiling`
     /// dispatches as the newest compiled class the CPU runs at or under it; nil sets no ceiling.
     /// Calls `uform_executor_for_ram`.
     public static func forRam(
@@ -679,19 +680,19 @@ public final class Executor: @unchecked Sendable {
         streams: [UnsafeMutableRawPointer?]? = nil,
         scratchLimit: Int = 0
     ) throws(UFormError) -> Executor {
-        // The C side reads one stream per device behind a pointer that carries no count.
+        // The C side reads one stream per device behind a pointer that has no count.
         if let streams, streams.count != devices.count {
             throw UFormError(status: .shapeMismatch, message: "the streams must name one per device")
         }
         let landing = Landing()
         let executor = landing.slots(uform_executor_t?.none)
-        let lentStreams = streams.flatMap { landing.lend($0) }
+        let streamHandles = streams.flatMap { landing.copy($0) }
         var arguments = uform_executor_for_vram_t(
             executor: executor,
             outcome: landing.outcome,
             vram: landing.vram(devices, gpuClassCeiling),
             ram: landing.ram(memoryDomains, cpuClassCeiling),
-            streams: lentStreams,
+            streams: streamHandles,
             scratch_limit: scratchLimit
         )
         uform_executor_for_vram(&arguments)
@@ -818,7 +819,7 @@ public struct Rows: RandomAccessCollection {
         return Row(write: write, base: base! + row * stride, scalar: scalar, endIndex: columns)
     }
 
-    /// Lends the rows' bytes as stored to `body`, which must not keep the buffer past its return.
+    /// Passes the rows' bytes as stored to `body`, which must not keep the buffer past its return.
     public func withUnsafeBytes<Result, Failure: Swift.Error>(
         _ body: (UnsafeRawBufferPointer) throws(Failure) -> Result
     ) throws(Failure) -> Result {

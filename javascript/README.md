@@ -10,7 +10,7 @@ The WebAssembly build is how the smallest models sit inside a page, computing on
 npm install @unum-cloud/uform
 ```
 
-The package carries prebuilt addons under `prebuilds/`, and the `uform.mjs` and `uform.wasm` pair for browsers under `javascript/dist/wasm/`.
+The package ships prebuilt addons under `prebuilds/`, and the `uform.mjs` and `uform.wasm` pair for browsers under `javascript/dist/wasm/`.
 
 ## Quickstart
 
@@ -155,7 +155,7 @@ console.log(portable.describe().cpuClass); // "intel-haswell" on an AVX2 machine
 ## Training
 
 Training runs on GPUs through the Node addon.
-A run's processes join a mesh once, and a trainer borrows it until freed.
+A run's processes join a mesh once, and each trainer holds it until freed.
 
 ```js
 import { Executor, Mesh, Trainer, Objective, Modality, PairLossForm, LateInteractionSide } from "@unum-cloud/uform";
@@ -198,11 +198,11 @@ reranker.step({
 ```
 
 The choices take the shape `textChoose` takes, and their targets the shape of the `Probabilities` it answers, so one model's probabilities can train another as they land.
-Every batch, `contents` and `choices` alike, also takes a packed `{ data, offsets }` tape, which the Node addon lends to the library without a copy when its offsets are a `BigUint64Array`; an array of entries is first gathered into one tape, the one copy that path makes.
+Every batch, `contents` and `choices` alike, also takes a packed `{ data, offsets }` tape, which the Node addon reads in place when its offsets are a `BigUint64Array`, so it must stay unchanged until the call is final; an array of entries is first gathered into one tape, the one copy that path makes.
 
 ## Errors
 
-Every error carries a `code` from the `Status` enum, spelled as the C library names it, so a caller branches on the identity of the fault:
+Every error has a `code` from the `Status` enum, spelled as the C library names it, so a caller branches on the identity of the fault:
 
 ```js
 import { Model, Status } from "@unum-cloud/uform";
@@ -221,10 +221,10 @@ The SDK is a thin layer over the C interface, one module per header: `types`, `m
 - One method per exported verb, spelled as in C: `textEncode` calls `uform_text_encode`.
 - The receiver chooses and the verb stays: `model.textEncode` runs on the calling thread, `model.on(executor).textEncode` blocks on an executor, and `model.deferred(executor).textEncode` answers a `Deferred`.
 - A `Deferred` is `PromiseLike` and `Disposable`: `await` polls `status` between turns of the event loop, `wait` blocks the calling thread, `status` polls, and disposing one waits until it is final.
-- Every output verb takes an arena and answers views borrowing it, detached when the arena rewinds or is freed.
+- Every output verb takes an arena and answers views into it, detached when the arena rewinds or is freed.
 - Statuses, scalars, moods, modalities, objectives, negatives, pair-loss forms and late-interaction sides are string enums spelled as their C names.
 - CPU and GPU classes cross as the strings the C name tables spell, and multimem tiers and GPU vendors come back as string unions of their C names.
-- The SDK starts no threads, borrows none, and keeps no queues or caches.
+- The SDK starts no threads, occupies none, and keeps no queues or caches.
 - A progress handler runs only on the calling thread, so only a model's own verbs take one.
 - Blocking calls look as they would without asynchrony, deferred calls reach the same verbs through the language's own idioms, and neither costs anything until used.
 - The browser build lays every argument structure into the module's heap at offsets computed once from the C headers, runs it with a `NULL` executor, and copies its outputs out before the next call can grow the heap.
