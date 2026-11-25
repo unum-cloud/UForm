@@ -374,7 +374,7 @@ struct vram_site {
 
 /** A choice's arguments, which land probabilities over its choices rather than any surface. */
 template <typename arguments_type_>
-concept choice_arguments = requires(arguments_type_& arguments) { arguments.probabilities; };
+concept a_choice_call = requires(arguments_type_& arguments) { arguments.probabilities; };
 
 /** The surfaces a call's arguments name, and the scalar they land as. */
 struct requested_t {
@@ -387,7 +387,7 @@ struct requested_t {
 /** The surfaces @p arguments name; a choice names none of them, as it lands probabilities. */
 template <typename arguments_type_>
 requested_t requested_of(arguments_type_ const& arguments) noexcept {
-    if constexpr (choice_arguments<arguments_type_>) return {};
+    if constexpr (a_choice_call<arguments_type_>) return {};
     else return {arguments.embeddings, arguments.states, arguments.token_vectors, arguments.outputs_scalar};
 }
 
@@ -399,7 +399,7 @@ void clear_outputs(arguments_type_& arguments) noexcept {
     if (requested.embeddings) *requested.embeddings = {};
     if (requested.states) *requested.states = {};
     if (requested.token_vectors) *requested.token_vectors = {};
-    if constexpr (choice_arguments<arguments_type_>)
+    if constexpr (a_choice_call<arguments_type_>)
         if (arguments.probabilities) *arguments.probabilities = {};
     if (arguments.stats) *arguments.stats = {};
 }
@@ -434,7 +434,7 @@ failure_t validate_call(arguments_type_ const& arguments, uform_tape_view_t cons
                         uform_scalar_t element) noexcept {
     if (!arguments.model) return {uform_status_uninitialized_k, "The model must not be null"};
     requested_t const requested = requested_of(arguments);
-    if constexpr (choice_arguments<arguments_type_>) {
+    if constexpr (a_choice_call<arguments_type_>) {
         if (failure_t const refused = validate_choices(arguments); refused.message) return refused;
     }
     else if (!requested.embeddings && !requested.states && !requested.token_vectors)
@@ -559,11 +559,11 @@ void encode_items(arguments_type_& arguments, packer_type_& packer, site_type_& 
     util::b8_t* const states = output(requested.states, memory, tokens * row_bytes);
     util::b8_t* const token_vectors = output(requested.token_vectors, memory, tokens * token_row_bytes);
     util::f32_t* masked_logits = nullptr; // in host pages, where the choices' softmax reads them
-    if constexpr (choice_arguments<arguments_type_>)
+    if constexpr (a_choice_call<arguments_type_>)
         masked_logits = transfers.template allocate<util::f32_t>(count * geometry.masked_vocabulary + 1);
     if (!offsets_memory || (ragged && !landed_offsets_memory) || (requested.embeddings && !embeddings) ||
         (requested.states && !states) || (requested.token_vectors && !token_vectors) ||
-        (choice_arguments<arguments_type_> && !masked_logits))
+        (a_choice_call<arguments_type_> && !masked_logits))
         return fail({uform_status_out_of_memory_k, "Failed to allocate the outputs"});
     std::span<std::size_t> const offsets {offsets_memory, count + 1};
     std::span<std::size_t> const landed_offsets {landed_offsets_memory, ragged ? count + 1 : 0};
@@ -670,7 +670,7 @@ void encode_items(arguments_type_& arguments, packer_type_& packer, site_type_& 
             landed.message)
             return fail(landed);
     if (failure_t const finished = site.finish(); finished.message) return fail(finished);
-    if constexpr (choice_arguments<arguments_type_>)
+    if constexpr (a_choice_call<arguments_type_>)
         if (failure_t const chosen = land_choices(arguments, surfaces.masked_logits, site, memory); chosen.message)
             return fail(chosen);
 

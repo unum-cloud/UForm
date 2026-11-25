@@ -1261,17 +1261,17 @@ void wait_named_calls(util::u64_t& named_calls) noexcept;
 /** A handle whose frees wait for the calls naming it; outputs for handles a call creates, and
  *  handles this build never defines, hold no count. */
 template <typename handle_type_>
-concept counted_handle = requires(handle_type_ handle) { handle->named_calls; };
+concept a_counted_handle = requires(handle_type_ handle) { handle->named_calls; };
 
 /** Arguments naming a model, an arena, a mesh or a trainer, each a handle the call may count. */
 template <typename arguments_type_>
-concept names_model = requires(arguments_type_& arguments) { arguments.model; };
+concept a_model_naming_call = requires(arguments_type_& arguments) { arguments.model; };
 template <typename arguments_type_>
-concept names_arena = requires(arguments_type_& arguments) { arguments.arena; };
+concept an_arena_naming_call = requires(arguments_type_& arguments) { arguments.arena; };
 template <typename arguments_type_>
-concept names_mesh = requires(arguments_type_& arguments) { arguments.mesh; };
+concept a_mesh_naming_call = requires(arguments_type_& arguments) { arguments.mesh; };
 template <typename arguments_type_>
-concept names_trainer = requires(arguments_type_& arguments) { arguments.trainer; };
+concept a_trainer_naming_call = requires(arguments_type_& arguments) { arguments.trainer; };
 
 /** Whether the calling thread runs the body of the call holding @p executor . */
 bool runs_holding_call(uform_executor_handle_t& executor) noexcept;
@@ -1300,16 +1300,16 @@ bool submitted(arguments_type_* arguments) noexcept {
     call.recorded = {uform_status_internal_k, "The call finished without reporting a status"};
     std::size_t named = 0;
     auto const name = [&](auto handle) noexcept {
-        if constexpr (counted_handle<decltype(handle)>)
+        if constexpr (a_counted_handle<decltype(handle)>)
             if (handle) {
                 fu::standard_atomic_ref<util::u64_t> {handle->named_calls}.fetch_add(1, std::memory_order_relaxed);
                 call.named_calls[named++] = &handle->named_calls;
             }
     };
-    if constexpr (names_model<arguments_type_>) name(arguments->model);
-    if constexpr (names_arena<arguments_type_>) name(arguments->arena);
-    if constexpr (names_mesh<arguments_type_>) name(arguments->mesh);
-    if constexpr (names_trainer<arguments_type_>) name(arguments->trainer);
+    if constexpr (a_model_naming_call<arguments_type_>) name(arguments->model);
+    if constexpr (an_arena_naming_call<arguments_type_>) name(arguments->arena);
+    if constexpr (a_mesh_naming_call<arguments_type_>) name(arguments->mesh);
+    if constexpr (a_trainer_naming_call<arguments_type_>) name(arguments->trainer);
     propagate_pending(arguments->outcome); // before the body or the dispatch, never after
     if (arguments->completion != uform_completion_deferred_k || !delegates(*executor)) {
         call.arguments = arguments;
@@ -1347,7 +1347,7 @@ class call_outcome_t {
     template <typename arguments_type_>
     explicit call_outcome_t(arguments_type_ const& arguments) noexcept
         : published_(arguments.outcome), executor_(arguments.executor) {
-        if constexpr (names_arena<arguments_type_>) arena_ = arguments.arena;
+        if constexpr (an_arena_naming_call<arguments_type_>) arena_ = arguments.arena;
         if (!executor_) propagate_pending(published_);
     }
 

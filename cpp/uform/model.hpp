@@ -55,14 +55,14 @@ class model {
 
   public:
     model() noexcept
-        requires owns_handle<receiver_type_>
+        requires an_owning_receiver<receiver_type_>
     = default;
 
     uform_model_t handle() const noexcept { return receiver_.handle(); }
 
     /** The output field a lifecycle verb writes the new handle into. */
     uform_model_t* handle_field() noexcept
-        requires owns_handle<receiver_type_>
+        requires an_owning_receiver<receiver_type_>
     {
         return receiver_.handle_field();
     }
@@ -271,7 +271,7 @@ class model {
 
     /** Copies a safetensors checkpoint file into host memory and packs it for the CPU, blocking. */
     static expected<model> load_ram(uform_model_load_ram_t arguments) noexcept
-        requires owns_handle<receiver_type_>
+        requires an_owning_receiver<receiver_type_>
     {
         arguments.completion = uform_completion_blocking_k;
         return opened_<model>(uform_model_load_ram, arguments, &uform_model_load_ram_t::model);
@@ -279,7 +279,7 @@ class model {
 
     /** Copies a checkpoint held in memory into host memory and packs it for the CPU, blocking. */
     static expected<model> load_ram_buffer(uform_model_load_ram_buffer_t arguments) noexcept
-        requires owns_handle<receiver_type_>
+        requires an_owning_receiver<receiver_type_>
     {
         arguments.completion = uform_completion_blocking_k;
         return opened_<model>(uform_model_load_ram_buffer, arguments, &uform_model_load_ram_buffer_t::model);
@@ -287,7 +287,7 @@ class model {
 
     /** Copies a checkpoint file onto the GPUs @p arguments names and packs it there, blocking. */
     static expected<model> load_vram(uform_model_load_vram_t arguments) noexcept
-        requires owns_handle<receiver_type_>
+        requires an_owning_receiver<receiver_type_>
     {
         arguments.completion = uform_completion_blocking_k;
         return opened_<model>(uform_model_load_vram, arguments, &uform_model_load_vram_t::model);
@@ -295,7 +295,7 @@ class model {
 
     /** Copies a checkpoint held in memory onto the GPUs @p arguments names, blocking. */
     static expected<model> load_vram_buffer(uform_model_load_vram_buffer_t arguments) noexcept
-        requires owns_handle<receiver_type_>
+        requires an_owning_receiver<receiver_type_>
     {
         arguments.completion = uform_completion_blocking_k;
         return opened_<model>(uform_model_load_vram_buffer, arguments, &uform_model_load_vram_buffer_t::model);

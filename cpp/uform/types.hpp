@@ -93,11 +93,11 @@ struct outputs<void> {};
 /** Runs @p poll with @p state later on its own loop, storing the two words and allocating
  *  nothing. */
 template <typename scheduler_type_>
-concept scheduler = requires(scheduler_type_& loop, void (*poll)(void*) noexcept, void* state) {
+concept a_scheduler = requires(scheduler_type_& loop, void (*poll)(void*) noexcept, void* state) {
     loop.post(poll, state);
 };
 
-template <typename value_type_, scheduler scheduler_type_>
+template <typename value_type_, a_scheduler scheduler_type_>
 class awaiter;
 
 /**
@@ -158,7 +158,7 @@ class [[nodiscard]] deferred {
     }
 
     /** Awaits the call on @p loop, which polls its status until it is final. */
-    template <scheduler scheduler_type_>
+    template <a_scheduler scheduler_type_>
     awaiter<value_type_, scheduler_type_> wait(scheduler_type_& loop) noexcept {
         return {*this, loop};
     }
@@ -166,7 +166,7 @@ class [[nodiscard]] deferred {
 
 /** A @c deferred being awaited, living in the awaiting coroutine's frame: each poll reads the
  *  status word, and one not yet final posts itself again. */
-template <typename value_type_, scheduler scheduler_type_>
+template <typename value_type_, a_scheduler scheduler_type_>
 class awaiter {
     deferred<value_type_>& call_;
     scheduler_type_& loop_;
@@ -297,7 +297,7 @@ struct caller_owned {
 
 /** Only an owning receiver opens, loads and hands out cursors. */
 template <typename receiver_type_>
-concept owns_handle = requires(receiver_type_& receiver) { receiver.handle_field(); };
+concept an_owning_receiver = requires(receiver_type_& receiver) { receiver.handle_field(); };
 
 #pragma region Scalars Rows and Tapes
 
@@ -366,10 +366,10 @@ inline constexpr uform_scalar_t scalar_of<u1x8_t> = uform_scalar_u1x8_k;
 
 /** An element type a call can state as the scalar of the tape or rows it passes or reads. */
 template <typename element_type_>
-concept element = scalar_of<element_type_> != uform_scalar_unknown_k;
+concept an_element = scalar_of<element_type_> != uform_scalar_unknown_k;
 
 /** Values one element packs: eight for bit sets, two for nibbles, one otherwise. */
-template <element element_type_>
+template <an_element element_type_>
 inline constexpr std::size_t values_per_element = 1;
 template <>
 inline constexpr std::size_t values_per_element<i4x2_t> = 2;
@@ -395,7 +395,7 @@ inline uform_bytes_view_t bytes_view(std::span<std::uint8_t const> bytes) noexce
  *  The caller owns both spans: as an input, it keeps them alive until the call is final; as an
  *  output, it reads the call's arena until the arena's next call.
  */
-template <element element_type_>
+template <an_element element_type_>
 struct tape_view {
     std::span<element_type_ const> elements {};
     std::span<std::size_t const> offsets {};
@@ -426,7 +426,7 @@ struct tape_view {
  *  Gathering copies every element once, which a caller already holding a tape skips by passing its
  *  @c tape_view directly. The answer views both spans, so they outlive every call it is passed to.
  */
-template <element element_type_, std::ranges::sized_range items_type_>
+template <an_element element_type_, std::ranges::sized_range items_type_>
 expected<tape_view<element_type_>> gathered(items_type_ const& items, std::span<std::size_t> offsets,
                                             std::span<element_type_> elements) noexcept {
     std::size_t const count = std::ranges::size(items);
@@ -456,7 +456,7 @@ struct written_rows_t {
     std::size_t written = 0;
 
     /** The row at @p position, below @c written, or empty when the rows hold another scalar. */
-    template <element element_type_>
+    template <an_element element_type_>
     std::span<element_type_ const> row(std::size_t position) const noexcept {
         if (view.scalar != scalar_of<element_type_>) return {};
         std::byte const* const first = static_cast<std::byte const*>(view.data) + position * view.stride;
@@ -495,7 +495,7 @@ struct written_rows_tape_t {
 
 /** A progress handler: hears units completed of a total and answers whether the call goes on. */
 template <typename handler_type_>
-concept progress_handler =
+concept a_progress_handler =
     std::is_nothrow_invocable_r_v<uform_continuation_t, handler_type_&, std::size_t, std::size_t>;
 
 /** A progress handler the caller keeps for one call, passed as its own state; empty hears
@@ -512,7 +512,7 @@ class progress_t {
     progress_t() noexcept = default;
 
     /** Hears @p handler after each of @p steps slices of a batch verb; zero derives. */
-    template <progress_handler handler_type_>
+    template <a_progress_handler handler_type_>
     progress_t(handler_type_& handler, std::size_t steps = 0) noexcept
         : raw_ {&trampoline_<handler_type_>, &handler, steps} {}
 

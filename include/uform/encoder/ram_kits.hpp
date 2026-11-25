@@ -15,8 +15,8 @@
  *
  *  Every kit runs BFloat16 products, and E4M3 ones where its capability has them: precision is a
  *  runtime value of the tower, never a type, so a class whose products kit has no E4M3 kernel
- *  refuses an E4M3 load, as @c e4m3_products tells. Where a whole ISA family lacks a kernel, its
- *  kits compose the operation from the family's own kernels, as @c mrope rotates without
+ *  refuses an E4M3 load, as @c an_e4m3_products_kit tells. Where a whole ISA family lacks a kernel,
+ *  its kits compose the operation from the family's own kernels, as @c mrope rotates without
  *  @c rope_bf16 , or, with nothing to compose from, reuse the serial kit's row, the only place a
  *  @c _serial kernel is named.
  *
@@ -61,11 +61,11 @@ struct highest_kit<caps_, floor_, head_, tail_...> {
 /** Whether a products kit has E4M3 products; a class whose kit has none refuses E4M3 loads
  *  rather than fall to serial code. */
 template <typename products_kit_type_>
-concept e4m3_products = requires { products_kit_type_::multiply_e4m3; };
+concept an_e4m3_products_kit = requires { products_kit_type_::multiply_e4m3; };
 
 /** Whether an element-wise kit has NumKong's rotation; @c mrope composes one without it. */
 template <typename elementwise_kit_type_>
-concept rope_rotations = requires { elementwise_kit_type_::rope_bf16; };
+concept a_rope_rotating_kit = requires { elementwise_kit_type_::rope_bf16; };
 
 #pragma region Products
 
@@ -1060,7 +1060,7 @@ template <typename elementwise_kit_type_>
     nk_status_t status = elementwise_kit_type_::cosine_f32(angle, pairs, cosine, nullptr);
     if (status == nk_success_k) status = elementwise_kit_type_::sine_f32(angle, pairs, sine, nullptr);
     nk_bf16_t* const rotated = values.row(row).data() + role_offset;
-    if constexpr (rope_rotations<elementwise_kit_type_>) {
+    if constexpr (a_rope_rotating_kit<elementwise_kit_type_>) {
         std::size_t const stride = values.extent(1) * sizeof(nk_bf16_t);
         if (status == nk_success_k)
             status = elementwise_kit_type_::rope_bf16(rotated, cosine, sine, rotated, 1, heads, head_width, stride,

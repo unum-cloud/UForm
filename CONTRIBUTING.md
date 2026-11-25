@@ -114,7 +114,7 @@ The pre-commit hook refuses a namespace no directory backs and a nameless one.
 
 ### Templates and Macros
 
-Every template head and argument list is spelled out where it is used, and constraints are named C++20 concepts, like `task_callback` in `include/uform/utilities/ram_device.hpp`.
+Every template head and argument list is spelled out where it is used, and constraints are named C++20 concepts, `a_`/`an_` noun phrases like `a_model_naming_call` in `src/lib.hpp`, with `an_` before a vowel sound, as `an_arena_naming_call` has.
 A requires-clause parenthesizes only what the grammar needs, and never opens with a negation, since the constrained overload already wins wherever its concept holds.
 Macros are object-like: include guards, configuration flags such as `UFORM_TARGET_<CLASS>`, and the `UFORM_EXPORT` marker; the hook refuses a function-like one.
 Preprocessor conditionals nest two levels deep at most beside the include guard, no `#elif` chain sits inside another, and the `#endif` closing a pair names its condition, as `#endif // NUMKONG_TARGET_HASWELL` does.
@@ -371,6 +371,29 @@ A comment that explains the line pins it just as well, and a bare `//` on a memb
 - A commit message names only what its diff shows.
 - A wave never re-wraps or rewords comments it does not otherwise touch.
 - A commit touching `.cu`, `.cuh`, `.hip` or `.metal` names the box that built and ran it, or says none did.
+
+## Lean State
+
+A type holds only what it cannot recompute, and names each part for what it holds.
+These rules are shared by every sibling library, and the pre-commit hook enforces each rule that names a check.
+
+- Members are named for what they hold, never for their type.
+  Write `request->call` or `call->kept`, never `call->call` or `file.file`.
+  Checked by `check_self_repeat_access`.
+- Derived state is a method, not a field.
+  A count, mask or capacity that follows from other members is computed when asked, so it can never disagree with them.
+- One fact, one constant.
+  Every `_k` constant states its derivation in its docblock, or says "measured" and where, and no other constant restates it.
+- An owner that never moves holds its parts by value.
+  A pointer is for a part that outlives its owner, moves apart from it, or is shared beyond it.
+- Empty allocators take no bytes.
+  An allocator member is declared `[[no_unique_address]]`, so a container over a stateless allocator is no larger than its own state.
+  Checked by `check_empty_member_bytes`.
+- No wrapper without its own state or invariant.
+  A type that only forwards to one member is a name for that member, so use an alias or a function instead.
+- Concepts are `a_`/`an_` noun phrases.
+  A concept names what satisfies it, as `an_allocator` or `a_task_callback`: `an_` before a vowel sound, singular, with no `is_` or `has_` prefix and no `_concept` or `_t` suffix.
+  Checked by `check_concept_names`.
 
 ## Test Suites
 

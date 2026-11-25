@@ -15,20 +15,20 @@ using namespace unum::uform;
 
 /** A verb creating a mesh or a trainer, whose output this build leaves null. */
 template <typename arguments_type_>
-concept creates_mesh = requires(arguments_type_& arguments) { *arguments.mesh = nullptr; };
+concept a_mesh_creating_call = requires(arguments_type_& arguments) { *arguments.mesh = nullptr; };
 template <typename arguments_type_>
-concept creates_trainer = requires(arguments_type_& arguments) { *arguments.trainer = nullptr; };
+concept a_trainer_creating_call = requires(arguments_type_& arguments) { *arguments.trainer = nullptr; };
 template <typename arguments_type_>
-concept steps_trainer = std::same_as<decltype(arguments_type_::trainer), uform_trainer_t>;
+concept a_trainer_stepping_call = std::same_as<decltype(arguments_type_::trainer), uform_trainer_t>;
 
 /** Finish a training verb this build cannot run, leaving every handle it would create null. */
 template <auto verb_, typename arguments_type_>
 static void refuse(arguments_type_* arguments) noexcept {
     if (submitted<verb_>(arguments)) return;
     call_outcome_t outcome(*arguments);
-    if constexpr (creates_mesh<arguments_type_>) *arguments->mesh = nullptr;
-    if constexpr (creates_trainer<arguments_type_>) *arguments->trainer = nullptr;
-    if constexpr (steps_trainer<arguments_type_>)
+    if constexpr (a_mesh_creating_call<arguments_type_>) *arguments->mesh = nullptr;
+    if constexpr (a_trainer_creating_call<arguments_type_>) *arguments->trainer = nullptr;
+    if constexpr (a_trainer_stepping_call<arguments_type_>)
         if (!arguments->trainer)
             return propagate_error(uform_status_uninitialized_k, outcome, "The trainer must not be null"), void();
     if (!arguments->executor || !std::holds_alternative<vram_executor_t>(arguments->executor->executor))

@@ -1589,10 +1589,12 @@ struct infiniband_all_to_all {
 
 #endif // UFORM_WITH_INFINIBAND
 
-/** The three InfiniBand buffers share the unified enqueue-only shape — a drifted
+/*  The three InfiniBand buffers share the unified enqueue-only shape — a drifted
  *  signature fails here. */
-static_assert(collective_buffer<infiniband_all_reduce<f32_t>>, "infiniband_all_reduce must model collective_buffer");
-static_assert(collective_buffer<infiniband_all_gather<bf16_t>>, "infiniband_all_gather must model collective_buffer");
-static_assert(collective_buffer<infiniband_all_to_all<b8_t>>, "infiniband_all_to_all must model collective_buffer");
+static_assert(a_collective_buffer<infiniband_all_reduce<f32_t>>,
+              "infiniband_all_reduce must model a_collective_buffer");
+static_assert(a_collective_buffer<infiniband_all_gather<bf16_t>>,
+              "infiniband_all_gather must model a_collective_buffer");
+static_assert(a_collective_buffer<infiniband_all_to_all<b8_t>>, "infiniband_all_to_all must model a_collective_buffer");
 
 } // namespace unum::uform::utilities

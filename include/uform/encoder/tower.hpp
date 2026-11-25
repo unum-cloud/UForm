@@ -41,7 +41,7 @@
 #include "uform/utilities/types.hpp"              // `expected`, `expected_t`, the scalar aliases, `st::basic_vector`
 #include "uform/encoder/entries.hpp"              // `rope_angles_t`, `segment_layout_t`, `e4m3_range_k`
 #include "uform/encoder/geometry.hpp"             // `geometry_t`
-#include "uform/encoder/ram_kits.hpp" // `e4m3_products`, `quantize_tokens_e4m3` — the host staging of a load
+#include "uform/encoder/ram_kits.hpp" // `an_e4m3_products_kit`, `quantize_tokens_e4m3` — the host staging of a load
 
 namespace unum::uform::encoder {
 
@@ -364,7 +364,7 @@ template <typename products_kit_type_, typename staging_kit_type_, typename plac
     nk_size_t bytes = 0;
     nk_status_t status = nk_success_k;
     if (precision == precision_t::bf16_k) status = products_kit_type_::pack_size_bf16(outputs, inputs, &bytes);
-    else if constexpr (e4m3_products<products_kit_type_>)
+    else if constexpr (an_e4m3_products_kit<products_kit_type_>)
         status = products_kit_type_::pack_size_e4m3(outputs, inputs, &bytes);
     else return expected_t::fail(uu::status_code_t::unsupported_k, "The class has no E4M3 products");
     if (status != nk_success_k)
@@ -381,7 +381,7 @@ template <typename products_kit_type_, typename staging_kit_type_, typename plac
                                                      packed.bytes.data(), 0, outputs, placer.stream),
                        "packing");
     }
-    if constexpr (e4m3_products<products_kit_type_>) {
+    if constexpr (an_e4m3_products_kit<products_kit_type_>) {
         st::basic_vector<f32_t> wide;
         st::basic_vector<nk_e4m3_t> shadow;
         if (st::failed(wide.resize(st::assume_uninitialized, scalars)) ||
@@ -634,7 +634,7 @@ template <typename steps_type_>
                 return products_kit_t::multiply_bf16(static_cast<nk_bf16_t const*>(tile_inputs), weight.bytes.data(),
                                                      tile, count, outputs, inputs, stride, products.stride_bytes(0),
                                                      nullptr, 0, stream);
-            if constexpr (e4m3_products<products_kit_t>)
+            if constexpr (an_e4m3_products_kit<products_kit_t>)
                 return products_kit_t::multiply_e4m3(static_cast<nk_e4m3_t const*>(tile_inputs), weight.bytes.data(),
                                                      tile, count, outputs, inputs, stride, products.stride_bytes(0),
                                                      nullptr, 0, stream);

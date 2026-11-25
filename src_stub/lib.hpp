@@ -194,13 +194,13 @@ bool hold_arena(uform_arena_t arena, uform_outcome_t const* call);
 
 /** Arguments naming a model, an arena, a mesh or a trainer, each a handle the call may hold. */
 template <typename arguments_type_>
-concept names_model = requires(arguments_type_ const& arguments) { arguments.model; };
+concept a_model_naming_call = requires(arguments_type_ const& arguments) { arguments.model; };
 template <typename arguments_type_>
-concept names_arena = requires(arguments_type_ const& arguments) { arguments.arena; };
+concept an_arena_naming_call = requires(arguments_type_ const& arguments) { arguments.arena; };
 template <typename arguments_type_>
-concept names_mesh = requires(arguments_type_ const& arguments) { arguments.mesh; };
+concept a_mesh_naming_call = requires(arguments_type_ const& arguments) { arguments.mesh; };
 template <typename arguments_type_>
-concept names_trainer = requires(arguments_type_ const& arguments) { arguments.trainer; };
+concept a_trainer_naming_call = requires(arguments_type_ const& arguments) { arguments.trainer; };
 
 /** Collects @c call_t::handles from a verb's @p arguments, skipping the outputs, which name
  *  no handle yet. */
@@ -210,10 +210,10 @@ std::vector<void const*> handles_used_by(arguments_ const& arguments) {
     auto const add = [&](auto handle) {
         if constexpr (!std::is_pointer_v<std::remove_pointer_t<decltype(handle)>>) handles.push_back(handle);
     };
-    if constexpr (names_model<arguments_>) add(arguments.model);
-    if constexpr (names_arena<arguments_>) add(arguments.arena);
-    if constexpr (names_mesh<arguments_>) add(arguments.mesh);
-    if constexpr (names_trainer<arguments_>) add(arguments.trainer);
+    if constexpr (a_model_naming_call<arguments_>) add(arguments.model);
+    if constexpr (an_arena_naming_call<arguments_>) add(arguments.arena);
+    if constexpr (a_mesh_naming_call<arguments_>) add(arguments.mesh);
+    if constexpr (a_trainer_naming_call<arguments_>) add(arguments.trainer);
     return handles;
 }
 

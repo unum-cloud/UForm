@@ -253,7 +253,7 @@ static util::expected<util::checkpoint_to_load_t> view_checkpoint(uform_bytes_vi
 
 /** A load naming its checkpoint by path, which a C string ends at its first NUL. */
 template <typename arguments_type_>
-concept loads_from_path = requires(arguments_type_ const& arguments) { arguments.path; };
+concept a_path_naming_load = requires(arguments_type_ const& arguments) { arguments.path; };
 
 /** The refusals every load shares, clearing the output first so a refused load leaves no model. */
 template <typename arguments_type_>
@@ -264,7 +264,7 @@ static bool rejects_load(arguments_type_ const& arguments, uform_bytes_view_t so
     *arguments.model = nullptr;
     if (!source.data || !source.length)
         return !propagate_error(uform_status_invalid_argument_k, outcome, "The checkpoint must not be empty");
-    if constexpr (loads_from_path<arguments_type_>) // a NUL inside the path names another file
+    if constexpr (a_path_naming_load<arguments_type_>) // a NUL inside the path names another file
         if (std::memchr(source.data, 0, source.length))
             return !propagate_error(uform_status_invalid_argument_k, outcome, "The checkpoint path holds a NUL byte");
     return !precision_of(arguments.quantization, precision, outcome);

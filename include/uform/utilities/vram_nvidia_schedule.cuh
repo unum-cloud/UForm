@@ -945,7 +945,7 @@ struct switch_to_gpu_t {
  *  @c static_assert s it, so a drifted signature fails at compile time and generic code (mixer,
  *  telemetry, tests) can name any collective uniformly. */
 template <typename buffer_type_>
-concept collective_buffer = requires(buffer_type_ buffer, gpu_stream_t& stream) {
+concept a_collective_buffer = requires(buffer_type_ buffer, gpu_stream_t& stream) {
     typename buffer_type_::value_type;
     { buffer(stream) };
 };

@@ -102,14 +102,14 @@ class trainer {
 
   public:
     trainer() noexcept
-        requires owns_handle<receiver_type_>
+        requires an_owning_receiver<receiver_type_>
     = default;
 
     uform_trainer_t handle() const noexcept { return receiver_.handle(); }
 
     /** The output field a lifecycle verb writes the new handle into. */
     uform_trainer_t* handle_field() noexcept
-        requires owns_handle<receiver_type_>
+        requires an_owning_receiver<receiver_type_>
     {
         return receiver_.handle_field();
     }
@@ -193,7 +193,7 @@ class trainer {
     /** Builds one replica per device of the executor @p arguments names and starts or resumes the
      *  run, blocking until every process of the run has. */
     static expected<trainer> init_vram(uform_trainer_init_vram_t arguments) noexcept
-        requires owns_handle<receiver_type_>
+        requires an_owning_receiver<receiver_type_>
     {
         arguments.completion = uform_completion_blocking_k;
         return opened_<trainer>(uform_trainer_init_vram, arguments, &uform_trainer_init_vram_t::trainer);
