@@ -81,7 +81,7 @@ export class Mesh implements Disposable {
     return this.compiled.describe();
   }
 
-  /** Leaves the mesh; every trainer holding it must be freed first. Calls `uform_mesh_free`. */
+  /** Leaves the mesh, which lives on while a trainer holds it. Calls `uform_mesh_free`. */
   free(): void {
     this.compiled.free();
   }

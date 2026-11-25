@@ -28,8 +28,8 @@
 
 namespace unum::uform {
 
-/** Owns one process's place among the processes of a run; every trainer made over it must be
- *  freed first. */
+/** Owns one process's place among the processes of a run; each trainer made over it holds it, so
+ *  either may be freed first. */
 class mesh_t {
     owner<uform_mesh_t, uform_mesh_free> owner_;
 

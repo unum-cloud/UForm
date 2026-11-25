@@ -40,35 +40,33 @@ using util::optimizer_step_t;
 using util::switch_to_gpu_t;
 using util::u32_t;
 
-/** What @c uform_mesh_t owns: the bootstrapped mesh over its executor's devices, and how many
- *  trainers use it. */
+/** What @c uform_mesh_t owns: the bootstrapped mesh over its executor's devices, and who holds
+ *  it. */
 struct uform_mesh_handle_t {
     uform_executor_t executor = nullptr;
 
-    /** Trainers using the mesh, touched through the standard atomic reference; a free
-     *  waits for zero. */
-    u64_t trainers = 0;
+    /** The holds on the mesh, its maker's and one per trainer over it, touched through the
+     *  standard atomic reference; the last to leave deletes it. */
+    u32_t holds = 1;
 
     /** Executor calls naming the mesh that have not ended, which its free and description wait
      *  out. */
-    u64_t named_calls = 0;
+    u32_t named_calls = 0;
 
     /** Placed with the handle and never moved, as the trainers over it address it. */
     ut::mesh_t engine;
 };
 
 /** What @c uform_trainer_t owns: its run, the items source feeding it, and the host columns a step
- *  converts into; the mesh is the caller's own or a one-process mesh the trainer owns, whose
- *  executor the trainer runs on. */
+ *  converts into; it holds its mesh, the caller's or a one-process mesh of its own, whose executor
+ *  the trainer runs on. */
 struct uform_trainer_handle_t {
-
-    /** Declared first, so an owned mesh dies after the run and the items over it. */
-    std::variant<uform_mesh_t, uform_mesh_handle_t> mesh;
+    uform_mesh_t mesh = nullptr;
     ut::trainer_t run;
     ut::items_source_t items;
 
     /** Executor calls naming the trainer that have not ended, which its free waits out. */
-    u64_t named_calls = 0;
+    u32_t named_calls = 0;
 
     /** One step's modalities and sides in the engine's spelling, and its embeddings before they
      *  land in the arena. */
@@ -100,10 +98,9 @@ struct uform_trainer_handle_t {
     return numkong_capabilities_of(std::get<vram_executor_t>(executor->device).gpu_class);
 }
 
-/** The mesh a trainer runs over, the caller's or its own. */
-[[nodiscard]] static uform_mesh_handle_t& mesh_of(uform_trainer_handle_t& trainer) noexcept {
-    if (uform_mesh_t const* caller_mesh = std::get_if<uform_mesh_t>(&trainer.mesh)) return **caller_mesh;
-    return std::get<uform_mesh_handle_t>(trainer.mesh);
+/** Drops one hold on @p mesh , deleting it with the last. */
+static void leave_mesh(uform_mesh_t mesh) noexcept {
+    if (fu::standard_atomic_ref<u32_t> {mesh->holds}.fetch_sub(1, std::memory_order_acq_rel) == 1) delete mesh;
 }
 
 /** The static message an outcome holds for a fault a GPU recorded before it trapped. */
@@ -419,7 +416,7 @@ UFORM_EXPORT void uform_mesh_describe(uform_mesh_describe_t* arguments) {
         return propagate_error(uform_status_uninitialized_k, outcome, "The mesh must not be null"), void();
     if (!arguments->description)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The description must not be null"), void();
-    wait_named_calls(arguments->mesh->named_calls);
+    host_verbs().wait_named_calls(&arguments->mesh->named_calls);
     mesh_topology_t const& topology = arguments->mesh->engine.topology;
     mesh_shape_t const& shape = topology.shape;
     st::basic_vector<i32_t> devices;
@@ -441,11 +438,8 @@ UFORM_EXPORT void uform_mesh_describe(uform_mesh_describe_t* arguments) {
 
 UFORM_EXPORT void uform_mesh_free(uform_mesh_t mesh) {
     if (!mesh) return;
-    wait_named_calls(mesh->named_calls);
-    fu::standard_atomic_ref<u64_t> trainers {mesh->trainers};
-    for (u64_t seen = trainers.load(std::memory_order_acquire); seen; seen = trainers.load(std::memory_order_acquire))
-        mesh->executor->host_verbs->wait(mesh->trainers, seen);
-    delete mesh;
+    host_verbs().wait_named_calls(&mesh->named_calls);
+    leave_mesh(mesh);
 }
 
 UFORM_EXPORT void uform_trainer_init_vram(uform_trainer_init_vram_t* arguments) {
@@ -464,16 +458,22 @@ UFORM_EXPORT void uform_trainer_init_vram(uform_trainer_init_vram_t* arguments) 
     if (holds_nul(arguments->resume))
         return propagate_error(uform_status_invalid_argument_k, outcome, "The resume path holds a NUL byte"), void();
 
+    // Declared before the trainer, so a mesh of its own dies after the run and the items over it
+    std::unique_ptr<uform_mesh_handle_t> owned;
     std::unique_ptr<uform_trainer_handle_t> handle {new (std::nothrow) uform_trainer_handle_t {}};
     if (!handle)
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the trainer"), void();
-    if (arguments->mesh) handle->mesh = arguments->mesh;
-    else if (!bootstrap(handle->mesh.emplace<uform_mesh_handle_t>(), executor, uform_mesh_options_t {}, outcome))
-        return;
+    if (!arguments->mesh) {
+        owned.reset(new (std::nothrow) uform_mesh_handle_t {});
+        if (!owned)
+            return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the mesh"), void();
+        if (!bootstrap(*owned, executor, uform_mesh_options_t {}, outcome)) return;
+    }
+    handle->mesh = arguments->mesh ? arguments->mesh : owned.get();
     st::basic_vector<i32_t> devices;
     if (!devices_of(executor, devices))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the trainer"), void();
-    if (expected_t const built = ut::trainer_t::make(handle->run, mesh_of(*handle).engine, config, devices,
+    if (expected_t const built = ut::trainer_t::make(handle->run, handle->mesh->engine, config, devices,
                                                      ut::gpu_numerics_of(capabilities_of(executor)));
         !built)
         return propagate_train_error(built, arguments->mesh, outcome, build_failures_k), void();
@@ -492,7 +492,8 @@ UFORM_EXPORT void uform_trainer_init_vram(uform_trainer_init_vram_t* arguments) 
         st::failed(handle->embeddings.resize(segments * config.hidden * sizeof(f32_t))))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the step columns"), void();
     if (arguments->mesh)
-        fu::standard_atomic_ref<u64_t> {arguments->mesh->trainers}.fetch_add(1, std::memory_order_acq_rel);
+        fu::standard_atomic_ref<u32_t> {arguments->mesh->holds}.fetch_add(1, std::memory_order_relaxed);
+    owned.release(); // the trainer holds its own mesh's one hold
     *arguments->trainer = handle.release();
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
@@ -503,7 +504,7 @@ UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t* arguments) {
     uform_arena_t const requested = arguments->embeddings ? arguments->arena : nullptr;
     uform_trainer_handle_t* const handle = arguments->trainer;
     if (!handle) return propagate_error(uform_status_uninitialized_k, outcome, "The trainer must not be null"), void();
-    if (mesh_of(*handle).executor != arguments->executor)
+    if (handle->mesh->executor != arguments->executor)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The trainer runs on its own executor"),
                void();
     ut::trainer_t& trainer = handle->run;
@@ -580,7 +581,7 @@ UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t* arguments) {
     optimizer_step_t const optimizer_step {trainer.completed_steps};
     ut::step_report_t report;
     if (expected_t const stepped = trainer.step(ut::batch_source_of(source), optimizer_step, report); !stepped)
-        return propagate_train_error(stepped, &mesh_of(*handle), outcome, step_failures_k), void();
+        return propagate_train_error(stepped, handle->mesh, outcome, step_failures_k), void();
     if (arguments->stats) {
         ut::telemetry_t const telemetry = trainer.telemetry(optimizer_step);
         *arguments->stats = {optimizer_step.ordinal + 1u,
@@ -608,13 +609,13 @@ UFORM_EXPORT void uform_trainer_save(uform_trainer_save_t* arguments) {
     call_outcome_t outcome(*arguments);
     uform_trainer_handle_t* const handle = arguments->trainer;
     if (!handle) return propagate_error(uform_status_uninitialized_k, outcome, "The trainer must not be null"), void();
-    if (mesh_of(*handle).executor != arguments->executor || !arguments->path.length)
+    if (handle->mesh->executor != arguments->executor || !arguments->path.length)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The trainer, its executor and a path"),
                void();
     if (holds_nul(arguments->path))
         return propagate_error(uform_status_invalid_argument_k, outcome, "The path holds a NUL byte"), void();
     if (expected_t const saved = handle->run.save(text_of(arguments->path)); !saved)
-        return propagate_train_error(saved, &mesh_of(*handle), outcome, save_failures_k), void();
+        return propagate_train_error(saved, handle->mesh, outcome, save_failures_k), void();
     std::size_t const tensors = handle->run.replicas[0].weights.size();
     progress_ticks_t ticks(arguments->progress, tensors);
     (void)ticks(tensors);
@@ -623,11 +624,10 @@ UFORM_EXPORT void uform_trainer_save(uform_trainer_save_t* arguments) {
 
 UFORM_EXPORT void uform_trainer_free(uform_trainer_t trainer) {
     if (!trainer) return;
-    wait_named_calls(trainer->named_calls);
-    uform_mesh_t const* const caller = std::get_if<uform_mesh_t>(&trainer->mesh);
-    uform_mesh_t const counted = caller ? *caller : nullptr;
-    delete trainer; // the items, then the run, then an owned mesh
-    if (counted) fu::standard_atomic_ref<u64_t> {counted->trainers}.fetch_sub(1, std::memory_order_acq_rel);
+    host_verbs().wait_named_calls(&trainer->named_calls);
+    uform_mesh_t const mesh = trainer->mesh;
+    delete trainer; // the items and the run, before the mesh they run over
+    leave_mesh(mesh);
 }
 
 } // extern "C"

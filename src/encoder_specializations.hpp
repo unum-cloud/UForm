@@ -156,12 +156,15 @@ encoder_verbs<residency_> const* encoder_class_tables<residency_, class_>::find(
     }
 }
 
-template <cpu_class_t cpu_class_>
-void host_class_tables<cpu_class_>::wait(util::u64_t& word, util::u64_t seen) noexcept {
-    using atomic_ref_t = typename atomic_ref_for_cpu_class<cpu_class_>::template type<util::u64_t>;
-    util::u64_t const* const watched = &word;
-    while (atomic_ref_t {word}.load(std::memory_order_acquire) == seen)
-        waiter_of<cpu_class_> {}(watched, seen, std::size_t {0}, fu::wait_capped_k);
+/** Returns @p word as soon as it differs from @p seen , reading it through the atomic reference of
+ *  @p cpu_class_ and waiting between reads through its waiter. */
+template <cpu_class_t cpu_class_, typename value_type_>
+value_type_ wait_while_holds(value_type_ const& word, value_type_ seen) noexcept {
+    typename atomic_ref_for_cpu_class<cpu_class_>::template type<value_type_ const> const watched {word};
+    value_type_ read = watched.load(std::memory_order_acquire);
+    for (; read == seen; read = watched.load(std::memory_order_acquire))
+        waiter_of<cpu_class_> {}(&word, seen, std::size_t {0}, fu::wait_capped_k);
+    return read;
 }
 
 template <cpu_class_t cpu_class_>
@@ -172,7 +175,16 @@ host_verbs_t const* host_class_tables<cpu_class_>::find() noexcept {
                       !std::is_same_v<typename atomic_ref_for_cpu_class<cpu_class_>::template type<util::u64_t>,
                                       typename atomic_ref_for_cpu_class<parent_k>::template type<util::u64_t>>,
                   "A compiled class no longer advances past the one below");
-    static constexpr host_verbs_t verbs_k {&host_class_tables::wait};
+    static constexpr host_verbs_t verbs_k {
+        [](uform_outcome_t const* outcome) noexcept {
+            return wait_while_holds<cpu_class_>(outcome->status, uform_status_deferred_k);
+        },
+        [](call_claim_t const* claim) noexcept { wait_while_holds<cpu_class_>(*claim, call_claim_t::held_k); },
+        [](util::u32_t const* named_calls) noexcept {
+            // Waits out each count it reads, from any nonzero guess, until it reads none
+            for (util::u32_t seen = 1; seen;) seen = wait_while_holds<cpu_class_>(*named_calls, seen);
+        },
+    };
     return &verbs_k;
 }
 

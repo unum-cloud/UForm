@@ -333,7 +333,7 @@ UFORM_EXPORT void uform_model_describe(uform_model_describe_t* arguments) {
 
 UFORM_EXPORT void uform_model_free(uform_model_t model) {
     if (!model) return;
-    wait_named_calls(model->named_calls);
+    host_verbs().wait_named_calls(&model->named_calls);
     delete model;
 }
 

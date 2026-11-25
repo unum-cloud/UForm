@@ -881,8 +881,8 @@ static void test_media_shapes(void) {
     else check_media(&outputs, 1, &model);
 
 #if !UFORM_TEST_STUB // the stand-in decodes nothing, so it encodes any bytes
-    /* Bytes of no image format fail as malformed, the engine's note in place of the status's own
-     *  name. */
+    /* Bytes of no image format fail as malformed, the format sniffer's note in place of the
+     *  status's own name. */
     uint8_t const unrecognized[] = {'n', 'o', 't', ' ', 'a', 'n', ' ', 'i', 'm', 'a', 'g', 'e'};
     size_t const unrecognized_offsets[] = {0, sizeof(unrecognized)};
     memset(&outputs, 0, sizeof(outputs)), memset(&image_stats, 0, sizeof(image_stats));
@@ -898,8 +898,7 @@ static void test_media_shapes(void) {
                                                 .stats = &image_stats});
     if (decodes_files) {
         expect_(outputs.outcome.status == uform_status_malformed_k);
-        expect_(outputs.outcome.message &&
-                strcmp(outputs.outcome.message, uform_status_name(outputs.outcome.status)) != 0);
+        expect_(outputs.outcome.message && strcmp(outputs.outcome.message, "Unrecognized image format") == 0);
     }
 #endif
 

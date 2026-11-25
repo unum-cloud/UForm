@@ -166,8 +166,8 @@ Tensors index by rank, `tensor[row, column]`, and slice through the same subscri
 
 ### Threads and Placement
 
-Host threads come from ForkUnion's `fu::pool_t`, the RAII owner `forkunion/forkunion.hpp` declares over the C ABI, and the machine's topology from `forkunion/forkunion.h`, both reached through `include/uform/utilities/ram_device.hpp`, and nothing else calls a `fu_*` function.
-There `topology_t` harvests the machine through `fu_topology_new`, and `spawn_pool` fills a `fu::pool_t` through its `spawn` or `spawn_near`, allowed only the ForkUnion facilities that `forkunion_allowed_of` grants the executor's CPU ceiling.
+Host threads come from ForkUnion's `fu::pool_t` and the machine's topology from its `fu::topology_t`, the RAII owners `forkunion/forkunion.hpp` declares over the C ABI, both reached through `include/uform/utilities/ram_device.hpp`, and nothing else calls a `fu_*` function.
+There `spawn_pool` fills a `fu::pool_t` over a harvested `fu::topology_t` through its `spawn` or `spawn_near`, allowed only the ForkUnion facilities that `forkunion_allowed_of` grants the executor's CPU ceiling; a build without OS threads runs one thread on the caller and refuses more as unsupported.
 An executor holds its `fu::pool_t` by value, declared last so its threads join before anything they write is freed; a call, a tower step or a site borrows it as `fu::pool_t&`, and a loader, which moves, holds a `fu::pool_t*`.
 Engines, loaders, tools and tests dispatch through it, `for_n` for tasks of similar cost and `for_n_dynamic` for uneven ones, and a dispatch finding the pool busy answers `fu::status_t::contended_k` rather than waiting.
 An empty `fu::pool_t` runs every dispatch on the calling thread, as thread 0: a call without an executor dispatches on one, and its scratch is the arena the call names.
@@ -184,7 +184,7 @@ Shared words follow the Atomics rule above, and `src/lib.hpp` alone picks the pr
 `atomic_ref_for_cpu_class` pairs it with its atomic reference: RCpc or LSE on the Armv8.6 and newer cores, CMPCCXADD on the newest Xeons, Zacas on RISC-V, the ISA 3.0 store atomics on Power and a notifying reference on WebAssembly.
 Each specialization sits under the `FORKUNION_TARGET_<BIT>` verdict of the probe.
 A class whose bit is off falls back to the standard yield and reference, and `forkunion_capabilities_of` reads the bits a class needs off the two types, so a ladder admits it only where the runtime confirms them.
-Engines receive these as template parameters and never spell a class, an instruction or a sleep of their own, while the C layer, compiled once at the baseline, waits through the `host_verbs_t` of its executor's class.
+Engines receive these as template parameters and never spell a class, an instruction or a sleep of their own, while the C layer, compiled once at the baseline, waits on every outcome, claim and named call through `host_verbs()`, the `host_verbs_t` of the newest class the machine admits, picked once per process.
 
 ### Documentation and Comments
 

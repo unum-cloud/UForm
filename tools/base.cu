@@ -146,8 +146,8 @@ using namespace unum::uform::train;
     }
 
     // Counted before the spawn, since a caller-inclusive pool pins this thread to one core.
-    auto [topology, make_topology_status] = topology_t::make();
-    if (!make_topology_status) return fail_out_(make_topology_status.description_.view());
+    fu::topology_t topology;
+    if (fu::failed(topology.harvest())) return fail_out_("Topology discovery failed");
     std::size_t const allowed_cores = topology.logical_cores_count();
     fu::pool_t decoders; // empty, so the calling thread decodes, unless a mixture pairs media
     if (mixture.pairs() || held_out_mixture.pairs())

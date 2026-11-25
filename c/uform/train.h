@@ -488,8 +488,8 @@ typedef struct uform_mesh_describe_t {
 /** Reports a mesh's shape and this process's place in it. */
 UFORM_EXPORT void uform_mesh_describe(uform_mesh_describe_t* arguments);
 
-/** Leaves the mesh; @c NULL is safe, and it cannot fail, so takes no outcome. Every trainer
- *  made over it must be freed first. */
+/** Leaves the mesh; @c NULL is safe, and it cannot fail, so takes no outcome. Each trainer made
+ *  over it holds it, so the last of them and this free, in any order, deletes it. */
 UFORM_EXPORT void uform_mesh_free(uform_mesh_t mesh);
 
 /** The canonical spelling of a multimem tier, as

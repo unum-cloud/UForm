@@ -128,7 +128,7 @@ An executor owns what a call runs on but a model does not: host threads or devic
 
 - `uform_executor_for_ram` creates an executor of host threads, near the one memory domain its `uform_ram_options_t` names or across the machine for none or several, 7/8 of those domains' cores, less the coordinating caller's own, when `threads` is zero.
 - `uform_executor_for_vram` opens one stream on every device of its `uform_vram_options_t`, named by their position in `uform_gpu_devices`, beside host threads for the decoding the devices cannot do, and refuses caller streams with `uform_status_unsupported_k`.
-- `uform_executor_drain` waits until no call holds the executor, then applies the `uform_mood_t` its threads keep until the next call: parked sleeps in the kernel, spinning keeps polling.
+- `uform_executor_drain` waits until no call holds the executor, then holds it as a call would, so a call submitted meanwhile finishes `uform_status_contended_k`, while its devices go idle and it applies the `uform_mood_t` its threads keep until the next call: parked sleeps in the kernel, spinning keeps polling.
 - `uform_executor_free` waits the same way, releases what the executor owns and leaves what the caller owns untouched.
 
 ```c
@@ -271,7 +271,7 @@ printf("%zu dimensions on %s\n", description.dimensions, uform_gpu_class_name(de
 
 Training is GPU-only.
 `uform_mesh_bootstrap` joins this process to a run once, through files in a directory every host sees, and after it processes talk only over NVLink and InfiniBand.
-The mesh is the process-wide half of the transport, owned by the caller and used by every trainer made over it; `uform_mesh_describe` reports the topology every process agreed on, its multimem tier, and the `gpu_class` every GPU of the run dispatches as, the best class its devices load under the executor's ceiling.
+The mesh is the process-wide half of the transport, made by the caller and held by every trainer made over it, so the mesh and its trainers are freed in any order; `uform_mesh_describe` reports the topology every process agreed on, its multimem tier, and the `gpu_class` every GPU of the run dispatches as, the best class its devices load under the executor's ceiling.
 Every process bootstraps with the same count, multicast extent, directory, job and GPU class, or the call reports `uform_status_config_mismatch_k`.
 
 `uform_trainer_init_vram` makes a trainer on a VRAM executor, owning one replica of the tower per device, its gradients, the Adafactor moments, the reconstruction heads and the learnable temperatures.

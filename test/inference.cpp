@@ -443,8 +443,8 @@ int main(int argc, char** argv) {
     auto [geometry, read_status] = geometry_t::from(checkpoint);
     if (!expect_true(read_status, "geometry: {}", read_status.description_)) return finish_test_run();
 
-    auto [topology, make_topology_status] = util::topology_t::make();
-    if (!expect_true(make_topology_status, "topology: {}", make_topology_status.description_)) return finish_test_run();
+    fu::topology_t topology;
+    if (!expect_true(!fu::failed(topology.harvest()), "topology discovery failed")) return finish_test_run();
     fu::pool_t pool;
     if (util::expected_t spawned = util::spawn_pool(pool, topology, 4, fu::caller_inclusive_k, fu_capabilities_all_k);
         !expect_true(spawned, "pool: {}", spawned.description_))

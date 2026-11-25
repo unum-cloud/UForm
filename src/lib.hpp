@@ -25,6 +25,7 @@
 
 #include <cstddef> // `std::size_t`
 
+#include <array>            // `std::array` - the handles a call names
 #include <initializer_list> // `std::initializer_list` - the inputs a call checks against its arena
 #include <limits>           // `std::numeric_limits` - the overflow guard of a typed allocation
 #include <type_traits>      // `std::is_trivially_copyable_v`
@@ -32,6 +33,7 @@
 
 #include <forkunion/atomics.hpp>      // `fu::standard_atomic_ref` & kin - the classes' atomic references
 #include <forkunion/capabilities.hpp> // `fu::x86_pause_t`, `fu::arm64_wfet_t` & waiter kin
+#include <forkunion/topology.hpp>     // `fu::current_thread_id` - the thread running an executor's call
 #include <forkunion/types.hpp>        // `fu::spin_mutex_t`, `fu::wait_capped_k`
 #include <numkong/capabilities.h>     // `nk_capability_t`, `nk_stream_t`
 #include <numkong/memory.h>           // `nk_allocator_t`, `nk_allocator_init_heap`
@@ -40,7 +42,7 @@
 #include "uform/uform.h" // every argument structure
 
 #include "uform/utilities/array.hpp"      // `per_gpu_array`
-#include "uform/utilities/ram_device.hpp" // `spawn_pool`, `topology_t`
+#include "uform/utilities/ram_device.hpp" // `spawn_pool`, `fu::topology_t`
 #include "uform/utilities/types.hpp"      // `status_t`, the integer aliases, `sz::string_view_t`, `st::basic_vector`
 #include "uform/utilities/vram_apple_device.hpp" // `metal_api_t`, `metal_contexts_t`
 #include "uform/encoder/tower.hpp" // `geometry_t`, `precision_t`, `outputs_t` - what a model's towers take
@@ -781,13 +783,25 @@ gpu_class_t pick_gpu_class(gpu_ladder<classes_...>, gpu_device_t const& device, 
     return picked;
 }
 
-/** The verbs one CPU class compiles in its class unit for the C layer, which is compiled once at
- *  the baseline: how its threads wait on a word another thread writes. */
+/** Whether an executor runs no call, or one call from its claim to its end. */
+enum class call_claim_t : util::u32_t {
+    free_k,
+    held_k,
+};
+
+/** The waits one CPU class compiles in its class unit for the C layer, which is compiled once at
+ *  the baseline: each reads its word through the class's atomic reference and waits between reads
+ *  through the class's waiter. */
 struct host_verbs_t {
 
-    /** Returns once @p word no longer holds @p seen, reading it through the class's atomic
-     *  reference and waiting between reads through the class's waiter. */
-    void (*wait)(util::u64_t& word, util::u64_t seen) noexcept;
+    /** Returns the status of @p outcome once it leaves @c uform_status_deferred_k . */
+    uform_status_t (*wait)(uform_outcome_t const* outcome) noexcept;
+
+    /** Returns once no call holds the executor whose claim is @p claim . */
+    void (*wait_while_claimed)(call_claim_t const* claim) noexcept;
+
+    /** Returns once no executor call names the handle whose count is @p named_calls . */
+    void (*wait_named_calls)(util::u32_t const* named_calls) noexcept;
 };
 
 /** The host verbs one class unit compiles, defined in @c encoder_specializations.hpp , which the
@@ -795,7 +809,6 @@ struct host_verbs_t {
 template <cpu_class_t cpu_class_>
 struct host_class_tables {
     static host_verbs_t const* find() noexcept;
-    static void wait(util::u64_t& word, util::u64_t seen) noexcept;
 };
 
 /** The host verbs of the newest compiled class on @p ladder that fits under @p ceiling, one of
@@ -810,6 +823,11 @@ host_verbs_t const* pick_host_verbs(cpu_ladder<classes_...>, cpu_ceiling_t ceili
     (rung.template operator()<classes_>(), ...);
     return picked;
 }
+
+/** The host verbs of the newest compiled class this machine admits, picked once, which every
+ *  outcome, claim and named-call wait of the C layer goes through; defined outside the class units,
+ *  each of which sees only its own class's tables. */
+host_verbs_t const& host_verbs() noexcept;
 
 #pragma endregion Classes
 
@@ -1169,15 +1187,6 @@ using deferred_arguments_t = std::variant<                                      
     uform_mesh_bootstrap_t, uform_trainer_init_vram_t, uform_trainer_step_t, uform_trainer_save_t //
     >;
 
-/** Whether an executor runs no call, or one call from its claim to its end. */
-enum class call_claim_t : util::u32_t {
-    free_k,
-    held_k,
-};
-
-/** The handles one call names, besides its executor, whose frees wait for the call to end. */
-inline constexpr std::size_t named_handles_max_k = 4;
-
 /** The one call that holds an executor, from its claim to its end. */
 struct holding_call_t {
 
@@ -1196,27 +1205,24 @@ struct holding_call_t {
     /** The status the verb body recorded, which @ref end_call publishes. */
     uform_outcome_t recorded {uform_status_internal_k, "The call finished without reporting a status"};
 
-    /** The counts of the handles the call names, raised at the entry, lowered at its end. */
-    util::u64_t* named_calls[named_handles_max_k] {};
+    /** The counts of the handles the call names besides its executor, raised at the entry,
+     *  lowered at its end. */
+    std::array<util::u32_t*, 4> named_calls {};
 
-    /** The body pool thread 0 runs for a delegated call. */
-    void (*delegated_body)(void*) = nullptr;
-
-    /** The kernel ID of the thread running the body, or zero before thread 0 takes it up. */
+    /** The kernel ID of the thread running the body: an eager call's caller, or a delegated one's
+     *  pool thread 0; zero outside the body. */
     util::u64_t body_thread = 0;
 };
 
 /** Lets go of @p arena when the call whose published outcome is @p call holds it. */
 void release_arena(uform_arena_t arena, uform_outcome_t const* call) noexcept;
 
-/** Takes @p executor for one call; false while another call holds it. */
+/** Takes @p executor for one call, once its pool's thread 0 left the last call's slice; false while
+ *  another call holds it. */
 bool take_call_claim(uform_executor_handle_t& executor) noexcept;
 
 /** Whether a caller-exclusive pool backs @p executor , running deferred calls on its threads. */
 bool delegates(uform_executor_handle_t& executor) noexcept;
-
-/** Starts the held call on the pool's thread 0, which runs @p body and ends the call. */
-uform_status_t delegate_call(uform_executor_handle_t& executor, void (*body)(void*)) noexcept;
 
 /** Keeps @p recorded , the body's status, for @ref end_call to publish. */
 void record_status(uform_executor_t executor, uform_outcome_t const& recorded) noexcept;
@@ -1224,29 +1230,28 @@ void record_status(uform_executor_t executor, uform_outcome_t const& recorded) n
 /** Ends the call holding @p executor : the named counts, the claim, then the status. */
 void end_call(uform_executor_handle_t& executor) noexcept;
 
-/** Returns once no executor call names the handle whose count is @p named_calls . */
-void wait_named_calls(util::u64_t& named_calls) noexcept;
+/** Arguments naming a model, an arena, a mesh or a trainer whose count the call raises; outputs for
+ *  handles a call creates, and handles this build never defines, hold no count. */
+template <typename arguments_type_>
+concept a_model_naming_call = requires(arguments_type_& arguments) { arguments.model->named_calls; };
+template <typename arguments_type_>
+concept an_arena_naming_call = requires(arguments_type_& arguments) { arguments.arena->named_calls; };
+template <typename arguments_type_>
+concept a_mesh_naming_call = requires(arguments_type_& arguments) { arguments.mesh->named_calls; };
+template <typename arguments_type_>
+concept a_trainer_naming_call = requires(arguments_type_& arguments) { arguments.trainer->named_calls; };
 
-/** A handle whose frees wait for the calls naming it; outputs for handles a call creates, and
- *  handles this build never defines, hold no count. */
-template <typename handle_type_>
-concept a_counted_handle = requires(handle_type_ handle) { handle->named_calls; };
-
-/** Arguments naming a model, an arena, a mesh or a trainer, each a handle the call may count. */
-template <typename arguments_type_>
-concept a_model_naming_call = requires(arguments_type_& arguments) { arguments.model; };
-template <typename arguments_type_>
-concept an_arena_naming_call = requires(arguments_type_& arguments) { arguments.arena; };
-template <typename arguments_type_>
-concept a_mesh_naming_call = requires(arguments_type_& arguments) { arguments.mesh; };
-template <typename arguments_type_>
-concept a_trainer_naming_call = requires(arguments_type_& arguments) { arguments.trainer; };
+/** Marks the calling thread as the one running @p call 's body. */
+inline void hold_body(holding_call_t& call) noexcept {
+    fu::standard_atomic_ref<util::u64_t>(call.body_thread).store(fu::current_thread_id(), std::memory_order_relaxed);
+}
 
 /** Whether the calling thread runs the body of the call holding @p executor . */
 bool runs_holding_call(uform_executor_handle_t& executor) noexcept;
 
-/** Returns once no call holds @p executor and its pool finished the last one. */
-void wait_while_claimed(uform_executor_handle_t& executor) noexcept;
+/** Takes the claim of @p executor once no call holds it, joining the slice the last call's thread 0
+ *  may still be leaving, so the caller alone joins, parks or frees its pool. */
+void take_idle_claim(uform_executor_handle_t& executor) noexcept;
 
 /**
  *  @brief Every verb's entry: claims the call's executor and runs its body, answering true once the
@@ -1272,12 +1277,10 @@ bool submitted(arguments_type_* arguments) noexcept {
     call.outcome = arguments->outcome;
     call.recorded = {uform_status_internal_k, "The call finished without reporting a status"};
     std::size_t named = 0;
-    auto const name = [&](auto handle) noexcept {
-        if constexpr (a_counted_handle<decltype(handle)>)
-            if (handle) {
-                fu::standard_atomic_ref<util::u64_t> {handle->named_calls}.fetch_add(1, std::memory_order_relaxed);
-                call.named_calls[named++] = &handle->named_calls;
-            }
+    auto const name = [&](auto* handle) noexcept {
+        if (!handle) return;
+        fu::standard_atomic_ref<util::u32_t> {handle->named_calls}.fetch_add(1, std::memory_order_relaxed);
+        call.named_calls[named++] = &handle->named_calls;
     };
     if constexpr (a_model_naming_call<arguments_type_>) name(arguments->model);
     if constexpr (an_arena_naming_call<arguments_type_>) name(arguments->arena);
@@ -1286,18 +1289,25 @@ bool submitted(arguments_type_* arguments) noexcept {
     propagate_pending(arguments->outcome); // before the body or the dispatch, never after
     if (arguments->completion != uform_completion_deferred_k || !delegates(*executor)) {
         fu::standard_atomic_ref<void const*>(call.arguments).store(arguments, std::memory_order_relaxed);
+        hold_body(call);
         verb_(arguments);
         return end_call(*executor), true;
     }
-    void const* const delegated_arguments = &call.delegated_arguments.template emplace<arguments_type_>(*arguments);
-    fu::standard_atomic_ref<void const*>(call.arguments).store(delegated_arguments, std::memory_order_relaxed);
+    auto& copy = call.delegated_arguments.template emplace<arguments_type_>(*arguments);
+    fu::standard_atomic_ref<void const*>(call.arguments).store(&copy, std::memory_order_relaxed);
     using executor_handle_t = std::remove_pointer_t<decltype(arguments->executor)>;
-    uform_status_t const delegated = delegate_call(*executor, [](void* context) noexcept {
-        auto& held = static_cast<executor_handle_t*>(context)->holding_call;
-        verb_(std::get_if<arguments_type_>(&held.delegated_arguments));
-    });
-    if (delegated != uform_status_success_k)
-        call.recorded = {delegated, "The executor's threads run another dispatch"}, end_call(*executor);
+    // Thread 0 runs the whole call in its slice, forking the rest of the pool as it goes
+    fu_for_threads_t const delegated_body = [](fu_lambda_context_t context, std::size_t thread, std::size_t) noexcept {
+        if (thread) return;
+        auto& held = *static_cast<executor_handle_t*>(context);
+        hold_body(held.holding_call);
+        verb_(std::get_if<arguments_type_>(&held.holding_call.delegated_arguments));
+        end_call(held);
+    };
+    // A local token: thread 0 may end the call, and a waiter free the executor, before it lands
+    fu_generation_t generation = 0;
+    if (fu::failed(executor->threads.unsafe_for_threads(delegated_body, executor, generation)))
+        call.recorded = {uform_status_contended_k, "The executor's threads run another dispatch"}, end_call(*executor);
     return true;
 }
 
@@ -1372,10 +1382,6 @@ struct uform_executor_handle_t {
     /** The one call that holds the executor, from its claim to its end. */
     uf::holding_call_t holding_call;
 
-    /** How its callers wait on what its threads write: the verbs of the CPU class they run, a
-     *  static table that outlives the executor. */
-    uf::host_verbs_t const* host_verbs = nullptr;
-
     /** What the threads may run: the machine's masks under the executor's ceiling class. */
     uf::cpu_ceiling_t cpu_ceiling;
 
@@ -1404,7 +1410,7 @@ struct uform_arena_handle_t {
     uform_outcome_t const* holder = nullptr;
 
     /** Executor calls naming the arena that have not ended, which its free waits out. */
-    util::u64_t named_calls = 0;
+    util::u32_t named_calls = 0;
 };
 
 /** What @c uform_model_t owns: the geometry its checkpoint held, the precision its blocks run in,
@@ -1429,7 +1435,7 @@ struct uform_model_handle_t {
     util::per_gpu_array<uf::vram_replica_t> towers;
 
     /** Executor calls naming the model that have not ended, which its free waits out. */
-    util::u64_t named_calls = 0;
+    util::u32_t named_calls = 0;
 
     uform_model_handle_t() noexcept = default;
     uform_model_handle_t(uform_model_handle_t const&) = delete;

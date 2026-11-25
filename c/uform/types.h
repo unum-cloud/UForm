@@ -293,8 +293,8 @@ typedef enum uform_status_t {
      *  of another geometry. */
     uform_status_config_mismatch_k = 13,
 
-    /** The call was refused rather than waited for: another call holds its executor or arena, or a
-     *  drain came from a callback of the call it would wait on. */
+    /** The call was refused rather than waited for: another call or a drain holds its executor,
+     *  another call its arena, or a drain came from a callback of the call it would wait on. */
     uform_status_contended_k = 14,
 
     /** A progress handler asked the call to stop; it unwound and published nothing. */
@@ -785,7 +785,7 @@ typedef struct uform_executor_for_ram_t {
     uform_ram_options_t ram;
 
     /** Threads to spawn; zero takes 7/8 of the cores those domains span, less the coordinating
-     *  caller's own. */
+     *  caller's own. More than one is @c uform_status_unsupported_k in a build without threads. */
     size_t threads;
 } uform_executor_for_ram_t;
 
@@ -860,14 +860,15 @@ typedef struct uform_executor_drain_t {
     uform_mood_t mood;
 } uform_executor_drain_t;
 
-/** Waits until no call holds the executor and its devices are idle, then applies the mood. Reports
- *  only executor-level failures, and @c uform_status_contended_k from a callback of the call it
- *  would wait on. */
+/** Waits until no call holds the executor, then holds it as a call would while its devices go idle
+ *  and it applies the mood. Reports only executor-level failures, and @c uform_status_contended_k
+ *  from a callback of the call it would wait on. */
 UFORM_EXPORT void uform_executor_drain(uform_executor_drain_t* arguments);
 
 /** Waits until no call holds the executor, releases what it owns, its streams included, and frees
  *  it; @c NULL is safe, and it cannot fail, so it takes no outcome. Free every arena it made
- *  before calling it. */
+ *  before calling it, and never call it from a callback of a call on the same executor: it would
+ *  wait on that call forever, which Debug builds assert. */
 UFORM_EXPORT void uform_executor_free(uform_executor_t executor);
 
 /**

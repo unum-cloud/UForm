@@ -1397,11 +1397,11 @@ int main(int argc, char** argv) {
     auto [arena, make_arena_status] = util::gpu_arena_t::make(0, 2ull << 30);
     if (!expect_true(make_arena_status, "gpu arena make: {}", util::to_string(make_arena_status.status_)))
         return finish_test_run();
-    auto [topology, make_topology_status] = util::topology_t::make();
+    fu::topology_t topology;
     fu::pool_t pool;
-    if (!expect_true(
-            make_topology_status && util::spawn_pool(pool, topology, 4, fu::caller_inclusive_k, fu_capabilities_all_k),
-            "the CPU decode pool should spawn"))
+    if (!expect_true(!fu::failed(topology.harvest()) &&
+                         util::spawn_pool(pool, topology, 4, fu::caller_inclusive_k, fu_capabilities_all_k),
+                     "the CPU decode pool should spawn"))
         return finish_test_run();
 
     // Tier C — the coordinate oracle, no external media.

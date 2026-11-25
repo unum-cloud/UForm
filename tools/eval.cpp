@@ -64,7 +64,7 @@
 
 #include "uform/utilities/safetensors_format.hpp" // `checkpoint_to_load_t`, `checkpoint_to_save_t` — the calibrated copy
 #include "uform/utilities/types.hpp"              // `divide_round_up`
-#include "uform/utilities/ram_device.hpp"         // `spawn_pool`, `topology_t`
+#include "uform/utilities/ram_device.hpp"         // `spawn_pool`, `fu::topology_t`
 
 #include "arguments.hpp" // `flag_t`, `parse_or_exit`, `stop_requested`, `verb_phase_t`
 
@@ -72,7 +72,6 @@ namespace fu = ashvardanian::forkunion;
 namespace st = ashvardanian::smashtable;
 namespace util = unum::uform::utilities;
 using util::expected;
-using util::topology_t;
 using namespace unum::uform::tools;
 
 /** Append @p count trivially copyable @p items onto @p values , or report the refusal. */
@@ -475,8 +474,8 @@ static constexpr std::size_t score_block_rows_k = 64;
     for (std::size_t query = 0; query <= queries; ++query) owner_offsets[query] = query;
     nk_capability_t capabilities = 0;
     if (nk_capabilities_enabled_cpu(&capabilities) != nk_success_k) return false;
-    auto [topology, make_topology_status] = topology_t::make();
-    if (!make_topology_status) return false;
+    fu::topology_t topology;
+    if (fu::failed(topology.harvest())) return false;
     fu::pool_t pool;
     if (!util::spawn_pool(pool, topology, encoder.threads ? encoder.threads : topology.logical_cores_count(),
                           fu::caller_inclusive_k, fu_capabilities_all_k))

@@ -31,6 +31,7 @@ UFORM_EXPORT void uform_text_encode(uform_text_encode_t *arguments) {
 
 - `submitted<verb>` claims the executor for the call and runs the verb's body: here for a blocking call or a caller-inclusive pool, on pool thread 0 for a deferred one, through `fu::pool_t::unsafe_for_threads` with a slice that runs the whole call there, over a copy of the arguments held in the executor's `holding_call`. The body is the same verb meeting its own arguments again.
 - `call_outcome_t` collects every step's status privately and on unwinding releases the arena; without an executor it stores the final status itself, and with one it hands the status to `end_call`, which lowers the named handles' counts, frees the executor, and only then stores it, so a path that forgot to report finishes `uform_status_internal_k` rather than hanging its waiters.
+- Only the claim holder joins or parks the pool: `take_call_claim` joins the slice the last call's thread 0 may still be leaving, and `uform_executor_drain` and `uform_executor_free` take the claim through `take_idle_claim` before they park or free it.
 - `claim_arena` refuses a null arena, one of another residency or executor, one another call holds, and inputs inside it, then rewinds it for the call's outputs.
 
 A verb runs the variant its model picked at load through that variant's table, and never asks which residency or vendor the model holds.
@@ -52,7 +53,7 @@ Rubin compiles no unit of its own, so its devices pick `nvidia_blackwell`.
 A monoversioned build keeps one class per vendor, and `compiled_rungs` asserts each ladder compiles at most one rung.
 
 - `pick_cpu_ceiling` is the one caller of NumKong's and ForkUnion's CPU detection: it reads the detected masks, grants the AMX tiles there and drops them where the kernel refuses, then intersects them with the masks of the ceiling class, refusing a value no class takes as an invalid argument and an intersection no compiled class fits as unsupported, so a ceiling above the machine runs as the machine.
-- `uform_executor_for_ram` and `uform_executor_for_vram` keep their ceiling and the `host_verbs_t` of the newest class under it, which the C layer waits through.
+- `host_verbs()` picks once per process the `host_verbs_t` of the newest class the machine admits, which every wait of the C layer goes through, while `uform_executor_for_ram` and `uform_executor_for_vram` keep their own ceiling.
 - `uform_model_load_ram` walks `pick_cpu_variant` to the newest rung with `cpu_class_compiled` and `cpu_rung_fits` under the load's ceiling, which `pick_cpu_ceiling` made sure exists.
 - A monoversioned build compiles no `serial` unit and no named class, so a ceiling below its masks is refused rather than run on them.
 - A rung fits when its two masks are subsets of the ceiling's, so a ceiling the machine runs behaves as running on a machine of that class.
@@ -64,7 +65,7 @@ A monoversioned build keeps one class per vendor, and `compiled_rungs` asserts e
 
 `waiter_for_cpu_class` and `atomic_ref_for_cpu_class` in `lib.hpp` are the one place a CPU class meets its synchronization primitives.
 Each specialization is gated by the `FORKUNION_TARGET_<BIT>` verdict of ForkUnion's probe, so the class units and the dispatch unit name the same rungs, and a class whose bit is off takes the standard yield and the standard atomic reference.
-`ram_tower_of` hands the class's atomic reference to the host tower, and `host_class_tables<class>::wait` reads a word through that reference between calls of the class's waiter, which is how an executor's callers wait.
+`ram_tower_of` hands the class's atomic reference to the host tower, and the waits of `host_class_tables<class>` read a word through that reference between calls of the class's waiter, which is how the callers of every executor wait on an outcome, a claim or a handle's named calls.
 The C layer itself is compiled at the baseline, so the outcome words it stores go through `fu::standard_atomic_ref`, which every class's waiter reads.
 
 ## Variant Tables
