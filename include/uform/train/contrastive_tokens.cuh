@@ -337,7 +337,7 @@ struct distributed_contrastive_tokens_t {
     [[nodiscard]] static expected<distributed_contrastive_tokens_t> make(
         multimem_domain_t& domain, colocated_domain_t& colocated, std::span<gpu_arena_t> arenas,
         std::span<gpu_stream_t> streams, contrastive_tokens_config_t config, gpu_numerics_t const& numerics,
-        f64_t timeout_seconds = 120.0) noexcept;
+        f64_t timeout_seconds = peer_timeout_seconds_k) noexcept;
 
     /** One step over every local GPU, enqueued phase by phase across @p inputs and @p streams . */
     [[nodiscard]] expected_t operator()(std::span<gpu_tokens_inputs_t const> inputs,

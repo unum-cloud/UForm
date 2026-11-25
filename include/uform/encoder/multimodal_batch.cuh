@@ -105,12 +105,10 @@ struct multimodal_batch_mixer_t {
      *  @param[in] timeout_seconds The coordinate-exchange deadline handed to
      *      each all-gather wiring.
      */
-    [[nodiscard]] static expected<multimodal_batch_mixer_t> make(multimem_domain_t& multimem,
-                                                                 colocated_domain_t& colocated,
-                                                                 std::span<gpu_arena_t> arenas,
-                                                                 multimodal_batch_shape_t shape, u64_t seed,
-                                                                 std::span<gpu_stream_t> streams,
-                                                                 f64_t timeout_seconds = 120.0) noexcept;
+    [[nodiscard]] static expected<multimodal_batch_mixer_t> make(
+        multimem_domain_t& multimem, colocated_domain_t& colocated, std::span<gpu_arena_t> arenas,
+        multimodal_batch_shape_t shape, u64_t seed, std::span<gpu_stream_t> streams,
+        f64_t timeout_seconds = peer_timeout_seconds_k) noexcept;
 
     /**
      *  @brief Local member @p local 's slice of one mix — pure enqueue onto @p stream : gather its

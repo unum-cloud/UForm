@@ -33,11 +33,6 @@ using um::image_format_t;
 using um::patch_grid_t;
 using enum um::image_format_t;
 
-/** Purpose salts folded through @ref splitmix64_hash_t so the file draw and the row draw stay
- *  decorrelated under one @c (seed,step,rank) — the same salts the tokens loader uses. */
-inline constexpr util::u64_t file_draw_salt_k = 0x9E3779B97F4A7C15ull;
-inline constexpr util::u64_t row_draw_salt_k = 0xD1B54A32D192ED03ull;
-
 /** Header bytes gathered per drawn blob — enough for the magic sniff and the dimension parse
  *  (JPEG start-of-frame, PNG IHDR, WebP VP8 header) without lifting the whole compressed blob.
  *  One device gather kernel packs these prefixes contiguously so the whole triage reads back in
@@ -483,7 +478,7 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const* entries, u
 /** Decode the plan's @c cpu_fallback_k rows (PNG, WebP, and any rejected JPEG) on @p pool : one
  *  pinned blob hop in, an RGBA decode per worker at the plan's @c native extent, then one bulk
  *  host-to-device copy into each scratch region. */
-[[nodiscard]] static util::expected_t decode_cpu_plans_(util::pool_view_t pool, std::span<image_plan_t> plans,
+[[nodiscard]] static util::expected_t decode_cpu_plans_(fu::pool_t& pool, std::span<image_plan_t> plans,
                                                         util::u8_t* scratch, column_view_t tape,
                                                         util::u64r1_view_t drawn_rows,
                                                         util::gpu_stream_t& stream) noexcept {
@@ -540,7 +535,7 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const* entries, u
     util::b8_t const* const blob_base = blobs.data();
     util::pixel_t* const pixel_base = decoded.data();
     util::u8_t* const result_base = results.data();
-    util::status_t const dispatched = pool.for_n(tasks.size(), [=](std::size_t index, std::size_t) noexcept {
+    fu::status_t const dispatched = pool.for_n(tasks.size(), [=](std::size_t index, std::size_t) noexcept {
         cpu_task_t const& task = task_base[index];
         image_plan_t const& plan = plan_base[task.plan_index];
         util::bytes_view_t const encoded {blob_base + task.blob_offset, task.blob_length};
@@ -548,8 +543,9 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const* entries, u
                                                   {plan.native.height, plan.native.width, image_channels_k}};
         result_base[index] = um::decode_image_rgba(encoded, plan.format, destination) ? 1u : 0u;
     });
-    if (dispatched != util::status_code_t::success_k)
-        return util::expected_t::fail(dispatched, "the decode pool refused {} CPU images", tasks.size());
+    if (fu::failed(dispatched))
+        return util::expected_t::fail(util::status_from_(dispatched), "the decode pool refused {} CPU images",
+                                      tasks.size());
     for (std::size_t index = 0; index != tasks.size(); ++index) {
         cpu_task_t const& task = tasks[index];
         if (!results[index])
@@ -704,7 +700,7 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, util::p
     return {};
 }
 
-util::expected_t ul::decode_images(nvjpeg_session_t& jpeg, util::pool_view_t pool, column_view_t tape,
+util::expected_t ul::decode_images(nvjpeg_session_t& jpeg, fu::pool_t& pool, column_view_t tape,
                                    util::u64r1_view_t drawn_rows, std::span<image_batch_shape_t const> representations,
                                    pixel_patches_span_t pixels, image_shape_span_t shapes,
                                    util::u32r1_span_t segment_offsets, util::u32r1_span_t segment_lengths,
@@ -779,7 +775,7 @@ util::expected_t ul::decode_images(nvjpeg_session_t& jpeg, util::pool_view_t poo
 
 util::expected<image_loader_parquet_t> image_loader_parquet_t::make(gpu_direct_storage_session_t& session,
                                                                     sz::string_view_t path_or_glob, util::u64_t seed,
-                                                                    util::pool_view_t pool,
+                                                                    fu::pool_t& pool,
                                                                     image_batch_shape_t image) noexcept {
     using result_t = util::expected<image_loader_parquet_t>;
 
@@ -790,7 +786,7 @@ util::expected<image_loader_parquet_t> image_loader_parquet_t::make(gpu_direct_s
 
     image_loader_parquet_t loader;
     loader.storage_ = &session;
-    loader.pool_ = pool;
+    loader.pool_ = &pool;
     loader.absolute_paths_ = std::move(paths);
     loader.seed_ = seed;
     loader.image_ = image;
@@ -904,7 +900,7 @@ util::expected_t image_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, nv
         // The batch's [rows,columns,P,P,C] image tensor names the whole grid directly: extent(2) is the square
         // patch side and extent(4) the RGBA channels — no arithmetic from a flattened run.
         std::span<image_batch_shape_t const> const representations {&image_, 1}; // one representation today
-        if (util::expected_t decoded = decode_images(decoder, pool_, tape, batch_records[batch, nk::slice],
+        if (util::expected_t decoded = decode_images(decoder, *pool_, tape, batch_records[batch, nk::slice],
                                                      representations, loaded.images.span(), loaded.image_shapes.span(),
                                                      loaded.segment_offsets.span(), loaded.segment_lengths.span(),
                                                      loaded.segment_modality.span(), loaded.dropped.span(), gpu_stream);

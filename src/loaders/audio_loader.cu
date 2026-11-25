@@ -57,12 +57,7 @@ static __global__ void audio_segments_kernel_(util::u32r1_span_t segment_offsets
     dropped[0] += overflowed;
 }
 
-/** Purpose salts folded through @ref splitmix64_hash_t so the file draw and the row draw stay
- *  decorrelated under one @c (seed,step,rank) — the same salts the tokens and image loaders use. */
-inline constexpr util::u64_t file_draw_salt_k = 0x9E3779B97F4A7C15ull;
-inline constexpr util::u64_t row_draw_salt_k = 0xD1B54A32D192ED03ull;
-
-util::expected_t ul::decode_audios(util::pool_view_t pool, column_view_t tape, util::u64r1_view_t drawn_rows,
+util::expected_t ul::decode_audios(fu::pool_t& pool, column_view_t tape, util::u64r1_view_t drawn_rows,
                                    std::span<audio_batch_shape_t const> representations,
                                    audio_samples_span_t audio_samples, util::u32r1_span_t segment_offsets,
                                    util::u32r1_span_t segment_lengths, modality_span_t segment_modality,
@@ -142,15 +137,16 @@ util::expected_t ul::decode_audios(util::pool_view_t pool, column_view_t tape, u
     // A job is (clip, representation): job j = (clip j/reps, rep j%reps), resampled to that
     // representation's rate and chunked into row j. A clip is decoded once per representation (one
     // decode for the single-representation case).
-    util::status_t const dispatched = pool.for_n(job_count, [=](std::size_t job, std::size_t) noexcept {
+    fu::status_t const dispatched = pool.for_n(job_count, [=](std::size_t job, std::size_t) noexcept {
         std::size_t const clip = job / reps;
         util::bytes_view_t const bytes = staged_tape[clip];
         util::f32r1_span_t const job_waveform = job_waveforms[job, nk::slice];
         status_base[job] = static_cast<util::i32_t>(
             um::decode_audio(bytes, rate_base[job % reps], job_waveform).status_.code);
     });
-    if (dispatched != util::status_code_t::success_k)
-        return util::expected_t::fail(dispatched, "the decode pool refused {} audio jobs", job_count);
+    if (fu::failed(dispatched))
+        return util::expected_t::fail(util::status_from_(dispatched), "the decode pool refused {} audio jobs",
+                                      job_count);
     // Mark-and-continue: a clip that fails to decode is left silence (decode_audio zeros its row),
     // matching the batch's "existence is read from the data" contract and the video loader's
     // per-clip fault isolation. Only a wholly failed batch is a systematic error (a bad codec /
@@ -182,7 +178,7 @@ util::expected_t ul::decode_audios(util::pool_view_t pool, column_view_t tape, u
 
 util::expected<audio_loader_parquet_t> audio_loader_parquet_t::make(gpu_direct_storage_session_t& session,
                                                                     sz::string_view_t path_or_glob, util::u64_t seed,
-                                                                    util::pool_view_t pool,
+                                                                    fu::pool_t& pool,
                                                                     audio_batch_shape_t audio) noexcept {
     using result_t = util::expected<audio_loader_parquet_t>;
 
@@ -198,7 +194,7 @@ util::expected<audio_loader_parquet_t> audio_loader_parquet_t::make(gpu_direct_s
 
     audio_loader_parquet_t loader;
     loader.storage_ = &session;
-    loader.pool_ = pool;
+    loader.pool_ = &pool;
     loader.absolute_paths_ = std::move(paths);
     loader.seed_ = seed;
     loader.audio_ = audio;
@@ -317,7 +313,7 @@ util::expected_t audio_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, au
             clips_per_batch > loaded.segment_lengths.extent(0))
             return util::expected_t::fail(util::status_code_t::unsupported_k, "batch {} cannot hold {} clips", batch,
                                           clips_per_batch);
-        if (util::expected_t decoded = decode_audios(pool_, tape, batch_records[batch, nk::slice], representations,
+        if (util::expected_t decoded = decode_audios(*pool_, tape, batch_records[batch, nk::slice], representations,
                                                      loaded.audio_samples.span(), loaded.segment_offsets.span(),
                                                      loaded.segment_lengths.span(), loaded.segment_modality.span(),
                                                      loaded.dropped.span(), gpu_stream);

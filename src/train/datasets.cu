@@ -317,8 +317,8 @@ void mixture_sampler_t::reweigh_(util::u32_t epoch, void (*report)(sz::string_vi
 }
 
 util::expected_t dataset_source_t::open(dataset_source_t& placed, trainer_config_t& config,
-                                        gpu_direct_storage_session_t& session, mixture_t mixture,
-                                        util::pool_view_t pool, std::size_t batches_per_fill) noexcept {
+                                        gpu_direct_storage_session_t& session, mixture_t mixture, fu::pool_t& pool,
+                                        std::size_t batches_per_fill) noexcept {
     multimodal_batch_shape_t const& shape = config.batch;
     placed.mixture_ = std::move(mixture);
     std::span<mixture_entry_t const> const entries = placed.mixture_.datasets;

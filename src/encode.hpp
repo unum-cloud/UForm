@@ -149,7 +149,7 @@ inline ue::rows_span_t rebased(ue::rows_span_t rows, util::bytes_span_t staging)
 /** A RAM call: the host tower on a pool, packing into the call's own arena, which also
  *  holds the scratch. */
 struct ram_site_t {
-    util::pool_view_t pool;
+    fu::pool_t& pool;
 
     /** What only the host reads, and what the tower reads, both the call's arena on the host. */
     chunked_arena_t& staging;
@@ -214,7 +214,7 @@ struct vram_site {
     using entries_kit_t = entries_kit_of<residency_>;
     static constexpr failure_t unselected_k {uform_status_device_k, "A device failed to become current"};
 
-    util::pool_view_t pool;
+    fu::pool_t& pool;
     chunked_arena_t& staging;
     chunked_arena_t& transfers;
 
@@ -233,7 +233,7 @@ struct vram_site {
             auto [bytes, status] = verbs.scratch_bytes(shard.replica->tower, tokens, segments,
                                                        shard.device->stream.get());
             if (!status) return tower_failure(status.status_);
-            chunked_arena_t& memory = shard.device->scratch.chunks;
+            chunked_arena_t& memory = shard.device->scratch;
             memory.rewind();
             failure_t failure {};
             auto const allocate = [&](std::size_t size) noexcept {
@@ -488,15 +488,16 @@ failure_t land_choices(uform_text_choose_t& arguments, util::f32r2_view_t logits
 /** Runs @p step for every item of @c [begin,end) on @p pool , answering the first
  *  failure any reported. */
 template <typename step_type_>
-failure_t for_items(util::pool_view_t pool, std::size_t begin, std::size_t end, step_type_ step) noexcept {
+failure_t for_items(fu::pool_t& pool, std::size_t begin, std::size_t end, step_type_ step) noexcept {
     failure_t first {};
     fu::spin_mutex_t guard;
-    util::status_t const dispatched = pool.for_n(end - begin, [&](std::size_t task, std::size_t thread) noexcept {
-        failure_t const failure = step(begin + task, thread);
-        if (!failure.message) return;
-        st::unique_lock<fu::spin_mutex_t> lock(guard);
-        if (!first.message) first = failure;
-    });
+    util::status_t const dispatched = util::status_from_(
+        pool.for_n(end - begin, [&](std::size_t task, std::size_t thread) noexcept {
+            failure_t const failure = step(begin + task, thread);
+            if (!failure.message) return;
+            st::unique_lock<fu::spin_mutex_t> lock(guard);
+            if (!first.message) first = failure;
+        }));
     if (dispatched != util::status_code_t::success_k)
         return {status_of(dispatched), "The executor's pool refused the batch"};
     return first;
@@ -684,23 +685,24 @@ void encode_items(arguments_type_& arguments, packer_type_& packer, site_type_& 
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
 
-/** A VRAM call through @p verbs : one shard per device of @p devices holding one of
- *  @p replicas . */
+/** A VRAM call through @p verbs : one shard per device of @p vram holding one of
+ *  @p replicas , planned on @p decoders . */
 template <vendored_residency_t residency_, typename arguments_type_, typename packer_type_>
 void encode_on_devices(arguments_type_& arguments, packer_type_& packer, encoder_verbs<residency_> const& verbs,
-                       util::per_gpu_array<vram_replica_t> const& replicas, vram_executor_t& devices,
+                       util::per_gpu_array<vram_replica_t> const& replicas, vram_executor_t& vram, fu::pool_t& decoders,
                        chunked_arena_t& memory, call_outcome_t& outcome) noexcept {
     auto const fail = [&](failure_t failure) noexcept { propagate_error(failure.status, outcome, failure.message); };
-    vram_device_t& lead = devices.devices[0];
-    devices.staging.chunks.rewind();
+    vram_device_t& lead = vram.devices[0];
+    vram.staging.rewind();
     lead.transfers.rewind();
     // The arena and the pinned pages live on the lead device, where the outputs grow first
     if (entries_kit_of<residency_>::select(static_cast<std::size_t>(lead.vendor_ordinal)) != nk_success_k)
         return fail(vram_site<residency_>::unselected_k);
-    vram_site<residency_> site {devices.decoders.view(), devices.staging.chunks, lead.transfers, lead, verbs};
-    for (vram_device_t& device : devices.devices)
+    vram_site<residency_> site {decoders, vram.staging, lead.transfers, lead, verbs};
+    bool const vendor_serves = numkong_capabilities_of(vram.gpu_class) & vendor_of(residency_);
+    for (vram_device_t& device : vram.devices)
         for (vram_replica_t const& replica : replicas) {
-            bool const serves = replica.ordinal == device.ordinal && (device.capabilities & vendor_of(residency_));
+            bool const serves = vendor_serves && replica.ordinal == device.ordinal;
             if (serves && site.shards.push_back({&device, &replica}) != util::status_code_t::success_k)
                 return fail({uform_status_internal_k, "More devices than one process drives"});
         }
@@ -720,33 +722,25 @@ void encode_call(arguments_type_& arguments, packer_type_& packer, uform_tape_vi
     if (failure_t const refused = packer.validate(arguments.model->geometry); refused.message) return fail(refused);
     uform_arena_t const arena = claim_arena(arguments.arena, arguments.executor, inputs, outcome);
     if (!arena) return;
-    chunked_arena_t& memory = chunks_of(arena->memory);
+    chunked_arena_t& memory = arena->chunks;
     uform_executor_t const executor = arguments.executor;
     uform_model_handle_t const& model = *arguments.model;
 
     std::visit(
         [&]<vendored_residency_t residency_>(encoder_verbs<residency_> const* verbs) noexcept {
             if constexpr (residency_ == vendored_residency_t::ram_k) {
-                void* const tower = std::get<void*>(model.towers);
-                if (executor && !std::holds_alternative<ram_executor_t>(executor->executor))
+                if (executor && !std::holds_alternative<std::monostate>(executor->device))
                     return fail({uform_status_device_k, "A RAM model computes on a RAM executor or none"});
-                if (executor) {
-                    ram_site_t site {std::get<ram_executor_t>(executor->executor).pool.view(), memory, memory, *verbs,
-                                     tower};
-                    return encode_items(arguments, packer, site, memory, outcome);
-                }
-                util::ram_executor_t const caller = util::ram_executor_t::on_calling_thread();
-                ram_site_t site {caller.view(), memory, memory, *verbs, tower};
+                fu::pool_t caller; // empty, so it runs every dispatch on the calling thread
+                ram_site_t site {executor ? executor->threads : caller, memory, memory, *verbs, model.towers[0].tower};
                 return encode_items(arguments, packer, site, memory, outcome);
             }
             else if constexpr (!gpu_vendor_compiled(vendor_of(residency_)))
                 return fail({uform_status_unsupported_k, "This build drives no GPU of the model's vendor"});
             else {
-                vram_executor_t* const devices = executor ? std::get_if<vram_executor_t>(&executor->executor) : nullptr;
-                if (!devices) return fail({uform_status_device_k, "A VRAM model computes on a VRAM executor"});
-                encode_on_devices(arguments, packer, *verbs,
-                                  std::get<util::per_gpu_array<vram_replica_t>>(model.towers), *devices, memory,
-                                  outcome);
+                vram_executor_t* const vram = executor ? std::get_if<vram_executor_t>(&executor->device) : nullptr;
+                if (!vram) return fail({uform_status_device_k, "A VRAM model computes on a VRAM executor"});
+                encode_on_devices(arguments, packer, *verbs, model.towers, *vram, executor->threads, memory, outcome);
             }
         },
         model.tables);

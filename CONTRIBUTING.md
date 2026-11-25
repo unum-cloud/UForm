@@ -106,7 +106,7 @@ The pre-commit hook refuses a namespace no directory backs and a nameless one.
 - Template parameters end in one underscore, as `typename tower_type_` and `vendored_residency_t residency_` do, and so do private and protected data members, so neither shadows the public names around it.
 - Identifiers are whole words, like `index`, `count`, `threads` and `segments`.
 - One word names one concept: memory is allocated or reserved, a contiguous region is a buffer, a chunk or a plane, and the hook refuses `carve`, `slab`, `seam` and `slot`.
-- A `bool` parameter of the C ABI or the library becomes a two-value `enum class`, as `caller_exclusivity_t` names `caller_inclusive_k` and `caller_exclusive_k`.
+- A `bool` parameter of the C ABI or the library becomes a two-value `enum class`, as `call_claim_t` names `free_k` and `held_k`.
 - A file one residency owns opens with `ram_` or `vram_`, and a vendor's own file names the vendor next, as `vram_nvidia_device.hpp` and `vram_entries_amd.cpp` do.
 - A file every GPU vendor compiles names no vendor, and its symbols say `vram_`, never `cuda_`, `hip_` or `metal_`.
 - Host headers are `.hpp`, CUDA headers `.cuh`, device units `.cu` and `.hip`, and only C sources use `.h`.
@@ -153,7 +153,7 @@ The library under `include/uform/` and `src/` holds none of these standard types
 | `std::optional`                           | `expected<value_type_>`                               |
 | `std::pair`, `std::tuple`                 | a named struct, a NumKong view or a StringZilla slice |
 | `std::function`                           | a template callback parameter                         |
-| `std::thread`, `std::mutex`, `std::async` | `pool_view_t`, with ForkUnion locks and waiters       |
+| `std::thread`, `std::mutex`, `std::async` | `fu::pool_t`, with ForkUnion locks and waiters        |
 | `std::shared_ptr`                         | one owner                                             |
 | `std::ranges`                             | the plain algorithms                                  |
 | `std::filesystem`, iostreams              | the C library and memory mappings                     |
@@ -166,14 +166,14 @@ Tensors index by rank, `tensor[row, column]`, and slice through the same subscri
 
 ### Threads and Placement
 
-Host threads and the machine's topology come from ForkUnion's C ABI in `forkunion/forkunion.h`, wrapped once by `include/uform/utilities/ram_device.hpp`, and nothing else calls a `fu_*` function.
-There `topology_t` harvests the machine through `fu_topology_new`, and `ram_executor_t` holds its threads as `threads_t`, a `std::variant` of a `fu_pool_t` or ForkUnion's `fu::dummy_pool_t`.
-It spawns the pool through `fu_pool_new` and `fu_pool_spawn` and deletes it in its destructor, while `ram_executor_t::on_calling_thread()` holds the `fu::dummy_pool_t`: no pool, no thread and no topology probe.
-Engines, loaders, tools and tests dispatch through the `pool_view_t` it hands out, `for_n` for tasks of similar cost and `for_n_dynamic` for uneven ones, and a dispatch finding the pool busy answers `status_code_t::contended_k` rather than waiting.
-A `pool_view_t` holds a copy of `threads_t` and visits it once per dispatch, never inside a loop.
-A call without an executor runs on `on_calling_thread()`, and its scratch is the arena the call names.
+Host threads come from ForkUnion's `fu::pool_t`, the RAII owner `forkunion/forkunion.hpp` declares over the C ABI, and the machine's topology from `forkunion/forkunion.h`, both reached through `include/uform/utilities/ram_device.hpp`, and nothing else calls a `fu_*` function.
+There `topology_t` harvests the machine through `fu_topology_new`, and `spawn_pool` fills a `fu::pool_t` through its `spawn` or `spawn_near`, allowed only the ForkUnion facilities that `forkunion_allowed_of` grants the executor's CPU ceiling.
+An executor holds its `fu::pool_t` by value, declared last so its threads join before anything they write is freed; a call, a tower step or a site borrows it as `fu::pool_t&`, and a loader, which moves, holds a `fu::pool_t*`.
+Engines, loaders, tools and tests dispatch through it, `for_n` for tasks of similar cost and `for_n_dynamic` for uneven ones, and a dispatch finding the pool busy answers `fu::status_t::contended_k` rather than waiting.
+An empty `fu::pool_t` runs every dispatch on the calling thread, as thread 0: a call without an executor dispatches on one, and its scratch is the arena the call names.
+A caller naming no thread count gets `fu::default_threads_count`, the rule every sibling library shares.
 The hook refuses a ForkUnion pool or topology class under `include/uform/`, a `fu_pool_new`, `fu_pool_spawn` or `fu_topology_new` outside `ram_device.hpp`, and a `std::thread` in a CUDA source, where one host thread drives every device through its streams and events.
-The binary's root spawns one pool and passes its `pool_view_t` to every loader and data source, which never spawn one.
+The binary's root spawns one pool and passes it to every loader and data source, which never spawn one.
 KvikIO is set up at one site, sized from the cores the root's pools left idle.
 An executor spawns its threads near the memory domain the caller names, and the library never names cores of its own.
 A VRAM executor owns one stream per device, created with it and destroyed by it, a caller's `streams` answer `uform_status_unsupported_k`, and every per-device step makes its device current first.
@@ -575,7 +575,7 @@ AMD compiles one code object per listed target either way.
 - `UFORM_SITE_PACKAGES` and `UFORM_CUDF_ROOT`: the directory the libcudf wheel discovery searches, or the prefix holding the libraries themselves.
 
 Binaries take long kebab-case flags with no short forms, as `uform_bench_encoder --checkpoint model.safetensors --cpu-class-ceiling intel-haswell` does, and spell classes, scalars and statuses as the C name tables do.
-A namespace-scope `_k` constant names an invariant or the default a zero field derives, as `idle_cores_denominator_k` and `default_progress_steps_k` in `src/lib.hpp` do, while a size a caller may want otherwise is a field of an argument structure.
+A namespace-scope `_k` constant names an invariant or the default a zero field derives, as `default_progress_steps_k` in `src/lib.hpp` does, while a size a caller may want otherwise is a field of an argument structure.
 
 ## Data Scripts
 

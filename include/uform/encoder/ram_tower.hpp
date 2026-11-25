@@ -18,7 +18,7 @@
 
 #include "uform/encoder/ram_kits.hpp"     // the host entries
 #include "uform/encoder/tower.hpp"        // `tower_weights_t`, `pack_weights`, `encode_steps`
-#include "uform/utilities/ram_device.hpp" // `pool_view_t`, the threads every step splits across
+#include "uform/utilities/ram_device.hpp" // `fu::pool_t`, the threads every step splits across
 
 namespace unum::uform::encoder {
 
@@ -47,7 +47,7 @@ struct entries_rows_t {
 
 /** Places a tower's arrays in NumKong's aligned heap, copying with @c memcpy . */
 struct ram_placer_t {
-    nk::allocator<b8_t> allocator {};
+    [[no_unique_address]] nk::allocator<b8_t> allocator {};
     nk_stream_t stream = nullptr;
 
     /** Copy @p values into @p target , a fresh array in host memory. */
@@ -75,7 +75,7 @@ struct ram_steps {
     using attention_kit_t = attention_kit_type_;
     using elementwise_kit_t = elementwise_kit_type_;
 
-    uu::pool_view_t pool;
+    fu::pool_t& pool;
     entries_rows_t rows;
 
     [[nodiscard]] nk_stream_t stream() const noexcept { return nullptr; }
@@ -91,7 +91,7 @@ struct ram_steps {
     [[nodiscard]] expected_t each(std::size_t tasks, sz::string_view_t what, body_type_ const& body) noexcept {
         std::size_t const width = rows.workers.extent(1);
         nk_status_t failure = nk_success_k;
-        uu::status_t const status = pool.for_n(tasks, [&](std::size_t task, std::size_t thread) noexcept {
+        fu::status_t const status = pool.for_n(tasks, [&](std::size_t task, std::size_t thread) noexcept {
             nk_status_t const step = body(task, f32r1_span_t {rows.workers.row(thread).data(), width});
             if (step != nk_success_k)
                 atomic_ref_template_<nk_status_t> {failure}.store(step, std::memory_order_relaxed);
@@ -148,9 +148,9 @@ struct ram_steps {
     }
 
     /** @p status of a pool dispatch for step @p what , a failure naming the step. */
-    [[nodiscard]] static expected_t dispatched(uu::status_t status, sz::string_view_t what) noexcept {
-        if (status == uu::status_code_t::success_k) return {};
-        return expected_t::fail(status, "{} dispatch was refused by the pool", what);
+    [[nodiscard]] static expected_t dispatched(fu::status_t status, sz::string_view_t what) noexcept {
+        if (!fu::failed(status)) return {};
+        return expected_t::fail(uu::status_from_(status), "{} dispatch was refused by the pool", what);
     }
 
     [[nodiscard]] expected_t stage_patches(segment_layout_t const& layout, modality_t target,
@@ -235,7 +235,7 @@ struct ram_tower {
 
     /** Encode @p batch in host memory on @p pool 's threads. */
     [[nodiscard]] expected_t encode(multimodal_batch_view_t batch, outputs_t outputs, bytes_span_t scratch,
-                                    uu::pool_view_t pool) const noexcept {
+                                    fu::pool_t& pool) const noexcept {
         scratch_cursor_t cursor {scratch};
         steps_t steps {pool, reserve_entries(cursor, weights_.geometry, pool.threads_count())};
         if (scratch.size() < cursor.used)

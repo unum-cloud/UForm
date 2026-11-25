@@ -17,11 +17,6 @@ namespace util = unum::uform::utilities;
 using namespace unum::uform::loaders;
 namespace ul = unum::uform::loaders;
 
-/** Purpose salts folded through @ref splitmix64_hash_t so the file draw and the row permutation
- *  stay decorrelated under one @c (seed, epoch, rank) . */
-inline constexpr util::u64_t file_draw_salt_k = 0x9E3779B97F4A7C15ull;
-inline constexpr util::u64_t row_draw_salt_k = 0xD1B54A32D192ED03ull;
-
 /**
  *  @brief Draw the whole fill's document rows: a keyed permutation of @c [0, pooled_rows) into
  *      @p record_indices , without replacement (a Feistel bijection, so distinct draw positions map

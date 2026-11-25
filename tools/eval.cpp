@@ -64,17 +64,14 @@
 
 #include "uform/utilities/safetensors_format.hpp" // `checkpoint_to_load_t`, `checkpoint_to_save_t` — the calibrated copy
 #include "uform/utilities/types.hpp"              // `divide_round_up`
-#include "uform/utilities/ram_device.hpp"         // `ram_executor_t`, `pool_view_t`, `topology_t`
+#include "uform/utilities/ram_device.hpp"         // `spawn_pool`, `topology_t`
 
 #include "arguments.hpp" // `flag_t`, `parse_or_exit`, `stop_requested`, `verb_phase_t`
 
 namespace fu = ashvardanian::forkunion;
 namespace st = ashvardanian::smashtable;
 namespace util = unum::uform::utilities;
-using util::caller_exclusivity_t;
 using util::expected;
-using util::pool_view_t;
-using util::ram_executor_t;
 using util::topology_t;
 using namespace unum::uform::tools;
 
@@ -413,7 +410,7 @@ static constexpr std::size_t score_block_rows_k = 64;
  *  queries rank within each of @ref recall_depths_k . A query's targets are @p targets from
  *  @p offsets [query] to @p offsets [query + 1], and its rank counts the items scoring strictly
  *  above the best of them. */
-[[nodiscard]] static bool count_hits_(pool_view_t pool, nk_capability_t capabilities,
+[[nodiscard]] static bool count_hits_(fu::pool_t& pool, nk_capability_t capabilities,
                                       st::basic_vector<float> const& queries, st::basic_vector<float> const& items,
                                       std::size_t dimensions, std::size_t const* offsets, std::uint32_t const* targets,
                                       std::span<std::size_t, 3> hits) noexcept {
@@ -429,7 +426,7 @@ static constexpr std::size_t score_block_rows_k = 64;
         return false;
     bool scored = true;
     std::size_t const blocks_count = util::divide_round_up(queries_count, score_block_rows_k);
-    util::status_t const dispatched = pool.for_n_dynamic(
+    fu::status_t const dispatched = pool.for_n_dynamic(
         blocks_count, [&](std::size_t block, std::size_t thread) noexcept {
             std::size_t const first = block * score_block_rows_k;
             std::size_t const count = fu::min_of(score_block_rows_k, queries_count - first);
@@ -451,7 +448,7 @@ static constexpr std::size_t score_block_rows_k = 64;
             for (std::size_t k = 0; k != 3; ++k)
                 fu::standard_atomic_ref<std::size_t> {hits[k]}.fetch_add(block_hits[k], std::memory_order_relaxed);
         });
-    return dispatched == util::status_code_t::success_k && scored; // `for_n_dynamic` joined every thread
+    return !fu::failed(dispatched) && scored; // `for_n_dynamic` joined every thread
 }
 
 /** Score every caption against every medium on @p encoder 's thread count, report both directions,
@@ -480,14 +477,14 @@ static constexpr std::size_t score_block_rows_k = 64;
     if (nk_capabilities_enabled_cpu(&capabilities) != nk_success_k) return false;
     auto [topology, make_topology_status] = topology_t::make();
     if (!make_topology_status) return false;
-    auto [pool, make_pool_status] = ram_executor_t::make(
-        topology, encoder.threads ? encoder.threads : topology.logical_cores_count(),
-        caller_exclusivity_t::caller_inclusive_k);
-    if (!make_pool_status) return false;
+    fu::pool_t pool;
+    if (!util::spawn_pool(pool, topology, encoder.threads ? encoder.threads : topology.logical_cores_count(),
+                          fu::caller_inclusive_k, fu_capabilities_all_k))
+        return false;
     std::size_t text_hits[3] = {}, media_hits[3] = {};
-    if (!count_hits_(pool.view(), capabilities, captions, media, encoder.dimensions, owner_offsets.data(),
-                     split.owners.data(), text_hits) ||
-        !count_hits_(pool.view(), capabilities, media, captions, encoder.dimensions, caption_offsets.data(),
+    if (!count_hits_(pool, capabilities, captions, media, encoder.dimensions, owner_offsets.data(), split.owners.data(),
+                     text_hits) ||
+        !count_hits_(pool, capabilities, media, captions, encoder.dimensions, caption_offsets.data(),
                      captions_by_item.data(), media_hits))
         return false;
     for (std::size_t k = 0; k != 3; ++k) {

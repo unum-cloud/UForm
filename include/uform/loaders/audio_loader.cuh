@@ -41,7 +41,7 @@
 
 #include <span> // `std::span`
 
-#include "uform/utilities/ram_device.hpp"           // `pool_view_t` — the CPU-decode pool the composition root owns
+#include "uform/utilities/ram_device.hpp"           // `fu::pool_t` — the CPU-decode pool the composition root owns
 #include "uform/utilities/vram_nvidia_device.hpp"   // `pinned_alloc` — the decode's host tapes
 #include "uform/encoder/multimodal_batch.cuh"       // `multimodal_batch_on_gpu_t` — the decode target
 #include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
@@ -85,7 +85,7 @@ using namespace unum::uform::encoder;
  *      @p audio_samples adds one to.
  *  @param[in,out] stream The stream the staging, the copy, and every kernel enqueue on.
  */
-[[nodiscard]] expected_t decode_audios(pool_view_t pool, column_view_t tape, u64r1_view_t drawn_rows,
+[[nodiscard]] expected_t decode_audios(fu::pool_t& pool, column_view_t tape, u64r1_view_t drawn_rows,
                                        std::span<audio_batch_shape_t const> representations,
                                        audio_samples_span_t audio_samples, u32r1_span_t segment_offsets,
                                        u32r1_span_t segment_lengths, modality_span_t segment_modality,
@@ -126,7 +126,7 @@ struct audio_loader_parquet_t {
      */
     [[nodiscard]] static expected<audio_loader_parquet_t> make(gpu_direct_storage_session_t& session,
                                                                sz::string_view_t path_or_glob, u64_t seed,
-                                                               pool_view_t pool, audio_batch_shape_t audio) noexcept;
+                                                               fu::pool_t& pool, audio_batch_shape_t audio) noexcept;
 
     /**
      *  @brief Fill the next few @p batches ' @c audio_samples grid on one GPU rank, one decoded
@@ -156,7 +156,7 @@ struct audio_loader_parquet_t {
 
     /** The run's CPU-decode worker pool, owned by the composition root and handed to the decode;
      *  never spawned here. */
-    pool_view_t pool_ {nullptr};
+    fu::pool_t* pool_ = nullptr;
 
     /** The dataset's Parquet shard paths, sorted by the glob — owned. */
     st::basic_vector<sz::string_t> absolute_paths_ {};

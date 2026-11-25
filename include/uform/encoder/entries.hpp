@@ -121,4 +121,8 @@ struct rope_angles_t {
 /** Threads per block of every vendor kernel, a power of two the quantize reduction halves. */
 inline constexpr unsigned entries_block_threads_k = 256;
 
+/** Most blocks a grid-stride entries kernel launches on any vendor; NVIDIA's training kernels
+ *  cap at @c kernel_grid_cap_k instead. */
+inline constexpr std::size_t entries_grid_blocks_max_k = 1024;
+
 } // namespace unum::uform::encoder

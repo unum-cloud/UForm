@@ -45,7 +45,7 @@
 
 #include <nvjpeg.h> // vendor-boundary: `nvjpegHandle_t` / `nvjpegJpegState_t` — the session's device state
 
-#include "uform/utilities/ram_device.hpp"           // `pool_view_t` — the CPU-decode pool the composition root owns
+#include "uform/utilities/ram_device.hpp"           // `fu::pool_t` — the CPU-decode pool the composition root owns
 #include "uform/utilities/vram_nvidia_device.hpp"   // `pinned_alloc` — the non-JPEG fallback's host tapes
 #include "uform/encoder/multimodal_batch.cuh"       // `multimodal_batch_on_gpu_t` — the decode target
 #include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
@@ -167,7 +167,7 @@ struct nvjpeg_session_t {
  *      adds one to.
  *  @param[in,out] stream The stream the staging, decode, resize, and copies run on.
  */
-[[nodiscard]] expected_t decode_images(nvjpeg_session_t& jpeg, pool_view_t pool, column_view_t tape,
+[[nodiscard]] expected_t decode_images(nvjpeg_session_t& jpeg, fu::pool_t& pool, column_view_t tape,
                                        u64r1_view_t drawn_rows, std::span<image_batch_shape_t const> representations,
                                        pixel_patches_span_t pixels, image_shape_span_t shapes,
                                        u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
@@ -206,7 +206,7 @@ struct image_loader_parquet_t {
      */
     [[nodiscard]] static expected<image_loader_parquet_t> make(gpu_direct_storage_session_t& session,
                                                                sz::string_view_t path_or_glob, u64_t seed,
-                                                               pool_view_t pool, image_batch_shape_t image) noexcept;
+                                                               fu::pool_t& pool, image_batch_shape_t image) noexcept;
 
     /**
      *  @brief Fill the next few @p batches ' @c images grid on one GPU rank, each image
@@ -241,7 +241,7 @@ struct image_loader_parquet_t {
 
     /** The run's CPU-decode worker pool, owned by the composition root and handed to the
      *  decode's PNG / WebP / progressive-JPEG fallback; never spawned here. */
-    pool_view_t pool_ {nullptr};
+    fu::pool_t* pool_ = nullptr;
 
     /** The dataset's Parquet shard paths, sorted by the glob — owned. */
     st::basic_vector<sz::string_t> absolute_paths_ {};

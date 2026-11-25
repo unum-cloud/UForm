@@ -67,14 +67,10 @@ using namespace unum::uform::test;
 namespace um = unum::uform::media;
 namespace ut = unum::uform::train;
 
-/** The loaders' file-local keyed-draw salts, pinned here as a frozen copy (like Tier A's
- *  finalize golden): a changed loader salt diverges these host oracles, catching a silent
- *  reshuffle of the draw. */
-inline constexpr util::u64_t file_draw_salt_k = 0x9E3779B97F4A7C15ull;
-
-/** The frozen row-draw salt — the loaders' per-row keyed-permutation constant, mirrored
- *  for Tier A. */
-inline constexpr util::u64_t row_draw_salt_k = 0xD1B54A32D192ED03ull;
+/*  The loaders' keyed-draw salts, frozen like Tier A's finalize golden: a changed salt reshuffles
+ *  every draw, so it fails this build instead of silently diverging the host oracles. */
+static_assert(file_draw_salt_k == 0x9E3779B97F4A7C15ull && row_draw_salt_k == 0xD1B54A32D192ED03ull,
+              "a loader draw salt changed, which reshuffles every seeded draw");
 
 using i16r2_tensor_pinned_t = nk::tensor<util::i16_t, util::pinned_alloc<util::i16_t>, 2>;
 using u16r2_tensor_pinned_t = nk::tensor<util::u16_t, util::pinned_alloc<util::u16_t>, 2>;
@@ -680,7 +676,7 @@ static void test_pack_tokens_starts_with_prefix(util::gpu_arena_t& arena, util::
  *  @param[in,out] pool The CPU-decode worker pool.
  */
 static case_result_t test_audio_decode(sz::string_view_t label, st::basic_vector<util::b8_t> const& clip,
-                                       util::gpu_arena_t& arena, util::gpu_stream_t& stream, util::pool_view_t pool) {
+                                       util::gpu_arena_t& arena, util::gpu_stream_t& stream, fu::pool_t& pool) {
     if (clip.empty()) return case_result_t::skipped("needs a readable UFORM_TEST_AUDIO fixture");
     util::u32_t const columns = 24u, chunk = 400u, max_segments = 4u, sample_rate = 16000u;
     multimodal_batch_shape_t shape {};
@@ -749,8 +745,8 @@ static case_result_t test_audio_decode(sz::string_view_t label, st::basic_vector
  *  @param[in,out] pool The CPU-decode worker pool.
  *  @param[in] clip The real env audio clip; an empty clip skips the case.
  */
-static case_result_t test_audio_fault_isolation(util::gpu_arena_t& arena, util::gpu_stream_t& stream,
-                                                util::pool_view_t pool, st::basic_vector<util::b8_t> const& clip) {
+static case_result_t test_audio_fault_isolation(util::gpu_arena_t& arena, util::gpu_stream_t& stream, fu::pool_t& pool,
+                                                st::basic_vector<util::b8_t> const& clip) {
     if (clip.empty()) return case_result_t::skipped("needs a UFORM_TEST_AUDIO fixture");
     util::u32_t const columns = 16u, chunk = 400u, max_segments = 4u, sample_rate = 16000u;
     st::basic_vector<util::b8_t> garbage; // not a decodable container → silence, but not the whole batch
@@ -816,7 +812,7 @@ static case_result_t test_audio_fault_isolation(util::gpu_arena_t& arena, util::
  *  @param[in,out] jpeg This GPU's nvJPEG session.
  */
 static case_result_t test_image_decode(sz::string_view_t label, st::basic_vector<util::b8_t> const& blob,
-                                       util::gpu_arena_t& arena, util::gpu_stream_t& stream, util::pool_view_t pool,
+                                       util::gpu_arena_t& arena, util::gpu_stream_t& stream, fu::pool_t& pool,
                                        nvjpeg_session_t& jpeg) {
     if (blob.empty()) return case_result_t::skipped("needs a readable UFORM_TEST_IMAGE fixture");
     util::u32_t const columns = 64u, patch = 16u, channels = 4u, max_segments = 4u;
@@ -885,7 +881,7 @@ static case_result_t test_image_decode(sz::string_view_t label, st::basic_vector
  *  image's patches to match bit for bit, so no image's decode writes into another's region. */
 static case_result_t test_image_batch_matches_single(std::span<st::basic_vector<util::b8_t> const> blobs,
                                                      util::gpu_arena_t& arena, util::gpu_stream_t& stream,
-                                                     util::pool_view_t pool, nvjpeg_session_t& jpeg) {
+                                                     fu::pool_t& pool, nvjpeg_session_t& jpeg) {
     if (blobs.size() < 2) return case_result_t::skipped("needs at least two UFORM_TEST_IMAGE fixtures");
     util::u32_t const columns = 256u, patch = 16u, channels = 4u, images = static_cast<util::u32_t>(blobs.size());
     std::size_t const cell_pixels = std::size_t {patch} * patch * channels;
@@ -978,7 +974,7 @@ static case_result_t test_image_batch_matches_single(std::span<st::basic_vector<
  */
 static case_result_t test_video_decode(sz::string_view_t label, st::basic_vector<util::b8_t> const& clip,
                                        std::span<util::u32_t const> frame_strides, util::gpu_arena_t& arena,
-                                       util::gpu_stream_t& stream, util::pool_view_t pool, nvdec_session_t& nvdec) {
+                                       util::gpu_stream_t& stream, fu::pool_t& pool, nvdec_session_t& nvdec) {
     if (clip.empty()) return case_result_t::skipped("needs a readable UFORM_TEST_VIDEO fixture");
     util::u32_t const columns = 4096u, patch = 32u, channels = 3u, tube_frames = 2u, max_segments = 8u;
     multimodal_batch_shape_t shape {};
@@ -1062,7 +1058,7 @@ static case_result_t test_video_decode(sz::string_view_t label, st::basic_vector
  *  @param[in] image_blob The real env image blob; empty skips the case.
  */
 static case_result_t test_multimodal_packet_routes(util::gpu_arena_t& arena, util::gpu_stream_t& stream,
-                                                   util::pool_view_t pool, nvjpeg_session_t& jpeg,
+                                                   fu::pool_t& pool, nvjpeg_session_t& jpeg,
                                                    st::basic_vector<util::b8_t> const& audio_clip,
                                                    st::basic_vector<util::b8_t> const& image_blob) {
     if (audio_clip.empty() || image_blob.empty())
@@ -1236,7 +1232,7 @@ static case_result_t test_multimodal_packet_routes(util::gpu_arena_t& arena, uti
  *  read must not land in memory the first fill's queued decode still reads. */
 static void test_paired_fill_replays_after_back_to_back_fills(ut::mixture_entry_t const& entry,
                                                               util::gpu_arena_t& arena, util::gpu_stream_t& stream,
-                                                              util::pool_view_t pool, nvjpeg_session_t& jpeg) {
+                                                              fu::pool_t& pool, nvjpeg_session_t& jpeg) {
     sz::string_view_t const name = entry.name.view();
     auto [session, make_session_status] = gpu_direct_storage_session_t::make(1);
     if (!expect_true(make_session_status, "the storage session should make: {}", make_session_status.description_))
@@ -1401,10 +1397,12 @@ int main(int argc, char** argv) {
     auto [arena, make_arena_status] = util::gpu_arena_t::make(0, 2ull << 30);
     if (!expect_true(make_arena_status, "gpu arena make: {}", util::to_string(make_arena_status.status_)))
         return finish_test_run();
-    auto [executor, make_executor_status] = util::ram_executor_t::make(4,
-                                                                       util::caller_exclusivity_t::caller_inclusive_k);
-    if (!expect_true(make_executor_status, "the CPU decode pool should spawn")) return finish_test_run();
-    util::pool_view_t const pool = executor.view();
+    auto [topology, make_topology_status] = util::topology_t::make();
+    fu::pool_t pool;
+    if (!expect_true(
+            make_topology_status && util::spawn_pool(pool, topology, 4, fu::caller_inclusive_k, fu_capabilities_all_k),
+            "the CPU decode pool should spawn"))
+        return finish_test_run();
 
     // Tier C — the coordinate oracle, no external media.
     run_test_case("test_fill_coords_routes_every_modality", test_fill_coords_routes_every_modality, arena, stream);

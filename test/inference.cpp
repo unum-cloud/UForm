@@ -443,14 +443,18 @@ int main(int argc, char** argv) {
     auto [geometry, read_status] = geometry_t::from(checkpoint);
     if (!expect_true(read_status, "geometry: {}", read_status.description_)) return finish_test_run();
 
-    auto [pool, make_pool_status] = util::ram_executor_t::make(4, util::caller_exclusivity_t::caller_inclusive_k);
-    if (!expect_true(make_pool_status, "pool: {}", make_pool_status.description_)) return finish_test_run();
+    auto [topology, make_topology_status] = util::topology_t::make();
+    if (!expect_true(make_topology_status, "topology: {}", make_topology_status.description_)) return finish_test_run();
+    fu::pool_t pool;
+    if (util::expected_t spawned = util::spawn_pool(pool, topology, 4, fu::caller_inclusive_k, fu_capabilities_all_k);
+        !expect_true(spawned, "pool: {}", spawned.description_))
+        return finish_test_run();
 
     encoder_verbs<vendored_residency_t::ram_k> const& reference =
         *encoder_class_tables<vendored_residency_t::ram_k, cpu_ladder_floor_k>::find();
     encoded_t bf16_reference, e4m3_reference;
-    encode(reference, checkpoint, geometry, precision_t::bf16_k, pool.view(), nullptr, bf16_reference);
-    encode(reference, checkpoint, geometry, precision_t::e4m3_k, pool.view(), nullptr, e4m3_reference);
+    encode(reference, checkpoint, geometry, precision_t::bf16_k, pool, nullptr, bf16_reference);
+    encode(reference, checkpoint, geometry, precision_t::e4m3_k, pool, nullptr, e4m3_reference);
     if (!expect_true(!bf16_reference.states.empty() && !e4m3_reference.states.empty(),
                      "the serial floor encodes in both precisions"))
         return finish_test_run();

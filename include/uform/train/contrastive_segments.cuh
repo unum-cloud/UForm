@@ -521,7 +521,7 @@ struct distributed_contrastive_segments_t {
         std::span<gpu_stream_t> streams, std::span<bf16r2_view_t const> towers,
         std::span<contrastive_relations_view_t const> relations, std::span<bf16r2_span_t const> from_vertices_grads,
         contrastive_segments_config_t config, u32r1_view_t prefix_dims, gpu_numerics_t const& numerics,
-        f64_t timeout_seconds = 120.0) noexcept;
+        f64_t timeout_seconds = peer_timeout_seconds_k) noexcept;
 
     /** The @b [gpus] rank-local loss summands of the last call — sum for the global mean. */
     [[nodiscard]] f32r1_view_t loss_outs() const noexcept { return loss_outs_.view(); }

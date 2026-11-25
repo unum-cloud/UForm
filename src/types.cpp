@@ -41,17 +41,11 @@ void uf::release_arena(uform_arena_t arena, uform_outcome_t const* call) noexcep
             call, nullptr, std::memory_order_release);
 }
 
-/** The threads a call of @p executor forks on: the RAM threads, or a VRAM executor's decoders. */
-static util::pool_view_t pool_of(uform_executor_handle_t& executor) noexcept {
-    if (ram_executor_t* const ram = std::get_if<ram_executor_t>(&executor.executor)) return ram->pool.view();
-    return std::get<vram_executor_t>(executor.executor).decoders.view();
-}
-
 bool uf::take_call_claim(uform_executor_handle_t& executor) noexcept {
     fu::standard_atomic_ref<call_claim_t> claim {executor.holding_call.claim};
     if (claim.exchange(call_claim_t::held_k, std::memory_order_acquire) != call_claim_t::free_k) return false;
     // The last call's thread 0 may still be leaving the slice it ended that call in
-    if (delegates(executor)) pool_of(executor).unsafe_join();
+    if (delegates(executor)) executor.threads.unsafe_join(0);
     fu::standard_atomic_ref<util::u64_t> {executor.holding_call.body_thread}.store(fu::current_thread_id(),
                                                                                    std::memory_order_relaxed);
     return true;
@@ -62,7 +56,7 @@ void uf::record_status(uform_executor_t executor, uform_outcome_t const& recorde
 }
 
 bool uf::delegates(uform_executor_handle_t& executor) noexcept {
-    return pool_of(executor).caller_exclusivity() == util::caller_exclusivity_t::caller_exclusive_k;
+    return executor.threads.caller_exclusivity() == fu::caller_exclusive_k;
 }
 
 uform_status_t uf::delegate_call(uform_executor_handle_t& executor, void (*body)(void*)) noexcept {
@@ -79,8 +73,11 @@ uform_status_t uf::delegate_call(uform_executor_handle_t& executor, void (*body)
         held.holding_call.delegated_body(context);
         end_call(held);
     };
-    return pool_of(executor).unsafe_for_threads(run_on_thread_zero, &executor) ? uform_status_success_k
-                                                                               : uform_status_contended_k;
+    // A local token: thread 0 may end the call, and a waiter free the executor, before it lands
+    fu_generation_t generation = 0;
+    return fu::failed(executor.threads.unsafe_for_threads(run_on_thread_zero, &executor, generation))
+               ? uform_status_contended_k
+               : uform_status_success_k;
 }
 
 void uf::end_call(uform_executor_handle_t& executor) noexcept {
@@ -90,7 +87,7 @@ void uf::end_call(uform_executor_handle_t& executor) noexcept {
     for (util::u64_t* const named : call.named_calls)
         if (named) fu::standard_atomic_ref<util::u64_t> {*named}.fetch_sub(1, std::memory_order_release);
     std::memset(call.named_calls, 0, sizeof(call.named_calls));
-    call.arguments = nullptr;
+    fu::standard_atomic_ref<void const*>(call.arguments).store(nullptr, std::memory_order_relaxed);
     call.delegated_body = nullptr;
     call.delegated_arguments.emplace<std::monostate>();
     // ! Past this store a waiter may free the executor; only the caller's outcome is touched after
@@ -117,41 +114,32 @@ void uf::wait_while_claimed(uform_executor_handle_t& executor) noexcept {
     fu::standard_atomic_ref<call_claim_t> claim {executor.holding_call.claim};
     while (claim.load(std::memory_order_acquire) == call_claim_t::held_k)
         fu::standard_yield_t {}(&executor.holding_call.claim, call_claim_t::held_k, std::size_t {0}, fu::wait_capped_k);
-    if (delegates(executor)) pool_of(executor).unsafe_join(); // its thread 0 may still be leaving its slice
+    if (delegates(executor)) executor.threads.unsafe_join(0); // its thread 0 may still be leaving its slice
 }
 
 uform_arena_t uf::claim_arena(uform_arena_t arena, uform_executor_t executor, std::initializer_list<void const*> inputs,
                               call_outcome_t& outcome) noexcept {
     if (!arena) return propagate_error(uform_status_invalid_argument_k, outcome, "The arena must not be null"), nullptr;
-    if (std::holds_alternative<device_arena_t>(arena->memory) && arena->executor != executor)
+    if (arena->executor && arena->executor != executor)
         return propagate_error(uform_status_device_k, outcome,
                                "A device arena serves calls on the executor that made it"),
                nullptr;
-    if (std::holds_alternative<host_arena_t>(arena->memory) && executor &&
-        std::holds_alternative<vram_executor_t>(executor->executor))
+    if (!arena->executor && executor && std::holds_alternative<vram_executor_t>(executor->device))
         return propagate_error(uform_status_device_k, outcome, "Host pages serve no call computing on a GPU"), nullptr;
     if (!hold_arena(arena, outcome.published()))
         return propagate_error(uform_status_contended_k, outcome, "The arena serves another call"), nullptr;
-    chunked_arena_t& memory = chunks_of(arena->memory);
     for (void const* input : inputs)
-        if (input && memory.contains(input))
+        if (input && arena->chunks.contains(input))
             return propagate_error(uform_status_invalid_argument_k, outcome,
                                    "An input lies inside the arena it rewinds"),
                    nullptr;
-    memory.rewind();
+    arena->chunks.rewind();
     return arena;
 }
 
 #pragma endregion Executor Calls
 
 #pragma region Executors
-
-/** Threads an executor spawns over @p cores when its caller names none: 7/8 of them, and
- *  at least one. */
-static std::size_t derived_threads(std::size_t cores) noexcept {
-    std::size_t const threads = cores - cores / idle_cores_denominator_k;
-    return threads ? threads : 1;
-}
 
 /** Whether the OS numbers a NUMA node of @p topology @p id. */
 static bool has_memory_domain(util::topology_t const& topology, util::i32_t id) noexcept {
@@ -187,11 +175,11 @@ static std::size_t cores_of(util::topology_t const& topology, st::basic_vector<u
     return cores;
 }
 
-/** Gives @p executor the host verbs of the newest class under @p ceiling and hands it out through
+/** Gives @p executor the host verbs of the newest class under its ceiling and hands it out through
  *  @p output. */
-static void hand_out_executor(std::unique_ptr<uform_executor_handle_t> executor, cpu_ceiling_t ceiling,
-                              uform_executor_t* output, uform_outcome_t* outcome) noexcept {
-    executor->host_verbs = pick_host_verbs(cpu_ladder_t {}, ceiling);
+static void hand_out_executor(std::unique_ptr<uform_executor_handle_t> executor, uform_executor_t* output,
+                              uform_outcome_t* outcome) noexcept {
+    executor->host_verbs = pick_host_verbs(cpu_ladder_t {}, executor->cpu_ceiling);
     *output = executor.release();
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
@@ -328,26 +316,23 @@ static bool open_device(util::per_gpu_array<vram_device_t>& devices, util::i32_t
     });
     if (!policy.allocate) return propagate_error(uform_status_device_k, outcome, "The GPU has no device allocator");
     if (!pages.allocate) return propagate_error(uform_status_device_k, outcome, "The GPU has no pinned host allocator");
-    vram_device_t opened {listed,
-                          static_cast<util::i32_t>(vendor_ordinal),
-                          capabilities,
-                          gpu_class,
-                          std::move(stream),
-                          device_arena_t {chunked_arena_t(policy, handle, scratch_limit)},
-                          chunked_arena_t(pages, handle, 0)};
+    vram_device_t opened {listed, static_cast<util::i32_t>(vendor_ordinal), std::move(stream),
+                          chunked_arena_t(policy, handle, scratch_limit), chunked_arena_t(pages, handle, 0)};
     if (devices.push_back(std::move(opened)) != util::status_code_t::success_k)
         return propagate_error(uform_status_invalid_argument_k, outcome, "More devices than one process drives");
     return true;
 }
 
-/** Makes @p device current on the calling thread, where its work, allocations and frees land. */
-static nk_status_t select_device(vram_device_t const& device) noexcept {
+/** Makes @p device of @p vram current on the calling thread, where its work, allocations and
+ *  frees land. */
+static nk_status_t select_device(vram_executor_t const& vram, vram_device_t const& device) noexcept {
     nk_status_t status = nk_missing_gpu_k;
-    visit_vram_residency(device.capabilities, [&]<vendored_residency_t residency_, typename>() noexcept {
-        if constexpr (gpu_vendor_compiled(vendor_of(residency_)))
-            status = entries_kit_of<residency_>::select(static_cast<std::size_t>(device.vendor_ordinal));
-        return true;
-    });
+    visit_vram_residency(
+        numkong_capabilities_of(vram.gpu_class), [&]<vendored_residency_t residency_, typename>() noexcept {
+            if constexpr (gpu_vendor_compiled(vendor_of(residency_)))
+                status = entries_kit_of<residency_>::select(static_cast<std::size_t>(device.vendor_ordinal));
+            return true;
+        });
     return status;
 }
 
@@ -412,45 +397,37 @@ UFORM_EXPORT void uform_gpu_devices(uform_gpu_devices_t* arguments) {
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
 
-/** Sets the machine's ceiling capped by the one @p ram sets, then hands out @p executor , whose
- *  pool and memory domains are set. */
-static void hand_out_ram_executor(std::unique_ptr<uform_executor_handle_t> executor, uform_ram_options_t const& ram,
-                                  uform_executor_t* output, uform_outcome_t* outcome) noexcept {
-    auto [ceiling, status] = pick_cpu_ceiling(ram.cpu_class_ceiling);
-    if (!status) return propagate_error(status.status_, outcome, "No compiled class fits the ceiling"), void();
-    std::get<ram_executor_t>(executor->executor).ceiling = ceiling;
-    hand_out_executor(std::move(executor), ceiling, output, outcome);
-}
-
 UFORM_EXPORT void uform_executor_for_ram(uform_executor_for_ram_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
+    auto [ceiling, pick_status] = pick_cpu_ceiling(arguments->ram.cpu_class_ceiling);
+    if (!pick_status)
+        return propagate_error(pick_status.status_, outcome, "No compiled class fits the ceiling"), void();
     auto [topology, make_topology_status] = util::topology_t::make();
     if (!make_topology_status)
         return propagate_error(make_topology_status.status_, outcome, "Topology discovery failed"), void();
     std::unique_ptr<uform_executor_handle_t> executor {new (std::nothrow) uform_executor_handle_t {}};
     if (!executor)
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
-    ram_executor_t& ram = std::get<ram_executor_t>(executor->executor);
-    if (!adopt_memory_domains(ram.memory_domains, arguments->ram, topology, outcome)) return;
+    executor->cpu_ceiling = ceiling;
+    st::basic_vector<util::i32_t> memory_domains;
+    if (!adopt_memory_domains(memory_domains, arguments->ram, topology, outcome)) return;
+    // Deferred calls run on the pool's own threads, the caller only coordinating
     std::size_t const threads = arguments->threads ? arguments->threads
-                                                   : derived_threads(cores_of(topology, ram.memory_domains));
-    util::caller_exclusivity_t const exclusivity = util::ram_executor_t::deferring_exclusivity();
-    auto [pool, make_pool_status] = arguments->ram.memory_domains_count == 1
-                                        ? util::ram_executor_t::spawn_near(topology, ram.memory_domains[0], threads,
-                                                                           exclusivity)
-                                        : util::ram_executor_t::make(topology, threads, exclusivity);
-    if (!make_pool_status)
-        return propagate_error(make_pool_status.status_, outcome, "Failed to spawn the threads"), void();
-    ram.pool = std::move(pool);
-    hand_out_ram_executor(std::move(executor), arguments->ram, arguments->executor, outcome);
+                                                   : fu::default_threads_count(cores_of(topology, memory_domains));
+    if (util::expected_t spawned = util::spawn_pool(executor->threads, topology, threads, fu::caller_exclusive_k,
+                                                    forkunion_allowed_of(ceiling),
+                                                    arguments->ram.memory_domains_count == 1 ? memory_domains[0] : -1);
+        !spawned)
+        return propagate_error(spawned.status_, outcome, "Failed to spawn the threads"), void();
+    hand_out_executor(std::move(executor), arguments->executor, outcome);
 }
 
 UFORM_EXPORT void uform_executor_for_vram(uform_executor_for_vram_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
-    uform_vram_options_t const& vram = arguments->vram;
-    if (vram.devices_count && !vram.devices)
+    uform_vram_options_t const& requested = arguments->vram;
+    if (requested.devices_count && !requested.devices)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The devices must not be null"), void();
     auto [ceiling, pick_status] = pick_cpu_ceiling(arguments->ram.cpu_class_ceiling);
     if (!pick_status)
@@ -466,24 +443,25 @@ UFORM_EXPORT void uform_executor_for_vram(uform_executor_for_vram_t* arguments) 
     std::unique_ptr<uform_executor_handle_t> executor {new (std::nothrow) uform_executor_handle_t {}};
     if (!executor)
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
-    vram_executor_t& devices = executor->executor.emplace<vram_executor_t>();
+    executor->cpu_ceiling = ceiling;
+    vram_executor_t& vram = executor->device.emplace<vram_executor_t>();
     static constexpr util::i32_t device_zero_k[] {0};
-    std::span<util::i32_t const> const listed = vram.devices_count
-                                                    ? std::span<util::i32_t const> {vram.devices, vram.devices_count}
+    std::span<util::i32_t const> const listed = requested.devices_count
+                                                    ? std::span<util::i32_t const> {requested.devices,
+                                                                                    requested.devices_count}
                                                     : std::span<util::i32_t const> {device_zero_k};
-    gpu_class_t gpu_class = gpu_class_t::unknown_k;
-    if (!resolve_placement(listed, gpus, vram.gpu_class_ceiling, gpu_class, outcome)) return;
+    if (!resolve_placement(listed, gpus, requested.gpu_class_ceiling, vram.gpu_class, outcome)) return;
     for (util::i32_t const ordinal : listed)
-        if (!open_device(devices.devices, ordinal, gpus, gpu_class, arguments->scratch_limit, outcome)) return;
+        if (!open_device(vram.devices, ordinal, gpus, vram.gpu_class, arguments->scratch_limit, outcome)) return;
     st::basic_vector<util::i32_t> memory_domains;
     if (!adopt_memory_domains(memory_domains, arguments->ram, topology, outcome)) return;
     // The caller is decoder 0: it stages, feeds the devices and waits, so calls finish on return
-    auto [decoders, make_decoders_status] = util::ram_executor_t::make(
-        topology, derived_threads(cores_of(topology, memory_domains)), util::caller_exclusivity_t::caller_inclusive_k);
-    if (!make_decoders_status)
-        return propagate_error(make_decoders_status.status_, outcome, "Failed to spawn the decoders"), void();
-    devices.decoders = std::move(decoders);
-    hand_out_executor(std::move(executor), ceiling, arguments->executor, outcome);
+    std::size_t const decoders = fu::default_threads_count(cores_of(topology, memory_domains));
+    if (util::expected_t spawned = util::spawn_pool(executor->threads, topology, decoders, fu::caller_inclusive_k,
+                                                    forkunion_allowed_of(ceiling));
+        !spawned)
+        return propagate_error(spawned.status_, outcome, "Failed to spawn the decoders"), void();
+    hand_out_executor(std::move(executor), arguments->executor, outcome);
 }
 
 UFORM_EXPORT void uform_executor_drain(uform_executor_drain_t* arguments) {
@@ -497,29 +475,30 @@ UFORM_EXPORT void uform_executor_drain(uform_executor_drain_t* arguments) {
         return propagate_error(uform_status_contended_k, outcome, "A callback cannot drain the executor running it"),
                void();
     wait_while_claimed(executor);
-    if (vram_executor_t* const devices = std::get_if<vram_executor_t>(&executor.executor))
-        for (vram_device_t& device : devices->devices) {
-            nk_status_t status = select_device(device);
-            visit_vram_residency(device.capabilities, [&]<vendored_residency_t residency_, typename>() noexcept {
-                if constexpr (gpu_vendor_compiled(vendor_of(residency_)))
-                    status = status != nk_success_k ? status
-                                                    : entries_kit_of<residency_>::synchronize(device.stream.get());
-                return true;
-            });
+    if (vram_executor_t* const vram = std::get_if<vram_executor_t>(&executor.device))
+        for (vram_device_t& device : vram->devices) {
+            nk_status_t status = select_device(*vram, device);
+            visit_vram_residency(
+                numkong_capabilities_of(vram->gpu_class), [&]<vendored_residency_t residency_, typename>() noexcept {
+                    if constexpr (gpu_vendor_compiled(vendor_of(residency_)))
+                        status = status != nk_success_k ? status
+                                                        : entries_kit_of<residency_>::synchronize(device.stream.get());
+                    return true;
+                });
             if (status != nk_success_k)
                 return propagate_error(status_of(status), outcome, "A device failed the work queued on it"), void();
         }
-    if (arguments->mood == uform_mood_parked_k) pool_of(executor).park();
+    if (arguments->mood == uform_mood_parked_k) executor.threads.sleep();
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
 
 UFORM_EXPORT void uform_executor_free(uform_executor_t executor) {
     if (!executor) return;
     wait_while_claimed(*executor);
-    if (vram_executor_t* const devices = std::get_if<vram_executor_t>(&executor->executor))
-        for (util::per_gpu_array<vram_device_t>& opened = devices->devices; opened.size(); opened.pop_back()) {
+    if (vram_executor_t* const vram = std::get_if<vram_executor_t>(&executor->device))
+        for (util::per_gpu_array<vram_device_t>& opened = vram->devices; opened.size(); opened.pop_back()) {
             // Its scratch and pinned pages free on it
-            [[maybe_unused]] nk_status_t const selected = select_device(opened[opened.size() - 1]);
+            [[maybe_unused]] nk_status_t const selected = select_device(*vram, opened[opened.size() - 1]);
         }
     delete executor;
 }
@@ -527,32 +506,36 @@ UFORM_EXPORT void uform_executor_free(uform_executor_t executor) {
 UFORM_EXPORT void uform_arena_init(uform_arena_init_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
     *arguments->arena = nullptr;
-    std::unique_ptr<uform_arena_handle_t> arena {new (std::nothrow) uform_arena_handle_t {}};
+    // A VRAM executor lands outputs on its first device's stream, any other on the host
+    vram_executor_t* const vram = arguments->executor ? std::get_if<vram_executor_t>(&arguments->executor->device)
+                                                      : nullptr;
+    nk_allocator_t policy = host_pages_policy();
+    nk_stream_t stream = nullptr;
+    if (vram) {
+        stream = vram->devices[0].stream.get();
+        policy = {};
+        visit_vram_residency(numkong_capabilities_of(vram->gpu_class),
+                             [&]<vendored_residency_t residency_, typename>() noexcept {
+                                 if constexpr (gpu_vendor_compiled(vendor_of(residency_)))
+                                     policy = entries_kit_of<residency_>::policy(stream, uform_residency_vram_k);
+                                 return true;
+                             });
+        if (!policy.allocate)
+            return propagate_error(uform_status_device_k, outcome, "The GPU has no device allocator"), void();
+    }
+    uform_arena_t const arena = new (std::nothrow)
+        uform_arena_handle_t {chunked_arena_t(policy, stream, 0), vram ? arguments->executor : nullptr};
     if (!arena) return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the arena"), void();
-    if (arguments->executor) // a VRAM executor lands outputs on its first device's stream, any other on the host
-        if (vram_executor_t* const devices = std::get_if<vram_executor_t>(&arguments->executor->executor)) {
-            vram_device_t& first = devices->devices[0];
-            nk_allocator_t policy {};
-            visit_vram_residency(first.capabilities, [&]<vendored_residency_t residency_, typename>() noexcept {
-                if constexpr (gpu_vendor_compiled(vendor_of(residency_)))
-                    policy = entries_kit_of<residency_>::policy(first.stream.get(), uform_residency_vram_k);
-                return true;
-            });
-            if (!policy.allocate)
-                return propagate_error(uform_status_device_k, outcome, "The GPU has no device allocator"), void();
-            arena->memory.emplace<device_arena_t>(chunked_arena_t(policy, first.stream.get(), 0));
-            arena->executor = arguments->executor;
-        }
-    *arguments->arena = arena.release();
+    *arguments->arena = arena;
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
 
 UFORM_EXPORT void uform_arena_free(uform_arena_t arena) {
     if (!arena) return;
     wait_named_calls(arena->named_calls);
-    if (std::holds_alternative<device_arena_t>(arena->memory)) { // its chunks free on its executor's first device
-        [[maybe_unused]] nk_status_t const selected = select_device(
-            std::get<vram_executor_t>(arena->executor->executor).devices[0]);
+    if (arena->executor) { // its chunks free on its executor's first device
+        vram_executor_t const& vram = std::get<vram_executor_t>(arena->executor->device);
+        [[maybe_unused]] nk_status_t const selected = select_device(vram, vram.devices[0]);
     }
     delete arena;
 }
@@ -564,9 +547,9 @@ UFORM_EXPORT void uform_arena_describe(uform_arena_describe_t* arguments) {
     if (!arguments->description)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The description must not be null"), void();
     *arguments->description = {uform_residency_ram_k, -1};
-    if (std::holds_alternative<device_arena_t>(arguments->arena->memory))
+    if (arguments->arena->executor)
         *arguments->description = {uform_residency_vram_k,
-                                   std::get<vram_executor_t>(arguments->arena->executor->executor).devices[0].ordinal};
+                                   std::get<vram_executor_t>(arguments->arena->executor->device).devices[0].ordinal};
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
 

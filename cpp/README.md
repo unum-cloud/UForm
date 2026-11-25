@@ -138,7 +138,7 @@ An executor owns host threads or device streams, the activation scratch, and the
 One executor serves any number of models of its residency.
 
 ```cpp
-auto [threads, threads_status] = uf::executor_t::for_ram({.threads = 8});         // eight threads, where zero takes 7/8 of the cores
+auto [threads, threads_status] = uf::executor_t::for_ram({.threads = 8});         // eight threads, where zero takes 7/8 of the cores less one
 std::int32_t const domains[] = {1};
 auto [numa, numa_status] = uf::executor_t::for_ram({.ram = {.memory_domains = domains, .memory_domains_count = 1}});
 auto [serial, serial_status] = uf::executor_t::for_ram({.ram = {.cpu_class_ceiling = uform_cpu_class_serial_k}});

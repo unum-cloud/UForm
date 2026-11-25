@@ -80,13 +80,12 @@ struct ram_bodies {
     static void destroy(void* tower) noexcept { delete static_cast<tower_type_*>(tower); }
 
     static util::expected<std::size_t> scratch_bytes(void const* tower, std::size_t tokens, std::size_t segments,
-                                                     util::pool_view_t pool) noexcept {
+                                                     fu::pool_t& pool) noexcept {
         return static_cast<tower_type_ const*>(tower)->scratch_bytes(tokens, segments, pool.threads_count());
     }
 
     static util::expected_t encode(void const* tower, encoder::multimodal_batch_view_t batch,
-                                   encoder::outputs_t outputs, util::bytes_span_t scratch,
-                                   util::pool_view_t pool) noexcept {
+                                   encoder::outputs_t outputs, util::bytes_span_t scratch, fu::pool_t& pool) noexcept {
         return static_cast<tower_type_ const*>(tower)->encode(batch, outputs, scratch, pool);
     }
 };

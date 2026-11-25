@@ -784,7 +784,8 @@ typedef struct uform_executor_for_ram_t {
      *  it once the call returns. */
     uform_ram_options_t ram;
 
-    /** Threads to spawn; zero takes 7/8 of the cores those domains span. */
+    /** Threads to spawn; zero takes 7/8 of the cores those domains span, less the coordinating
+     *  caller's own. */
     size_t threads;
 } uform_executor_for_ram_t;
 

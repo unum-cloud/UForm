@@ -102,6 +102,11 @@ struct reservoir_bound_t {
     }
 };
 
+/** Purpose salts folded through @ref splitmix64_hash_t so a loader's file draw and its row draw
+ *  stay decorrelated under one @b (seed,step,rank) ; every loader shares them. */
+inline constexpr u64_t file_draw_salt_k = 0x9E3779B97F4A7C15ull;
+inline constexpr u64_t row_draw_salt_k = 0xD1B54A32D192ED03ull;
+
 /** A keyed weighted draw of Parquet row groups across shards, sized by their complete rows, and
  *  the reader's arguments for the groups one fill drew. */
 struct row_group_draw_t {

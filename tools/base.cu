@@ -149,13 +149,12 @@ using namespace unum::uform::train;
     auto [topology, make_topology_status] = topology_t::make();
     if (!make_topology_status) return fail_out_(make_topology_status.description_.view());
     std::size_t const allowed_cores = topology.logical_cores_count();
-    ram_executor_t decoders;
-    if (mixture.pairs() || held_out_mixture.pairs()) {
-        auto [spawned, spawn_status] = ram_executor_t::make(topology, allowed_cores,
-                                                            caller_exclusivity_t::caller_inclusive_k);
-        if (!spawn_status) return fail_out_(spawn_status.description_.view());
-        decoders = std::move(spawned);
-    }
+    fu::pool_t decoders; // empty, so the calling thread decodes, unless a mixture pairs media
+    if (mixture.pairs() || held_out_mixture.pairs())
+        if (expected_t spawned = spawn_pool(decoders, topology, allowed_cores, fu::caller_inclusive_k,
+                                            fu_capabilities_all_k);
+            !spawned)
+            return fail_out_(spawned.description_.view());
     std::size_t const spawned_threads = decoders.threads_count();
 
     // The loaders open before the trainer, so the envelope leaves room for their reservoirs.
@@ -164,7 +163,7 @@ using namespace unum::uform::train;
     if (!make_status) return fail_out_(make_status.description_.view());
     dataset_source_t datasets, held_out;
     if (!config.mixture.empty())
-        if (expected_t opened = dataset_source_t::open(datasets, config, storage, std::move(mixture), decoders.view(),
+        if (expected_t opened = dataset_source_t::open(datasets, config, storage, std::move(mixture), decoders,
                                                        config.batches_per_fill);
             !opened)
             return fail_out_(opened.description_.view());
@@ -172,8 +171,8 @@ using namespace unum::uform::train;
         // Each source charges its own reservoir, so the envelope makes room for both.
         std::size_t const training_fixed = config.reservoir_fixed_bytes, training_row = config.reservoir_row_bytes;
         // Every evaluation refills, so each scores fresh entries rather than a fill 16 evals old.
-        if (expected_t opened = dataset_source_t::open(held_out, config, storage, std::move(held_out_mixture),
-                                                       decoders.view(), 1);
+        if (expected_t opened = dataset_source_t::open(held_out, config, storage, std::move(held_out_mixture), decoders,
+                                                       1);
             !opened)
             return fail_out_(opened.description_.view());
         config.reservoir_fixed_bytes += training_fixed, config.reservoir_row_bytes += training_row;

@@ -54,7 +54,7 @@ struct mesh_options_t {
     sz::string_view_t job {};
 
     /** Seconds any wait for a peer lasts before failing. */
-    f64_t timeout_seconds = 120.0;
+    f64_t timeout_seconds = peer_timeout_seconds_k;
 
     /** The NumKong capabilities this process's GPUs dispatch with, which every peer must share. */
     nk_capability_t capabilities = 0;
@@ -72,7 +72,7 @@ struct mesh_t {
     colocated_domain_t colocated {};
 
     /** Seconds any later wait for a peer lasts, from @ref mesh_options_t::timeout_seconds . */
-    f64_t timeout_seconds = 120.0;
+    f64_t timeout_seconds;
 
     /**
      *  @brief Bootstrap @p placed from @p options over @p devices , this process's members.

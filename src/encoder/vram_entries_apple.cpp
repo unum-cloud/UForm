@@ -114,9 +114,6 @@ static char const* const kernel_names_k[] = {
 static_assert(sizeof(kernel_names_k) / sizeof(kernel_names_k[0]) == std::size_t(kernel_t::count_k),
               "Every kernel has a name");
 
-/** Most threadgroups a grid-stride kernel launches. */
-static constexpr std::size_t grid_blocks_max_k = 1024;
-
 /** Most threadgroups NumKong's kernels take along one axis of their grids. */
 static constexpr std::size_t grid_axis_max_k = 65535;
 
@@ -498,7 +495,7 @@ template <typename arguments_type_, std::size_t count_>
 /** Threadgroups for a grid-stride walk over @p total items. */
 [[nodiscard]] static std::size_t stride_blocks_(std::size_t total) noexcept {
     std::size_t const blocks = divide_round_up(total, entries_block_threads_k);
-    return blocks == 0 ? 1 : blocks < grid_blocks_max_k ? blocks : grid_blocks_max_k;
+    return blocks == 0 ? 1 : blocks < entries_grid_blocks_max_k ? blocks : entries_grid_blocks_max_k;
 }
 
 /** The smaller of @p first and @p second . */

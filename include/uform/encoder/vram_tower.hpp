@@ -24,7 +24,7 @@ namespace unum::uform::encoder {
  *  vendor's entries kit. */
 template <typename entries_kit_type_>
 struct vram_placer {
-    nk::allocator<b8_t> allocator {};
+    [[no_unique_address]] nk::allocator<b8_t> allocator {};
     nk_stream_t stream = nullptr;
 
     /** Copy @p values into @p target , a fresh array in device memory. */

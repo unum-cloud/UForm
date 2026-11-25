@@ -53,16 +53,19 @@ struct uform_mesh_handle_t {
      *  out. */
     u64_t named_calls = 0;
 
-    std::unique_ptr<ut::mesh_t> mesh;
+    /** Placed with the handle and never moved, as the trainers over it address it. */
+    ut::mesh_t engine;
 };
 
 /** What @c uform_trainer_t owns: its run, the items source feeding it, and the host columns a step
- *  converts into; the mesh is the caller's own or a one-process mesh the trainer owns. */
+ *  converts into; the mesh is the caller's own or a one-process mesh the trainer owns, whose
+ *  executor the trainer runs on. */
 struct uform_trainer_handle_t {
-    uform_executor_t executor = nullptr;
-    std::variant<uform_mesh_t, std::unique_ptr<uform_mesh_handle_t>> mesh;
-    std::unique_ptr<ut::trainer_t> trainer;
-    std::unique_ptr<ut::items_source_t> items;
+
+    /** Declared first, so an owned mesh dies after the run and the items over it. */
+    std::variant<uform_mesh_t, uform_mesh_handle_t> mesh;
+    ut::trainer_t run;
+    ut::items_source_t items;
 
     /** Executor calls naming the trainer that have not ended, which its free waits out. */
     u64_t named_calls = 0;
@@ -82,25 +85,25 @@ struct uform_trainer_handle_t {
 
 /** Whether @p executor drives GPUs, the only residency training runs on. */
 [[nodiscard]] static bool drives_vram(uform_executor_t executor) noexcept {
-    return executor && std::holds_alternative<vram_executor_t>(executor->executor);
+    return executor && std::holds_alternative<vram_executor_t>(executor->device);
 }
 
 /** The CUDA ordinals of a VRAM @p executor 's devices, the members of its mesh. */
 [[nodiscard]] static bool devices_of(uform_executor_t executor, st::basic_vector<i32_t>& devices) noexcept {
-    for (vram_device_t const& device : std::get<vram_executor_t>(executor->executor).devices)
+    for (vram_device_t const& device : std::get<vram_executor_t>(executor->device).devices)
         if (st::failed(devices.push_back(i32_t {device.vendor_ordinal}))) return false;
     return true;
 }
 
 /** The NumKong capabilities every GPU of a VRAM @p executor dispatches with, after its pin. */
 [[nodiscard]] static nk_capability_t capabilities_of(uform_executor_t executor) noexcept {
-    return std::get<vram_executor_t>(executor->executor).devices[0].capabilities;
+    return numkong_capabilities_of(std::get<vram_executor_t>(executor->device).gpu_class);
 }
 
 /** The mesh a trainer runs over, the caller's or its own. */
 [[nodiscard]] static uform_mesh_handle_t& mesh_of(uform_trainer_handle_t& trainer) noexcept {
     if (uform_mesh_t const* caller_mesh = std::get_if<uform_mesh_t>(&trainer.mesh)) return **caller_mesh;
-    return *std::get<std::unique_ptr<uform_mesh_handle_t>>(trainer.mesh);
+    return std::get<uform_mesh_handle_t>(trainer.mesh);
 }
 
 /** The static message an outcome holds for a fault a GPU recorded before it trapped. */
@@ -204,7 +207,7 @@ static bool propagate_train_error(expected_t const& failure, uform_mesh_handle_t
                                   failure_messages_t const& messages) noexcept {
     char const* message = message_of(failure, messages);
     if (failure.status_ == status_code_t::device_k && mesh)
-        for (gpu_fault_t const& fault : mesh->mesh->topology.faults())
+        for (gpu_fault_t const& fault : mesh->engine.topology.faults())
             if (char const* const recorded = fault_message(fault.code)) {
                 message = recorded;
                 break;
@@ -212,36 +215,31 @@ static bool propagate_train_error(expected_t const& failure, uform_mesh_handle_t
     return propagate_error(train_status_of(failure), outcome, message);
 }
 
-/** Bootstrap a mesh over @p executor 's devices from @p options into a new handle. */
-[[nodiscard]] static std::unique_ptr<uform_mesh_handle_t> bootstrap(uform_executor_t executor,
-                                                                    uform_mesh_options_t const& options,
-                                                                    uform_outcome_t* outcome) noexcept {
+/** Bootstrap a mesh over @p executor 's devices from @p options into @p handle ; false once
+ *  @p outcome records why not. */
+[[nodiscard]] static bool bootstrap(uform_mesh_handle_t& handle, uform_executor_t executor,
+                                    uform_mesh_options_t const& options, uform_outcome_t* outcome) noexcept {
     if (holds_nul(options.directory) || holds_nul(options.job))
-        return propagate_error(uform_status_invalid_argument_k, outcome, "The directory and the job hold no NUL byte"),
-               nullptr;
+        return propagate_error(uform_status_invalid_argument_k, outcome, "The directory and the job hold no NUL byte");
     st::basic_vector<i32_t> devices;
     if (!devices_of(executor, devices))
-        return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to list the devices"), nullptr;
-    std::unique_ptr<uform_mesh_handle_t> handle {new (std::nothrow) uform_mesh_handle_t {}};
-    if (handle) handle->mesh.reset(new (std::nothrow) ut::mesh_t {});
-    if (!handle || !handle->mesh)
-        return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the mesh"), nullptr;
+        return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to list the devices");
     ut::mesh_options_t engine;
     engine.host_domain_index = static_cast<u32_t>(options.host_domain_index);
     engine.host_domain_count = options.host_domain_count ? static_cast<u32_t>(options.host_domain_count) : 1u;
     engine.gpus_per_multimem_domain = static_cast<u32_t>(options.gpus_per_multimem_domain);
     engine.directory = text_of(options.directory);
     engine.job = text_of(options.job);
-    engine.timeout_seconds = options.timeout_seconds > 0.0 ? options.timeout_seconds : 120.0;
+    if (options.timeout_seconds > 0.0) engine.timeout_seconds = options.timeout_seconds;
     engine.capabilities = capabilities_of(executor);
-    if (expected_t const joined = ut::mesh_t::make(*handle->mesh, engine, devices); !joined) {
+    if (expected_t const joined = ut::mesh_t::make(handle.engine, engine, devices); !joined) {
         // The engine refuses a world its processes disagree on, as unsupported.
         uform_status_t const status = joined.status_ == status_code_t::unsupported_k ? uform_status_config_mismatch_k
                                                                                      : train_status_of(joined);
-        return propagate_error(status, outcome, message_of(joined, bootstrap_failures_k)), nullptr;
+        return propagate_error(status, outcome, message_of(joined, bootstrap_failures_k));
     }
-    handle->executor = executor;
-    return handle;
+    handle.executor = executor;
+    return true;
 }
 
 /** The engine's pair-loss form @p form names, or @p derived for its zero. */
@@ -374,7 +372,7 @@ static bool propagate_train_error(expected_t const& failure, uform_mesh_handle_t
     std::size_t const bytes_per_value = scalar == uform_scalar_f32_k ? 4 : 2;
     if (scalar != uform_scalar_f32_k && scalar != uform_scalar_f16_k && scalar != uform_scalar_bf16_k)
         return propagate_error(uform_status_unsupported_layout_k, outcome, "Embeddings land as f32, f16 or bf16");
-    auto [vertices, status] = handle.items->pooled(*handle.trainer);
+    auto [vertices, status] = handle.items.pooled(handle.run);
     if (!status) return propagate_error(status.status_, outcome, "The pooled vertices could not be read");
     std::size_t const hidden = vertices.extent(1), bytes = count * hidden * bytes_per_value;
     b8_t* const staging = handle.embeddings.data();
@@ -383,7 +381,7 @@ static bool propagate_train_error(expected_t const& failure, uform_mesh_handle_t
     nk::tensor_span<__half, 2> const halves = nk::as_writable_values<__half>(landing).reshape<2>({count, hidden});
     nk::tensor_span<bf16_t, 2> const bfloats = nk::as_writable_values<bf16_t>(landing).reshape<2>({count, hidden});
     for (std::size_t item = 0; item != count; ++item) {
-        u32_t const vertex = handle.items->destination(item);
+        u32_t const vertex = handle.items.destination(item);
         for (std::size_t column = 0; column != hidden; ++column) {
             f32_t const value = vertex != ~u32_t {0} ? __bfloat162float(vertices[vertex, column]) : 0.0f;
             if (scalar == uform_scalar_f32_k) floats[item, column] = value;
@@ -393,7 +391,7 @@ static bool propagate_train_error(expected_t const& failure, uform_mesh_handle_t
     }
     void* const landed = memory.allocate(bytes ? bytes : 1);
     if (!landed) return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the embeddings");
-    switch_to_gpu_t gpu_scope {handle.trainer->streams[0]};
+    switch_to_gpu_t gpu_scope {handle.run.streams[0]};
     if (!gpu_scope.ok() || cuMemcpyHtoD(device_address(landed), staging, bytes) != CUDA_SUCCESS)
         return propagate_error(uform_status_device_k, outcome, "The embeddings could not land in the arena");
     rows = {landed, hidden * bytes_per_value, hidden, scalar};
@@ -408,8 +406,9 @@ UFORM_EXPORT void uform_mesh_bootstrap(uform_mesh_bootstrap_t* arguments) {
     *arguments->mesh = nullptr;
     if (!drives_vram(arguments->executor))
         return propagate_error(uform_status_device_k, outcome, "The verb needs a VRAM executor"), void();
-    std::unique_ptr<uform_mesh_handle_t> mesh = bootstrap(arguments->executor, arguments->options, outcome);
-    if (!mesh) return;
+    std::unique_ptr<uform_mesh_handle_t> mesh {new (std::nothrow) uform_mesh_handle_t {}};
+    if (!mesh) return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the mesh"), void();
+    if (!bootstrap(*mesh, arguments->executor, arguments->options, outcome)) return;
     *arguments->mesh = mesh.release();
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
@@ -421,12 +420,12 @@ UFORM_EXPORT void uform_mesh_describe(uform_mesh_describe_t* arguments) {
     if (!arguments->description)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The description must not be null"), void();
     wait_named_calls(arguments->mesh->named_calls);
-    mesh_topology_t const& topology = arguments->mesh->mesh->topology;
+    mesh_topology_t const& topology = arguments->mesh->engine.topology;
     mesh_shape_t const& shape = topology.shape;
     st::basic_vector<i32_t> devices;
     if (!devices_of(arguments->mesh->executor, devices))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to list the devices"), void();
-    auto [tier, status] = multimem_tier_choice_t::make(shape.gpus_per_multimem_domain, devices);
+    auto [choice, status] = multimem_tier_choice_t::make(shape.gpus_per_multimem_domain, devices);
     if (!status) return propagate_error(status.status_, outcome, "The multimem tier could not be probed"), void();
     uform_mesh_description_t& description = *arguments->description;
     description.gpus_per_host_domain = shape.gpus_per_host_domain;
@@ -434,9 +433,9 @@ UFORM_EXPORT void uform_mesh_describe(uform_mesh_describe_t* arguments) {
     description.gpus_per_colocated_domain = shape.gpus_per_colocated_domain;
     description.host_domain_index = topology.host_domain_index;
     description.first_gpu_index = topology.first_gpu_index();
-    description.multimem_tier = static_cast<uform_multimem_tier_t>(tier.tier);
+    description.multimem_tier = static_cast<uform_multimem_tier_t>(choice.tier);
     description.gpu_class = static_cast<uform_gpu_class_t>(
-        std::get<vram_executor_t>(arguments->mesh->executor->executor).devices[0].gpu_class);
+        std::get<vram_executor_t>(arguments->mesh->executor->device).gpu_class);
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
 
@@ -468,31 +467,25 @@ UFORM_EXPORT void uform_trainer_init_vram(uform_trainer_init_vram_t* arguments) 
     std::unique_ptr<uform_trainer_handle_t> handle {new (std::nothrow) uform_trainer_handle_t {}};
     if (!handle)
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the trainer"), void();
-    handle->executor = executor;
     if (arguments->mesh) handle->mesh = arguments->mesh;
-    else {
-        std::unique_ptr<uform_mesh_handle_t> own = bootstrap(executor, uform_mesh_options_t {}, outcome);
-        if (!own) return;
-        handle->mesh = std::move(own);
-    }
+    else if (!bootstrap(handle->mesh.emplace<uform_mesh_handle_t>(), executor, uform_mesh_options_t {}, outcome))
+        return;
     st::basic_vector<i32_t> devices;
-    handle->trainer.reset(new (std::nothrow) ut::trainer_t {});
-    handle->items.reset(new (std::nothrow) ut::items_source_t {});
-    if (!handle->trainer || !handle->items || !devices_of(executor, devices))
+    if (!devices_of(executor, devices))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the trainer"), void();
-    if (expected_t const built = ut::trainer_t::make(*handle->trainer, *mesh_of(*handle).mesh, config, devices,
+    if (expected_t const built = ut::trainer_t::make(handle->run, mesh_of(*handle).engine, config, devices,
                                                      ut::gpu_numerics_of(capabilities_of(executor)));
         !built)
         return propagate_train_error(built, arguments->mesh, outcome, build_failures_k), void();
     if (arguments->resume.length) {
-        if (expected_t const resumed = handle->trainer->resume(text_of(arguments->resume)); !resumed)
+        if (expected_t const resumed = handle->run.resume(text_of(arguments->resume)); !resumed)
             return propagate_error(resume_status_of(resumed), outcome, message_of(resumed, resume_failures_k)), void();
-        std::size_t const tensors = handle->trainer->replicas[0].weights.size();
+        std::size_t const tensors = handle->run.replicas[0].weights.size();
         progress_ticks_t ticks(arguments->progress, tensors);
         if (ticks(tensors) == continuation_t::cancel_k)
             return propagate_error(uform_status_cancelled_k, outcome, "The handler cancelled the resume"), void();
     }
-    if (expected_t const sourced = ut::items_source_t::make(*handle->items, *handle->trainer); !sourced)
+    if (expected_t const sourced = ut::items_source_t::make(handle->items, handle->run); !sourced)
         return propagate_train_error(sourced, arguments->mesh, outcome, source_failures_k), void();
     std::size_t const segments = devices.size() * config.batch.max_segments_per_gpu;
     if (st::failed(handle->modalities.resize(segments)) || st::failed(handle->sides.resize(segments)) ||
@@ -510,10 +503,10 @@ UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t* arguments) {
     uform_arena_t const requested = arguments->embeddings ? arguments->arena : nullptr;
     uform_trainer_handle_t* const handle = arguments->trainer;
     if (!handle) return propagate_error(uform_status_uninitialized_k, outcome, "The trainer must not be null"), void();
-    if (handle->executor != arguments->executor)
+    if (mesh_of(*handle).executor != arguments->executor)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The trainer runs on its own executor"),
                void();
-    ut::trainer_t& trainer = *handle->trainer;
+    ut::trainer_t& trainer = handle->run;
     ut::trainer_config_t const& config = trainer.config;
     std::size_t const count = arguments->count;
     uform_tape_view_t const& contents = arguments->contents;
@@ -574,7 +567,7 @@ UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t* arguments) {
             : nullptr;
     if (requested && !arena) return;
 
-    ut::items_source_t& source = *handle->items;
+    ut::items_source_t& source = handle->items;
     source.items = {{handle->modalities.data(), count},
                     tape_of<b8_t const>(contents, count),
                     {arguments->bags, arguments->bags ? count : 0},
@@ -604,8 +597,7 @@ UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t* arguments) {
                              telemetry.dropped};
     }
     if (arguments->embeddings) {
-        chunked_arena_t& memory = chunks_of(arena->memory);
-        if (!land_embeddings(*handle, count, arguments->outputs_scalar, memory, *arguments->embeddings, outcome))
+        if (!land_embeddings(*handle, count, arguments->outputs_scalar, arena->chunks, *arguments->embeddings, outcome))
             return;
     }
     propagate_error(uform_status_success_k, outcome, nullptr);
@@ -616,14 +608,14 @@ UFORM_EXPORT void uform_trainer_save(uform_trainer_save_t* arguments) {
     call_outcome_t outcome(*arguments);
     uform_trainer_handle_t* const handle = arguments->trainer;
     if (!handle) return propagate_error(uform_status_uninitialized_k, outcome, "The trainer must not be null"), void();
-    if (handle->executor != arguments->executor || !arguments->path.length)
+    if (mesh_of(*handle).executor != arguments->executor || !arguments->path.length)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The trainer, its executor and a path"),
                void();
     if (holds_nul(arguments->path))
         return propagate_error(uform_status_invalid_argument_k, outcome, "The path holds a NUL byte"), void();
-    if (expected_t const saved = handle->trainer->save(text_of(arguments->path)); !saved)
+    if (expected_t const saved = handle->run.save(text_of(arguments->path)); !saved)
         return propagate_train_error(saved, &mesh_of(*handle), outcome, save_failures_k), void();
-    std::size_t const tensors = handle->trainer->replicas[0].weights.size();
+    std::size_t const tensors = handle->run.replicas[0].weights.size();
     progress_ticks_t ticks(arguments->progress, tensors);
     (void)ticks(tensors);
     propagate_error(uform_status_success_k, outcome, nullptr);
@@ -632,11 +624,10 @@ UFORM_EXPORT void uform_trainer_save(uform_trainer_save_t* arguments) {
 UFORM_EXPORT void uform_trainer_free(uform_trainer_t trainer) {
     if (!trainer) return;
     wait_named_calls(trainer->named_calls);
-    trainer->items.reset();
-    trainer->trainer.reset();
-    if (uform_mesh_t const* caller_mesh = std::get_if<uform_mesh_t>(&trainer->mesh))
-        fu::standard_atomic_ref<u64_t> {(*caller_mesh)->trainers}.fetch_sub(1, std::memory_order_acq_rel);
-    delete trainer;
+    uform_mesh_t const* const caller = std::get_if<uform_mesh_t>(&trainer->mesh);
+    uform_mesh_t const counted = caller ? *caller : nullptr;
+    delete trainer; // the items, then the run, then an owned mesh
+    if (counted) fu::standard_atomic_ref<u64_t> {counted->trainers}.fetch_sub(1, std::memory_order_acq_rel);
 }
 
 } // extern "C"

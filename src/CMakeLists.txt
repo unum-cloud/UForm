@@ -594,7 +594,7 @@ if (UFORM_BUILD_TRAIN)
     # demux targets already linked above for video; adds the resampler, and the scaler the host video decode uses.
     target_link_libraries(uform_loaders PRIVATE "${UFORM_SWRESAMPLE_LIBRARY}" "${UFORM_SWSCALE_LIBRARY}")
 
-    # The host-side media demux and decode run on ForkUnion pools, public because the loader headers take `pool_view_t`.
+    # The host-side media demux and decode run on ForkUnion pools, public because the loader headers take `fu::pool_t`.
     target_link_libraries(uform_loaders PUBLIC forkunion::cpp)
 
     # `train/datasets.cu` → `uform::datasets`: the mixtures and the batch source over the loaders, kept out of

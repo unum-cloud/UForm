@@ -40,7 +40,7 @@
 #include "uform/uform.h" // every argument structure
 
 #include "uform/utilities/array.hpp"      // `per_gpu_array`
-#include "uform/utilities/ram_device.hpp" // `ram_executor_t`, `pool_view_t`, `topology_t`
+#include "uform/utilities/ram_device.hpp" // `spawn_pool`, `topology_t`
 #include "uform/utilities/types.hpp"      // `status_t`, the integer aliases, `sz::string_view_t`, `st::basic_vector`
 #include "uform/utilities/vram_apple_device.hpp" // `metal_api_t`, `metal_contexts_t`
 #include "uform/encoder/tower.hpp" // `geometry_t`, `precision_t`, `outputs_t` - what a model's towers take
@@ -54,10 +54,6 @@ namespace st = ashvardanian::smashtable;
 
 /** Reports a progress handler hears at most when its call names zero steps. */
 inline constexpr std::size_t default_progress_steps_k = 10;
-
-/** One core in this many stays idle when an executor derives its thread count, so threads are 7/8
- *  of the cores. */
-inline constexpr std::size_t idle_cores_denominator_k = 8;
 
 /** A byte run of the C interface, a path or a spelling, as a string view valid while the caller
  *  keeps it. */
@@ -495,6 +491,13 @@ struct cpu_ceiling_t {
 constexpr bool cpu_rung_fits(cpu_class_t rung, cpu_ceiling_t ceiling) noexcept {
     return (numkong_capabilities_of(rung) & ~ceiling.compute) == 0 &&
            (forkunion_capabilities_of(rung) & ~ceiling.sync) == 0;
+}
+
+/** The allow-mask a pool spawns under @p ceiling : every thread and memory facility, and only the
+ *  instruction bits the ceiling holds. */
+constexpr fu_capabilities_t forkunion_allowed_of(cpu_ceiling_t ceiling) noexcept {
+    return static_cast<fu_capabilities_t>((fu_capabilities_all_k & ~fu_capability_any_instruction_k) | ceiling.sync |
+                                          baseline_hints_k);
 }
 
 /** CPU classes newest first, the order a ladder tries them in. */
@@ -1037,24 +1040,6 @@ class chunked_arena_t {
     return policy;
 }
 
-/** Host pages, which serve calls on the calling thread or any RAM executor, freed before the
- *  executor that made them. */
-struct host_arena_t {
-    chunked_arena_t chunks {host_pages_policy(), nullptr, 0};
-};
-
-/** The memory of one GPU, grown through NumKong's device allocator on one stream of the executor
- *  that made it. */
-struct device_arena_t {
-    chunked_arena_t chunks;
-};
-
-/** The chunks either residency's arena grows. */
-[[nodiscard]] inline chunked_arena_t& chunks_of(std::variant<host_arena_t, device_arena_t>& memory) noexcept {
-    if (host_arena_t* const host = std::get_if<host_arena_t>(&memory)) return host->chunks;
-    return std::get<device_arena_t>(memory).chunks;
-}
-
 #pragma endregion Memory
 
 #pragma region Executors
@@ -1082,18 +1067,6 @@ struct gpu_drivers_t {
     return drivers;
 }
 
-/** The host threads of a RAM executor, spawned and deleted here, and where its models place
- *  their bytes. */
-struct ram_executor_t {
-    util::ram_executor_t pool;
-
-    /** What the threads may run: the machine's masks under the executor's ceiling class. */
-    cpu_ceiling_t ceiling;
-
-    /** The NUMA nodes the executor's models place their bytes in. */
-    st::basic_vector<util::i32_t> memory_domains;
-};
-
 /** One GPU of a VRAM executor: its stream, and the scratch its calls rewind. */
 struct vram_device_t {
 
@@ -1104,33 +1077,29 @@ struct vram_device_t {
     /** The vendor's own ordinal, as @c cuDeviceGet or @c hipSetDevice takes it. */
     util::i32_t vendor_ordinal = 0;
 
-    /** What the device runs, whose group names the vendor every NumKong call dispatches on. */
-    nk_capability_t capabilities = 0;
-
-    /** The class the device dispatches as: the best class all the executor's devices load
-     *  under its ceiling. */
-    gpu_class_t gpu_class = gpu_class_t::unknown_k;
-
     /** Declared before the scratch, so the scratch returns its chunks while the
      *  stream still lives. */
     owned_stream_t stream;
 
     /** Activations, grown to a high-water mark under the executor's @c scratch_limit. */
-    device_arena_t scratch;
+    chunked_arena_t scratch;
 
     /** Pinned host pages both the host and the device address, where a call packs what
      *  the device reads. */
     chunked_arena_t transfers;
 };
 
-/** The devices of a VRAM executor and its decoders, a caller-inclusive pool whose thread 0 is the
- *  caller: it stages and feeds the devices and waits on them, while the rest decode for them. */
+/** The devices of a VRAM executor, whose threads are its decoders: a caller-inclusive pool whose
+ *  thread 0, the caller, stages, feeds the devices and waits on them while the rest decode. */
 struct vram_executor_t {
     util::per_gpu_array<vram_device_t> devices;
-    util::ram_executor_t decoders;
+
+    /** The class every device dispatches as: the best class all of them load under the executor's
+     *  ceiling, whose capabilities name the vendor every NumKong call dispatches on. */
+    gpu_class_t gpu_class = gpu_class_t::unknown_k;
 
     /** Host pages for what only the decoders read: the plans and every thread's decode window. */
-    host_arena_t staging;
+    chunked_arena_t staging {host_pages_policy(), nullptr, 0};
 };
 
 #pragma endregion Executors
@@ -1164,7 +1133,7 @@ struct vendored_residency_executor {
 };
 template <>
 struct vendored_residency_executor<vendored_residency_t::ram_k> {
-    using type = util::pool_view_t;
+    using type = fu::pool_t&;
 };
 
 /** The verbs one encoder variant compiles in its class unit, defined in @c encoder_punned.hpp . */
@@ -1292,7 +1261,11 @@ template <auto verb_, typename arguments_type_>
 bool submitted(arguments_type_* arguments) noexcept {
     // Dependent, so the handle's members resolve at instantiation
     auto* const executor = arguments->executor;
-    if (!executor || arguments == executor->holding_call.arguments) return false;
+    if (!executor) return false;
+    // Any thread compares while the claim holder writes, so both sides go through the reference
+    if (arguments ==
+        fu::standard_atomic_ref<void const*>(executor->holding_call.arguments).load(std::memory_order_relaxed))
+        return false;
     if (!take_call_claim(*executor))
         return propagate_error(uform_status_contended_k, arguments->outcome, "Another call holds the executor"), true;
     auto& call = executor->holding_call;
@@ -1312,11 +1285,12 @@ bool submitted(arguments_type_* arguments) noexcept {
     if constexpr (a_trainer_naming_call<arguments_type_>) name(arguments->trainer);
     propagate_pending(arguments->outcome); // before the body or the dispatch, never after
     if (arguments->completion != uform_completion_deferred_k || !delegates(*executor)) {
-        call.arguments = arguments;
+        fu::standard_atomic_ref<void const*>(call.arguments).store(arguments, std::memory_order_relaxed);
         verb_(arguments);
         return end_call(*executor), true;
     }
-    call.arguments = &call.delegated_arguments.template emplace<arguments_type_>(*arguments);
+    void const* const delegated_arguments = &call.delegated_arguments.template emplace<arguments_type_>(*arguments);
+    fu::standard_atomic_ref<void const*>(call.arguments).store(delegated_arguments, std::memory_order_relaxed);
     using executor_handle_t = std::remove_pointer_t<decltype(arguments->executor)>;
     uform_status_t const delegated = delegate_call(*executor, [](void* context) noexcept {
         auto& held = static_cast<executor_handle_t*>(context)->holding_call;
@@ -1391,8 +1365,8 @@ uform_arena_t claim_arena(uform_arena_t arena, uform_executor_t executor, std::i
 namespace uf = unum::uform;
 namespace util = unum::uform::utilities;
 
-/** The state behind @c uform_executor_t: the one call it holds and one residency's executor; the
- *  variant is the kind tag, so no second word can disagree. */
+/** The state behind @c uform_executor_t: the one call it holds, its host threads, and the GPUs it
+ *  drives, if any; the variant is the kind tag, so no second word can disagree. */
 struct uform_executor_handle_t {
 
     /** The one call that holds the executor, from its claim to its end. */
@@ -1402,15 +1376,24 @@ struct uform_executor_handle_t {
      *  static table that outlives the executor. */
     uf::host_verbs_t const* host_verbs = nullptr;
 
-    std::variant<uf::ram_executor_t, uf::vram_executor_t> executor;
+    /** What the threads may run: the machine's masks under the executor's ceiling class. */
+    uf::cpu_ceiling_t cpu_ceiling;
+
+    /** Nothing for a RAM executor, or the GPUs a VRAM executor drives. */
+    std::variant<std::monostate, uf::vram_executor_t> device;
+
+    /** A RAM executor's pool, or a VRAM executor's decoders. Declared last, so it dies first: the
+     *  decoders join before the staging pages they write are freed. */
+    uf::fu::pool_t threads;
 };
 
 /** What @c uform_arena_t owns: memory that one call at a time rewinds and refills, as host pages or
  *  on one device, and the call holding it. */
 struct uform_arena_handle_t {
 
-    /** Fixed at @c uform_arena_init by the executor that made it. */
-    std::variant<uf::host_arena_t, uf::device_arena_t> memory;
+    /** Host pages, or the memory of the first device of @ref executor , fixed at
+     *  @c uform_arena_init . */
+    uf::chunked_arena_t chunks;
 
     /** The executor whose first stream the device memory rides, the only one whose calls it serves;
      *  null for host pages, which serve any call computing on the host. */
@@ -1425,7 +1408,7 @@ struct uform_arena_handle_t {
 };
 
 /** What @c uform_model_t owns: the geometry its checkpoint held, the precision its blocks run in,
- *  and its packed towers; the variant is the residency, so the checkpoint closes after the load. */
+ *  and its packed towers, so the checkpoint closes after the load. */
 struct uform_model_handle_t {
     uf::encoder::geometry_t geometry;
     uf::encoder::precision_t precision = uf::encoder::precision_t::bf16_k;
@@ -1442,15 +1425,15 @@ struct uform_model_handle_t {
     uf::encoder_residency_tables_t tables;
 
     /** The one host tower, serving any RAM executor, or one replica per GPU the load named, every
-     *  one of the picked class. */
-    std::variant<void*, util::per_gpu_array<uf::vram_replica_t>> towers;
+     *  one of the picked class; @ref tables names the residency. */
+    util::per_gpu_array<uf::vram_replica_t> towers;
+
+    /** Executor calls naming the model that have not ended, which its free waits out. */
+    util::u64_t named_calls = 0;
 
     uform_model_handle_t() noexcept = default;
     uform_model_handle_t(uform_model_handle_t const&) = delete;
     uform_model_handle_t& operator=(uform_model_handle_t const&) = delete;
-
-    /** Executor calls naming the model that have not ended, which its free waits out. */
-    util::u64_t named_calls = 0;
 
     /** Destroys every tower through the verbs that made it; defined beside them in
      *  @c model.cpp . */

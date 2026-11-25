@@ -195,7 +195,7 @@ struct dataset_source_t {
      *  outside the arena when one fill packs @p batches_per_fill batches. */
     [[nodiscard]] static expected_t open(dataset_source_t& placed, trainer_config_t& config,
                                          loaders::gpu_direct_storage_session_t& storage, mixture_t mixture,
-                                         pool_view_t pool, std::size_t batches_per_fill) noexcept;
+                                         fu::pool_t& pool, std::size_t batches_per_fill) noexcept;
 
     /** Make the loaded batches, the decoder sessions and the mixer of an @ref open source from
      *  @p trainer 's arenas, packing @p batches_per_fill batches per GPU per fill. */

@@ -293,6 +293,11 @@ inline constexpr std::size_t device_name_capacity_k = 64u;
  *  directory fails loudly on its first line instead of misparsing. */
 inline constexpr char mesh_schema_k[] = "uform.mesh.3";
 
+/** Seconds any wait for a peer lasts before it fails, unless a caller names its own: past a
+ *  slow host's start-up and checkpoint read, short of hiding a peer that never comes. A policy,
+ *  not a measurement. */
+inline constexpr f64_t peer_timeout_seconds_k = 120.0;
+
 /** One host_domain's published facts — the payload of the bootstrap exchange, one entry
  *  per host_domain in @ref mesh_topology_t::host_domains . POD, so an @c st::basic_vector
  *  holds the table. */
@@ -533,7 +538,7 @@ struct mesh_topology_t {
      */
     [[nodiscard]] static expected<mesh_topology_t> bootstrap(
         u32_t host_domain_index, u32_t host_domain_count, mesh_pause_t poll_pause, u32_t gpus_per_multimem_domain = 0,
-        sz::string_view_t directory = {}, sz::string_view_t job_id = {}, f64_t timeout_seconds = 120.0,
+        sz::string_view_t directory = {}, sz::string_view_t job_id = {}, f64_t timeout_seconds = peer_timeout_seconds_k,
         u32_t gpu_class = 0) noexcept {
         if (host_domain_count == 0 || host_domain_index >= host_domain_count)
             return expected<mesh_topology_t>::fail( //

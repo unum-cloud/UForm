@@ -112,7 +112,7 @@ struct distributed_pooled_spectrum_t {
         multimem_domain_t& domain, colocated_domain_t& colocated, std::span<gpu_arena_t> arenas,
         std::span<gpu_stream_t> streams, std::span<differentiable_weights_t const> weights,
         std::size_t weights_per_rank, pooled_spectrum_config_t config, gpu_numerics_t const& numerics,
-        f64_t timeout_seconds = 120.0) noexcept;
+        f64_t timeout_seconds = peer_timeout_seconds_k) noexcept;
 
     /**
      *  @brief Local rank @p rank 's regularizers, pure enqueue onto @p stream : the coding rate

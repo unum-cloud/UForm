@@ -381,8 +381,10 @@ struct gpu_numerics_t {
 
 #if defined(__CUDACC__)
 
-/** Grid cap of every grid-strided launch: a bandwidth-bound kernel gains nothing past this, and
- *  an unbounded grid stalls capture-time instantiation on huge shards. */
+/** Grid cap of every grid-strided training launch: a bandwidth-bound kernel gains nothing past
+ *  this, and an unbounded grid stalls capture-time instantiation on huge shards. Wider than the
+ *  encoder's @c entries_grid_blocks_max_k , whose kernels stride over one call's batch. A policy,
+ *  not a measurement. */
 inline constexpr unsigned kernel_grid_cap_k = 4096u;
 
 /** The one grid-size formula for grid-strided kernels over @p scalars elements: at least one

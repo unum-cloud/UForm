@@ -29,7 +29,7 @@ UFORM_EXPORT void uform_text_encode(uform_text_encode_t *arguments) {
 }
 ```
 
-- `submitted<verb>` claims the executor for the call and runs the verb's body: here for a blocking call or a caller-inclusive pool, on pool thread 0 for a deferred one, through `pool_view_t::unsafe_for_threads` with a slice that runs the whole call there, over a copy of the arguments held in the executor's `holding_call`. The body is the same verb meeting its own arguments again.
+- `submitted<verb>` claims the executor for the call and runs the verb's body: here for a blocking call or a caller-inclusive pool, on pool thread 0 for a deferred one, through `fu::pool_t::unsafe_for_threads` with a slice that runs the whole call there, over a copy of the arguments held in the executor's `holding_call`. The body is the same verb meeting its own arguments again.
 - `call_outcome_t` collects every step's status privately and on unwinding releases the arena; without an executor it stores the final status itself, and with one it hands the status to `end_call`, which lowers the named handles' counts, frees the executor, and only then stores it, so a path that forgot to report finishes `uform_status_internal_k` rather than hanging its waiters.
 - `claim_arena` refuses a null arena, one of another residency or executor, one another call holds, and inputs inside it, then rewinds it for the call's outputs.
 

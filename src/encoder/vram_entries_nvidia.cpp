@@ -62,9 +62,6 @@ static char const* const kernel_names_k[] = {
     "uform_quantize_bf16_tokens_kernel", "uform_quantize_f32_tokens_kernel", "uform_rescale_tokens_kernel",
 };
 
-/** Most blocks a grid-stride kernel launches. */
-static constexpr std::size_t grid_blocks_max_k = 1024;
-
 /** How far a device got loading the bundle; whichever thread leaves @c unloaded_k loads it. */
 enum class load_stage_t : u8_t {
     unloaded_k,
@@ -153,7 +150,9 @@ template <typename... argument_types_>
 /** Blocks for a grid-stride walk over @p total items. */
 [[nodiscard]] static unsigned stride_blocks_(std::size_t total) noexcept {
     std::size_t const blocks = divide_round_up(total, entries_block_threads_k);
-    return static_cast<unsigned>(blocks == 0 ? 1 : blocks < grid_blocks_max_k ? blocks : grid_blocks_max_k);
+    return static_cast<unsigned>(blocks == 0                          ? 1
+                                 : blocks < entries_grid_blocks_max_k ? blocks
+                                                                      : entries_grid_blocks_max_k);
 }
 
 nk_allocator_t ue::vram_nvidia_entries_kit_t::policy(nk_stream_t, uform_residency_t residency) noexcept {

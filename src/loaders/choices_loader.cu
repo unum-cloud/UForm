@@ -22,11 +22,6 @@ using namespace unum::uform::encoder;
 namespace util = unum::uform::utilities;
 using namespace unum::uform::loaders;
 
-/** Purpose salts folded through @ref splitmix64_hash_t so the file draw and the row draw stay
- *  decorrelated under one @c (seed,step,rank) — the same salts the other loaders use. */
-inline constexpr util::u64_t file_draw_salt_k = 0x9E3779B97F4A7C15ull;
-inline constexpr util::u64_t row_draw_salt_k = 0xD1B54A32D192ED03ull;
-
 /**
  *  @brief Copy each choice segment's kept state tail from the reservoir into the token grid and
  *      append the mask byte, the position the decoder answers at.

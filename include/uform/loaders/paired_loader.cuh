@@ -98,7 +98,7 @@ struct paired_loader_parquet_t {
      */
     [[nodiscard]] static expected<paired_loader_parquet_t> make(gpu_direct_storage_session_t& session,
                                                                 sz::string_view_t path_or_glob, u64_t seed,
-                                                                pool_view_t pool, paired_loader_parquet_config_t config,
+                                                                fu::pool_t& pool, paired_loader_parquet_config_t config,
                                                                 modality_t modality,
                                                                 multimodal_batch_shape_t const& shape) noexcept;
 
@@ -176,7 +176,7 @@ struct paired_loader_parquet_t {
     gpu_direct_storage_session_t* storage_ = nullptr;
 
     /** The run's CPU-decode worker pool, owned by the composition root and never spawned here. */
-    pool_view_t pool_ {nullptr};
+    fu::pool_t* pool_ = nullptr;
 
     /** The caption column, the positive column resolved to its blob leaf, and the negative column,
      *  empty for none. */

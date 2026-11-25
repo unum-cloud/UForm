@@ -42,12 +42,6 @@ using um::video_codec_count_k;
 using um::video_codec_t;
 using um::video_grid_t;
 
-/** Purpose salts folded through @ref splitmix64_hash_t so the file draw and the row draw
- *  stay decorrelated under one @c (seed,step,rank) — the same salts the tokens / image /
- *  audio loaders use. */
-inline constexpr util::u64_t file_draw_salt_k = 0x9E3779B97F4A7C15ull;
-inline constexpr util::u64_t row_draw_salt_k = 0xD1B54A32D192ED03ull;
-
 /** One codec's NVDEC parser + decoder within one engine — not a cache: the @b parser is built once
  *  and persists across clips, while the @b decoder is destroyed and recreated from each clip's
  *  probed sequence format on its sequence header (per-job width/height), so a decoder never
@@ -1109,7 +1103,7 @@ struct engine_cursor_t {
     return {};
 }
 
-util::expected_t nvdec_session_t::decode_into(util::pool_view_t pool, column_view_t clips,
+util::expected_t nvdec_session_t::decode_into(fu::pool_t& pool, column_view_t clips,
                                               std::span<video_batch_shape_t const> representations,
                                               pixel_tubes_span_t videos, video_shape_span_t video_shapes,
                                               util::u32r1_span_t segment_offsets, util::u32r1_span_t segment_lengths,
@@ -1158,13 +1152,14 @@ util::expected_t nvdec_session_t::decode_into(util::pool_view_t pool, column_vie
                                       "demux result table allocation failed ({} clips)", clip_count);
     demuxed_t* const demuxed_data = demuxed.data();
     column_view_t const clips_tape = clips;
-    util::status_t const dispatched = pool.for_n(
+    fu::status_t const dispatched = pool.for_n(
         clip_count, [demuxed_data, clips_tape](std::size_t clip_index, std::size_t) noexcept {
             auto [clip, status] = um::demux_video(clips_tape[clip_index]);
             if (status) demuxed_data[clip_index] = std::move(clip);
         });
-    if (dispatched != util::status_code_t::success_k)
-        return util::expected_t::fail(dispatched, "the decode pool refused {} clip demuxes", clip_count);
+    if (fu::failed(dispatched))
+        return util::expected_t::fail(util::status_from_(dispatched), "the decode pool refused {} clip demuxes",
+                                      clip_count);
     std::span<demuxed_t const> const demuxed_view = std::span<demuxed_t const> {demuxed}.first(clip_count);
 
     // Stage 2: the token cursor — the serial repack scan writing the segment geometry plus the
@@ -1217,7 +1212,7 @@ util::expected_t nvdec_session_t::decode_into(util::pool_view_t pool, column_vie
 
 #pragma region Decode Orchestrator and Dataset Loader
 
-util::expected_t ul::decode_videos(nvdec_session_t& nvdec, util::pool_view_t pool, column_view_t tape,
+util::expected_t ul::decode_videos(nvdec_session_t& nvdec, fu::pool_t& pool, column_view_t tape,
                                    util::u64r1_view_t drawn_rows, std::span<video_batch_shape_t const> representations,
                                    pixel_tubes_span_t videos, video_shape_span_t video_shapes,
                                    util::u32r1_span_t segment_offsets, util::u32r1_span_t segment_lengths,
@@ -1257,7 +1252,7 @@ util::expected_t ul::decode_videos(nvdec_session_t& nvdec, util::pool_view_t poo
 
 util::expected<video_loader_parquet_t> video_loader_parquet_t::make(gpu_direct_storage_session_t& session,
                                                                     sz::string_view_t path_or_glob, util::u64_t seed,
-                                                                    util::pool_view_t pool,
+                                                                    fu::pool_t& pool,
                                                                     video_batch_shape_t video) noexcept {
     using result_t = util::expected<video_loader_parquet_t>;
     auto [paths, status] = expand_glob(path_or_glob);
@@ -1265,7 +1260,7 @@ util::expected<video_loader_parquet_t> video_loader_parquet_t::make(gpu_direct_s
 
     video_loader_parquet_t loader;
     loader.storage_ = &session;
-    loader.pool_ = pool;
+    loader.pool_ = &pool;
     loader.absolute_paths_ = std::move(paths);
     loader.seed_ = seed;
     loader.video_ = video;
@@ -1380,7 +1375,7 @@ util::expected_t video_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, nv
                                           "batch {} does not match the lead batch geometry", batch);
         // The whole [rows,columns,…] grid is the scatter target now — segments land across its
         // rows, not one per row.
-        if (util::expected_t decoded = decode_videos(decoder, pool_, tape, batch_records[batch, nk::slice],
+        if (util::expected_t decoded = decode_videos(decoder, *pool_, tape, batch_records[batch, nk::slice],
                                                      representations, loaded.videos.span(), loaded.video_shapes.span(),
                                                      loaded.segment_offsets.span(), loaded.segment_lengths.span(),
                                                      loaded.segment_modality.span(), gpu_stream);
