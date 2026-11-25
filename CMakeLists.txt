@@ -298,11 +298,11 @@ if (UFORM_BUILD_NODE)
     add_subdirectory(javascript)
 endif ()
 
-# The C headers always install, and the libraries only where the default build compiles them, with the C++ SDK that
-# links the archive.
+# The C headers and the header-only engine always install, and the libraries only where the default build compiles
+# them, with the C++ SDK that links the archive.
 if (UFORM_BUILD_SHARED)
-    set(uform_install_sdk_targets_ uform_abi uform_cpp uform_static uform_shared)
+    set(uform_install_sdk_targets_ uform_abi uform_header uform_cpp uform_static uform_shared)
 else ()
-    set(uform_install_sdk_targets_ uform_abi)
+    set(uform_install_sdk_targets_ uform_abi uform_header)
 endif ()
 include(cmake/uform_install.cmake)

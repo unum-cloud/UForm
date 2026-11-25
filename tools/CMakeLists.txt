@@ -11,7 +11,7 @@ target_link_libraries(
     PRIVATE uform::static
             uform::train
             numkong::static
-            forkunion::header
+            forkunion::cpp
             smashtable::header
             yyjson
             fmt::fmt

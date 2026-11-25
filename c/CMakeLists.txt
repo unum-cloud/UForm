@@ -54,6 +54,16 @@ target_compile_options(
 target_include_directories(
     uform_abi INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}> $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
+# The header-only engine in `include/uform/`, whose headers name the C types `uform::abi` carries; a consumer brings
+# NumKong's, ForkUnion's, StringZilla's and SmashTable's headers itself.
+add_library(uform_header INTERFACE)
+add_library(uform::header ALIAS uform_header)
+set_target_properties(uform_header PROPERTIES EXPORT_NAME header)
+target_include_directories(
+    uform_header INTERFACE $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+target_link_libraries(uform_header INTERFACE uform_abi)
+target_compile_features(uform_header INTERFACE cxx_std_23)
 target_link_libraries(uform_shared PUBLIC uform_abi)
 target_link_libraries(uform_static PUBLIC uform_abi)
 # The system codecs the host decoders call stay shared libraries, which an archive can only name to its consumers.

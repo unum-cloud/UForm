@@ -5,8 +5,8 @@
 # - `uform_install_sdk_targets_`: the targets of the `sdk` component, exported as `uformTargets`;
 # - `uform_install_programs_`: the executables the `sdk` component ships beside its libraries, outside the export set.
 #
-# One export set holds `uform::abi`, `uform::cpp` and both libraries, because `uform::cpp` links `uform::abi` and
-# `uform::static`. An empty list installs nothing, and a component no list covers installs from the root after this
+# One export set holds `uform::abi`, `uform::header`, `uform::cpp` and both libraries, because `uform::header` and
+# `uform::cpp` link `uform::abi`, and `uform::cpp` links `uform::static`. An empty list installs nothing, and a component no list covers installs from the root after this
 # file.
 
 if (UFORM_INSTALL)
@@ -54,6 +54,11 @@ if (UFORM_INSTALL)
     )
     install(
         DIRECTORY "${PROJECT_SOURCE_DIR}/c/uform"
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+        COMPONENT sdk
+    )
+    install(
+        DIRECTORY "${PROJECT_SOURCE_DIR}/include/uform"
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
         COMPONENT sdk
     )

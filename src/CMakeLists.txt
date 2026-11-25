@@ -335,7 +335,7 @@ function (uform_variants modality_ residency_ backend_)
     )
     target_compile_definitions(${library_} PRIVATE ${uform_cpu_gates_} ${uform_gpu_gates_})
     target_link_libraries(
-        ${library_} PRIVATE numkong::static forkunion::header stringzilla::static smashtable::header yyjson
+        ${library_} PRIVATE numkong::static forkunion::cpp stringzilla::static smashtable::header yyjson
                             $<BUILD_INTERFACE:forkunion::cpu_capabilities_compiled>
     )
     target_compile_features(${library_} PRIVATE cxx_std_23)
@@ -407,7 +407,7 @@ if (NOT UFORM_BUILD_TRAIN)
     target_sources(uform_host PRIVATE train_absent.cpp)
 endif ()
 target_link_libraries(
-    uform_host PUBLIC numkong::static forkunion::header forkunion::static stringzilla::static smashtable::header yyjson
+    uform_host PUBLIC numkong::static forkunion::cpp stringzilla::static smashtable::header yyjson
 )
 # Every unit naming a class's waiter or atomic reference reads ForkUnion's probe verdicts rather than its own flags, so
 # the class units and the dispatch unit name the same rungs, and the dispatch unit admits them at run time.
@@ -516,8 +516,7 @@ if (UFORM_BUILD_TRAIN)
         uform_train
         PUBLIC numkong::static
                stringzilla::static
-               forkunion::header
-               forkunion::static
+               forkunion::cpp
                smashtable::header
                yyjson
                CUDA::cuda_driver
@@ -596,7 +595,7 @@ if (UFORM_BUILD_TRAIN)
     target_link_libraries(uform_loaders PRIVATE "${UFORM_SWRESAMPLE_LIBRARY}" "${UFORM_SWSCALE_LIBRARY}")
 
     # The host-side media demux and decode run on ForkUnion pools, public because the loader headers take `pool_view_t`.
-    target_link_libraries(uform_loaders PUBLIC forkunion::header forkunion::static)
+    target_link_libraries(uform_loaders PUBLIC forkunion::cpp)
 
     # `train/datasets.cu` → `uform::datasets`: the mixtures and the batch source over the loaders, kept out of
     # `uform::train`, which the C library links without the loaders or cuDF.
