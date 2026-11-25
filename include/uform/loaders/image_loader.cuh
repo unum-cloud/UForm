@@ -8,11 +8,11 @@
  *  @ref unum::uform::loaders::image_loader_parquet_t::make reads only each shard's Parquet footer
  *  once, and every @ref unum::uform::loaders::image_loader_parquet_t::fill takes the caller's
  *  stream, rank, and step, so one loader serves every GPU on every step. Each
- *  @ref unum::uform::loaders::image_loader_parquet_t::fill opens @b as many randomly chosen shards
- *  as it takes to pool the images it needs — at least two unless the dataset is one file — decodes
- *  their blob column into one device reservoir over GDS, draws rows by a keyed bijection over the
- *  whole pool, and decodes the drawn compressed blobs into the batch's shared patch grid with
- *  @ref unum::uform::loaders::nvjpeg_session_t .
+ *  @ref unum::uform::loaders::image_loader_parquet_t::fill reads @b as many randomly drawn row
+ *  groups as it takes to pool the images it needs, from at least two shards unless the dataset is
+ *  one file, decodes their blob column into one device reservoir over GDS, draws rows by a keyed
+ *  bijection over the whole pool, and decodes the drawn compressed blobs into the batch's shared
+ *  patch grid with @ref unum::uform::loaders::nvjpeg_session_t .
  *
  *  @section image_decode_split JPEG on the GPU, the rest on the CPU pool
  *
@@ -213,7 +213,7 @@ struct image_loader_parquet_t {
      *      one sub-row segment.
      *  @sa multimodal_batch_mixer_t for the subsequent cross-GPU mixing.
      *
-     *  Opens ≥2 randomly chosen shards (keyed by @c (seed,step,rank) ), pools their blob column
+     *  Draws row groups from ≥2 shards (keyed by @b (seed,step,rank) ), pools their blob column
      *  into one reservoir, draws up to @c max_segments_per_gpu rows across it, and decodes each
      *  batch's drawn blobs into its patch grid — each resized to its own factor pair of a
      *  native-resolution-derived column budget and packed row-safe into a column sub-range —
@@ -243,16 +243,11 @@ struct image_loader_parquet_t {
      *  decode's PNG / WebP / progressive-JPEG fallback; never spawned here. */
     fu::pool_t* pool_ = nullptr;
 
-    /** The dataset's Parquet shard paths, sorted by the glob — owned. */
-    st::basic_vector<sz::string_t> absolute_paths_ {};
-
     /** The run seed keying the random file and row draws. */
     u64_t seed_ = 0;
 
-    /** @b [shards+1] cumulative footer row counts — the weighted file draw's search table (an
-     *  @c upper_bound maps a keyed row position to its owning file) and, at its back, the dataset's
-     *  total rows. Read once per dataset; shared across every GPU the loader serves. */
-    st::basic_vector<std::size_t> row_prefix_ {};
+    /** The shards' row groups and each fill's pick of them. */
+    row_group_draw_t groups_ {};
 
     /** The image modality's geometry ( @c patch_side , @c channels ) every
      *  @ref unum::uform::loaders::image_loader_parquet_t::fill hands the decode as its one

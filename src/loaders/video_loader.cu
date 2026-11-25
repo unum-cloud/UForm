@@ -19,8 +19,7 @@
 
 #include <unistd.h> // `::write`, `STDERR_FILENO`
 
-#include <algorithm> // `std::find`, `std::upper_bound`
-#include <memory>    // `std::unique_ptr` — the session's pimpl (`nvdec_state_t`)
+#include <memory> // `std::unique_ptr` — the session's pimpl (`nvdec_state_t`)
 
 #include <cuda.h> // vendor-boundary: the Driver API types (`CUstream`, `CUresult`) the NVDEC headers build on
 
@@ -1261,22 +1260,22 @@ util::expected<video_loader_parquet_t> video_loader_parquet_t::make(gpu_direct_s
     video_loader_parquet_t loader;
     loader.storage_ = &session;
     loader.pool_ = &pool;
-    loader.absolute_paths_ = std::move(paths);
     loader.seed_ = seed;
     loader.video_ = video;
 
-    if (st::failed(loader.row_prefix_.resize(loader.absolute_paths_.size() + 1)))
-        return result_t::fail(util::status_code_t::out_of_memory_k, "shard prefix allocation failed ({} shards)",
-                              loader.absolute_paths_.size());
-    loader.row_prefix_[0] = 0;
-    for (std::size_t index = 0; index != loader.absolute_paths_.size(); ++index) {
-        auto [metadata, read_status] = parquet_file_t::table_metadata(session, loader.absolute_paths_[index]);
+    // Footer only, host-side: every shard's row groups, the weighted draw's table.
+    std::size_t groups = 0;
+    for (sz::string_t const& path : paths) {
+        auto [metadata, read_status] = parquet_file_t::table_metadata(session, path);
         if (!read_status) return result_t::fail(std::move(read_status));
         if (metadata.rows == 0)
-            return result_t::fail(util::status_code_t::invalid_argument_k, "shard {} is empty",
-                                  loader.absolute_paths_[index]);
-        loader.row_prefix_[index + 1] = loader.row_prefix_[index] + metadata.rows;
+            return result_t::fail(util::status_code_t::invalid_argument_k, "shard {} is empty", path);
+        if (util::expected_t appended = loader.groups_.append_shard(path, metadata); !appended)
+            return result_t::fail(std::move(appended));
+        groups += metadata.group_rows.size();
     }
+    if (util::expected_t reserved = loader.groups_.reserve(groups); !reserved)
+        return result_t::fail(std::move(reserved));
     return result_t {std::move(loader)};
 }
 
@@ -1308,36 +1307,21 @@ util::expected_t video_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, nv
                                       max_segments, rows * columns_per_row, representations.size());
     std::size_t const total_clips = unroll * clips_per_batch;
 
-    std::size_t const shard_count = absolute_paths_.size();
-    std::size_t const floor_files = fu::min_of<std::size_t>(2, shard_count);
-    std::size_t const total_rows = row_prefix_[shard_count];
+    // Row groups, drawn by their rows and keyed by (seed,step,rank), until they cover the fill;
+    // from at least two shards unless the dataset is one.
+    if (util::expected_t picked = groups_.draw(seed_, training_step, gpu_rank, file_draw_salt_k, total_clips, 2);
+        !picked)
+        return picked;
     constexpr util::splitmix64_hash_t hash {};
-
-    st::basic_vector<sz::string_view_t> picked_paths;
-    st::basic_vector<std::size_t> picked_shards;
-    std::size_t pooled_estimate = 0, attempt = 0;
-    while ((pooled_estimate < total_clips || picked_shards.size() < floor_files) &&
-           picked_shards.size() < shard_count) {
-        std::size_t const position = hash(seed_, training_step, gpu_rank, file_draw_salt_k, attempt) % total_rows;
-        ++attempt;
-        std::size_t const file = static_cast<std::size_t>(
-            std::upper_bound(row_prefix_.begin(), row_prefix_.end(), position) - row_prefix_.begin() - 1);
-        if (std::find(picked_shards.begin(), picked_shards.end(), file) != picked_shards.end()) continue;
-        if (st::failed(picked_shards.push_back(std::size_t {file})) ||
-            st::failed(picked_paths.push_back(absolute_paths_[file].view())))
-            return util::expected_t::fail(util::status_code_t::out_of_memory_k, "No room for the file pick");
-        pooled_estimate += row_prefix_[file + 1] - row_prefix_[file];
-    }
-
-    auto [reservoir, status] = parquet_file_t::make(*storage_, std::span<sz::string_view_t const> {picked_paths},
-                                                    std::span<sz::string_view_t const> {&config.clip_column, 1}, {},
-                                                    gpu_stream);
+    auto [reservoir, status] = parquet_file_t::make(*storage_, groups_.picked_paths(),
+                                                    std::span<sz::string_view_t const> {&config.clip_column, 1},
+                                                    groups_.picked_groups(), gpu_stream);
     if (!status) return util::expected_t::fail(std::move(status));
     std::size_t const pooled_rows = reservoir.rows();
     if (pooled_rows < total_clips)
         return util::expected_t::fail(util::status_code_t::unsupported_k,
                                       "{} pooled rows across {} files cover fewer than the {} clips this fill needs",
-                                      pooled_rows, picked_shards.size(), total_clips);
+                                      pooled_rows, groups_.picked_paths().size(), total_clips);
 
     util::switch_to_gpu_t gpu_scope {gpu_stream};
     if (!gpu_scope.ok())

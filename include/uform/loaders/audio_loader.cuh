@@ -9,11 +9,11 @@
  *  @ref unum::uform::loaders::audio_loader_parquet_t::make reads only each shard's Parquet footer
  *  once, and every @ref unum::uform::loaders::audio_loader_parquet_t::fill takes the caller's
  *  stream, rank, and step, so one loader serves every GPU on every step. Each
- *  @ref unum::uform::loaders::audio_loader_parquet_t::fill opens @b as many randomly chosen shards
- *  as it takes to pool the clips it needs — at least two unless the dataset is one file — decodes
- *  their blob column into one device reservoir over GDS, draws rows by a keyed bijection over the
- *  whole pool, and decodes the drawn clips into the batch's @c audio_samples frame grid with
- *  @ref unum::uform::loaders::decode_audios .
+ *  @ref unum::uform::loaders::audio_loader_parquet_t::fill reads @b as many randomly drawn row
+ *  groups as it takes to pool the clips it needs, from at least two shards unless the dataset is
+ *  one file, decodes their blob column into one device reservoir over GDS, draws rows by a keyed
+ *  bijection over the whole pool, and decodes the drawn clips into the batch's @c audio_samples
+ *  frame grid with @ref unum::uform::loaders::decode_audios .
  *
  *  @section audio_raw The loader delivers raw waveform frames — the spectral frontend is learned
  *
@@ -133,7 +133,7 @@ struct audio_loader_parquet_t {
      *      clip per segment.
      *  @sa multimodal_batch_mixer_t for the subsequent cross-GPU mixing.
      *
-     *  Opens ≥2 randomly chosen shards (keyed by @c (seed,step,rank) ), pools their clip column
+     *  Draws row groups from ≥2 shards (keyed by @b (seed,step,rank) ), pools their clip column
      *  into one reservoir, draws a scatter of rows across it, and decodes each batch's drawn clips
      *  into its frame grid — each clip one sub-row segment of @c columns raw-sample frames —
      *  writing the segment geometry and @c segment_modality .
@@ -158,16 +158,11 @@ struct audio_loader_parquet_t {
      *  never spawned here. */
     fu::pool_t* pool_ = nullptr;
 
-    /** The dataset's Parquet shard paths, sorted by the glob — owned. */
-    st::basic_vector<sz::string_t> absolute_paths_ {};
-
     /** The run seed keying the random file and row draws. */
     u64_t seed_ = 0;
 
-    /** @b [shards+1] cumulative footer row counts — the weighted file draw's search table (an
-     *  @c upper_bound maps a keyed row position to its owning file) and, at its back, the dataset's
-     *  total rows. Read once per dataset; shared across every GPU the loader serves. */
-    st::basic_vector<std::size_t> row_prefix_ {};
+    /** The shards' row groups and each fill's pick of them. */
+    row_group_draw_t groups_ {};
 
     /** The audio modality's geometry ( @c chunk_samples , @c sample_rate ) every
      *  @ref unum::uform::loaders::audio_loader_parquet_t::fill hands the decode — fixed at

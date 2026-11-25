@@ -9,7 +9,7 @@
  *
  *  @ref unum::uform::loaders::video_loader_parquet_t::make reads each shard's Parquet footer once;
  *  every @ref unum::uform::loaders::video_loader_parquet_t::fill takes the caller's stream, rank,
- *  and step, pools randomly chosen shards' clip column into one device reservoir over GDS, draws
+ *  and step, pools randomly drawn row groups' clip column into one device reservoir over GDS, draws
  *  rows by a keyed bijection, and decodes the drawn clips into the batches' @c videos tube grid
  *  with @ref unum::uform::loaders::decode_videos .
  *
@@ -261,16 +261,11 @@ struct video_loader_parquet_t {
      *  to the decode. */
     fu::pool_t* pool_ = nullptr;
 
-    /** The dataset's Parquet shard paths, sorted by the glob — owned. */
-    st::basic_vector<sz::string_t> absolute_paths_ {};
-
     /** The run seed keying the random file and row draws. */
     u64_t seed_ = 0;
 
-    /** @b [shards+1] cumulative footer row counts — the weighted file draw's search table and,
-     *  at its back, the dataset's total rows. Read once per dataset; shared across every GPU
-     *  the loader serves. */
-    st::basic_vector<std::size_t> row_prefix_ {};
+    /** The shards' row groups and each fill's pick of them. */
+    row_group_draw_t groups_ {};
 
     /** The video modality's geometry ( @c tube_frames , @c patch_side , @c frame_stride ) every
      *  @ref unum::uform::loaders::video_loader_parquet_t::fill sources its one representation from
