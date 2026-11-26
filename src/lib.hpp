@@ -37,16 +37,14 @@
 #include <forkunion/topology.hpp>     // `fu::current_thread_id` - the thread running an executor's call
 #include <forkunion/types.hpp>        // `fu::wait_capped_k`
 #include <numkong/capabilities.h>     // `nk_capability_t`, `nk_stream_t`
-#include <numkong/memory.h>           // `nk_allocator_t`, `nk_allocator_init_heap`
-#include <numkong/memory.hpp>         // `nk::stream_t` - the stream an executor owns
 
 #include "uform/uform.h" // every argument structure
 
-#include "uform/utilities/array.hpp"      // `per_gpu_array`
-#include "uform/utilities/ram_device.hpp" // `spawn_pool`, `fu::topology_t`
-#include "uform/utilities/types.hpp"      // `status_t`, the integer aliases, `sz::string_view_t`, `st::basic_vector`
-#include "uform/utilities/vram_apple_device.hpp" // `metal_api_t`, `metal_contexts_t`
-#include "uform/encoder/tower.hpp" // `geometry_t`, `precision_t`, `outputs_t` - what a model's towers take
+#include "uform/utilities/array.hpp"       // `per_gpu_array`
+#include "uform/utilities/ram_device.hpp"  // `spawn_pool`, `fu::topology_t`
+#include "uform/utilities/types.hpp"       // `status_t`, the integer aliases, `sz::string_view_t`, `st::basic_vector`
+#include "uform/utilities/vram_device.hpp" // `gpu_drivers_t`, `gpu_executor_t`, `spawn_gpu_executor`
+#include "uform/encoder/tower.hpp"         // `geometry_t`, `precision_t`, `outputs_t` - what a model's towers take
 
 namespace unum::uform {
 
@@ -720,18 +718,6 @@ constexpr bool gpu_vendor_compiled([[maybe_unused]] nk_capability_t vendor) noex
     return false;
 }
 
-/** One GPU as NumKong reports it, what @ref gpu_class_serves reads. */
-struct gpu_device_t {
-    uform_gpu_vendor_t vendor = uform_gpu_vendor_unknown_k;
-
-    /** What NumKong detected on the device, its vendor's group bit included. */
-    nk_capability_t detected = 0;
-
-    /** What this build holds NumKong code for that the device's loader runs, its vendor's group
-     *  bit included. */
-    nk_capability_t compiled = 0;
-};
-
 /** The vendor whose devices @p gpu_class names; unknown for the zero class. */
 constexpr uform_gpu_vendor_t gpu_vendor_of(gpu_class_t gpu_class) noexcept {
     switch (gpu_class) {
@@ -752,12 +738,11 @@ constexpr uform_gpu_vendor_t gpu_vendor_of(gpu_class_t gpu_class) noexcept {
     return uform_gpu_vendor_unknown_k;
 }
 
-/** Whether @p gpu_class runs on @p device: built, of the device's vendor, and its kits all among
- *  those NumKong's loader runs there. */
-inline bool gpu_class_serves(gpu_class_t gpu_class, gpu_device_t const& device) noexcept {
+/** Whether @p gpu_class runs on a device of @p vendor : built, of that vendor, and its kits all
+ *  among the @p compiled ones NumKong's loader runs there. */
+inline bool gpu_class_serves(gpu_class_t gpu_class, uform_gpu_vendor_t vendor, nk_capability_t compiled) noexcept {
     nk_capability_t const kits = numkong_capabilities_of(gpu_class);
-    return gpu_class_compiled(gpu_class) && gpu_vendor_of(gpu_class) == device.vendor &&
-           (device.compiled & kits) == kits;
+    return gpu_class_compiled(gpu_class) && gpu_vendor_of(gpu_class) == vendor && (compiled & kits) == kits;
 }
 
 /** Whether @p gpu_class sits at or under @p ceiling on its lineage, as every class does under no
@@ -770,14 +755,36 @@ constexpr bool gpu_class_under_ceiling(gpu_class_t gpu_class, uform_gpu_class_t 
     }
 }
 
-/** The newest class of @p ladder serving @p device at or under @p ceiling, or @c unknown_k where
- *  none serves. */
+/** A set of GPU classes, one bit per C enum value. */
+using gpu_class_mask_t = util::u32_t;
+
+/** The bit of @p gpu_class in a @ref gpu_class_mask_t . */
+constexpr gpu_class_mask_t gpu_class_bit(gpu_class_t gpu_class) noexcept {
+    return gpu_class_mask_t {1} << static_cast<util::u32_t>(gpu_class);
+}
+
+/** Every class of @p ladder that loads on a device of @p vendor whose loader runs the @p compiled
+ *  kits. */
 template <gpu_class_t... classes_>
-gpu_class_t pick_gpu_class(gpu_ladder<classes_...>, gpu_device_t const& device, uform_gpu_class_t ceiling) noexcept {
+gpu_class_mask_t gpu_classes_loading(gpu_ladder<classes_...>, uform_gpu_vendor_t vendor,
+                                     nk_capability_t compiled) noexcept {
+    gpu_class_mask_t loading = 0;
+    auto rung = [&]<gpu_class_t class_>() noexcept {
+        if (gpu_class_serves(class_, vendor, compiled)) loading |= gpu_class_bit(class_);
+    };
+    (rung.template operator()<classes_>(), ...);
+    return loading;
+}
+
+/** The newest class of @p ladder in @p loaded at or under @p ceiling , or @c unknown_k where none
+ *  is; @p loaded is one device's set, or every device's sets intersected, as one model's replicas
+ *  run one class. */
+template <gpu_class_t... classes_>
+gpu_class_t pick_gpu_class(gpu_ladder<classes_...>, gpu_class_mask_t loaded, uform_gpu_class_t ceiling) noexcept {
     gpu_class_t picked = gpu_class_t::unknown_k;
     auto rung = [&]<gpu_class_t class_>() noexcept {
-        if (picked == gpu_class_t::unknown_k && gpu_class_under_ceiling(class_, ceiling) &&
-            gpu_class_serves(class_, device))
+        if (picked == gpu_class_t::unknown_k && (loaded & gpu_class_bit(class_)) &&
+            gpu_class_under_ceiling(class_, ceiling))
             picked = class_;
     };
     (rung.template operator()<classes_>(), ...);
@@ -974,150 +981,74 @@ class progress_ticks_t {
 
 #pragma region Memory
 
-/**
- *  @brief Memory that one call at a time rewinds and refills through one NumKong allocation policy:
- *      chunks that double and never move, so a steady loop allocates once and every view a call
- *      hands out stays put.
- *
- *  Chunks are returned through the policy on the stream it was given, so a device arena dies before
- *  its stream. Movable so a per-device table can hold it, never move-assigned, since that would
- *  leak the destination's chunks.
- */
-class chunked_arena_t {
-  public:
-    chunked_arena_t(nk_allocator_t policy, nk_stream_t stream, std::size_t limit) noexcept
-        : policy_(policy), stream_(stream), limit_(limit) {}
-    chunked_arena_t(chunked_arena_t&&) noexcept = default;
-    chunked_arena_t& operator=(chunked_arena_t&&) = delete;
-    ~chunked_arena_t() noexcept {
-        for (util::bytes_span_t const chunk : chunks_)
-            policy_.free(chunk.data(), chunk.size(), policy_.handle, stream_);
-    }
-
-    /** Forgets every allocation, keeping the chunks, which invalidates every view the previous
-     *  call handed out. */
-    void rewind() noexcept { current_ = 0, used_ = 0; }
-
-    /** Whether @p address lies in memory this arena handed out, which its next rewind reuses. */
-    [[nodiscard]] bool contains(void const* address) const noexcept {
-        for (util::bytes_span_t const chunk : chunks_)
-            if (address >= chunk.data() && address < chunk.data() + chunk.size()) return true;
-        return false;
-    }
-
-    /** Hands out @p bytes aligned for any kernel, growing by a chunk as large as everything held so
-     *  far when full, or null when the policy or the limit refuses. */
-    [[nodiscard]] void* allocate(std::size_t bytes) noexcept {
-        std::size_t const aligned = util::round_up_to_multiple(bytes, nk_default_alignment_k);
-        if (aligned < bytes) return nullptr; // saturated within an alignment of the address space
-        while (current_ != chunks_.size() && chunks_[current_].size() - used_ < aligned) ++current_, used_ = 0;
-        if (current_ != chunks_.size()) {
-            util::b8_t* const landed = chunks_[current_].data() + used_;
-            used_ += aligned;
-            return landed;
-        }
-        std::size_t held = 0;
-        for (util::bytes_span_t const chunk : chunks_) held += chunk.size();
-        std::size_t const capacity = held > aligned ? held : aligned;
-        if (limit_ && capacity > limit_ - held) return nullptr;
-        if (!policy_.allocate) return nullptr;
-        util::b8_t* const allocated = static_cast<util::b8_t*>(policy_.allocate(capacity, policy_.handle, stream_));
-        if (!allocated) return nullptr;
-        if (st::failed(chunks_.push_back(util::bytes_span_t {allocated, capacity})))
-            return policy_.free(allocated, capacity, policy_.handle, stream_), nullptr;
-        current_ = chunks_.size() - 1, used_ = aligned;
-        return allocated;
-    }
-
-    /** Hands out @p count values of @p value_type_, or null when they cannot be allocated. */
-    template <typename value_type_>
-    [[nodiscard]] value_type_* allocate(std::size_t count) noexcept {
-        static_assert(std::is_trivially_copyable_v<value_type_>, "Arenas hold plain outputs only");
-        if (count > (std::numeric_limits<std::size_t>::max)() / sizeof(value_type_)) return nullptr;
-        return static_cast<value_type_*>(allocate(count * sizeof(value_type_)));
-    }
-
-  private:
-    nk_allocator_t policy_;
-    nk_stream_t stream_;
-
-    /** Bytes the chunks may span together, or zero for no ceiling. */
-    std::size_t limit_;
-    st::basic_vector<util::bytes_span_t> chunks_;
-
-    /** The chunk being filled, and the bytes of it already handed out since the last rewind. */
-    std::size_t current_ = 0;
-    std::size_t used_ = 0;
-};
-
-/** NumKong's aligned heap, the policy every host arena grows through. */
-[[nodiscard]] inline nk_allocator_t host_pages_policy() noexcept {
-    nk_allocator_t policy {};
-    [[maybe_unused]] nk_status_t const status = nk_allocator_init_heap(&policy, nk_default_alignment_k);
-    return policy;
-}
+/** Memory one call at a time rewinds and allocates from, whose owner reserves and frees its
+ *  chunks. */
+using utilities::chunked_arena_t;
 
 #pragma endregion Memory
 
 #pragma region Executors
 
-/** A device stream an executor opened and closes, its vendor named by the device it
- *  was opened on. */
-using owned_stream_t = nk::stream_t;
+/** One vendor's bundle as every device of the process loaded it. */
+using utilities::kernel_tables;
 
-/** Metal's table and Apple's device contexts, which the process builds once, at the first GPU call,
- *  and every Apple listing, allocation and launch reads; empty off Apple platforms, which then list
- *  no Apple devices. NVIDIA and AMD devices list through NumKong, and their entries units keep the
- *  CUDA and HIP tables their own launches take. */
-struct gpu_drivers_t {
-    util::metal_api_t metal;
-    util::metal_contexts_t metal_contexts;
+#pragma region Shared VRAM
 
-    gpu_drivers_t() noexcept : metal(util::metal_api_t::load()), metal_contexts(metal) {}
-    gpu_drivers_t(gpu_drivers_t const&) = delete;
-    gpu_drivers_t& operator=(gpu_drivers_t const&) = delete;
+/** The GPU side of the process, built at its first VRAM call: every vendor's driver, every device
+ *  they report, NVIDIA first, then AMD, then Apple, a device's position here being its ordinal in
+ *  the C interface, the classes whose bundles loaded on each, and every vendor's kernels, loaded
+ *  once per device and shared by every executor there. A device no class runs on is listed too and
+ *  refuses all work. */
+struct gpu_runtime_t {
+    util::gpu_drivers_t drivers;
+    util::gpu_device_t devices[3 * util::gpu_devices_capacity_k];
+    gpu_class_mask_t loaded[3 * util::gpu_devices_capacity_k] = {};
+    kernel_tables<util::cuda_module_t> cuda_kernels;
+    kernel_tables<util::hip_module_t> hip_kernels;
+    kernel_tables<util::metal_module_t> metal_kernels;
+    std::size_t devices_count = 0;
+
+    gpu_runtime_t() noexcept;
 };
 
-/** Every vendor's driver, loaded at the first GPU call. */
-[[nodiscard]] inline gpu_drivers_t& gpu_drivers() noexcept {
-    static gpu_drivers_t drivers;
-    return drivers;
+/** The one runtime every VRAM call passes its drivers down from. */
+inline gpu_runtime_t& gpu_runtime() noexcept {
+    static gpu_runtime_t runtime;
+    return runtime;
 }
 
-/** One GPU of a VRAM executor: its stream, and the scratch its calls rewind. */
-struct vram_device_t {
+/** Every vendor's driver, loaded at the first VRAM call. */
+inline util::gpu_drivers_t& gpu_drivers() noexcept { return gpu_runtime().drivers; }
 
-    /** The UForm ordinal, the device's position in the @c uform_gpu_devices listing, NVIDIA
-     *  devices first, which @c uform_vram_options_t names and a model's replicas match by. */
-    util::i32_t ordinal = 0;
+/** Every GPU the drivers report, as the ABI numbers them. */
+inline std::span<util::gpu_device_t const> gpu_devices() noexcept {
+    gpu_runtime_t const& runtime = gpu_runtime();
+    return {runtime.devices, runtime.devices_count};
+}
 
-    /** The vendor's own ordinal, as @c cuDeviceGet or @c hipSetDevice takes it. */
-    util::i32_t vendor_ordinal = 0;
+/** The classes whose bundles load on each device @ref gpu_devices lists, asked once at listing. */
+inline std::span<gpu_class_mask_t const> gpu_classes_loaded() noexcept {
+    gpu_runtime_t const& runtime = gpu_runtime();
+    return {runtime.loaded, runtime.devices_count};
+}
 
-    /** Declared before the scratch, so the scratch returns its chunks while the
-     *  stream still lives. */
-    owned_stream_t stream;
+#pragma endregion Shared VRAM
 
-    /** Activations, grown to a high-water mark under the executor's @c scratch_limit. */
-    chunked_arena_t scratch;
+/** The position in @ref gpu_devices of device @p vendor_ordinal of @p vendor , or -1 when none
+ *  is listed there. */
+[[nodiscard]] inline util::i32_t listed_ordinal(util::gpu_vendor_t vendor, std::size_t vendor_ordinal) noexcept {
+    std::span<util::gpu_device_t const> const listed = gpu_devices();
+    for (std::size_t index = 0; index != listed.size(); ++index)
+        if (listed[index].vendor == vendor && listed[index].vendor_ordinal == vendor_ordinal)
+            return static_cast<util::i32_t>(index);
+    return -1;
+}
 
-    /** Pinned host pages both the host and the device address, where a call packs what
-     *  the device reads. */
-    chunked_arena_t transfers;
-};
-
-/** The devices of a VRAM executor, whose threads are its decoders: a caller-inclusive pool whose
- *  thread 0, the caller, stages, feeds the devices and waits on them while the rest decode. */
-struct vram_executor_t {
-    util::per_gpu_array<vram_device_t> devices;
-
-    /** The class every device dispatches as: the best class all of them load under the executor's
-     *  ceiling, whose capabilities name the vendor every NumKong call dispatches on. */
-    gpu_class_t gpu_class = gpu_class_t::unknown_k;
-
-    /** Host pages for what only the decoders read: the plans and every thread's decode window. */
-    chunked_arena_t staging {host_pages_policy(), nullptr, 0};
-};
+/** The position in @ref gpu_devices of the device @p stream of an @p executor_type_ queues on. */
+template <typename executor_type_>
+[[nodiscard]] util::i32_t listed_ordinal_of(typename executor_type_::stream_t const& stream) noexcept {
+    return listed_ordinal(executor_type_::vendor_k, stream.ordinal);
+}
 
 #pragma endregion Executors
 
@@ -1142,15 +1073,25 @@ constexpr uform_gpu_vendor_t gpu_vendor_of(vendored_residency_t residency) noexc
     return uform_gpu_vendor_unknown_k;
 }
 
-/** The executor each residency's verbs take: a host tower's thread pool, a device tower's
- *  stream. */
+/** The executor each residency's verbs take: a host tower's thread pool, a device tower's stream
+ *  record of its vendor's executor. */
 template <vendored_residency_t residency_>
-struct vendored_residency_executor {
-    using type = nk_stream_t;
-};
+struct vendored_residency_executor;
 template <>
 struct vendored_residency_executor<vendored_residency_t::ram_k> {
     using type = fu::pool_t&;
+};
+template <>
+struct vendored_residency_executor<vendored_residency_t::vram_nvidia_k> {
+    using type = util::cuda_executor_t::stream_t&;
+};
+template <>
+struct vendored_residency_executor<vendored_residency_t::vram_amd_k> {
+    using type = util::hip_executor_t::stream_t&;
+};
+template <>
+struct vendored_residency_executor<vendored_residency_t::vram_apple_k> {
+    using type = util::metal_executor_t::stream_t&;
 };
 
 /** The verbs one encoder variant compiles in its class unit, defined in @c encoder_punned.hpp . */
@@ -1163,11 +1104,10 @@ using encoder_residency_tables_t = std::variant<
     encoder_verbs<vendored_residency_t::ram_k> const*, encoder_verbs<vendored_residency_t::vram_nvidia_k> const*,
     encoder_verbs<vendored_residency_t::vram_amd_k> const*, encoder_verbs<vendored_residency_t::vram_apple_k> const*>;
 
-/** One copy of a model's tower on one GPU, matched to an executor's device by its UForm ordinal,
- *  and freed with its vendor's ordinal selected. */
+/** One copy of a model's tower on one GPU, matched to an executor's stream by its position in
+ *  @ref gpu_devices , and freed with that device bound. */
 struct vram_replica_t {
     util::i32_t ordinal = 0;
-    util::i32_t vendor_ordinal = 0;
     void* tower = nullptr;
 };
 
@@ -1367,6 +1307,17 @@ class call_outcome_t {
 uform_arena_t claim_arena(uform_arena_t arena, uform_executor_t executor, std::initializer_list<void const*> inputs,
                           call_outcome_t& outcome) noexcept;
 
+/**
+ *  @brief Makes room in @p arena for allocations of @p bytes , as their footprints sum: host
+ *      pages, or device memory in the order of its executor's first stream, binding that stream's
+ *      device before it allocates.
+ *
+ *  @par Statuses:
+ *  - @c out_of_memory_k The host or the device refused a chunk, or the chunk table could not grow.
+ *  - @c device_k The executor's first device could not be bound.
+ */
+util::status_t reserve_arena(uform_arena_handle_t& arena, std::size_t bytes) noexcept;
+
 #pragma endregion Deferred Calls
 
 } // namespace unum::uform
@@ -1384,12 +1335,34 @@ struct uform_executor_handle_t {
     /** What the threads may run: the machine's masks under the executor's ceiling class. */
     uf::cpu_ceiling_t cpu_ceiling;
 
-    /** Nothing for a RAM executor, or the GPUs a VRAM executor drives. */
-    std::variant<std::monostate, uf::vram_executor_t> device;
+    /** Nothing for a RAM executor, or the streams a VRAM executor queues on, one per GPU it drives,
+     *  each dying after its stream drained and its scratch was freed. */
+    util::gpu_executor_t device;
 
-    /** A RAM executor's pool, or a VRAM executor's decoders. Declared last, so it dies first: the
-     *  decoders join before the staging pages they write are freed. */
+    /** The class every device of a VRAM executor dispatches as: the best class all of them load
+     *  under the executor's ceiling, whose capabilities name the vendor every NumKong call
+     *  dispatches on; unknown on a RAM executor. */
+    uf::gpu_class_t gpu_class = uf::gpu_class_t::unknown_k;
+
+    /** Host pages for what only a VRAM executor's decoders read: the plans and every thread's
+     *  decode window, reserved before each call allocates them. */
+    uf::chunked_arena_t staging;
+
+    /** A RAM executor's pool, or a VRAM executor's decoders, which the destructor joins before it
+     *  frees the staging pages they write. */
     uf::fu::pool_t threads;
+
+    uform_executor_handle_t() noexcept = default;
+    uform_executor_handle_t(uform_executor_handle_t const&) = delete;
+    uform_executor_handle_t& operator=(uform_executor_handle_t const&) = delete;
+
+    /** Joins the decoders first, as the destructor's body runs before any member dies: the pool
+     *  swapped out into a temporary dies with it, joining its threads. Then frees the staging
+     *  pages they wrote. */
+    ~uform_executor_handle_t() noexcept {
+        threads = uf::fu::pool_t {};
+        util::release_host_pages(staging);
+    }
 };
 
 /** What @c uform_arena_t owns: memory that one call at a time rewinds and refills, as host pages or

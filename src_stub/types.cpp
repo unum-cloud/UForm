@@ -128,11 +128,18 @@ void uform_executor_for_ram(uform_executor_for_ram_t* arguments) {
 void uform_executor_for_vram(uform_executor_for_vram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     if (arguments->executor) *arguments->executor = nullptr;
-    if (reject_if(arguments->vram.devices_count && !arguments->vram.devices, uform_status_invalid_argument_k,
+    uform_vram_options_t const& requested = arguments->vram;
+    if (reject_if(arguments->streams && !requested.devices_count, uform_status_invalid_argument_k,
+                  "Streams pair with the devices named beside them", outcome))
+        return;
+    if (reject_if(requested.devices_count && !requested.devices, uform_status_invalid_argument_k,
                   "The devices must not be null", outcome))
         return;
-    if (reject_if(arguments->streams, uform_status_unsupported_k, "The executor drives only its own streams", outcome))
-        return;
+    for (std::size_t index = 0; arguments->streams && index != requested.devices_count; ++index)
+        for (std::size_t earlier = 0; earlier != index; ++earlier)
+            if (reject_if(requested.devices[earlier] == requested.devices[index], uform_status_invalid_argument_k,
+                          "Each adopted stream needs its own device", outcome))
+                return;
     propagate_error(uform_status_device_k, outcome, "This build has no GPU backends");
 }
 

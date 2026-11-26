@@ -31,7 +31,7 @@ static void refuse(arguments_type_* arguments) noexcept {
     if constexpr (a_trainer_stepping_call<arguments_type_>)
         if (!arguments->trainer)
             return propagate_error(uform_status_uninitialized_k, outcome, "The trainer must not be null"), void();
-    if (!arguments->executor || !std::holds_alternative<vram_executor_t>(arguments->executor->device))
+    if (!arguments->executor || std::holds_alternative<std::monostate>(arguments->executor->device))
         return propagate_error(uform_status_device_k, outcome, "The verb needs a VRAM executor"), void();
     propagate_error(uform_status_unsupported_k, outcome, "This build trains on no GPU");
 }

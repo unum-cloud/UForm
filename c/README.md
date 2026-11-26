@@ -127,7 +127,7 @@ while (uform_outcome_status(text_encode.outcome) == uform_status_deferred_k ||
 An executor owns what a call runs on but a model does not: host threads or device streams, activation scratch, and the pinned buffer staging passes through.
 
 - `uform_executor_for_ram` creates an executor of host threads, near the one memory domain its `uform_ram_options_t` names or across the machine for none or several, 7/8 of those domains' cores, less the coordinating caller's own, when `threads` is zero.
-- `uform_executor_for_vram` opens one stream on every device of its `uform_vram_options_t`, named by their position in `uform_gpu_devices`, beside host threads for the decoding the devices cannot do, and refuses caller streams with `uform_status_unsupported_k`.
+- `uform_executor_for_vram` opens one stream on every device of its `uform_vram_options_t`, named by their position in `uform_gpu_devices`, beside host threads for the decoding the devices cannot do, and adopts the caller's `streams` instead when given, one per named device, destroying them in `uform_executor_free`; `NULL` devices drive every listed device of the first vendor with a known class.
 - `uform_executor_drain` waits until no call holds the executor, then holds it as a call would, so a call submitted meanwhile finishes `uform_status_contended_k`, while its devices go idle and it applies the `uform_mood_t` its threads keep until the next call: parked sleeps in the kernel, spinning keeps polling.
 - `uform_executor_free` waits the same way, releases what the executor owns and leaves what the caller owns untouched.
 

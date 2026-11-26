@@ -37,7 +37,10 @@ struct text_packer_t {
 
     std::size_t cell_bytes(ue::geometry_t const&) const noexcept { return sizeof(util::token_id_t); }
     failure_t validate(ue::geometry_t const&) const noexcept { return {}; }
-    failure_t prepare(chunked_arena_t&, std::size_t, ue::geometry_t const&) noexcept { return {}; }
+    template <typename site_type_>
+    failure_t prepare(site_type_&, std::size_t, ue::geometry_t const&) noexcept {
+        return {};
+    }
 
     failure_t plan(std::size_t item, item_plan_t& plan, ue::geometry_t const& geometry, std::size_t) const noexcept {
         plan.spanned = tape[item].size();
@@ -63,7 +66,10 @@ struct choice_packer_t {
 
     std::size_t cell_bytes(ue::geometry_t const&) const noexcept { return sizeof(util::token_id_t); }
     failure_t validate(ue::geometry_t const&) const noexcept { return {}; }
-    failure_t prepare(chunked_arena_t&, std::size_t, ue::geometry_t const&) noexcept { return {}; }
+    template <typename site_type_>
+    failure_t prepare(site_type_&, std::size_t, ue::geometry_t const&) noexcept {
+        return {};
+    }
 
     failure_t plan(std::size_t item, item_plan_t& plan, ue::geometry_t const& geometry, std::size_t) const noexcept {
         plan.spanned = tape[item].size() + 1;
@@ -109,14 +115,19 @@ struct pixels_packer_t {
         return {};
     }
 
-    failure_t prepare(chunked_arena_t& staging, std::size_t threads, ue::geometry_t const&) noexcept {
+    template <typename site_type_>
+    failure_t prepare(site_type_& site, std::size_t threads, ue::geometry_t const&) noexcept {
         std::size_t widest = 0;
         for (std::size_t item = 0; item != tape.size(); ++item) {
             std::size_t const bytes = std::size_t {heights[item]} * widths[item] * um::image_channels_k;
             widest = bytes > widest ? bytes : widest;
         }
         if (!widest) return {};
-        util::pixel_t* const rows = staging.allocate<util::pixel_t>(widest * threads);
+        if (failure_t const reserved = site.reserve_staging(
+                chunked_arena_t::footprint<util::pixel_t>(widest * threads));
+            reserved.message)
+            return reserved;
+        util::pixel_t* const rows = site.staging.template allocate<util::pixel_t>(widest * threads);
         if (!rows) return {uform_status_out_of_memory_k, "Failed to allocate the pixel staging"};
         expanded = {rows, threads, widest};
         return {};
@@ -173,7 +184,10 @@ struct samples_packer_t {
         return {};
     }
 
-    failure_t prepare(chunked_arena_t&, std::size_t, ue::geometry_t const&) noexcept { return {}; }
+    template <typename site_type_>
+    failure_t prepare(site_type_&, std::size_t, ue::geometry_t const&) noexcept {
+        return {};
+    }
 
     /** Samples item @p item spans at the model's rate of @p geometry . */
     std::size_t resampled(std::size_t item, ue::geometry_t const& geometry) const noexcept {

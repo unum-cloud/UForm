@@ -64,7 +64,7 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor`, `nk::tensor_view` — owning columns and views into memory owned elsewhere
 
-#include "uform/utilities/vram_nvidia_device.hpp"   // `gpu_arena_t`, `gpu_arena_alloc` backing the owning tensors
+#include "uform/utilities/vram_nvidia_memory.hpp"   // `gpu_arena_t`, `gpu_arena_alloc` backing the owning tensors
 #include "uform/encoder/multimodal_batch.hpp"       // `segment_role_t`, the bag roles the builder reads
 #include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t` ordering the uploads
 #include "uform/utilities/types.hpp"                // `expected`, `expected_t`, `status_t`

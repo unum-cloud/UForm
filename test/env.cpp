@@ -20,7 +20,7 @@
 
 #include <cuda.h> // `cuInit`, `cuDeviceGetCount`, `cuDevicePrimaryCtxRetain`
 
-#include "uform/utilities/vram_nvidia_device.hpp"     // `gpu_arena_t`, `gpu_registrable_alloc`
+#include "uform/utilities/vram_nvidia_memory.hpp"     // `gpu_arena_t`, `gpu_registrable_alloc`
 #include "uform/utilities/infiniband_collectives.cuh" // `infiniband_nic_t`, `infiniband_endpoint_t` — the probed transport
 #include "uform/utilities/mesh.hpp"                   // `host_domain_count_from_environment`
 

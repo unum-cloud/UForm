@@ -54,7 +54,7 @@ third_party_identifier_prefixes=''
 rustfmt_command="cargo +stable fmt"
 std_collections_baseline_paths=''
 # The types of the static objects that predate the rule against them, as an alternation added lines may still name.
-static_objects_kept='gpu_drivers_t|device_module_t'
+static_objects_kept='gpu_runtime_t'
 # Uppercase non-cache CMake names this project publishes, and the third-party and toolchain inputs it sets.
 cmake_published_variables=''
 cmake_third_party_variables="EMSCRIPTEN_SYSTEM_PROCESSOR WASI_SDK_PATH WASI_SDK_PREFIX YYJSON_INSTALL FMT_MODULE CPACK_ARCHIVE_COMPONENT_INSTALL CPACK_COMPONENT_INCLUDE_TOPLEVEL_DIRECTORY CPACK_COMPONENTS_ALL CPACK_GENERATOR CPACK_PACKAGE_NAME CPACK_STRIP_FILES"
@@ -5524,11 +5524,12 @@ check_tower_isolation() {
 check_mesh_isolation() {
     local reaching
     reaching=$(grep -nE '^[[:space:]]*#[[:space:]]*(include|embed)[[:space:]]*"' "$staged_text_path" |
-        grep -vE '"uform/(utilities/(types\.hpp|array\.hpp|blocking_files\.hpp|safetensors_format\.hpp|vram_nvidia_device\.hpp|vram_nvidia_schedule\.cuh|mesh\.hpp|multimem_[^"]+|infiniband_[^"]+))"' ||
+        grep -vE '"uform/(utilities/(types\.hpp|array\.hpp|blocking_files\.hpp|safetensors_format\.hpp|vram_nvidia_(device|memory)\.hpp|vram_nvidia_schedule\.cuh|mesh\.hpp|multimem_[^"]+|infiniband_[^"]+))"' ||
         true)
     [ -z "$reaching" ] || reject_with_reason "$reaching" \
         "$staged_path is part of the mesh, which includes only system headers, the host-only utilities types and files," \
-        "            uform/utilities/vram_nvidia_device.hpp, uform/utilities/vram_nvidia_schedule.cuh and the other mesh files:"
+        "            the CUDA driver and allocators in uform/utilities/vram_nvidia_{device,memory}.hpp, the schedule and the" \
+        "            other mesh files:"
 }
 
 # A const member that locks or writes hides a mutation behind its signature, and a `const_cast` launders a

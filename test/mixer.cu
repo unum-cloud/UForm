@@ -24,7 +24,7 @@
 #include <cuda.h> // `cuInit`, `cuDeviceGetCount`, `cuStreamSynchronize`
 
 #include "uform/utilities/array.hpp"                  // `stack_array`
-#include "uform/utilities/vram_nvidia_device.hpp"     // `gpu_arena_t`, `gpu_arena_alloc_t`, `pinned_alloc`
+#include "uform/utilities/vram_nvidia_memory.hpp"     // `gpu_arena_t`, `gpu_arena_alloc_t`, `pinned_alloc`
 #include "uform/utilities/infiniband_collectives.cuh" // `colocated_domain_t`
 #include "uform/utilities/mesh.hpp"                   // `mesh_topology_t`, `host_domain_index_from_environment`
 #include "uform/utilities/multimem_collectives.cuh"   // `multimem_domain_t`

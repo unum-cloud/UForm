@@ -38,7 +38,7 @@
 #include <vector>     // `std::vector`
 
 #include <numkong/capabilities.h>
-#include <numkong/memory.hpp>
+#include <numkong/memory.hpp> // `nk::allocator`
 
 #include "uform/utilities/safetensors_format.hpp"
 #include "uform/encoder/multimodal_batch.hpp"
@@ -98,27 +98,25 @@ static std::size_t read_floats(char const* path, std::span<float> values) {
 }
 
 /** Encodes the texts through @p verbs in @p precision into @p encoded : on @p executor , a pool
- *  for a host variant or a stream for a device one, the batch and the outputs in memory that both
- *  the host and the device address. Skips a class without E4M3 products, and leaves @p encoded
- *  empty unless it encoded. */
-template <vendored_residency_t residency_>
+ *  for a host variant or a stream for a device one, the batch and the outputs in memory @p shared
+ *  allocates, which both the host and the device address, waiting through @p wait after the packs
+ *  and after the encode. Skips a class without E4M3 products, and leaves @p encoded empty unless
+ *  every step succeeded. */
+template <vendored_residency_t residency_, typename wait_type_>
 static case_result_t encode(encoder_verbs<residency_> const& verbs, checkpoint_to_load_t const& checkpoint,
                             geometry_t const& geometry, precision_t precision,
                             typename vendored_residency_executor<residency_>::type executor, nk_stream_t stream,
-                            encoded_t& encoded) {
-    auto [tower, create_status] = verbs.create(checkpoint, geometry, precision, stream);
+                            nk_allocator_t shared, wait_type_ const& wait, encoded_t& encoded) {
+    auto [tower, create_status] = verbs.create(checkpoint, geometry, precision, executor);
     if (!create_status && create_status.status_ == status_code_t::unsupported_k && precision == precision_t::e4m3_k)
         return case_result_t::skipped("needs uform_scalar_e4m3_k products in the class");
     if (!expect_true(create_status, "tower: {}", create_status.description_)) return {};
+    if (!expect_true(wait(), "tower: the packs failed to land")) return verbs.destroy(tower), case_result_t {};
 
-    // A device variant takes its vendor's pinned pages for what both sides address, as its kernels
-    // read the batch's segments in place and the host reads the outputs there
-    nk_allocator_t shared {}, scratch_policy {};
-    if constexpr (residency_ == vendored_residency_t::ram_k) shared = scratch_policy = host_pages_policy();
-    else if constexpr (gpu_vendor_compiled(vendor_of(residency_))) {
-        shared = entries_kit_of<residency_>::policy(stream, uform_residency_ram_k);
-        scratch_policy = entries_kit_of<residency_>::policy(stream, uform_residency_vram_k);
-    }
+    // A device variant computes in its device's memory, and a host one in the shared pages
+    nk_allocator_t scratch_policy = shared;
+    if constexpr (residency_ != vendored_residency_t::ram_k && gpu_vendor_compiled(vendor_of(residency_)))
+        scratch_policy = entries_kit_of<residency_>::policy(executor);
     if (!expect_true(shared.allocate && scratch_policy.allocate, "allocators: none for the device"))
         return verbs.destroy(tower), case_result_t {};
     nk::allocator<b8_t> const allocator {shared, stream};
@@ -164,12 +162,10 @@ static case_result_t encode(encoder_verbs<residency_> const& verbs, checkpoint_t
                              {f32r2_span_t {token_vectors.data(), tokens, geometry.token_width}, nk_f32_k},
                              {masked_logits.data(), items_k, geometry.masked_vocabulary}};
     expected_t ran = verbs.encode(tower, batch.view(), outputs, scratch, executor);
-    nk_status_t finished = nk_success_k;
-    if constexpr (residency_ != vendored_residency_t::ram_k && gpu_vendor_compiled(vendor_of(residency_)))
-        finished = entries_kit_of<residency_>::synchronize(stream);
+    bool const finished = wait();
     verbs.destroy(tower);
     if (!expect_true(ran, "encode: {}", ran.description_)) return {};
-    if (!expect_true(finished == nk_success_k, "encode: {}", nk_status_name(finished))) return {};
+    if (!expect_true(finished, "encode: the device failed the queued work")) return {};
     encoded.states.assign(states.begin(), states.end());
     encoded.embeddings.assign(embeddings.begin(), embeddings.end());
     encoded.token_vectors.assign(token_vectors.begin(), token_vectors.end());
@@ -300,17 +296,56 @@ static case_result_t test_class_parity(char const* path, uform_cpu_class_t class
 
 /** Encodes in @p precision on @p stream through @p verbs , the variant a device's vendor ladder
  *  picked, and compares with the serial floor's @p reference . */
-template <vendored_residency_t residency_>
+template <vendored_residency_t residency_, typename stream_type_>
 static case_result_t device_variant_parity(encoder_verbs<residency_> const* verbs,
                                            checkpoint_to_load_t const& checkpoint, geometry_t const& geometry,
-                                           precision_t precision, nk_stream_t stream, encoded_t const& reference,
-                                           double tolerance) {
+                                           precision_t precision, stream_type_& stream, nk_allocator_t shared,
+                                           encoded_t const& reference, double tolerance) {
     if (!verbs) return case_result_t::skipped("needs a variant for the device's vendor");
     encoded_t encoded;
-    case_result_t const encoded_or_skipped = encode(*verbs, checkpoint, geometry, precision, stream, stream, encoded);
+    nk_stream_t const raw = entries_kit_of<residency_>::raw(stream);
+    case_result_t const encoded_or_skipped = encode(
+        *verbs, checkpoint, geometry, precision, stream, raw, shared, [&] { return stream.wait().succeeded(); },
+        encoded);
     check_agreement(uform_gpu_class_name(static_cast<uform_gpu_class_t>(verbs->gpu_class)), encoded, reference,
                     geometry.hidden, tolerance);
     return encoded_or_skipped;
+}
+
+/** Host pages that @p device also addresses, through its vendor's driver, which the batch's
+ *  segments and the outputs take: the device's kernels read the one in place, and the host reads
+ *  the other there too. */
+[[maybe_unused]] static nk_allocator_t pinned_policy(util::gpu_device_t const& device) {
+    nk_allocator_t policy {};
+    if (device.vendor == util::gpu_vendor_t::nvidia_k) {
+        policy.allocate = [](nk_size_t bytes, void*, nk_stream_t) noexcept -> void* {
+            void* pages = nullptr;
+            return gpu_drivers().cuda.allocate_host(&pages, bytes, util::cuda_host_portable_k) == util::cuda_success_k
+                       ? pages
+                       : nullptr;
+        };
+        policy.free = [](void* pages, nk_size_t, void*, nk_stream_t) noexcept { gpu_drivers().cuda.free_host(pages); };
+    }
+    else if (device.vendor == util::gpu_vendor_t::amd_k) {
+        policy.allocate = [](nk_size_t bytes, void*, nk_stream_t) noexcept -> void* {
+            void* pages = nullptr;
+            return gpu_drivers().hip.host_malloc(&pages, bytes, util::hip_host_portable_k) == util::hip_success_k
+                       ? pages
+                       : nullptr;
+        };
+        policy.free = [](void* pages, nk_size_t, void*, nk_stream_t) noexcept { gpu_drivers().hip.host_free(pages); };
+    }
+    else if (device.vendor == util::gpu_vendor_t::apple_k) {
+        policy.handle = gpu_drivers().metal_contexts.context(static_cast<int>(device.vendor_ordinal));
+        policy.allocate = [](nk_size_t bytes, void* context, nk_stream_t) noexcept -> void* {
+            return util::metal_allocate_pages(*static_cast<util::metal_context_t*>(context), bytes).data();
+        };
+        policy.free = [](void* pages, nk_size_t, void* context, nk_stream_t) noexcept {
+            util::metal_free_block(*static_cast<util::metal_context_t*>(context),
+                                   reinterpret_cast<std::uintptr_t>(pages));
+        };
+    }
+    return policy;
 }
 
 /** Encodes in @p precision on @p device through the newest class its vendor's ladder admits, and
@@ -318,23 +353,89 @@ static case_result_t device_variant_parity(encoder_verbs<residency_> const* verb
 static case_result_t test_device_parity(checkpoint_to_load_t const& checkpoint, geometry_t const& geometry,
                                         uform_gpu_device_t device, precision_t precision, encoded_t const& reference,
                                         double tolerance) {
-    nk::device_kind_t kind = nk::device_kind_t::cuda_k;
-    if (device.vendor == uform_gpu_vendor_amd_k) kind = nk::device_kind_t::rocm_k;
-    if (device.vendor == uform_gpu_vendor_apple_k) kind = nk::device_kind_t::metal_k;
-    auto const [opened, open_status] = nk::device_t::make(kind, device.vendor_ordinal);
-    if (!expect_true(nk::succeeded(open_status), "device: {}", nk::status_name(open_status))) return {};
-    auto const [capabilities, query_status] = opened.capabilities_enabled();
-    if (nk::failed(query_status) || !capabilities) return case_result_t::skipped("needs kernels for the device");
-    auto const [stream, create_status] = nk::stream_t::make(opened);
-    if (!expect_true(nk::succeeded(create_status), "device stream: {}", nk::status_name(create_status))) return {};
-    case_result_t result {};
-    visit_vram_residency(capabilities, [&]<vendored_residency_t residency_, typename ladder_type_>() {
-        result = device_variant_parity(
-            pick_gpu_variant<residency_>(ladder_type_ {}, uform_gpu_class_unknown_k, capabilities), checkpoint,
-            geometry, precision, stream.get(), reference, tolerance);
+    nk_capability_t vendor = nk_cap_cuda_k;
+    if (device.vendor == uform_gpu_vendor_amd_k) vendor = nk_cap_rocm_k;
+    if (device.vendor == uform_gpu_vendor_apple_k) vendor = nk_cap_metal_k;
+    case_result_t result = case_result_t::skipped("needs the device's vendor in this build");
+    visit_vram_residency(vendor, [&]<vendored_residency_t residency_, typename ladder_type_>() {
+        if constexpr (gpu_vendor_compiled(vendor_of(residency_))) {
+            using kit_t = entries_kit_of<residency_>;
+            util::i32_t const listed = listed_ordinal(static_cast<util::gpu_vendor_t>(device.vendor),
+                                                      device.vendor_ordinal);
+            if (!expect_true(listed >= 0, "device: {}", device.vendor_ordinal)) return true;
+            std::span<util::gpu_device_t const> const rows = gpu_devices();
+            util::gpu_device_t const row = rows[static_cast<std::size_t>(listed)];
+            nk_capability_t const capabilities = kit_t::capabilities_compiled(row);
+            if (!capabilities) return result = case_result_t::skipped("needs kernels for the device"), true;
+            // One stream on the device, from an executor like any call's
+            std::size_t scratch_limit = 0;
+            auto [spawned, spawn_status] = util::spawn_gpu_executor(gpu_drivers(), std::span {&row, 1}, {},
+                                                                    gpu_runtime(), scratch_limit);
+            if (!expect_true(spawn_status.succeeded(), "device stream: {}",
+                             util::to_string(util::status_t {spawn_status})))
+                return true;
+            auto& stream = std::get<executor_of<residency_>>(spawned).stream(0);
+            if (!expect_true(stream.bind().succeeded(), "device: {}", device.vendor_ordinal)) return true;
+            result = device_variant_parity(
+                pick_gpu_variant<residency_>(ladder_type_ {}, uform_gpu_class_unknown_k, capabilities), checkpoint,
+                geometry, precision, stream, pinned_policy(row), reference, tolerance);
+        }
         return true;
     });
     return result;
+}
+
+/** A move-only value the Shared VRAM text returns, as an executor's claim or a stream owner is. */
+struct move_only_t {
+    int held = 0;
+    move_only_t() noexcept = default;
+    explicit move_only_t(int value) noexcept : held(value) {}
+    move_only_t(move_only_t&& other) noexcept : held(std::exchange(other.held, 0)) {}
+    move_only_t& operator=(move_only_t&& other) noexcept { return held = std::exchange(other.held, 0), *this; }
+    move_only_t(move_only_t const&) = delete;
+    move_only_t& operator=(move_only_t const&) = delete;
+};
+
+/** The forms the Shared VRAM text returns, each read back through <tt>auto [value, status]</tt> . */
+static expected<move_only_t> held_(int value) noexcept { return {move_only_t {value}, status_code_t::success_k}; }
+static expected<move_only_t> contended_() noexcept { return {{}, {status_code_t::contended_k, "held"}}; }
+static expected<move_only_t> forwarded_(status_t status) noexcept { return {{}, status}; }
+
+/** The value-and-status constructor keeps the value only on success, and the binding hands back a
+ *  move-only value and a status that reads as a @c status_t . */
+static case_result_t test_expected_value_and_status() {
+    auto [value, status] = held_(7);
+    expect_true(!status.failed() && value.held == 7, "a success keeps its value");
+    auto [refused, refused_status] = contended_();
+    expect_true(refused_status.failed() && refused.held == 0, "a failure keeps no value");
+    status_t const passed = refused_status;
+    expect_true(passed.code == status_code_t::contended_k, "the bound status passes on as a status_t");
+    auto [forwarded, forwarded_status] = forwarded_(passed);
+    expect_true(forwarded_status.failed() && forwarded.held == 0, "a forwarded failure keeps its code");
+    return {};
+}
+
+/** An arena hands out only what its owner reserved: an allocation past the reservation answers
+ *  null, which every call reports as out of memory, never growing the arena behind its owner. */
+static case_result_t test_arena_refuses_past_reserve() {
+    util::chunked_arena_t arena;
+    expect_true(!arena.allocate(1), "an arena with nothing reserved allocates nothing");
+    std::size_t const reserved = util::chunked_arena_t::footprint(100);
+    if (!expect_true(util::reserve_host_pages(arena, reserved).succeeded(), "host pages: reserved")) return {};
+    expect_true(arena.allocate(100) != nullptr, "an allocation within the reservation lands");
+    expect_true(!arena.allocate(1), "an allocation past the reservation answers null");
+    arena.rewind();
+    expect_true(arena.allocate(reserved) != nullptr, "a rewind reuses the reservation");
+    // The cursor only moves forward, so what one reservation counted is allocated before the next
+    // reservation's: a later one appends a chunk the cursor moves into, leaving the earlier room
+    arena.rewind();
+    expect_true(arena.allocate(reserved / 2) != nullptr, "the first reservation's first half lands");
+    std::size_t const later = 4 * reserved;
+    if (!expect_true(util::reserve_host_pages(arena, later).succeeded(), "host pages: reserved again")) return {};
+    expect_true(arena.allocate(later) != nullptr, "the later reservation's allocation lands");
+    expect_true(!arena.allocate(reserved / 2), "the first reservation's late half answers null");
+    util::release_host_pages(arena);
+    return {};
 }
 
 /** Compares the serial floor's BFloat16 @p reference with the Rust crate's dumps at @p states_path
@@ -440,6 +541,8 @@ int main(int argc, char** argv) {
         return finish_test_run();
     run_test_case("test_checkpoint_round_trip", test_checkpoint_round_trip, checkpoint,
                   std::string {argv[1]} + ".round_trip");
+    run_test_case("test_arena_refuses_past_reserve", test_arena_refuses_past_reserve);
+    run_test_case("test_expected_value_and_status", test_expected_value_and_status);
     auto [geometry, read_status] = geometry_t::from(checkpoint);
     if (!expect_true(read_status, "geometry: {}", read_status.description_)) return finish_test_run();
 
@@ -453,8 +556,11 @@ int main(int argc, char** argv) {
     encoder_verbs<vendored_residency_t::ram_k> const& reference =
         *encoder_class_tables<vendored_residency_t::ram_k, cpu_ladder_floor_k>::find();
     encoded_t bf16_reference, e4m3_reference;
-    encode(reference, checkpoint, geometry, precision_t::bf16_k, pool, nullptr, bf16_reference);
-    encode(reference, checkpoint, geometry, precision_t::e4m3_k, pool, nullptr, e4m3_reference);
+    nk_allocator_t heap {};
+    [[maybe_unused]] nk_status_t const heaped = nk_allocator_init_heap(&heap, nk_default_alignment_k);
+    auto const landed = [] { return true; }; // a host tower is done when its call returns
+    encode(reference, checkpoint, geometry, precision_t::bf16_k, pool, nullptr, heap, landed, bf16_reference);
+    encode(reference, checkpoint, geometry, precision_t::e4m3_k, pool, nullptr, heap, landed, e4m3_reference);
     if (!expect_true(!bf16_reference.states.empty() && !e4m3_reference.states.empty(),
                      "the serial floor encodes in both precisions"))
         return finish_test_run();

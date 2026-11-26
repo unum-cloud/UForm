@@ -169,7 +169,7 @@ Tensors index by rank, `tensor[row, column]`, and slice through the same subscri
 
 Host threads come from ForkUnion's `fu::pool_t` and the machine's topology from its `fu::topology_t`, the RAII owners `forkunion/forkunion.hpp` declares over the C ABI, both reached through `include/uform/utilities/ram_device.hpp`, and nothing else calls a `fu_*` function.
 There `spawn_pool` fills a `fu::pool_t` over a harvested `fu::topology_t` through its `spawn` or `spawn_near`, allowed only the ForkUnion facilities that `forkunion_allowed_of` grants the executor's CPU ceiling; a build without OS threads runs one thread on the caller and refuses more as unsupported.
-An executor holds its `fu::pool_t` by value, declared last so its threads join before anything they write is freed; a call, a tower step or a site borrows it as `fu::pool_t&`, and a loader, which moves, holds a `fu::pool_t*`.
+An executor holds its `fu::pool_t` by value, declared last so its threads join before anything they write is freed; a call, a tower step or a site takes it as `fu::pool_t&`, and a loader, which moves, holds a `fu::pool_t*`.
 Engines, loaders, tools and tests dispatch through it, `for_n` for tasks of similar cost and `for_n_dynamic` for uneven ones, and a dispatch finding the pool busy answers `fu::status_t::contended_k` rather than waiting.
 An empty `fu::pool_t` runs every dispatch on the calling thread, as thread 0: a call without an executor dispatches on one, and its scratch is the arena the call names.
 A caller naming no thread count gets `fu::default_threads_count`, the rule every sibling library shares.
@@ -177,8 +177,14 @@ The hook refuses a ForkUnion pool or topology class under `include/uform/`, a `f
 The binary's root spawns one pool and passes it to every loader and data source, which never spawn one.
 KvikIO is set up at one site, sized from the cores the root's pools left idle.
 An executor spawns its threads near the memory domain the caller names, and the library never names cores of its own.
-A VRAM executor owns one stream per device, created with it and destroyed by it, a caller's `streams` answer `uform_status_unsupported_k`, and every per-device step makes its device current first.
+A VRAM executor owns one stream per device, opened with it or adopted from the caller's `streams` as its last step, so a refused creation leaves them the caller's, and destroyed by it; every per-device step makes its device current first.
+Code that holds an executor and drives its streams takes the executor's `claim()` once, at its top, in `include/` or `src/`, and answers `contended_k` while another call holds it; code handed only a stream takes none, and a verb calling a claimed verb never claims again.
+Freeing an arena is the one exception: it takes no claim, since it first waits out every call naming the arena, so its chunks belong to no running call, and a stream accepts their frees from any thread.
+Those streams are the shared `cuda_stream_t`, `hip_stream_t` and `metal_stream_t` inside the vendor executors, which wait on their events; `gpu_runtime_t` lists the devices once, and the entries kits launch and copy through UForm's own driver tables, never through NumKong.
+Naming no devices drives every listed device of the first vendor with a known class.
 A GPU verb without an executor answers `uform_status_device_k`, since such a call has no device memory for its scratch.
+GPU-scheduling types, the runtime, the vendor stream and event owners, `stream_t`, the vendor executors and their concepts, live in the `Shared VRAM` regions of `include/uform/utilities/vram_device.hpp`, its vendor headers and `src/lib.hpp`, the same text in USearch, UForm and UStore apart from the project prefix, which `.githooks/selftest --siblings` compares.
+A stream queues and a device describes: a `stream_t` holds one listed GPU's queuing state, and every device fact lives once in `gpu_runtime_t`, never copied into an executor.
 
 Shared words follow the Atomics rule above, and `src/lib.hpp` alone picks the primitives for each CPU class.
 `waiter_for_cpu_class` pairs a class with its waiter: PAUSE on the AVX2 and AVX-512 cores, TPAUSE on the WAITPKG Xeons, YIELD on the older Arm cores, WFE on the Armv9.2 ones, WFET only where a monoversioned preset vouches for it, WRS on RISC-V, `pause_short` on Power and `memory.atomic.wait` on WebAssembly.
@@ -362,7 +368,7 @@ A comment that explains the line pins it just as well, and a bare `//` on a memb
 
 - A `NULL` executor runs the call on the calling thread. It creates no pool, thread, ring, SPDK queue pair or stream and probes no topology; its scratch and blocking queues live for that call only. Name an executor for calls that allocate nothing once warm.
 - No static, global, shared or thread-local pool, executor, queue set, stream or handle exists, stateless ones included: whoever needs one creates it and frees it.
-- An executor owns its streams, created with it; a call without one uses the null legacy stream or is refused, and no second origin sits beside the owner.
+- An executor owns its streams, opened or adopted at creation, one per device; a call without one uses the null legacy stream or is refused, and no second origin sits beside the owner.
 - An engine creates, synchronizes and frees its own CUDA, HIP and Metal streams and allocates its own device and pinned memory; NumKong and StringZilla only provide kernels, which may still take an `nk_stream_t` or `sz_stream_t` handle.
 - Every arena is freed before its executor; a binding enforces the order by lifetime where its language can and documents it otherwise, never by reference counts.
 - A C struct change lands with every binding that lays the struct out by hand, checked field by field in review.

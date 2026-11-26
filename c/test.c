@@ -456,12 +456,35 @@ static void test_executors(void) {
     expect_((outcome.status == uform_status_success_k) == (gpu != NULL));
     uform_executor_free(gpu);
 
-    // A caller stream is refused before any device is looked for, so every build answers alike.
-    void* const caller_streams[] = {&outcome};
+    // Streams pair with the devices named beside them, one each, which every build checks before
+    // looking for a device; a null stream is refused once the device answers.
+    void* const caller_streams[] = {&outcome, &outcome};
     gpu = NULL;
     uform_executor_for_vram(
         &(uform_executor_for_vram_t) {.executor = &gpu, .outcome = &outcome, .streams = caller_streams});
-    expect_(outcome.status == uform_status_unsupported_k && gpu == NULL);
+    expect_(outcome.status == uform_status_invalid_argument_k && gpu == NULL);
+    int32_t const device_twice[] = {0, 0};
+    uform_executor_for_vram(&(uform_executor_for_vram_t) {.executor = &gpu,
+                                                          .outcome = &outcome,
+                                                          .vram = {.devices = device_twice, .devices_count = 2},
+                                                          .streams = caller_streams});
+    expect_(outcome.status == uform_status_invalid_argument_k && gpu == NULL);
+    uform_gpu_device_t first_listed[1] = {0};
+    size_t listed_count = 0;
+    uform_gpu_devices(&(uform_gpu_devices_t) {.outcome = &outcome,
+                                              .devices = first_listed,
+                                              .devices_capacity = 1,
+                                              .devices_count = &listed_count});
+    void* const null_streams[] = {NULL};
+    uform_executor_for_vram(&(uform_executor_for_vram_t) {.executor = &gpu,
+                                                          .outcome = &outcome,
+                                                          .vram = {.devices = device_twice, .devices_count = 1},
+                                                          .streams = null_streams});
+    uform_status_t const null_refusal = !listed_count ? uform_status_device_k
+                                        : first_listed[0].gpu_class == uform_gpu_class_unknown_k
+                                            ? uform_status_unsupported_k
+                                            : uform_status_invalid_argument_k;
+    expect_(outcome.status == null_refusal && gpu == NULL);
     uform_executor_for_vram(&(uform_executor_for_vram_t) {.executor = &gpu,
                                                           .outcome = &outcome,
                                                           .vram = {.devices = NULL, .devices_count = 1},

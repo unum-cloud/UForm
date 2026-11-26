@@ -37,7 +37,7 @@
 #include <cuda.h> // `cuInit`, `cuStreamSynchronize`
 
 #include "uform/utilities/array.hpp"              // `stack_array` — the host-oracle and staging scratch
-#include "uform/utilities/vram_nvidia_device.hpp" // `gpu_arena_t`, `gpu_arena_alloc_t`, `pinned_alloc`, the tensor aliases
+#include "uform/utilities/vram_nvidia_memory.hpp" // `gpu_arena_t`, `gpu_arena_alloc_t`, `pinned_alloc`, the tensor aliases
 #include "uform/utilities/mesh.hpp"               // `mesh_topology_t`, `host_domain_index_from_environment`
 #include "uform/encoder/multimodal_batch.cuh"     // `multimodal_batch_on_gpu_t`, the shape, `fill_coords`, `modality_t`
 #include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`, `copy_host_to_device`, `copy_device_to_host`

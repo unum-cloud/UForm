@@ -9,14 +9,14 @@
  *  binary with the runtime, and every call goes through the runtime table this unit loads at its
  *  first entry, so nothing links @c libamdhip64 . Each device loads the bundle once, the first time
  *  a stream on it launches, and keeps it for the life of the process. Every entry runs on the
- *  current device, the one the executor selected, never one a stream names.
+ *  current device, the one the executor selected, never one a stream names, and so does every
+ *  allocation and free of the executor's policies.
  */
-#include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the module's load stage
-#include <forkunion/types.hpp>   // `fu::standard_yield_t`, `fu::wait_capped_k`
-#include <numkong/types.hpp>     // `nk::device_t`
+#include <numkong/capabilities.h> // `nk_capabilities_detected_rocm`, `nk_capabilities_compiled_rocm`
 
 #include "uform/encoder/vram_kits.hpp" // `vram_amd_entries_kit_t`, `segment_layout_t`, `entries_block_threads_k`
-#include "uform/utilities/vram_amd_device.hpp" // `hip_api_t`
+
+#include "lib.hpp" // `gpu_runtime` - the runtime and the bundle's tables
 
 namespace fu = ashvardanian::forkunion;
 namespace ue = unum::uform::encoder;
@@ -31,7 +31,6 @@ using util::hip_function_handle_t;
 using util::hip_module_handle_t;
 using util::hip_result_t;
 using util::hip_stream_handle_t;
-using util::max_gpus_per_host_k;
 using util::u8_t;
 
 /** The bundle's bytes, linked in by the assembler stub @c uform_gpu_bundle writes. */
@@ -57,80 +56,53 @@ static char const* const kernel_names_k[] = {
     "uform_quantize_bf16_tokens_kernel", "uform_quantize_f32_tokens_kernel", "uform_rescale_tokens_kernel",
 };
 
-/** How far a device got loading the bundle; whichever thread leaves @c unloaded_k loads it. */
-enum class load_stage_t : u8_t {
-    unloaded_k,
-    loading_k,
-    loaded_k,
-};
+/** The runtime every entry calls through, the GPU runtime's; empty without one. */
+[[nodiscard]] static hip_api_t const& runtime_() noexcept { return uf::gpu_drivers().hip; }
 
-/** The bundle as one device loaded it: every kernel's function. The stage is touched through the
- *  standard reference, since the entries name no CPU class. */
-struct device_module_t {
-    load_stage_t stage = load_stage_t::unloaded_k;
-    hip_result_t status = util::hip_error_not_initialized_k;
-    hip_function_handle_t functions[std::size_t(kernel_t::count_k)] = {};
-};
+using stream_t = vram_amd_entries_kit_t::stream_t;
 
-static device_module_t device_modules_[max_gpus_per_host_k];
-
-/** The runtime every entry calls through, opened at the first entry; empty without one. */
-[[nodiscard]] static hip_api_t const& runtime_() noexcept {
-    static hip_api_t const runtime = hip_api_t::load();
-    return runtime;
-}
-
-[[nodiscard]] static hip_stream_handle_t native_(nk_stream_t stream) noexcept {
-    return static_cast<hip_stream_handle_t>(static_cast<void*>(stream)); // vendor-boundary: an opaque stream handle
-}
-
-/** Run @p enqueue on @p stream and the current device, the selected one, and report its result. */
+/** Run @p enqueue on @p stream , whose device is bound, and report its result. */
 template <typename enqueue_type_>
-[[nodiscard]] static nk_status_t on_device_(nk_stream_t stream, enqueue_type_ const& enqueue) noexcept {
-    hip_api_t const& runtime = runtime_();
-    int device = 0;
-    if (!runtime || runtime.get_device(&device) != util::hip_success_k) return nk_device_code_mismatch_k;
-    return enqueue(runtime, native_(stream), device) == util::hip_success_k ? nk_success_k : nk_device_code_mismatch_k;
+[[nodiscard]] static nk_status_t on_device_(stream_t& stream, enqueue_type_ const& enqueue) noexcept {
+    hip_api_t const& runtime = stream.handle.api();
+    if (!runtime) return nk_device_code_mismatch_k;
+    return enqueue(runtime, static_cast<hip_stream_handle_t>(stream.handle)) == util::hip_success_k
+               ? nk_success_k
+               : nk_device_code_mismatch_k;
 }
 
-/** The function of @p kernel on @p device , the current one, loading the bundle there on first
+/** The functions of the bundle on @p stream 's device, which its kernel tables load there on first
  *  use. */
-[[nodiscard]] static hip_result_t function_of_(hip_api_t const& runtime, kernel_t kernel, int device,
-                                               hip_function_handle_t& function) noexcept {
-    if (device < 0 || std::size_t(device) >= max_gpus_per_host_k) return util::hip_error_invalid_device_k;
-    device_module_t& module = device_modules_[device];
-    fu::standard_atomic_ref<load_stage_t> const stage_ref {module.stage};
-    load_stage_t stage = load_stage_t::unloaded_k;
-    if (stage_ref.compare_exchange_strong(stage, load_stage_t::loading_k, std::memory_order_acquire)) {
-        if (uform_encoder_amd_bundle_end - uform_encoder_amd_bundle_start == 0)
-            module.status = util::hip_error_no_binary_for_gpu_k;
-        else {
-            hip_module_handle_t loaded = nullptr;
-            module.status = runtime.module_load_data(&loaded, uform_encoder_amd_bundle_start);
-            for (std::size_t index = 0; module.status == util::hip_success_k && index != std::size_t(kernel_t::count_k);
-                 ++index)
-                module.status = runtime.module_get_function(&module.functions[index], loaded, kernel_names_k[index]);
-        }
-        stage_ref.store(load_stage_t::loaded_k, std::memory_order_release);
-    }
-    while (stage_ref.load(std::memory_order_acquire) != load_stage_t::loaded_k)
-        fu::standard_yield_t {}(&module.stage, load_stage_t::loading_k, std::size_t {0}, fu::wait_capped_k);
-    if (module.status != util::hip_success_k) return module.status;
-    function = module.functions[std::size_t(kernel)];
+[[nodiscard]] static hip_result_t functions_of_(stream_t& stream,
+                                                std::span<hip_function_handle_t const>& functions) noexcept {
+    hip_api_t const& runtime = stream.handle.api();
+    int const device = static_cast<int>(stream.ordinal);
+    auto const load = [&](util::hip_module_t& module, std::span<hip_function_handle_t> into) noexcept {
+        bytes_view_t const bundle {uform_encoder_amd_bundle_start, uform_encoder_amd_bundle_end};
+        auto [loaded, status] = util::hip_module_t::load(runtime, device, bundle);
+        if (status.failed()) return util::status_t {status};
+        module = std::move(loaded);
+        for (std::size_t index = 0; index != std::size(kernel_names_k); ++index)
+            if (!(into[index] = module.function(kernel_names_k[index])))
+                return util::status_t {util::status_code_t::device_k, "The bundle lacks a kernel"};
+        return util::status_t {};
+    };
+    if (!stream.kernels || stream.kernels->on(stream.ordinal, load, functions).failed())
+        return util::hip_error_no_binary_for_gpu_k;
     return util::hip_success_k;
 }
 
 /** Launch @p kernel over @p blocks blocks of @p threads on @p stream ; each argument is passed as
  *  the exact type of the kernel's parameter, as the runtime copies its bytes. */
 template <typename... argument_types_>
-[[nodiscard]] static nk_status_t launch_(kernel_t kernel, unsigned blocks, unsigned threads, nk_stream_t stream,
+[[nodiscard]] static nk_status_t launch_(kernel_t kernel, unsigned blocks, unsigned threads, stream_t& stream,
                                          argument_types_... arguments) noexcept {
     void* addresses[] = {static_cast<void*>(&arguments)...}; // vendor-boundary: the launch takes argument addresses
-    return on_device_(stream, [&](hip_api_t const& runtime, hip_stream_handle_t native, int device) {
-        hip_function_handle_t function = nullptr;
-        if (hip_result_t const result = function_of_(runtime, kernel, device, function); result != util::hip_success_k)
-            return result;
-        return runtime.module_launch_kernel(function, blocks, 1, 1, threads, 1, 1, 0, native, addresses, nullptr);
+    return on_device_(stream, [&](hip_api_t const& runtime, hip_stream_handle_t native) {
+        std::span<hip_function_handle_t const> functions;
+        if (hip_result_t const result = functions_of_(stream, functions); result != util::hip_success_k) return result;
+        return runtime.module_launch_kernel(functions[std::size_t(kernel)], blocks, 1, 1, threads, 1, 1, 0, native,
+                                            addresses, nullptr);
     });
 }
 
@@ -142,91 +114,58 @@ template <typename... argument_types_>
                                                                       : entries_grid_blocks_max_k);
 }
 
-nk_allocator_t ue::vram_amd_entries_kit_t::policy(nk_stream_t, uform_residency_t residency) noexcept {
-    // NumKong picks the allocator by the vendor's group alone, so the vendor's bit picks the one
-    // any of its class masks would
+nk_allocator_t ue::vram_amd_entries_kit_t::policy(stream_t&) noexcept {
+    if (!runtime_()) return {};
+    // Weights live as long as their model, on no stream: a blocking allocation with the device
+    // bound, and the blocking free that pairs with it
     nk_allocator_t policy {};
-    nk_status_t const status = residency == uform_residency_ram_k
-                                   ? nk_allocator_init_pinned_best(&policy, capability_k)
-                                   : nk_allocator_init_device_best(&policy, capability_k);
-    return status == nk_success_k ? policy : nk_allocator_t {};
+    policy.allocate = [](nk_size_t bytes, void*, nk_stream_t) noexcept -> void* {
+        void* pointer = nullptr;
+        return runtime_().malloc(&pointer, bytes) == util::hip_success_k ? pointer : nullptr;
+    };
+    policy.free = [](void* pointer, nk_size_t, void*, nk_stream_t) noexcept {
+        [[maybe_unused]] hip_result_t const freed = runtime_().free(pointer);
+    };
+    return policy;
 }
 
-nk_status_t ue::vram_amd_entries_kit_t::select(std::size_t vendor_ordinal) noexcept {
-    hip_api_t const& runtime = runtime_();
-    return runtime && runtime.set_device(static_cast<int>(vendor_ordinal)) == util::hip_success_k ? nk_success_k
-                                                                                                  : nk_missing_gpu_k;
+void ue::vram_amd_entries_kit_t::bind(std::size_t vendor_ordinal) noexcept {
+    [[maybe_unused]] hip_result_t const bound = util::hip_set_device(runtime_(), static_cast<int>(vendor_ordinal));
 }
 
-nk_status_t ue::vram_amd_entries_kit_t::synchronize(nk_stream_t stream) noexcept {
-    return nk_stream_synchronize_best(capability_k, stream);
+nk_capability_t ue::vram_amd_entries_kit_t::capabilities_compiled(util::gpu_device_t const& device) noexcept {
+    nk_capability_t compiled = 0;
+    return nk_capabilities_compiled_rocm(device.vendor_ordinal, &compiled) == nk_success_k ? compiled : 0;
 }
 
-nk_status_t ue::vram_amd_entries_kit_t::describe(std::size_t vendor_ordinal,
-                                                 device_description_t& description) noexcept {
-    hip_api_t const& runtime = runtime_();
-    int const device = static_cast<int>(vendor_ordinal);
-    int compute_units = 0, architecture_major = 0, architecture_minor = 0;
-    std::size_t memory_bytes = 0;
-    if (!runtime ||
-        runtime.get_device_name(description.name, sizeof(description.name), device) != util::hip_success_k ||
-        runtime.get_device_attribute(&compute_units, util::hip_attribute_multiprocessor_count_k, device) !=
-            util::hip_success_k ||
-        runtime.get_device_attribute(&architecture_major, util::hip_attribute_compute_capability_major_k, device) !=
-            util::hip_success_k ||
-        runtime.get_device_attribute(&architecture_minor, util::hip_attribute_compute_capability_minor_k, device) !=
-            util::hip_success_k ||
-        runtime.get_device_memory(&memory_bytes, device) != util::hip_success_k)
-        return nk_device_code_mismatch_k;
-    description.compute_units = static_cast<u32_t>(compute_units);
-    description.memory_bytes = memory_bytes;
-    description.architecture_major = static_cast<u32_t>(architecture_major);
-    description.architecture_minor = static_cast<u32_t>(architecture_minor);
-    return nk_success_k;
-}
-
-nk_capability_t ue::vram_amd_entries_kit_t::capabilities_detected(std::size_t vendor_ordinal,
-                                                                  device_description_t const&) noexcept {
-    auto const [device, open_status] = nk::device_t::make(nk::device_kind_t::rocm_k, vendor_ordinal);
-    if (nk::failed(open_status)) return 0;
-    auto const [detected, detect_status] = device.capabilities_detected();
-    return nk::succeeded(detect_status) ? detected : 0;
-}
-
-nk_capability_t ue::vram_amd_entries_kit_t::capabilities_compiled(std::size_t vendor_ordinal,
-                                                                  device_description_t const&) noexcept {
-    auto const [device, status] = nk::device_t::make(nk::device_kind_t::rocm_k, vendor_ordinal);
-    return nk::succeeded(status) ? device.capabilities_compiled() : 0;
-}
-
-nk_status_t ue::vram_amd_entries_kit_t::copy(bytes_span_t target, bytes_view_t source, nk_stream_t stream) noexcept {
-    return on_device_(stream, [&](hip_api_t const& runtime, hip_stream_handle_t native, int) {
+nk_status_t ue::vram_amd_entries_kit_t::copy(bytes_span_t target, bytes_view_t source, stream_t& stream) noexcept {
+    return on_device_(stream, [&](hip_api_t const& runtime, hip_stream_handle_t native) {
         return runtime.copy_async(target.data(), source.data(), source.size(), util::hip_copy_default_k, native);
     });
 }
 
-nk_status_t ue::vram_amd_entries_kit_t::zero(bytes_span_t target, nk_stream_t stream) noexcept {
-    return on_device_(stream, [&](hip_api_t const& runtime, hip_stream_handle_t native, int) {
+nk_status_t ue::vram_amd_entries_kit_t::zero(bytes_span_t target, stream_t& stream) noexcept {
+    return on_device_(stream, [&](hip_api_t const& runtime, hip_stream_handle_t native) {
         return runtime.fill_async(target.data(), 0, target.size(), native);
     });
 }
 
 nk_status_t ue::vram_amd_entries_kit_t::fill_layout(u32r1_view_t lengths, u32r1_span_t packed_offsets,
-                                                    u32r1_span_t pool_offsets, nk_stream_t stream) noexcept {
+                                                    u32r1_span_t pool_offsets, stream_t& stream) noexcept {
     return launch_(kernel_t::fill_layout_k, 1, 1, stream, lengths, packed_offsets, pool_offsets);
 }
 
 nk_status_t ue::vram_amd_entries_kit_t::fill_coords(segment_layout_t layout, nk::tensor_view<u16_t, 2> image_shapes,
                                                     nk::tensor_view<u16_t, 2> video_shapes, u32_t tube_frames,
                                                     u32_t frame_stride, u32_t positions, i16r2_span_t coords,
-                                                    nk_stream_t stream) noexcept {
+                                                    stream_t& stream) noexcept {
     return launch_(kernel_t::fill_coords_k, static_cast<unsigned>(layout.lengths.extent(0)), entries_block_threads_k,
                    stream, layout, image_shapes, video_shapes, tube_frames, frame_stride, positions, coords);
 }
 
 nk_status_t ue::vram_amd_entries_kit_t::gather_bytes(segment_layout_t layout, nk::tensor_view<token_id_t, 1> tokens,
                                                      bf16r2_view_t table, bf16r2_span_t rows,
-                                                     nk_stream_t stream) noexcept {
+                                                     stream_t& stream) noexcept {
     return launch_(kernel_t::gather_bytes_k, static_cast<unsigned>(layout.lengths.extent(0)), entries_block_threads_k,
                    stream, layout, tokens, table, rows);
 }
@@ -234,39 +173,39 @@ nk_status_t ue::vram_amd_entries_kit_t::gather_bytes(segment_layout_t layout, nk
 nk_status_t ue::vram_amd_entries_kit_t::stage_patches(segment_layout_t layout, modality_t target,
                                                       nk::tensor_view<pixel_t, 3> pixels, f32r1_view_t mean,
                                                       f32r1_view_t inverse_std, bf16r2_span_t patches,
-                                                      nk_stream_t stream) noexcept {
+                                                      stream_t& stream) noexcept {
     nk::tensor_span<nk_bf16_t, 3> const cells {patches.data(), {patches.extent(0), pixels.extent(1), pixels.extent(2)}};
     return launch_(kernel_t::stage_patches_k, static_cast<unsigned>(layout.lengths.extent(0)), entries_block_threads_k,
                    stream, layout, target, pixels, mean, inverse_std, cells);
 }
 
 nk_status_t ue::vram_amd_entries_kit_t::stage_frames(segment_layout_t layout, nk::tensor_view<f32_t, 2> samples,
-                                                     bf16r2_span_t frames, nk_stream_t stream) noexcept {
+                                                     bf16r2_span_t frames, stream_t& stream) noexcept {
     return launch_(kernel_t::stage_frames_k, static_cast<unsigned>(layout.lengths.extent(0)), entries_block_threads_k,
                    stream, layout, samples, frames);
 }
 
 nk_status_t ue::vram_amd_entries_kit_t::mrope(bf16r2_span_t values, u32_t role_offset, u32_t heads, u32_t head_width,
-                                              i16r2_view_t coords, rope_grids_t angles, nk_stream_t stream) noexcept {
+                                              i16r2_view_t coords, rope_grids_t angles, stream_t& stream) noexcept {
     return launch_(kernel_t::mrope_k, stride_blocks_(values.extent(0) * (head_width / 2u)), entries_block_threads_k,
                    stream, values, angles, coords, heads, head_width, role_offset);
 }
 
 nk_status_t ue::vram_amd_entries_kit_t::quantize_tokens_e4m3(bf16r2_view_t values, e4m3r2_span_t shadow,
-                                                             f32r1_span_t token_scales, nk_stream_t stream) noexcept {
+                                                             f32r1_span_t token_scales, stream_t& stream) noexcept {
     return launch_(kernel_t::quantize_bf16_tokens_k, static_cast<unsigned>(values.extent(0)), entries_block_threads_k,
                    stream, values, shadow, token_scales);
 }
 
 nk_status_t ue::vram_amd_entries_kit_t::quantize_tokens_e4m3(f32r2_view_t values, e4m3r2_span_t shadow,
-                                                             f32r1_span_t token_scales, nk_stream_t stream) noexcept {
+                                                             f32r1_span_t token_scales, stream_t& stream) noexcept {
     return launch_(kernel_t::quantize_f32_tokens_k, static_cast<unsigned>(values.extent(0)), entries_block_threads_k,
                    stream, values, shadow, token_scales);
 }
 
 nk_status_t ue::vram_amd_entries_kit_t::rescale_tokens(f32r2_view_t products, f32r1_view_t token_scales,
                                                        f32_t weight_descale, bf16r2_view_t residual,
-                                                       bf16r2_span_t values, nk_stream_t stream) noexcept {
+                                                       bf16r2_span_t values, stream_t& stream) noexcept {
     return launch_(kernel_t::rescale_tokens_k, stride_blocks_(values.extent(0) * values.extent(1)),
                    entries_block_threads_k, stream, products, token_scales, weight_descale, residual, values);
 }

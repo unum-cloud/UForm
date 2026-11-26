@@ -665,12 +665,15 @@ public final class Executor: @unchecked Sendable {
         return try landing.read { () throws(UFormError) in Executor(raw: try created(executor)) }
     }
 
-    /// Opens one submission stream on every named device; an empty list derives one free device.
-    /// Caller `streams`, one per device in `devices` order, report `unsupported`. A zero
-    /// `scratchLimit` lets per-device scratch grow as batches ask. A `gpuClassCeiling`
-    /// dispatches every device as the best class all of them load at or under it; nil sets no
-    /// ceiling. The host decoders take 7/8 of the cores local to `memoryDomains` and dispatch
-    /// under `cpuClassCeiling` likewise. Calls `uform_executor_for_vram`.
+    /// Opens one submission stream on every named device, or adopts the caller's `streams`, one
+    /// per device in `devices` order: a CUDA or HIP stream becomes the executor's, which
+    /// synchronizes and destroys it; a Metal queue is retained, the executor releasing its own
+    /// reference while the caller keeps and releases theirs. An empty list drives every listed
+    /// device of a known class from the first vendor that has one. A zero `scratchLimit` lets
+    /// per-device scratch grow as batches ask. A `gpuClassCeiling` dispatches every device as the
+    /// best class all of them load at or under it; nil sets no ceiling. The host decoders take
+    /// 7/8 of the cores local to `memoryDomains` and dispatch under `cpuClassCeiling` likewise.
+    /// Calls `uform_executor_for_vram`.
     public static func forVram(
         devices: [Int32] = [],
         gpuClassCeiling: GPUClass? = nil,

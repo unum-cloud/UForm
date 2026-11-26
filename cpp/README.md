@@ -151,7 +151,7 @@ uf::status_t const drained = threads.drain(uform_mood_spinning_k);     // waits 
 
 Every factory takes the C argument struct by designator, so a field left out is zero, which the library derives.
 Naming one memory domain spawns the threads near it, while none or several interleave them across the machine.
-`for_vram` opens one stream per device, which the executor destroys, and refuses caller streams with `uform_status_unsupported_k`.
+`for_vram` opens one stream per device, or adopts the caller's `streams`, one per named device, and the executor destroys them; naming no devices drives every listed device of the first vendor with a known class.
 `uf::gpu_devices(devices)` fills a span of `uform_gpu_device_t` and answers how many GPUs the process can drive, and a device's position there is the ordinal `for_vram` and `load_vram` name it by, while `uf::version_name()` spells the linked library's version.
 An executor runs one call at a time, so two threads that genuinely overlap take one apiece.
 Destroying an executor waits until no call holds it.

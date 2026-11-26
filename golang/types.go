@@ -772,8 +772,10 @@ func ExecutorForRam(memoryDomains []int32, cpuClassCeiling CPUClass, threads uin
 // thread that calls the verbs, beside host threads on memoryDomains for the decoding the devices
 // leave to the host.
 //
-// Streams is empty, which the library requires today, or holds one CUDA stream per device in
-// devices order. Zero scratchLimit lets scratch grow as batches ask.
+// Streams is empty, or holds one stream per device in devices order: a CUDA or HIP stream becomes
+// the executor's, which synchronizes and destroys it; a Metal queue is retained, the executor
+// releasing its own reference while the caller keeps and releases theirs. Zero scratchLimit lets
+// scratch grow as batches ask.
 func ExecutorForVram(
 	devices []int32, gpuClassCeiling GPUClass, memoryDomains []int32, cpuClassCeiling CPUClass,
 	streams []unsafe.Pointer, scratchLimit uint,

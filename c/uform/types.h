@@ -730,11 +730,12 @@ typedef struct uform_ram_options_t {
 /** The devices a VRAM-resident model, trainer and executor place their bytes in. */
 typedef struct uform_vram_options_t {
 
-    /** UForm device ordinals, positions in the listing @c uform_gpu_devices reports, read
-     *  only during the call; @c NULL derives one free device. */
+    /** UForm device ordinals, positions in the listing @c uform_gpu_devices reports, read only
+     *  during the call. @c NULL places a model on every device of its executor, while an executor
+     *  takes every listed device of a known class from the first vendor that has one. */
     int32_t const* devices;
 
-    /** Number of entries in @c devices; zero derives. */
+    /** Number of entries in @c devices; zero takes the devices @c NULL does. */
     size_t devices_count;
 
     /** The newest class every named device dispatches as: the best class all of them load, never
@@ -811,22 +812,37 @@ typedef struct uform_executor_for_vram_t {
      *  may free it once the call returns. */
     uform_ram_options_t ram;
 
-    /** The @b optional caller streams, one per device in @c vram order; @c NULL creates its own,
-     *  and the executor drives only streams it creates, so any other value reports
-     *  @c uform_status_unsupported_k. */
+    /** The @b optional streams to adopt, one per entry of @c vram.devices and on that device, an
+     *  @c id<MTLCommandQueue> on Apple. On success a CUDA or HIP stream becomes the executor's,
+     *  which synchronizes and destroys it in @c uform_executor_free; a Metal queue is retained,
+     *  the executor releasing its own reference there while the caller keeps and releases theirs.
+     *  On failure every stream stays the caller's as it was. @c NULL has the executor open its
+     *  own; default streams are refused. */
     void* const* streams;
 
-    /** The @b optional ceiling on scratch bytes per device; zero lets scratch grow as batches ask.
-     *  A batch larger than the ceiling fits runs in several passes. */
+    /** The @b optional ceiling on scratch bytes per device, so N devices hold N × scratch_limit at
+     *  most; zero lets scratch grow as batches ask. A call whose activations would pass the
+     *  ceiling answers @c uform_status_out_of_memory_k . */
     size_t scratch_limit;
 } uform_executor_for_vram_t;
 
 /**
- *  @brief Opens one submission stream on every named device, all driven by the host thread running
- *      the call; caller streams report @c uform_status_unsupported_k.
+ *  @brief Opens or adopts one submission stream on every named device, all driven by the host
+ *      thread running the call.
  *
  *  Before every step on a device the executor makes that device current on the calling thread,
- *  and leaves it current.
+ *  and leaves it current. Pitfalls of adopted streams:
+ *  - A CUDA stream must sit on its device's primary context, which the runtime API creates
+ *    streams on.
+ *  - A stream under CUDA graph capture can't be waited on from the host, so a call on it fails with
+ *    @c uform_status_device_k.
+ *  - Each call leaves the primary context of the last device it drove current on the calling
+ *    thread, as @c cuCtxSetCurrent does.
+ *
+ *  @c uform_status_config_mismatch_k Devices of more than one vendor, or a stream on another device
+ *  than its entry names. @c uform_status_invalid_argument_k A @c gpu_class_ceiling no class takes,
+ *  a null or default stream, which no executor can destroy, a device named twice beside @c streams,
+ *  or @c streams beside no named device at all.
  *
  *  Text and JPEG images never leave the device; the rest of decoding - container demux, PNG and
  *  WebP, audio, and every modality on AMD - runs on host threads the executor spawns beside its

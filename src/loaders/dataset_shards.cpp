@@ -35,7 +35,7 @@
 #include <cuda/stream_ref>        // `cuda::stream_ref` — the stream every cuDF and RMM call takes
 #include <rmm/device_buffer.hpp>  // `rmm::device_buffer` — the gathered tar members
 
-#include "uform/utilities/vram_nvidia_device.hpp" // `device_address` — the tar gather's copy endpoints
+#include "uform/utilities/vram_nvidia_memory.hpp" // `device_address` — the tar gather's copy endpoints
 #include "uform/utilities/types.hpp"              // `st::basic_vector` — the owned per-column table
 #include "uform/loaders/dataset_shards.hpp"
 

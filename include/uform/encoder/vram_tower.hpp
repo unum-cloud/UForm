@@ -24,8 +24,10 @@ namespace unum::uform::encoder {
  *  vendor's entries kit. */
 template <typename entries_kit_type_>
 struct vram_placer {
+    using stream_t = typename entries_kit_type_::stream_t;
+
     [[no_unique_address]] nk::allocator<b8_t> allocator {};
-    nk_stream_t stream = nullptr;
+    stream_t* stream = nullptr;
 
     /** Copy @p values into @p target , a fresh array in device memory. */
     template <typename value_type_>
@@ -37,7 +39,7 @@ struct vram_placer {
             return expected_t::fail(uu::status_code_t::out_of_memory_k, "{} allocation failed ({} bytes)", what,
                                     values.size_bytes());
         return checked(entries_kit_type_::copy(std::as_writable_bytes(std::span<value_type_> {target}),
-                                               std::as_bytes(values), stream),
+                                               std::as_bytes(values), *stream),
                        what);
     }
 };
@@ -52,9 +54,13 @@ struct vram_steps {
     using elementwise_kit_t = elementwise_kit_type_;
     using entries_kit_t = entries_kit_type_;
 
-    nk_stream_t stream_handle = nullptr;
+    using stream_t = typename entries_kit_t::stream_t;
 
-    [[nodiscard]] nk_stream_t stream() const noexcept { return stream_handle; }
+    /** The stream record every step queues on; the products, attention and elementwise kits take
+     *  its raw handle. */
+    stream_t* stream_record = nullptr;
+
+    [[nodiscard]] nk_stream_t stream() const noexcept { return entries_kit_t::raw(*stream_record); }
 
     [[nodiscard]] std::size_t share(std::size_t tasks) noexcept { return fu::max_of<std::size_t>(tasks, 1); }
 
@@ -65,59 +71,59 @@ struct vram_steps {
     }
 
     [[nodiscard]] expected_t zero(uu::bytes_span_t target) noexcept {
-        return checked(entries_kit_t::zero(target, stream_handle), "zeroing");
+        return checked(entries_kit_t::zero(target, *stream_record), "zeroing");
     }
 
     [[nodiscard]] expected_t copy(uu::bytes_span_t target, uu::bytes_view_t source) noexcept {
-        return checked(entries_kit_t::copy(target, source, stream_handle), "copying");
+        return checked(entries_kit_t::copy(target, source, *stream_record), "copying");
     }
 
     [[nodiscard]] expected_t fill_layout(u32r1_view_t lengths, u32r1_span_t packed_offsets,
                                          u32r1_span_t pool_offsets) noexcept {
-        return checked(entries_kit_t::fill_layout(lengths, packed_offsets, pool_offsets, stream_handle), "layout");
+        return checked(entries_kit_t::fill_layout(lengths, packed_offsets, pool_offsets, *stream_record), "layout");
     }
 
     [[nodiscard]] expected_t fill_coords(segment_layout_t const& layout, nk::tensor_view<u16_t, 2> image_shapes,
                                          nk::tensor_view<u16_t, 2> video_shapes, u32_t tube_frames, u32_t frame_stride,
                                          u32_t positions, i16r2_span_t coords) noexcept {
         return checked(entries_kit_t::fill_coords(layout, image_shapes, video_shapes, tube_frames, frame_stride,
-                                                  positions, coords, stream_handle),
+                                                  positions, coords, *stream_record),
                        "coordinates");
     }
 
     [[nodiscard]] expected_t gather_bytes(segment_layout_t const& layout, nk::tensor_view<token_id_t, 1> tokens,
                                           bf16r2_view_t table, bf16r2_span_t rows) noexcept {
-        return checked(entries_kit_t::gather_bytes(layout, tokens, table, rows, stream_handle), "byte gather");
+        return checked(entries_kit_t::gather_bytes(layout, tokens, table, rows, *stream_record), "byte gather");
     }
 
     [[nodiscard]] expected_t stage_patches(segment_layout_t const& layout, modality_t target,
                                            nk::tensor_view<pixel_t, 3> pixels, f32r1_view_t mean,
                                            f32r1_view_t inverse_std, bf16r2_span_t patches) noexcept {
-        return checked(entries_kit_t::stage_patches(layout, target, pixels, mean, inverse_std, patches, stream_handle),
+        return checked(entries_kit_t::stage_patches(layout, target, pixels, mean, inverse_std, patches, *stream_record),
                        "patch staging");
     }
 
     [[nodiscard]] expected_t stage_frames(segment_layout_t const& layout, nk::tensor_view<f32_t, 2> samples,
                                           bf16r2_span_t frames) noexcept {
-        return checked(entries_kit_t::stage_frames(layout, samples, frames, stream_handle), "frame staging");
+        return checked(entries_kit_t::stage_frames(layout, samples, frames, *stream_record), "frame staging");
     }
 
     [[nodiscard]] expected_t mrope(bf16r2_span_t values, u32_t role_offset, u32_t heads, u32_t head_width,
                                    i16r2_view_t coords, rope_grids_t angles) noexcept {
-        return checked(entries_kit_t::mrope(values, role_offset, heads, head_width, coords, angles, stream_handle),
+        return checked(entries_kit_t::mrope(values, role_offset, heads, head_width, coords, angles, *stream_record),
                        "M-RoPE");
     }
 
     template <typename values_type_>
     [[nodiscard]] expected_t quantize(values_type_ values, e4m3r2_span_t shadow, f32r1_span_t token_scales) noexcept {
-        return checked(entries_kit_t::quantize_tokens_e4m3(values, shadow, token_scales, stream_handle),
+        return checked(entries_kit_t::quantize_tokens_e4m3(values, shadow, token_scales, *stream_record),
                        "quantization");
     }
 
     [[nodiscard]] expected_t rescale(f32r2_view_t products, f32r1_view_t token_scales, f32_t weight_descale,
                                      bf16r2_view_t residual, bf16r2_span_t values) noexcept {
         return checked(
-            entries_kit_t::rescale_tokens(products, token_scales, weight_descale, residual, values, stream_handle),
+            entries_kit_t::rescale_tokens(products, token_scales, weight_descale, residual, values, *stream_record),
             "rescale");
     }
 };
@@ -132,19 +138,26 @@ struct vram_tower {
 
     /**
      *  @brief Pack every weight of @p checkpoint on @p stream into memory @p policy allocates, in
-     *      @p precision for the block products, and return once the packs are queued; the caller
-     *      synchronizes @p stream before the first encode, and frees the tower on the same stream.
+     *      @p precision for the block products, and return once every copy into them landed, on
+     *      success or failure, so neither a freed partial tower nor a finished one awaits @p stream
+     *      ; the tower frees on its device with no stream, so it may outlive @p stream .
      *
      *  @par Statuses:
      *  - @c status_code_t::invalid_argument_k A tensor is missing or misshapen.
+     *  - @c status_code_t::device_k The device failed the copies.
      */
     [[nodiscard]] static expected<vram_tower> make(uu::checkpoint_to_load_t const& checkpoint,
                                                    geometry_t const& geometry, precision_t precision,
-                                                   nk_allocator_t policy, nk_stream_t stream) noexcept {
-        vram_placer<entries_kit_type_> const placer {nk::allocator<b8_t> {policy, stream}, stream};
+                                                   nk_allocator_t policy,
+                                                   typename entries_kit_type_::stream_t& stream) noexcept {
+        // The weights allocate and free on no stream, outliving the one their packs queue on
+        vram_placer<entries_kit_type_> const placer {nk::allocator<b8_t> {policy, nullptr}, &stream};
         auto [weights, status] = pack_weights<products_kit_type_, staging_kit_type_>(checkpoint, geometry, precision,
                                                                                      placer);
+        // The copies queued into the weights land before any path frees them or hands them out
+        status_t const landed = stream.wait();
         if (!status) return expected<vram_tower>::fail(std::move(status));
+        if (landed.failed()) return expected<vram_tower>::fail(landed.code, landed.note);
         vram_tower tower;
         tower.weights_ = std::move(weights);
         return expected<vram_tower> {std::move(tower)};
@@ -163,8 +176,8 @@ struct vram_tower {
      *  the host sizes the call from them. The scratch and @p outputs are device memory.
      */
     [[nodiscard]] expected_t encode(multimodal_batch_view_t batch, outputs_t outputs, bytes_span_t scratch,
-                                    nk_stream_t stream) const noexcept {
-        steps_t steps {stream};
+                                    typename entries_kit_type_::stream_t& stream) const noexcept {
+        steps_t steps {&stream};
         return encode_steps(steps, weights_, batch, outputs, scratch);
     }
 

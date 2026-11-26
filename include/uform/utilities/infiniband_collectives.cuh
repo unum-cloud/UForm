@@ -80,7 +80,7 @@
 #include <cuda/atomic> // `cuda::atomic_ref` — the device producer index a post claims
 #include <cuda/memory> // `cuda::align_down`, `cuda::align_up` — the pages covering a host range
 
-#include "uform/utilities/vram_nvidia_device.hpp" // `gpu_arena_t` backing the device producer / consumer counters
+#include "uform/utilities/vram_nvidia_memory.hpp" // `gpu_arena_t` backing the device producer / consumer counters
 #include "uform/utilities/mesh.hpp" // `mesh_topology_t` — the coordinate exchange rides the mesh rendezvous
 #include "uform/utilities/vram_nvidia_schedule.cuh" // `b8r1_span_t` — the registered GPU range travels as one typed span
 #include "uform/utilities/types.hpp"                // `expected`, `expected_t`, `status_t`, `format_into`

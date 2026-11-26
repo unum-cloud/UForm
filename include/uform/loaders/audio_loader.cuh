@@ -42,7 +42,7 @@
 #include <span> // `std::span`
 
 #include "uform/utilities/ram_device.hpp"           // `fu::pool_t` — the CPU-decode pool the composition root owns
-#include "uform/utilities/vram_nvidia_device.hpp"   // `pinned_alloc` — the decode's host tapes
+#include "uform/utilities/vram_nvidia_memory.hpp"   // `pinned_alloc` — the decode's host tapes
 #include "uform/encoder/multimodal_batch.cuh"       // `multimodal_batch_on_gpu_t` — the decode target
 #include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
 #include "uform/utilities/types.hpp"                // `expected`, `status_t`, `data_epoch_t`, `epoch_permutation`

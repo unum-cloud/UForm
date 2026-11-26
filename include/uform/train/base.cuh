@@ -39,7 +39,7 @@
 #include "uform/utilities/safetensors_format.hpp" // `checkpoint_to_load_t`
 #include "uform/train/contrastive_segments.cuh"   // `max_matryoshka_prefixes_k`, `contrastive_relations_t`
 #include "uform/train/encoder_tower.hpp"          // `encoder_tower_bf16_t`
-#include "uform/utilities/vram_nvidia_device.hpp" // `gpu_arena_t`
+#include "uform/utilities/vram_nvidia_memory.hpp" // `gpu_arena_t`
 #include "uform/train/introspect.cuh"             // `telemetry_losses_k` and the other ledger channels
 #include "uform/encoder/multimodal_batch.cuh" // `multimodal_batch_shape_t`, `multimodal_batch_on_gpu_t`, `modality_t`
 #include "uform/train/multimodal_masking.hpp" // `masking_recipe_t`, the masked heads

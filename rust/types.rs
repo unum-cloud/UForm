@@ -1351,9 +1351,10 @@ impl Executor {
     /// `devices` are positions in what [`gpu_devices`] lists, and all of them dispatch as the best
     /// class they all load at or under `gpu_class_ceiling`, where `None` sets no ceiling. The host
     /// decoders take 7/8 of the cores local to `memory_domains` and dispatch under
-    /// `cpu_class_ceiling` likewise. `streams` is empty, or holds one CUDA stream per device in
-    /// `devices` order, which the library refuses with [`Status::Unsupported`]. Zero
-    /// `scratch_limit` lets scratch grow as batches ask.
+    /// `cpu_class_ceiling` likewise. `streams` is empty, or holds one stream per device in
+    /// `devices` order: a CUDA or HIP stream becomes the executor's, which synchronizes and
+    /// destroys it; a Metal queue is retained, the executor releasing its own reference while the
+    /// caller keeps and releases theirs. Zero `scratch_limit` lets scratch grow as batches ask.
     ///
     /// Calls `uform_executor_for_vram`.
     ///

@@ -23,7 +23,10 @@ struct images_packer_t {
 
     std::size_t cell_bytes(ue::geometry_t const& geometry) const noexcept { return geometry.image_scalars(); }
     failure_t validate(ue::geometry_t const& geometry) const noexcept { return validate_images(geometry); }
-    failure_t prepare(chunked_arena_t&, std::size_t, ue::geometry_t const&) noexcept { return {}; }
+    template <typename site_type_>
+    failure_t prepare(site_type_&, std::size_t, ue::geometry_t const&) noexcept {
+        return {};
+    }
 
     failure_t plan(std::size_t item, item_plan_t& plan, ue::geometry_t const& geometry, std::size_t) const noexcept {
         auto [image_plan, status] = um::plan_image(tape[item], geometry.image_patch_side, geometry.columns);
@@ -67,7 +70,10 @@ struct videos_packer_t {
         return {};
     }
 
-    failure_t prepare(chunked_arena_t&, std::size_t, ue::geometry_t const&) noexcept { return {}; }
+    template <typename site_type_>
+    failure_t prepare(site_type_&, std::size_t, ue::geometry_t const&) noexcept {
+        return {};
+    }
 
     failure_t plan(std::size_t item, item_plan_t& plan, ue::geometry_t const& geometry, std::size_t) const noexcept {
         auto [clip, status] = um::demux_video(tape[item]);
@@ -112,10 +118,14 @@ struct recordings_packer_t {
     }
     failure_t validate(ue::geometry_t const& geometry) const noexcept { return validate_audio(geometry); }
 
-    failure_t prepare(chunked_arena_t& staging, std::size_t threads, ue::geometry_t const& geometry) noexcept {
+    template <typename site_type_>
+    failure_t prepare(site_type_& site, std::size_t threads, ue::geometry_t const& geometry) noexcept {
         std::size_t const samples = std::size_t {ue::media_cells(ue::modality_t::audio_k, geometry.columns)} *
                                     geometry.audio_chunk_samples;
-        util::f32_t* const rows = staging.allocate<util::f32_t>(samples * threads);
+        if (failure_t const reserved = site.reserve_staging(chunked_arena_t::footprint<util::f32_t>(samples * threads));
+            reserved.message)
+            return reserved;
+        util::f32_t* const rows = site.staging.template allocate<util::f32_t>(samples * threads);
         if (!rows) return {uform_status_out_of_memory_k, "Failed to allocate the recording staging"};
         windows = {rows, threads, samples};
         return {};

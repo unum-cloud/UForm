@@ -75,8 +75,8 @@ type ModelLoadVramConfig struct {
 	// Executor is the one the upload runs on, one stream per device; nil uploads on the calling
 	// goroutine.
 	Executor *Executor
-	// Devices are the ordinals GPUDevices lists, each holding a replica; empty derives one free
-	// device.
+	// Devices are the ordinals GPUDevices lists, each holding a replica; empty places one on every
+	// device of the executor.
 	Devices []int32
 	// GPUClassCeiling is the newest class every device dispatches as; zero sets no ceiling.
 	GPUClassCeiling GPUClass

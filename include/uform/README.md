@@ -11,7 +11,7 @@ Only the C ABI is versioned, so these headers change with the code that instanti
   - `ram_device.hpp`: `spawn_pool`, which fills ForkUnion's `fu::pool_t` over its `fu::topology_t`, the one way host threads are spawned.
   - `array.hpp`: fixed-capacity arrays with inline storage, for tables of one entry per GPU.
   - `safetensors_format.hpp`: reading and writing safetensors checkpoints through NumKong views.
-  - `vram_nvidia_device.hpp` and `vram_nvidia_schedule.cuh`: the CUDA driver's entry points, single-GPU allocators, owning streams, and graphs captured once and replayed.
+  - `vram_nvidia_device.hpp`, `vram_nvidia_memory.hpp` and `vram_nvidia_schedule.cuh`: the CUDA driver's entry points and owning streams, the single-GPU allocators, and graphs captured once and replayed.
   - `vram_amd_device.hpp` and `vram_apple_device.hpp`: the HIP runtime's entry points, and the Metal executor with its contexts, pipelines, shared buffers and launches, each opened at first use.
   - `mesh.hpp`, `multimem_collectives.cuh` and `infiniband_collectives.cuh`: the multi-level GPU mesh, and the collectives inside one multimem domain and across them.
 - `encoder/`, in `unum::uform::encoder`:

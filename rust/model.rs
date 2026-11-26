@@ -189,7 +189,7 @@ pub struct ModelLoadVramConfig<'config> {
     /// the calling thread.
     pub executor: Option<&'config Executor>,
     /// Positions in what [`gpu_devices`](crate::gpu_devices) lists, each holding a replica; empty
-    /// derives one free device.
+    /// places one on every device of the executor.
     pub devices: &'config [i32],
     /// The newest class every device dispatches as; `None` sets no ceiling.
     pub gpu_class_ceiling: Option<GPUClass>,
@@ -267,7 +267,7 @@ pub struct ModelLoadVramBufferConfig<'config> {
     /// the calling thread.
     pub executor: Option<&'config Executor>,
     /// Positions in what [`gpu_devices`](crate::gpu_devices) lists, each holding a replica; empty
-    /// derives one free device.
+    /// places one on every device of the executor.
     pub devices: &'config [i32],
     /// The newest class every device dispatches as, as for
     /// [`ModelLoadVramConfig::gpu_class_ceiling`].

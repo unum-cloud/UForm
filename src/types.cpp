@@ -12,7 +12,7 @@
 #include <cassert> // `assert` - a callback freeing the executor running it
 #include <cstring> // `std::memcpy` - a listed device's name
 
-#include <iterator> // `std::size` - the GPU kinds
+#include <iterator> // `std::size` - the GPU vendors
 #include <memory>   // `std::unique_ptr` - a handle under construction
 #include <new>      // `std::nothrow`
 #include <span>     // `std::span` - the devices a VRAM executor names
@@ -95,7 +95,7 @@ uform_arena_t uf::claim_arena(uform_arena_t arena, uform_executor_t executor, st
         return propagate_error(uform_status_device_k, outcome,
                                "A device arena serves calls on the executor that made it"),
                nullptr;
-    if (!arena->executor && executor && std::holds_alternative<vram_executor_t>(executor->device))
+    if (!arena->executor && executor && !std::holds_alternative<std::monostate>(executor->device))
         return propagate_error(uform_status_device_k, outcome, "Host pages serve no call computing on a GPU"), nullptr;
     if (!hold_arena(arena, outcome.published()))
         return propagate_error(uform_status_contended_k, outcome, "The arena serves another call"), nullptr;
@@ -106,6 +106,31 @@ uform_arena_t uf::claim_arena(uform_arena_t arena, uform_executor_t executor, st
                    nullptr;
     arena->chunks.rewind();
     return arena;
+}
+
+util::status_t uf::reserve_arena(uform_arena_handle_t& arena, std::size_t bytes) noexcept {
+    chunked_arena_t& chunks = arena.chunks;
+    if (chunks.room() >= bytes) return {};
+    if (!arena.executor) return util::reserve_host_pages(chunks, bytes);
+    std::size_t const held = chunks.held(), width = held > bytes ? held : bytes;
+    return std::visit(
+        [&]<typename executor_type_>(executor_type_& gpus) noexcept -> util::status_t {
+            if constexpr (std::is_same_v<executor_type_, std::monostate>)
+                return {util::status_code_t::device_k, "The arena's executor drives no GPU"};
+            else {
+                auto& first = gpus.stream(0);
+                if (util::status_t const bound = first.bind(); bound.failed()) return bound;
+                auto [address, allocate_status] = first.allocate_async(width);
+                if (allocate_status.failed()) return allocate_status;
+                if (util::status_t const appended = chunks.append({reinterpret_cast<util::b8_t*>(address), width});
+                    appended.failed())
+                    return first.free_async(address), appended;
+                // Other streams copy into the arena and the trainer writes it synchronously, so the
+                // rare growth completes on the first stream before the memory leaves it
+                return first.wait();
+            }
+        },
+        arena.executor->device);
 }
 
 #pragma endregion Executor Calls
@@ -146,156 +171,91 @@ static std::size_t cores_of(fu::topology_t const& topology, st::basic_vector<uti
     return cores;
 }
 
-/** The GPU kinds in the order the process-wide ordinals list them: NVIDIA, then AMD, then Apple. */
-static constexpr nk::device_kind_t gpu_kinds_k[] {nk::device_kind_t::cuda_k, nk::device_kind_t::rocm_k,
-                                                  nk::device_kind_t::metal_k};
+/** The NumKong vendor bit of @p vendor , which picks its residency, its ladder and its kit. */
+static nk_capability_t numkong_vendor_of(util::gpu_vendor_t vendor) noexcept {
+    switch (vendor) {
+    case util::gpu_vendor_t::nvidia_k: return nk_cap_cuda_k;
+    case util::gpu_vendor_t::amd_k: return nk_cap_rocm_k;
+    case util::gpu_vendor_t::apple_k: return nk_cap_metal_k;
+    case util::gpu_vendor_t::unknown_k: return 0;
+    }
+    return 0;
+}
 
-/** The vendor's capability group a GPU kind runs on, which @ref visit_vram_residency keys on. */
-static constexpr nk_capability_t vendor_of(nk::device_kind_t kind) noexcept {
-    switch (kind) {
-    case nk::device_kind_t::cuda_k: return nk_cap_cuda_k;
-    case nk::device_kind_t::rocm_k: return nk_cap_rocm_k;
-    case nk::device_kind_t::metal_k: return nk_cap_metal_k;
-    default: return 0;
+uf::gpu_runtime_t::gpu_runtime_t() noexcept {
+    devices_count = util::list_gpu_devices(drivers, devices);
+    // Every class each device loads, by what its vendor's loader runs there
+    for (std::size_t index = 0; index != devices_count; ++index) {
+        util::gpu_device_t const& device = devices[index];
+        visit_vram_residency(
+            numkong_vendor_of(device.vendor), [&]<vendored_residency_t residency_, typename ladder_type_>() noexcept {
+                if constexpr (gpu_vendor_compiled(vendor_of(residency_)))
+                    loaded[index] = gpu_classes_loading(ladder_type_ {}, gpu_vendor_of(residency_),
+                                                        entries_kit_of<residency_>::capabilities_compiled(device));
+                return true;
+            });
     }
 }
 
-/** How many devices each kind of @ref gpu_kinds_k lists, in its order. */
-struct gpu_counts_t {
-    nk_size_t counts[std::size(gpu_kinds_k)] = {};
-
-    /** Asks every vendor's runtime, Apple's through the Metal contexts, a vendor this build or
-     *  machine lacks listing nothing. */
-    [[nodiscard]] static gpu_counts_t make() noexcept {
-        gpu_counts_t listed;
-        for (std::size_t index = 0; index != std::size(gpu_kinds_k); ++index) {
-            if (gpu_kinds_k[index] == nk::device_kind_t::metal_k) {
-                listed.counts[index] = gpu_vendor_compiled(nk_cap_metal_k) ? gpu_drivers().metal_contexts.count : 0;
-                continue;
-            }
-            auto const [count, status] = nk::device_t::count(gpu_kinds_k[index]);
-            listed.counts[index] = nk::succeeded(status) ? count : 0;
-        }
-        return listed;
-    }
-
-    [[nodiscard]] nk_size_t total() const noexcept {
-        nk_size_t sum = 0;
-        for (nk_size_t const count : counts) sum += count;
-        return sum;
-    }
-};
-
-/** The device @p vendor_ordinal of @p kind as its driver describes it into @p description, and as
- *  its vendor's entries kit reads what it detects and what this build runs there; one of a vendor
- *  this build lacks, or whose runtime refuses, detects and runs nothing. */
-static gpu_device_t describe_gpu(nk::device_kind_t kind, std::size_t vendor_ordinal,
-                                 ue::device_description_t& description) noexcept {
-    gpu_device_t device;
-    visit_vram_residency(vendor_of(kind), [&]<vendored_residency_t residency_, typename>() noexcept {
-        device.vendor = gpu_vendor_of(residency_);
-        if constexpr (gpu_vendor_compiled(vendor_of(residency_))) {
-            using kit_t = entries_kit_of<residency_>;
-            if (kit_t::describe(vendor_ordinal, description) != nk_success_k) return true;
-            device.detected = kit_t::capabilities_detected(vendor_ordinal, description);
-            device.compiled = kit_t::capabilities_compiled(vendor_ordinal, description);
-        }
-        return true;
-    });
-    return device;
-}
-
-/** The newest class of @p kind 's ladder serving @p device at or under @p ceiling. */
-static gpu_class_t pick_gpu_class(nk::device_kind_t kind, gpu_device_t const& device,
-                                  uform_gpu_class_t ceiling) noexcept {
+/** The newest class device @p index of the listing loads under @p ceiling , over its vendor's
+ *  ladder, or @c unknown_k where it loads none. */
+static gpu_class_t best_gpu_class(std::size_t index, gpu_class_mask_t loaded, uform_gpu_class_t ceiling) noexcept {
     gpu_class_t picked = gpu_class_t::unknown_k;
-    visit_vram_residency(vendor_of(kind), [&]<vendored_residency_t, typename ladder_type_>() noexcept {
-        picked = pick_gpu_class(ladder_type_ {}, device, ceiling);
-        return true;
-    });
+    std::span<util::gpu_device_t const> const listed = gpu_devices();
+    visit_vram_residency(numkong_vendor_of(listed[index].vendor),
+                         [&]<vendored_residency_t, typename ladder_type_>() noexcept {
+                             picked = pick_gpu_class(ladder_type_ {}, loaded, ceiling);
+                             return true;
+                         });
     return picked;
 }
 
-/** The device kind and vendor ordinal of the GPU the process-wide @p listed ordinal names, which
- *  the caller checked lies under @p gpus 's total, in the order of @ref gpu_kinds_k . */
-static nk::device_kind_t device_kind_of(util::i32_t listed, gpu_counts_t const& gpus,
-                                        nk_size_t& vendor_ordinal) noexcept {
-    vendor_ordinal = static_cast<nk_size_t>(listed);
-    std::size_t index = 0;
-    for (; index + 1 != std::size(gpu_kinds_k) && vendor_ordinal >= gpus.counts[index]; ++index)
-        vendor_ordinal -= gpus.counts[index];
-    return gpu_kinds_k[index];
+/** What an executor naming no devices drives, by position in the listing, into @p every : the first
+ *  listed device loading a class under @p ceiling , then every device of its vendor that still
+ *  shares one under it with all taken before, so the devices taken always share a class. */
+static void every_known_gpu(util::per_gpu_array<util::i32_t>& every, uform_gpu_class_t ceiling) noexcept {
+    gpu_runtime_t const& runtime = gpu_runtime();
+    gpu_class_mask_t shared = 0;
+    for (std::size_t index = 0; index != runtime.devices_count; ++index) {
+        gpu_class_mask_t const together = every.size() ? shared & runtime.loaded[index] : runtime.loaded[index];
+        if (best_gpu_class(index, together, ceiling) == gpu_class_t::unknown_k) continue;
+        if (every.size() && runtime.devices[index].vendor != runtime.devices[every[0]].vendor) continue;
+        if (every.push_back(static_cast<util::i32_t>(index)) != util::status_code_t::success_k) return;
+        shared = together;
+    }
 }
 
-/** Writes to @p picked the best class all devices of @p listed load, never above @p ceiling , as
- *  one model's replicas run one class. False once @p outcome records why not. */
-static bool resolve_placement(std::span<util::i32_t const> listed, gpu_counts_t const& gpus, uform_gpu_class_t ceiling,
-                              gpu_class_t& picked, uform_outcome_t* outcome) noexcept {
-    if (ceiling != uform_gpu_class_unknown_k && !listed_in(gpu_classes_k, ceiling))
-        return propagate_error(uform_status_invalid_argument_k, outcome, "No GPU class has that value");
-    gpu_device_t shared;
-    nk::device_kind_t kind = nk::device_kind_t::cuda_k;
+/** Whether @p vram names one device twice, which adopted streams refuse, one stream per device. */
+static bool names_a_device_twice(uform_vram_options_t const& vram) noexcept {
+    for (std::size_t index = 0; index != vram.devices_count; ++index)
+        for (std::size_t earlier = 0; earlier != index; ++earlier)
+            if (vram.devices[earlier] == vram.devices[index]) return true;
+    return false;
+}
+
+/** The listing rows the positions @p listed name into @p rows , and into @p picked the best class
+ *  all of them load, never above @p ceiling , as one model's replicas run one class. False once
+ *  @p outcome records why not. */
+static bool resolve_placement(std::span<util::i32_t const> listed, uform_gpu_class_t ceiling,
+                              util::gpu_device_t (&rows)[util::gpu_devices_capacity_k], gpu_class_t& picked,
+                              uform_outcome_t* outcome) noexcept {
+    if (listed.size() > util::gpu_devices_capacity_k)
+        return propagate_error(uform_status_invalid_argument_k, outcome, "More devices than one process drives");
+    gpu_runtime_t const& runtime = gpu_runtime();
+    gpu_class_mask_t shared = ~gpu_class_mask_t {0};
     for (std::size_t index = 0; index != listed.size(); ++index) {
-        if (listed[index] < 0 || static_cast<nk_size_t>(listed[index]) >= gpus.total())
+        if (listed[index] < 0 || static_cast<std::size_t>(listed[index]) >= runtime.devices_count)
             return propagate_error(uform_status_device_k, outcome, "A device ordinal names no GPU this build drives");
-        nk_size_t vendor_ordinal = 0;
-        nk::device_kind_t const device_kind = device_kind_of(listed[index], gpus, vendor_ordinal);
-        ue::device_description_t description;
-        gpu_device_t const described = describe_gpu(device_kind, vendor_ordinal, description);
-        if (index && described.vendor != shared.vendor)
+        rows[index] = runtime.devices[listed[index]];
+        shared &= runtime.loaded[listed[index]];
+        if (rows[index].vendor != rows[0].vendor)
             return propagate_error(uform_status_config_mismatch_k, outcome, "The devices span vendors");
-        if (!index) shared = described, kind = device_kind;
-        else shared.detected &= described.detected, shared.compiled &= described.compiled;
     }
-    picked = pick_gpu_class(kind, shared, ceiling);
+    picked = best_gpu_class(static_cast<std::size_t>(listed[0]), shared, ceiling);
     if (picked == gpu_class_t::unknown_k)
         return propagate_error(uform_status_unsupported_k, outcome,
                                "The GPUs share no compiled class under the ceiling");
     return true;
-}
-
-/** Opens a stream and a scratch arena on the GPU the process-wide @p listed ordinal names as
- *  @p gpu_class and appends it to @p devices; false once @p outcome records why not. */
-static bool open_device(util::per_gpu_array<vram_device_t>& devices, util::i32_t listed, gpu_counts_t const& gpus,
-                        gpu_class_t gpu_class, std::size_t scratch_limit, uform_outcome_t* outcome) noexcept {
-    nk_size_t vendor_ordinal = 0;
-    nk::device_kind_t const kind = device_kind_of(listed, gpus, vendor_ordinal);
-    auto const [device, open_status] = nk::device_t::make(kind, vendor_ordinal);
-    if (nk::failed(open_status))
-        return propagate_error(status_of(static_cast<nk_status_t>(open_status)), outcome, "No such GPU");
-    nk_capability_t const capabilities = numkong_capabilities_of(gpu_class);
-    auto [stream, create_status] = owned_stream_t::make(device);
-    if (nk::failed(create_status))
-        return propagate_error(status_of(static_cast<nk_status_t>(create_status)), outcome, "Failed to open a stream");
-    nk_stream_t const handle = stream.get();
-    nk_allocator_t policy {}, pages {};
-    visit_vram_residency(capabilities, [&]<vendored_residency_t residency_, typename>() noexcept {
-        if constexpr (gpu_vendor_compiled(vendor_of(residency_))) {
-            policy = entries_kit_of<residency_>::policy(handle, uform_residency_vram_k);
-            pages = entries_kit_of<residency_>::policy(handle, uform_residency_ram_k);
-        }
-        return true;
-    });
-    if (!policy.allocate) return propagate_error(uform_status_device_k, outcome, "The GPU has no device allocator");
-    if (!pages.allocate) return propagate_error(uform_status_device_k, outcome, "The GPU has no pinned host allocator");
-    vram_device_t opened {listed, static_cast<util::i32_t>(vendor_ordinal), std::move(stream),
-                          chunked_arena_t(policy, handle, scratch_limit), chunked_arena_t(pages, handle, 0)};
-    if (devices.push_back(std::move(opened)) != util::status_code_t::success_k)
-        return propagate_error(uform_status_invalid_argument_k, outcome, "More devices than one process drives");
-    return true;
-}
-
-/** Makes @p device of @p vram current on the calling thread, where its work, allocations and
- *  frees land. */
-static nk_status_t select_device(vram_executor_t const& vram, vram_device_t const& device) noexcept {
-    nk_status_t status = nk_missing_gpu_k;
-    visit_vram_residency(
-        numkong_capabilities_of(vram.gpu_class), [&]<vendored_residency_t residency_, typename>() noexcept {
-            if constexpr (gpu_vendor_compiled(vendor_of(residency_)))
-                status = entries_kit_of<residency_>::select(static_cast<std::size_t>(device.vendor_ordinal));
-            return true;
-        });
-    return status;
 }
 
 #pragma endregion Executors
@@ -314,6 +274,18 @@ static uform_status_t read_name(uform_bytes_view_t name, value_type_ const (&val
     return uform_status_invalid_argument_k;
 }
 
+/** Frees every chunk of @p memory , device memory @p gpus made, in the order of its first stream
+ *  with that device bound; a stream that cannot bind leaks them rather than free on another. */
+template <typename executor_type_>
+static void release_device_chunks(executor_type_& gpus, chunked_arena_t& memory) noexcept {
+    if constexpr (!std::is_same_v<executor_type_, std::monostate>) {
+        auto& first = gpus.stream(0);
+        if (first.bind().failed()) return;
+        for (util::bytes_span_t const chunk : memory.chunks())
+            first.free_async(reinterpret_cast<std::uintptr_t>(chunk.data()));
+    }
+}
+
 extern "C" {
 
 #pragma region Outcomes Executors and Arenas
@@ -330,24 +302,19 @@ UFORM_EXPORT void uform_gpu_devices(uform_gpu_devices_t* arguments) {
         return propagate_error(uform_status_invalid_argument_k, outcome, "The count output must not be null"), void();
     if (arguments->devices_capacity && !arguments->devices)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The devices must not be null"), void();
-    std::size_t listed = 0;
-    gpu_counts_t const gpus = gpu_counts_t::make(); // a vendor this build or machine lacks lists nothing
-    for (std::size_t kind_index = 0; kind_index != std::size(gpu_kinds_k); ++kind_index) {
-        nk::device_kind_t const kind = gpu_kinds_k[kind_index];
-        for (std::size_t ordinal = 0; ordinal != gpus.counts[kind_index]; ++ordinal, ++listed) {
-            if (listed >= arguments->devices_capacity) continue;
-            uform_gpu_device_t& entry = arguments->devices[listed];
-            entry = {};
-            entry.vendor_ordinal = static_cast<util::u32_t>(ordinal);
-            ue::device_description_t description;
-            gpu_device_t const described = describe_gpu(kind, ordinal, description);
-            entry.vendor = described.vendor;
-            entry.gpu_class = static_cast<uform_gpu_class_t>(
-                pick_gpu_class(kind, described, uform_gpu_class_unknown_k));
-            std::memcpy(entry.name, description.name, sizeof(entry.name));
-            entry.compute_units = description.compute_units;
-            entry.memory_bytes = description.memory_bytes;
-        }
+    gpu_runtime_t const& runtime = gpu_runtime(); // a vendor this build or machine lacks lists nothing
+    std::size_t const listed = runtime.devices_count;
+    for (std::size_t index = 0; index != listed && index != arguments->devices_capacity; ++index) {
+        util::gpu_device_t const& device = runtime.devices[index];
+        uform_gpu_device_t& entry = arguments->devices[index];
+        entry = {};
+        entry.vendor = static_cast<uform_gpu_vendor_t>(device.vendor);
+        entry.vendor_ordinal = device.vendor_ordinal;
+        entry.gpu_class = static_cast<uform_gpu_class_t>(
+            best_gpu_class(index, runtime.loaded[index], uform_gpu_class_unknown_k));
+        entry.compute_units = device.compute_units;
+        entry.memory_bytes = device.memory_bytes;
+        std::memcpy(entry.name, device.name, sizeof(entry.name));
     }
     *arguments->devices_count = listed;
     propagate_error(uform_status_success_k, outcome, nullptr);
@@ -384,16 +351,34 @@ UFORM_EXPORT void uform_executor_for_vram(uform_executor_for_vram_t* arguments) 
     call_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
     uform_vram_options_t const& requested = arguments->vram;
+    if (arguments->streams && !requested.devices_count)
+        return propagate_error(uform_status_invalid_argument_k, outcome,
+                               "Streams pair with the devices named beside them"),
+               void();
     if (requested.devices_count && !requested.devices)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The devices must not be null"), void();
+    if (arguments->streams && names_a_device_twice(requested))
+        return propagate_error(uform_status_invalid_argument_k, outcome, "Each adopted stream needs its own device"),
+               void();
     auto [ceiling, pick_status] = pick_cpu_ceiling(arguments->ram.cpu_class_ceiling);
     if (!pick_status)
         return propagate_error(pick_status.status_, outcome, "No compiled class fits the ceiling"), void();
-    if (arguments->streams) // refused on any machine, as an option the executor cannot honour
-        return propagate_error(uform_status_unsupported_k, outcome, "The executor drives only its own streams"), void();
-    gpu_counts_t const gpus = gpu_counts_t::make();
-    if (!gpus.total())
+    if (!gpu_runtime().devices_count)
         return propagate_error(uform_status_device_k, outcome, "No GPU this build drives answers"), void();
+    if (requested.gpu_class_ceiling != uform_gpu_class_unknown_k &&
+        !listed_in(gpu_classes_k, requested.gpu_class_ceiling))
+        return propagate_error(uform_status_invalid_argument_k, outcome, "No GPU class has that value"), void();
+    util::per_gpu_array<util::i32_t> every;
+    if (!requested.devices_count) every_known_gpu(every, requested.gpu_class_ceiling);
+    std::span<util::i32_t const> const listed = requested.devices_count
+                                                    ? std::span<util::i32_t const> {requested.devices,
+                                                                                    requested.devices_count}
+                                                    : every.view();
+    if (listed.empty())
+        return propagate_error(uform_status_unsupported_k, outcome, "No GPU runs a class this build compiled"), void();
+    util::gpu_device_t rows[util::gpu_devices_capacity_k];
+    gpu_class_t picked = gpu_class_t::unknown_k;
+    if (!resolve_placement(listed, requested.gpu_class_ceiling, rows, picked, outcome)) return;
     fu::topology_t topology;
     if (fu::status_t const harvested = topology.harvest(); fu::failed(harvested))
         return propagate_error(util::status_from_(harvested), outcome, "Topology discovery failed"), void();
@@ -401,15 +386,7 @@ UFORM_EXPORT void uform_executor_for_vram(uform_executor_for_vram_t* arguments) 
     if (!executor)
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
     executor->cpu_ceiling = ceiling;
-    vram_executor_t& vram = executor->device.emplace<vram_executor_t>();
-    static constexpr util::i32_t device_zero_k[] {0};
-    std::span<util::i32_t const> const listed = requested.devices_count
-                                                    ? std::span<util::i32_t const> {requested.devices,
-                                                                                    requested.devices_count}
-                                                    : std::span<util::i32_t const> {device_zero_k};
-    if (!resolve_placement(listed, gpus, requested.gpu_class_ceiling, vram.gpu_class, outcome)) return;
-    for (util::i32_t const ordinal : listed)
-        if (!open_device(vram.devices, ordinal, gpus, vram.gpu_class, arguments->scratch_limit, outcome)) return;
+    executor->gpu_class = picked;
     st::basic_vector<util::i32_t> memory_domains;
     if (!adopt_memory_domains(memory_domains, arguments->ram, topology, outcome)) return;
     // The caller is decoder 0: it stages, feeds the devices and waits, so calls finish on return
@@ -418,6 +395,15 @@ UFORM_EXPORT void uform_executor_for_vram(uform_executor_for_vram_t* arguments) 
                                                     forkunion_allowed_of(ceiling));
         !spawned)
         return propagate_error(spawned.status_, outcome, "Failed to spawn the decoders"), void();
+    // Last, as it adopts the caller's streams only once every fallible step is behind
+    std::size_t scratch_limit = arguments->scratch_limit;
+    std::span<void* const> const streams {arguments->streams, arguments->streams ? listed.size() : 0};
+    gpu_runtime_t& runtime = gpu_runtime();
+    auto [device, spawn_status] = util::spawn_gpu_executor(
+        runtime.drivers, std::span<util::gpu_device_t const> {rows, listed.size()}, streams, runtime, scratch_limit);
+    if (spawn_status.failed())
+        return propagate_error(spawn_status, outcome, "The devices refused their streams"), void();
+    executor->device = std::move(device);
     *arguments->executor = executor.release();
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
@@ -433,25 +419,17 @@ UFORM_EXPORT void uform_executor_drain(uform_executor_drain_t* arguments) {
         return propagate_error(uform_status_contended_k, outcome, "A callback cannot drain the executor running it"),
                void();
     take_idle_claim(executor);
-    nk_status_t status = nk_success_k;
-    if (vram_executor_t* const vram = std::get_if<vram_executor_t>(&executor.device))
-        for (vram_device_t& device : vram->devices) {
-            status = select_device(*vram, device);
-            visit_vram_residency(
-                numkong_capabilities_of(vram->gpu_class), [&]<vendored_residency_t residency_, typename>() noexcept {
-                    if constexpr (gpu_vendor_compiled(vendor_of(residency_)))
-                        status = status != nk_success_k ? status
-                                                        : entries_kit_of<residency_>::synchronize(device.stream.get());
-                    return true;
-                });
-            if (status != nk_success_k) break;
-        }
+    util::status_t const drained = std::visit(
+        []<typename executor_type_>(executor_type_& gpus) noexcept -> util::status_t {
+            if constexpr (std::is_same_v<executor_type_, std::monostate>) return {};
+            else return gpus.wait();
+        },
+        executor.device);
     // Only the claim holder parks the pool, so no submitter's dispatch races the sleep
-    if (status == nk_success_k && arguments->mood == uform_mood_parked_k) executor.threads.sleep();
+    if (drained.succeeded() && arguments->mood == uform_mood_parked_k) executor.threads.sleep();
     fu::standard_atomic_ref<call_claim_t> {executor.holding_call.claim}.store(call_claim_t::free_k,
                                                                               std::memory_order_release);
-    if (status != nk_success_k)
-        return propagate_error(status_of(status), outcome, "A device failed the work queued on it"), void();
+    if (drained.failed()) return propagate_error(drained, outcome, "A device failed the work queued on it"), void();
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
 
@@ -459,36 +437,17 @@ UFORM_EXPORT void uform_executor_free(uform_executor_t executor) {
     if (!executor) return;
     assert(!runs_holding_call(*executor) && "A callback cannot free the executor running it");
     take_idle_claim(*executor); // never released: the executor dies holding it
-    if (vram_executor_t* const vram = std::get_if<vram_executor_t>(&executor->device))
-        for (util::per_gpu_array<vram_device_t>& opened = vram->devices; opened.size(); opened.pop_back()) {
-            // Its scratch and pinned pages free on it
-            [[maybe_unused]] nk_status_t const selected = select_device(*vram, opened[opened.size() - 1]);
-        }
+    // Each stream record drains its stream, frees its scratch with its device bound, then closes
     delete executor;
 }
 
 UFORM_EXPORT void uform_arena_init(uform_arena_init_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
     *arguments->arena = nullptr;
-    // A VRAM executor lands outputs on its first device's stream, any other on the host
-    vram_executor_t* const vram = arguments->executor ? std::get_if<vram_executor_t>(&arguments->executor->device)
-                                                      : nullptr;
-    nk_allocator_t policy = host_pages_policy();
-    nk_stream_t stream = nullptr;
-    if (vram) {
-        stream = vram->devices[0].stream.get();
-        policy = {};
-        visit_vram_residency(numkong_capabilities_of(vram->gpu_class),
-                             [&]<vendored_residency_t residency_, typename>() noexcept {
-                                 if constexpr (gpu_vendor_compiled(vendor_of(residency_)))
-                                     policy = entries_kit_of<residency_>::policy(stream, uform_residency_vram_k);
-                                 return true;
-                             });
-        if (!policy.allocate)
-            return propagate_error(uform_status_device_k, outcome, "The GPU has no device allocator"), void();
-    }
-    uform_arena_t const arena = new (std::nothrow)
-        uform_arena_handle_t {chunked_arena_t(policy, stream, 0), vram ? arguments->executor : nullptr};
+    // A VRAM executor lands outputs on its first stream's device, any other on the host
+    uform_executor_t const executor = arguments->executor;
+    bool const on_device = executor && !std::holds_alternative<std::monostate>(executor->device);
+    uform_arena_t const arena = new (std::nothrow) uform_arena_handle_t {{}, on_device ? executor : nullptr};
     if (!arena) return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the arena"), void();
     *arguments->arena = arena;
     propagate_error(uform_status_success_k, outcome, nullptr);
@@ -497,10 +456,9 @@ UFORM_EXPORT void uform_arena_init(uform_arena_init_t* arguments) {
 UFORM_EXPORT void uform_arena_free(uform_arena_t arena) {
     if (!arena) return;
     host_verbs().wait_named_calls(&arena->named_calls);
-    if (arena->executor) { // its chunks free on its executor's first device
-        vram_executor_t const& vram = std::get<vram_executor_t>(arena->executor->device);
-        [[maybe_unused]] nk_status_t const selected = select_device(vram, vram.devices[0]);
-    }
+    if (!arena->executor) util::release_host_pages(arena->chunks);
+    else std::visit([&](auto& gpus) noexcept { release_device_chunks(gpus, arena->chunks); }, arena->executor->device);
+    arena->chunks.forget();
     delete arena;
 }
 
@@ -512,8 +470,13 @@ UFORM_EXPORT void uform_arena_describe(uform_arena_describe_t* arguments) {
         return propagate_error(uform_status_invalid_argument_k, outcome, "The description must not be null"), void();
     *arguments->description = {uform_residency_ram_k, -1};
     if (arguments->arena->executor)
-        *arguments->description = {uform_residency_vram_k,
-                                   std::get<vram_executor_t>(arguments->arena->executor->device).devices[0].ordinal};
+        std::visit(
+            [&]<typename executor_type_>(executor_type_ const& gpus) noexcept {
+                if constexpr (!std::is_same_v<executor_type_, std::monostate>)
+                    *arguments->description = {uform_residency_vram_k,
+                                               listed_ordinal_of<executor_type_>(gpus.stream(0))};
+            },
+            arguments->arena->executor->device);
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
 
@@ -792,16 +755,10 @@ UFORM_EXPORT char const* uform_capabilities_available(void) {
         static char text[NUMKONG_CAPABILITIES_NAME_CAPACITY] = {};
         auto [ceiling, status] = pick_cpu_ceiling(uform_cpu_class_unknown_k);
         nk_capability_t available = status ? ceiling.compute : nk_cap_serial_k;
-        gpu_counts_t const gpus = gpu_counts_t::make();
-        for (std::size_t kind_index = 0; kind_index != std::size(gpu_kinds_k); ++kind_index) {
-            nk::device_kind_t const kind = gpu_kinds_k[kind_index];
-            for (std::size_t ordinal = 0; ordinal != gpus.counts[kind_index]; ++ordinal) {
-                ue::device_description_t description;
-                gpu_device_t const described = describe_gpu(kind, ordinal, description);
-                gpu_class_t const gpu_class = pick_gpu_class(kind, described, uform_gpu_class_unknown_k);
-                if (gpu_class_serves(gpu_class, described)) available |= numkong_capabilities_of(gpu_class);
-            }
-        }
+        gpu_runtime_t const& runtime = gpu_runtime();
+        for (std::size_t index = 0; index != runtime.devices_count; ++index)
+            available |= numkong_capabilities_of(
+                best_gpu_class(index, runtime.loaded[index], uform_gpu_class_unknown_k));
         nk_capabilities_name(available, text, sizeof(text));
         return text;
     }();

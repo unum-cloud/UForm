@@ -20,7 +20,7 @@
 #include <cstddef> // `std::size_t`
 #include <cstring> // `std::memcpy`, `std::memset`, `std::strncpy`
 
-#include <forkunion/locks.hpp> // `fu::spin_mutex_t` - a context's lock
+#include <forkunion/locks.hpp> // `fu::fair_mutex_t` - a context's lock
 
 #include "uform/encoder/vram_kits.hpp" // `vram_apple_entries_kit_t`, the Metal kits, `entries_block_threads_k`
 
@@ -88,7 +88,8 @@ static char const apple10_source_k[] = {
 
 /** @c MTLLanguageVersion3_1 , the first with @c bfloat , and @c MTLLanguageVersion4_0 , the first
  *  with tensor operations, which only the Apple10 library takes. */
-static constexpr std::size_t language_3_1_k = (3u << 16) | 1u, language_4_0_k = (4u << 16) | 0u;
+static constexpr util::metal_language_t language_3_1_k = util::metal_language_t::msl_3_1_k,
+                                        language_4_0_k = util::metal_language_t::msl_4_0_k;
 
 /** UForm's own kernels, in the order of @ref kernel_names_k . */
 enum class kernel_t : std::size_t {
@@ -333,21 +334,23 @@ template <typename view_type_>
 
 #pragma region Launches
 
-/** The context of the Apple GPU @p stream submits to, the first listed for a null stream, or null
- *  for a stream on no listed device. */
-[[nodiscard]] static metal_context_t* context_of_(nk_stream_t stream) noexcept {
-    util::metal_contexts_t& contexts = uf::gpu_drivers().metal_contexts;
-    if (!contexts.count) return nullptr;
-    if (!stream) return &contexts.contexts[0];
-    void* const device = metal_send(*contexts.contexts[0].api, static_cast<void*>(stream), "device");
-    for (std::size_t index = 0; index != contexts.count; ++index)
-        if (contexts.contexts[index].device == device) return &contexts.contexts[index];
-    return nullptr;
+using stream_t = vram_apple_entries_kit_t::stream_t;
+
+/** The executor's stream record @p stream is the raw handle of, as
+ *  @ref vram_apple_entries_kit_t::raw hands it out; null for none. */
+[[nodiscard]] static stream_t const* record_of_(nk_stream_t stream) noexcept {
+    return static_cast<stream_t const*>(static_cast<void const*>(stream)); // vendor-boundary: NumKong's handle
 }
 
-/** The queue @p stream names on @p context 's device, its default one for a null stream. */
-[[nodiscard]] static void* queue_of_(metal_context_t const& context, nk_stream_t stream) noexcept {
-    return stream ? static_cast<void*>(stream) : context.queue;
+/** The context of the Apple GPU @p stream submits to, or null for no stream. */
+[[nodiscard]] static metal_context_t* context_of_(nk_stream_t stream) noexcept {
+    stream_t const* const record = record_of_(stream);
+    return record ? record->handle.context() : nullptr;
+}
+
+/** The queue @p stream submits to on @p context 's device. */
+[[nodiscard]] static void* queue_of_(metal_context_t const&, nk_stream_t stream) noexcept {
+    return record_of_(stream)->handle.queue();
 }
 
 /** Waits for the work committed to @p stream on @p context 's device. */
@@ -366,7 +369,7 @@ template <typename view_type_>
 [[nodiscard]] static bool resolve_(metal_context_t& context, metal_launch_t const* launch, void const* pointer,
                                    u64_t& address, std::size_t& bytes, b8_t** host = nullptr) noexcept {
     u64_t const wanted = reinterpret_cast<u64_t>(pointer);
-    st::unique_lock<fu::spin_mutex_t> guard {context.lock};
+    st::unique_lock<fu::fair_mutex_t> guard {context.lock};
     for (metal_buffer_t const& buffer : context.buffers.records()) {
         if (!buffer) continue;
         u64_t const host_first = reinterpret_cast<u64_t>(buffer.host);
@@ -412,16 +415,20 @@ template <typename byte_type_>
 
 /** One call's command buffer on @p stream , and the context of its device. */
 struct metal_call_t {
+    stream_t const* record = nullptr;
     metal_context_t* context = nullptr;
     metal_launch_t launch;
 
-    /** Opens the call on @p stream 's queue for kernel @p name of @p source under @p language . */
+    /** Opens the call on @p stream 's queue for kernel @p name of @p source under @p language ,
+     *  whose pipeline the stream's kernel tables build on first use. */
     [[nodiscard]] nk_status_t open(nk_stream_t stream, char const* source, char const* name,
-                                   std::size_t language) noexcept {
+                                   util::metal_language_t language) noexcept {
+        record = record_of_(stream);
         context = context_of_(stream);
-        if (!context) return nk_missing_gpu_k;
-        auto [state, status] = context->pipeline(source, name, language);
-        if (!status) return nk_device_code_mismatch_k;
+        if (!context || !record->kernels) return nk_missing_gpu_k;
+        metal_pipeline_state_t state;
+        if (record->kernels->pipeline(*context, record->ordinal, source, name, language, state).failed())
+            return nk_device_code_mismatch_k;
         launch = metal_launch_t {*context->api, queue_of_(*context, stream), state.pipeline};
         return launch ? nk_success_k : nk_device_code_mismatch_k;
     }
@@ -449,10 +456,12 @@ struct metal_call_t {
     }
 
     /** Switches the encoder to kernel @p name of @p source under @p language . */
-    [[nodiscard]] nk_status_t select(char const* source, char const* name,
-                                     std::size_t language) noexcept { // vendor-boundary: NumKong's C signature
-        auto [state, status] = context->pipeline(source, name, language);
-        if (!status) return nk_device_code_mismatch_k;
+    [[nodiscard]] nk_status_t select(
+        char const* source, char const* name,
+        util::metal_language_t language) noexcept { // vendor-boundary: NumKong's C signature
+        metal_pipeline_state_t state;
+        if (record->kernels->pipeline(*context, record->ordinal, source, name, language, state).failed())
+            return nk_device_code_mismatch_k;
         metal_send<void>(*launch.api, launch.encoder, "setComputePipelineState:", state.pipeline);
         return nk_success_k;
     }
@@ -527,8 +536,8 @@ template <typename arguments_type_, std::size_t count_>
  *  and B without bytes to read take C's address, as the record needs one.
  */
 [[nodiscard]] static nk_status_t cross_(char const* source,
-                                        std::size_t language, // vendor-boundary: NumKong's C signature
-                                        std::size_t threads,  // vendor-boundary: NumKong's C signature
+                                        util::metal_language_t language, // vendor-boundary: NumKong's C signature
+                                        std::size_t threads,             // vendor-boundary: NumKong's C signature
                                         char const* kernel, void const* a, void const* b,
                                         std::size_t b_offset, // vendor-boundary: NumKong's C signature
                                         f32_t* c, std::size_t rows_begin, std::size_t rows_end,
@@ -603,7 +612,8 @@ struct metal_products_launches;
 template <>
 struct metal_products_launches<metal_products_kit_t> {
     static constexpr char const* source_k = metal_source_k;
-    static constexpr std::size_t language_k = language_3_1_k, threads_k = 256, bf16_width_k = 16, e4m3_width_k = 16;
+    static constexpr util::metal_language_t language_k = language_3_1_k;
+    static constexpr std::size_t threads_k = 256, bf16_width_k = 16, e4m3_width_k = 16;
     static constexpr char const* bf16_kernel_k = "nk_dots_bf16_metal_kernel_";
     static constexpr char const* e4m3_kernel_k = "nk_dots_e4m3_metal_kernel_";
 };
@@ -612,7 +622,8 @@ struct metal_products_launches<metal_products_kit_t> {
 template <>
 struct metal_products_launches<apple9_products_kit_t> {
     static constexpr char const* source_k = apple9_source_k;
-    static constexpr std::size_t language_k = language_3_1_k, threads_k = 128, bf16_width_k = 16, e4m3_width_k = 16;
+    static constexpr util::metal_language_t language_k = language_3_1_k;
+    static constexpr std::size_t threads_k = 128, bf16_width_k = 16, e4m3_width_k = 16;
     static constexpr char const* bf16_kernel_k = "nk_dots_bf16_apple9_kernel_";
     static constexpr char const* e4m3_kernel_k = "nk_dots_e4m3_apple9_kernel_";
 };
@@ -621,7 +632,8 @@ struct metal_products_launches<apple9_products_kit_t> {
 template <>
 struct metal_products_launches<apple10_products_kit_t> {
     static constexpr char const* source_k = apple10_source_k;
-    static constexpr std::size_t language_k = language_4_0_k, threads_k = 128, bf16_width_k = 32, e4m3_width_k = 64;
+    static constexpr util::metal_language_t language_k = language_4_0_k;
+    static constexpr std::size_t threads_k = 128, bf16_width_k = 32, e4m3_width_k = 64;
     static constexpr char const* bf16_kernel_k = "nk_dots_bf16_apple10_kernel_";
     static constexpr char const* e4m3_kernel_k = "nk_dots_e4m3_apple10_kernel_";
 };
@@ -734,7 +746,8 @@ uform_define_metal_products_(metal_products_kit_t)
 template <>
 struct metal_attention_launches<metal_attention_kit_t> {
     static constexpr char const* source_k = metal_source_k;
-    static constexpr std::size_t language_k = language_3_1_k, backward_tile_k = 8, backward_threads_k = 256;
+    static constexpr util::metal_language_t language_k = language_3_1_k;
+    static constexpr std::size_t backward_tile_k = 8, backward_threads_k = 256;
     static constexpr char const* bf16_kernel_k = "nk_attention_packed_bf16_metal_kernel_";
     static constexpr char const* e4m3_kernel_k = "nk_attention_packed_e4m3_metal_kernel_";
     static constexpr char const* keys_kernel_k = "nk_attention_backward_keys_bf16_metal_kernel_";
@@ -745,7 +758,8 @@ struct metal_attention_launches<metal_attention_kit_t> {
 template <>
 struct metal_attention_launches<apple9_attention_kit_t> {
     static constexpr char const* source_k = apple9_source_k;
-    static constexpr std::size_t language_k = language_3_1_k, backward_tile_k = 32, backward_threads_k = 128;
+    static constexpr util::metal_language_t language_k = language_3_1_k;
+    static constexpr std::size_t backward_tile_k = 32, backward_threads_k = 128;
     static constexpr char const* bf16_kernel_k = "nk_attention_packed_bf16_apple9_kernel_";
     static constexpr char const* e4m3_kernel_k = "nk_attention_packed_e4m3_apple9_kernel_";
     static constexpr char const* keys_kernel_k = "nk_attention_backward_keys_bf16_apple9_kernel_";
@@ -756,7 +770,8 @@ struct metal_attention_launches<apple9_attention_kit_t> {
 template <>
 struct metal_attention_launches<apple10_attention_kit_t> {
     static constexpr char const* source_k = apple10_source_k;
-    static constexpr std::size_t language_k = language_4_0_k, backward_tile_k = 32, backward_threads_k = 128;
+    static constexpr util::metal_language_t language_k = language_4_0_k;
+    static constexpr std::size_t backward_tile_k = 32, backward_threads_k = 128;
     static constexpr char const* bf16_kernel_k = "nk_attention_packed_bf16_apple10_kernel_";
     static constexpr char const* e4m3_kernel_k = "nk_attention_packed_e4m3_apple10_kernel_";
     static constexpr char const* keys_kernel_k = "nk_attention_backward_keys_bf16_apple10_kernel_";
@@ -1300,85 +1315,34 @@ ue::metal_elementwise_kit_t::rope_bf16( // vendor-boundary: NumKong's C signatur
 
 #pragma region Entries
 
-nk_allocator_t ue::vram_apple_entries_kit_t::policy(nk_stream_t stream, uform_residency_t residency) noexcept {
+nk_allocator_t ue::vram_apple_entries_kit_t::policy(vram_apple_entries_kit_t::stream_t& record) noexcept {
+    nk_stream_t const stream = raw(record);
     nk_allocator_t policy {};
     policy.handle = context_of_(stream);
     if (!policy.handle) return {};
-    static constexpr auto allocate = [](nk_size_t bytes, void* handle, uform_residency_t residency) noexcept -> void* {
-        metal_context_t& context = *static_cast<metal_context_t*>(handle);
-        metal_buffer_t buffer = util::metal_allocate(context, bytes);
-        if (!buffer) return nullptr;
-        void* const address = residency == uform_residency_ram_k ? static_cast<void*>(buffer.host)
-                                                                 : reinterpret_cast<void*>(metal_send<u64_t>(
-                                                                       *context.api, buffer.handle, "gpuAddress"));
-        st::unique_lock<fu::spin_mutex_t> guard {context.lock};
-        auto const index = context.buffers.take();
-        if (index == context.buffers.absent_k) return nullptr;
-        context.buffers[index] = std::move(buffer);
-        return address;
+    // Device memory by GPU address, as CUDA hands out device pointers
+    policy.allocate = [](nk_size_t bytes, void* handle, nk_stream_t) noexcept -> void* {
+        auto [address, status] = util::metal_allocate_block(*static_cast<metal_context_t*>(handle), bytes);
+        return status.succeeded() ? reinterpret_cast<void*>(address) : nullptr;
     };
-    if (residency == uform_residency_ram_k)
-        policy.allocate = [](nk_size_t bytes, void* handle, nk_stream_t) noexcept -> void* {
-            return allocate(bytes, handle, uform_residency_ram_k);
-        };
-    else
-        policy.allocate = [](nk_size_t bytes, void* handle, nk_stream_t) noexcept -> void* {
-            return allocate(bytes, handle, uform_residency_vram_k);
-        };
-    // The buffer a pinned page starts at its host address, and device memory at its GPU address
     policy.free = [](void* pointer, nk_size_t, void* handle, nk_stream_t) noexcept {
-        metal_context_t& context = *static_cast<metal_context_t*>(handle);
-        metal_buffer_t dying;
-        st::unique_lock<fu::spin_mutex_t> guard {context.lock};
-        for (metal_buffer_t& buffer : context.buffers.records()) {
-            if (!buffer) continue;
-            bool const named = buffer.host == pointer || metal_send<u64_t>(*buffer.api, buffer.handle, "gpuAddress") ==
-                                                             reinterpret_cast<u64_t>(pointer);
-            if (!named) continue;
-            context.buffers.vacate(context.buffers.index_of(buffer));
-            dying = std::move(buffer);
-            return;
-        }
+        util::metal_free_block(*static_cast<metal_context_t*>(handle), reinterpret_cast<std::uintptr_t>(pointer));
     };
     return policy;
 }
 
-nk_status_t ue::vram_apple_entries_kit_t::select(std::size_t) noexcept { return nk_success_k; }
-
-nk_status_t ue::vram_apple_entries_kit_t::synchronize(nk_stream_t stream) noexcept {
-    metal_context_t const* const context = context_of_(stream);
-    return context ? drain_(*context, stream) : nk_missing_gpu_k;
-}
-
-nk_status_t ue::vram_apple_entries_kit_t::describe(std::size_t vendor_ordinal,
-                                                   device_description_t& description) noexcept {
-    metal_context_t const* const context = uf::gpu_drivers().metal_contexts.context(static_cast<int>(vendor_ordinal));
-    if (!context) return nk_missing_gpu_k;
-    util::metal_api_t const& api = *context->api;
-    void* const pool = api.autorelease_pool_push();
-    char const* const name = metal_send<char const*>(api, metal_send(api, context->device, "name"), "UTF8String");
-    if (name) std::strncpy(description.name, name, sizeof(description.name) - 1);
-    api.autorelease_pool_pop(pool);
-    description.compute_units = context->multiprocessor_count;
-    description.memory_bytes = metal_send<u64_t>(api, context->device, "recommendedMaxWorkingSetSize");
-    description.architecture_major = context->family;
-    description.architecture_minor = 0;
-    return nk_success_k;
-}
-
-nk_capability_t ue::vram_apple_entries_kit_t::capabilities_detected(std::size_t,
-                                                                    device_description_t const& description) noexcept {
-    u32_t const family = description.architecture_major;
+/** The Metal families of the device's newest family: Metal 3 from family 7, Apple 9 and Apple 10
+ *  from their own; Apple's kernels compile on the device at first use, so what it supports is what
+ *  this build runs there. */
+nk_capability_t ue::vram_apple_entries_kit_t::capabilities_compiled(util::gpu_device_t const& device) noexcept {
+    u32_t const family = device.architecture_major;
     return (family >= 7 ? nk_cap_metal_k : 0) | (family >= 9 ? nk_cap_apple9_k : 0) |
            (family >= 10 ? nk_cap_apple10_k : 0);
 }
 
-nk_capability_t ue::vram_apple_entries_kit_t::capabilities_compiled(std::size_t vendor_ordinal,
-                                                                    device_description_t const& description) noexcept {
-    return capabilities_detected(vendor_ordinal, description);
-}
-
-nk_status_t ue::vram_apple_entries_kit_t::copy(bytes_span_t target, bytes_view_t source, nk_stream_t stream) noexcept {
+nk_status_t ue::vram_apple_entries_kit_t::copy(bytes_span_t target, bytes_view_t source,
+                                               vram_apple_entries_kit_t::stream_t& record) noexcept {
+    nk_stream_t const stream = raw(record);
     if (source.empty()) return nk_success_k;
     metal_context_t* const context = context_of_(stream);
     if (!context) return nk_missing_gpu_k;
@@ -1394,7 +1358,9 @@ nk_status_t ue::vram_apple_entries_kit_t::copy(bytes_span_t target, bytes_view_t
     return nk_success_k;
 }
 
-nk_status_t ue::vram_apple_entries_kit_t::zero(bytes_span_t target, nk_stream_t stream) noexcept {
+nk_status_t ue::vram_apple_entries_kit_t::zero(bytes_span_t target,
+                                               vram_apple_entries_kit_t::stream_t& record) noexcept {
+    nk_stream_t const stream = raw(record);
     if (target.empty()) return nk_success_k;
     metal_context_t* const context = context_of_(stream);
     if (!context) return nk_missing_gpu_k;
@@ -1410,7 +1376,9 @@ nk_status_t ue::vram_apple_entries_kit_t::zero(bytes_span_t target, nk_stream_t 
 }
 
 nk_status_t ue::vram_apple_entries_kit_t::fill_layout(u32r1_view_t lengths, u32r1_span_t packed_offsets,
-                                                      u32r1_span_t pool_offsets, nk_stream_t stream) noexcept {
+                                                      u32r1_span_t pool_offsets,
+                                                      vram_apple_entries_kit_t::stream_t& record) noexcept {
+    nk_stream_t const stream = raw(record);
     fill_layout_arguments_t arguments;
     arguments.lengths = view_of_(lengths), arguments.packed_offsets = view_of_(packed_offsets);
     arguments.pool_offsets = view_of_(pool_offsets);
@@ -1421,7 +1389,8 @@ nk_status_t ue::vram_apple_entries_kit_t::fill_layout(u32r1_view_t lengths, u32r
 nk_status_t ue::vram_apple_entries_kit_t::fill_coords(segment_layout_t layout, nk::tensor_view<u16_t, 2> image_shapes,
                                                       nk::tensor_view<u16_t, 2> video_shapes, u32_t tube_frames,
                                                       u32_t frame_stride, u32_t positions, i16r2_span_t coords,
-                                                      nk_stream_t stream) noexcept {
+                                                      vram_apple_entries_kit_t::stream_t& record) noexcept {
+    nk_stream_t const stream = raw(record);
     fill_coords_arguments_t arguments;
     arguments.layout = layout_of_(layout);
     arguments.image_shapes = view_of_(image_shapes), arguments.video_shapes = view_of_(video_shapes);
@@ -1435,7 +1404,8 @@ nk_status_t ue::vram_apple_entries_kit_t::fill_coords(segment_layout_t layout, n
 
 nk_status_t ue::vram_apple_entries_kit_t::gather_bytes(segment_layout_t layout, nk::tensor_view<token_id_t, 1> tokens,
                                                        bf16r2_view_t table, bf16r2_span_t rows,
-                                                       nk_stream_t stream) noexcept {
+                                                       vram_apple_entries_kit_t::stream_t& record) noexcept {
+    nk_stream_t const stream = raw(record);
     gather_bytes_arguments_t arguments;
     arguments.layout = layout_of_(layout);
     arguments.tokens = view_of_(tokens), arguments.table = view_of_(table), arguments.rows = view_of_(rows);
@@ -1448,7 +1418,8 @@ nk_status_t ue::vram_apple_entries_kit_t::gather_bytes(segment_layout_t layout, 
 nk_status_t ue::vram_apple_entries_kit_t::stage_patches(segment_layout_t layout, modality_t target,
                                                         nk::tensor_view<pixel_t, 3> pixels, f32r1_view_t mean,
                                                         f32r1_view_t inverse_std, bf16r2_span_t patches,
-                                                        nk_stream_t stream) noexcept {
+                                                        vram_apple_entries_kit_t::stream_t& record) noexcept {
+    nk_stream_t const stream = raw(record);
     nk::tensor_span<nk_bf16_t, 3> const cells {patches.data(), {patches.extent(0), pixels.extent(1), pixels.extent(2)}};
     stage_patches_arguments_t arguments;
     arguments.layout = layout_of_(layout);
@@ -1462,7 +1433,9 @@ nk_status_t ue::vram_apple_entries_kit_t::stage_patches(segment_layout_t layout,
 }
 
 nk_status_t ue::vram_apple_entries_kit_t::stage_frames(segment_layout_t layout, nk::tensor_view<f32_t, 2> samples,
-                                                       bf16r2_span_t frames, nk_stream_t stream) noexcept {
+                                                       bf16r2_span_t frames,
+                                                       vram_apple_entries_kit_t::stream_t& record) noexcept {
+    nk_stream_t const stream = raw(record);
     stage_frames_arguments_t arguments;
     arguments.layout = layout_of_(layout);
     arguments.samples = view_of_(samples), arguments.frames = view_of_(frames);
@@ -1473,7 +1446,9 @@ nk_status_t ue::vram_apple_entries_kit_t::stage_frames(segment_layout_t layout, 
 }
 
 nk_status_t ue::vram_apple_entries_kit_t::mrope(bf16r2_span_t values, u32_t role_offset, u32_t heads, u32_t head_width,
-                                                i16r2_view_t coords, rope_grids_t angles, nk_stream_t stream) noexcept {
+                                                i16r2_view_t coords, rope_grids_t angles,
+                                                vram_apple_entries_kit_t::stream_t& record) noexcept {
+    nk_stream_t const stream = raw(record);
     mrope_arguments_t arguments;
     arguments.values = view_of_(values), arguments.temporal = view_of_(angles.temporal);
     arguments.height = view_of_(angles.height), arguments.width = view_of_(angles.width);
@@ -1487,7 +1462,9 @@ nk_status_t ue::vram_apple_entries_kit_t::mrope(bf16r2_span_t values, u32_t role
 }
 
 nk_status_t ue::vram_apple_entries_kit_t::quantize_tokens_e4m3(bf16r2_view_t values, e4m3r2_span_t shadow,
-                                                               f32r1_span_t token_scales, nk_stream_t stream) noexcept {
+                                                               f32r1_span_t token_scales,
+                                                               vram_apple_entries_kit_t::stream_t& record) noexcept {
+    nk_stream_t const stream = raw(record);
     quantize_arguments_t arguments;
     arguments.values = view_of_(values), arguments.shadow = view_of_(shadow);
     arguments.token_scales = view_of_(token_scales);
@@ -1496,7 +1473,9 @@ nk_status_t ue::vram_apple_entries_kit_t::quantize_tokens_e4m3(bf16r2_view_t val
 }
 
 nk_status_t ue::vram_apple_entries_kit_t::quantize_tokens_e4m3(f32r2_view_t values, e4m3r2_span_t shadow,
-                                                               f32r1_span_t token_scales, nk_stream_t stream) noexcept {
+                                                               f32r1_span_t token_scales,
+                                                               vram_apple_entries_kit_t::stream_t& record) noexcept {
+    nk_stream_t const stream = raw(record);
     quantize_arguments_t arguments;
     arguments.values = view_of_(values), arguments.shadow = view_of_(shadow);
     arguments.token_scales = view_of_(token_scales);
@@ -1506,7 +1485,9 @@ nk_status_t ue::vram_apple_entries_kit_t::quantize_tokens_e4m3(f32r2_view_t valu
 
 nk_status_t ue::vram_apple_entries_kit_t::rescale_tokens(f32r2_view_t products, f32r1_view_t token_scales,
                                                          f32_t weight_descale, bf16r2_view_t residual,
-                                                         bf16r2_span_t values, nk_stream_t stream) noexcept {
+                                                         bf16r2_span_t values,
+                                                         vram_apple_entries_kit_t::stream_t& record) noexcept {
+    nk_stream_t const stream = raw(record);
     rescale_arguments_t arguments;
     arguments.products = view_of_(products), arguments.token_scales = view_of_(token_scales);
     arguments.residual = view_of_(residual), arguments.values = view_of_(values);

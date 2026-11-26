@@ -72,7 +72,7 @@
 #include <span>   // `std::span`
 
 #include "uform/utilities/ram_device.hpp"           // `fu::pool_t` — the root-owned CPU demux / decode-drive pool
-#include "uform/utilities/vram_nvidia_device.hpp"   // `pinned_alloc`
+#include "uform/utilities/vram_nvidia_memory.hpp"   // `pinned_alloc`
 #include "uform/encoder/multimodal_batch.cuh"       // `multimodal_batch_on_gpu_t`
 #include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
 #include "uform/utilities/types.hpp"                // `expected`, `status_t`, `data_epoch_t`, `epoch_permutation`

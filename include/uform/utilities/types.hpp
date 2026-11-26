@@ -121,6 +121,9 @@ using bytes_view_t = std::span<b8_t const>;
 /** A writable run of raw bytes. */
 using bytes_span_t = std::span<b8_t>;
 
+/** One raw byte, as the Shared VRAM region spells it in every engine. */
+using byte_t = std::byte;
+
 /** One vocabulary entry's index — the byte-level vocabulary (256 bytes + the special tokens) fits
  *  16 bits, and every token tape, staging cell, and embedding lookup trades in this width. */
 using token_id_t = u16_t;
@@ -142,6 +145,56 @@ inline constexpr unsigned kernel_block_size_default_k = 256u;
  *  @sa Defines the upper bound for @ref unum::uform::utilities::mesh_shape_t::gpus_per_host_domain.
  */
 inline constexpr unsigned max_gpus_per_host_k = 32u;
+
+/** Devices one vendor's listing holds at most, so the process-wide listing needs no heap. */
+inline constexpr std::size_t gpu_devices_capacity_k = 64;
+
+/** One vendor's kernel bundle as every device loaded it, which @c vram_device.hpp defines and the
+ *  GPU runtime owns; a stream points at its vendor's. */
+template <typename module_type_>
+struct kernel_tables;
+
+/** The GPU vendors one binary drives at once, each through a driver opened at first use, with the
+ *  values of @c uform_gpu_vendor_t , so crossing the C ABI is a cast. */
+enum class gpu_vendor_t : u32_t {
+
+    /** No vendor, as a device no driver reports holds. */
+    unknown_k = uform_gpu_vendor_unknown_k,
+
+    /** NVIDIA, through the CUDA driver. */
+    nvidia_k = uform_gpu_vendor_nvidia_k,
+
+    /** AMD, through the HIP runtime. */
+    amd_k = uform_gpu_vendor_amd_k,
+
+    /** Apple, through Metal. */
+    apple_k = uform_gpu_vendor_apple_k,
+};
+
+/** One GPU as its vendor's driver reports it - the vendor, that vendor's own ordinal and its raw
+ *  architecture - with what a listing reports, so no caller asks a vendor SDK. */
+struct gpu_device_t {
+    gpu_vendor_t vendor = gpu_vendor_t::unknown_k;
+    u32_t vendor_ordinal = 0;
+
+    /** The CUDA compute capability, the AMD @c gfx version or the newest Apple GPU family, major
+     *  then minor. */
+    u32_t architecture_major = 0;
+    u32_t architecture_minor = 0;
+
+    /** Lanes of one warp, wavefront or simdgroup, as the driver reports it; zero where only a built
+     *  pipeline reports it. */
+    u32_t warp_lanes = 0;
+
+    /** Streaming multiprocessors, compute units or GPU cores. */
+    u32_t compute_units = 0;
+
+    /** Device memory, or the working set Metal recommends for unified memory. */
+    u64_t memory_bytes = 0;
+
+    /** The vendor's own name for the device, NUL-terminated and truncated to fit. */
+    char name[64] = {};
+};
 
 /** One pass over the data — the sole key of every deterministic draw (shuffling, mixing, masking,
  *  synthetic contents). Distinct from @ref optimizer_step_t : a resumed run at the same data epoch
@@ -273,6 +326,9 @@ enum class status_code_t : i32_t {
     /** The operation completed; outputs are valid. */
     success_k = uform_status_success_k,
 
+    /** Queued work still runs; its outcome is not final yet. */
+    deferred_k = uform_status_deferred_k,
+
     /** A resource status: a caller-provided buffer was too small or a device allocation failed. */
     out_of_memory_k = uform_status_out_of_memory_k,
 
@@ -293,6 +349,12 @@ enum class status_code_t : i32_t {
 
     /** An unclassified failure; prefer a specific code above when one fits. */
     internal_k = uform_status_internal_k,
+
+    /** The object was used before it was opened or after it was emptied. */
+    uninitialized_k = uform_status_uninitialized_k,
+
+    /** Valid arguments that disagree with each other or with the state they name. */
+    config_mismatch_k = uform_status_config_mismatch_k,
 };
 
 /** Why a call failed: a code recovery branches on, and an optional static note naming the broken
@@ -317,6 +379,7 @@ static_assert(sizeof(status_t) == 2 * sizeof(void*) && std::is_trivially_copyabl
 [[nodiscard]] inline char const* to_string(status_code_t code) noexcept {
     switch (code) {
     case status_code_t::success_k: return "success";
+    case status_code_t::deferred_k: return "deferred";
     case status_code_t::out_of_memory_k: return "out_of_memory";
     case status_code_t::invalid_argument_k: return "invalid_argument";
     case status_code_t::unsupported_k: return "unsupported";
@@ -324,6 +387,8 @@ static_assert(sizeof(status_t) == 2 * sizeof(void*) && std::is_trivially_copyabl
     case status_code_t::io_k: return "io";
     case status_code_t::contended_k: return "contended";
     case status_code_t::internal_k: return "internal";
+    case status_code_t::uninitialized_k: return "uninitialized";
+    case status_code_t::config_mismatch_k: return "config_mismatch";
     }
     return "unknown";
 }
@@ -409,6 +474,14 @@ struct expected<void> {
     /** @c true iff the action succeeded. */
     [[nodiscard]] explicit operator bool() const noexcept { return status_.succeeded(); }
 
+    /** The status's own reads, so a status bound from <tt>auto [value, status]</tt> reads as a
+     *  @ref status_t does in the Shared VRAM text. */
+    [[nodiscard]] bool succeeded() const noexcept { return status_.succeeded(); }
+    [[nodiscard]] bool failed() const noexcept { return status_.failed(); }
+
+    /** The code and note alone, which a verb answering a @ref status_t passes on. */
+    operator status_t() const noexcept { return status_; }
+
     /** Failure tagged with a @ref status_t : materializes @p format + @p args into the description
      *  and records the failure site @ref format_at_t captured. */
     template <typename... arg_types_>
@@ -471,6 +544,13 @@ struct expected {
 
     /** Success: adopts @p value , making the union member live. */
     expected(value_type_ value) noexcept : value_(std::move(value)) {}
+
+    /** The value and status the Shared VRAM text returns as <tt>return {std::move(value), ok}</tt>
+     *  or <tt>return {{}, status}</tt> : @p value lives only when @p status succeeds, and the
+     *  driver error, description and location keep their defaults. */
+    expected(value_type_&& value, status_t status) noexcept : status_(status) {
+        if (status_.succeeded()) ::new (static_cast<void*>(&value_)) value_type_(std::move(value)); // vendor-boundary
+    }
 
     /** Move: the error channel travels unconditionally; the value is adopted only when @p other is
      *  on the success path, since the union member is live only then. The @c noexcept is the same
@@ -559,11 +639,17 @@ struct expected {
     }
 
   private:
-    struct failure_t {};
+    /** The tag of the failure constructor, which no brace @c {} spells, so the value-and-status
+     *  constructor alone takes <tt>{{}, status}</tt> . */
+    struct failure_t {
+        explicit failure_t() noexcept = default;
+    };
 
     /** Failure ctor: sets a non-success @p status and leaves the union @c value_ unconstructed, so
-     *  the @c status_==success_k ⇔ value_ live invariant the destructor relies on holds at once. */
-    expected(failure_t, status_t status) noexcept : status_(status) {}
+     *  the @c status_==success_k ⇔ value_ live invariant the destructor relies on holds at once; a
+     *  success status handed here becomes @c internal_k , as no value was built. */
+    expected(failure_t, status_t status) noexcept
+        : status_(status.succeeded() ? status_t {status_code_t::internal_k, "An expected value is missing"} : status) {}
 };
 
 } // namespace unum::uform::utilities

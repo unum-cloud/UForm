@@ -33,7 +33,7 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor`, `nk::tensor_span` — the device row table
 
-#include "uform/utilities/vram_nvidia_device.hpp"   // `gpu_arena_t`, `gpu_arena_alloc`
+#include "uform/utilities/vram_nvidia_memory.hpp"   // `gpu_arena_t`, `gpu_arena_alloc`
 #include "uform/utilities/multimem_collectives.cuh" // `multimem_member_t` — the round probe's subject
 #include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`
 #include "uform/utilities/types.hpp" // `expected`, `expected_t`, `status_t`, the scalar aliases, `st::basic_vector`

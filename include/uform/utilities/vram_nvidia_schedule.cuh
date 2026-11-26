@@ -64,7 +64,7 @@
 #include <numkong/capabilities.h> // `nk_dots_pack_size_punned_t`, `nk_kernel_cast_punned_t` — the untyped kernel shapes
 #include <numkong/tensor.hpp>     // `nk::tensor_view`, `nk::tensor_span` for the typed transfer helpers
 
-#include "uform/utilities/vram_nvidia_device.hpp" // `gpu_arena_alloc`, `bf16_t`, `cuda_failure`
+#include "uform/utilities/vram_nvidia_memory.hpp" // `gpu_arena_alloc`, `bf16_t`, `cuda_failure`
 #include "uform/utilities/types.hpp" // `expected`, `expected_t`, `status_t`, `st::basic_vector` for the node-guard walk
 
 namespace unum::uform::utilities {

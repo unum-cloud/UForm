@@ -49,7 +49,7 @@
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
 #include "uform/utilities/safetensors_format.hpp" // `checkpoint_to_save_t`, `checkpoint_to_load_t` — the state a resume reads
-#include "uform/utilities/vram_nvidia_device.hpp"     // `gpu_arena_t`
+#include "uform/utilities/vram_nvidia_memory.hpp" // `gpu_arena_t`
 #include "uform/utilities/infiniband_collectives.cuh" // `infiniband_all_reduce` — the main-owned level-2 buffer
 #include "uform/train/introspect.cuh"                 // `telemetry_ledger_t` — the main-owned signal-probe ledger
 #include "uform/utilities/multimem_collectives.cuh"   // `multimem_domain_t` — the main-owned level-1 gradient surface

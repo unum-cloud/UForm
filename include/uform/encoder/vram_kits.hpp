@@ -27,36 +27,17 @@
 #include <numkong/each.h>      // `nk_each_*`
 #include <numkong/memory.h>    // `nk_allocator_t`
 
-#include "uform/encoder/entries.hpp"  // `segment_layout_t`, `rope_grids_t`
-#include "uform/encoder/ram_kits.hpp" // `highest_kit`
+#include "uform/encoder/entries.hpp"       // `segment_layout_t`, `rope_grids_t`
+#include "uform/encoder/ram_kits.hpp"      // `highest_kit`
+#include "uform/utilities/types.hpp"       // `gpu_device_t` - the listing row a class is picked over
+#include "uform/utilities/vram_device.hpp" // `cuda_executor_t`, `hip_executor_t`, `metal_executor_t`
 
 namespace unum::uform::encoder {
 
 #pragma region Entries
 
-/** What a vendor's runtime reports about one of its devices, its architecture numbers included. */
-struct device_description_t {
-
-    /** The vendor's own name for the device, NUL-terminated and truncated to fit. */
-    char name[64] = {};
-
-    /** Streaming multiprocessors or compute units. */
-    u32_t compute_units = 0;
-
-    /** Device memory in bytes. */
-    u64_t memory_bytes = 0;
-
-    /** The architecture's major number: NVIDIA's compute capability major, AMD's gfx major, the
-     *  newest Apple GPU family. */
-    u32_t architecture_major = 0;
-
-    /** The architecture's minor number: NVIDIA's compute capability minor, AMD's gfx minor, zero
-     *  on Apple. */
-    u32_t architecture_minor = 0;
-};
-
 /**
- *  @brief NVIDIA's own encoder steps, the copies weights move with, and the device listing, which
+ *  @brief NVIDIA's own encoder steps, the copies weights move with, and the classes it runs, which
  *      @c vram_entries_nvidia.cpp defines over the kernels it launches by name.
  *
  *  Every step queues on @p stream over device-addressable views and returns without waiting,
@@ -66,97 +47,93 @@ struct device_description_t {
 struct vram_nvidia_entries_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_cuda_k;
 
-    /** The allocation policy of the device @p stream submits to: its memory for a @p residency of
-     *  VRAM, or pinned host pages the device addresses for RAM, through NumKong's allocators of the
-     *  vendor; an empty policy when the build or the machine lacks them. */
-    static nk_allocator_t policy(nk_stream_t stream, uform_residency_t residency) noexcept;
+    /** The executor whose streams every step queues on, and one stream record of it. */
+    using executor_t = uu::cuda_executor_t;
+    using stream_t = executor_t::stream_t;
 
-    /** Makes the vendor's device @p vendor_ordinal current on the calling thread, so the executor's
-     *  stream on it, every allocation and free, and every step after it land there. */
-    static nk_status_t select(std::size_t vendor_ordinal) noexcept;
+    /** The raw handle of @p stream that NumKong's kernels take. */
+    static nk_stream_t raw(stream_t& stream) noexcept {
+        return static_cast<nk_stream_t>(static_cast<void*>(stream.handle)); // vendor-boundary: an opaque handle
+    }
 
-    /** Waits for everything queued on @p stream . */
-    static nk_status_t synchronize(nk_stream_t stream) noexcept;
+    /** Makes the vendor's device @p vendor_ordinal current on the calling thread, where memory made
+     *  on it frees, outside any executor. */
+    static void bind(std::size_t vendor_ordinal) noexcept;
 
-    /** Reads the name, compute units, memory and compute capability of the vendor's device
-     *  @p vendor_ordinal . */
-    static nk_status_t describe(std::size_t vendor_ordinal, device_description_t& description) noexcept;
-
-    /** What NumKong detects on the device @p vendor_ordinal that @p description read, its vendor's
-     *  group bit included; zero when the runtime refuses. */
-    static nk_capability_t capabilities_detected(std::size_t vendor_ordinal,
-                                                 device_description_t const& description) noexcept;
+    /** The allocation policy a tower's weights take on the device @p stream queues on: its memory,
+     *  through the vendor's own driver with the device bound, freed in the order of the stream they
+     *  were made on; an empty policy when the build or the machine lacks them. */
+    static nk_allocator_t policy(stream_t& stream) noexcept;
 
     /** What this build holds NumKong code for that the device's loader runs, its vendor's group
      *  bit included; zero when the runtime refuses. */
-    static nk_capability_t capabilities_compiled(std::size_t vendor_ordinal,
-                                                 device_description_t const& description) noexcept;
+    static nk_capability_t capabilities_compiled(uu::gpu_device_t const& device) noexcept;
 
     /** @p source into @p target , as long, either side in host or device memory. */
-    static nk_status_t copy(uu::bytes_span_t target, uu::bytes_view_t source, nk_stream_t stream) noexcept;
+    static nk_status_t copy(uu::bytes_span_t target, uu::bytes_view_t source, stream_t& stream) noexcept;
 
     /** Zeros into device memory at @p target . */
-    static nk_status_t zero(uu::bytes_span_t target, nk_stream_t stream) noexcept;
+    static nk_status_t zero(uu::bytes_span_t target, stream_t& stream) noexcept;
 
     /** Prefix sums of @p lengths into @p packed_offsets @b [segments+1] , and @c pool_offsets[s]=s
      *  over @b [segments+1] , the one query row per item the pool attends with. */
     static nk_status_t fill_layout(u32r1_view_t lengths, u32r1_span_t packed_offsets, u32r1_span_t pool_offsets,
-                                   nk_stream_t stream) noexcept;
+                                   stream_t& stream) noexcept;
 
     /** Coordinates clamp below @p positions , so @c mrope reads no grid out of range. */
     static nk_status_t fill_coords(segment_layout_t layout, nk::tensor_view<u16_t, 2> image_shapes,
                                    nk::tensor_view<u16_t, 2> video_shapes, u32_t tube_frames, u32_t frame_stride,
-                                   u32_t positions, i16r2_span_t coords, nk_stream_t stream) noexcept;
+                                   u32_t positions, i16r2_span_t coords, stream_t& stream) noexcept;
     static nk_status_t gather_bytes(segment_layout_t layout, nk::tensor_view<token_id_t, 1> grid_tokens,
-                                    bf16r2_view_t table, bf16r2_span_t rows, nk_stream_t stream) noexcept;
+                                    bf16r2_view_t table, bf16r2_span_t rows, stream_t& stream) noexcept;
     static nk_status_t stage_patches(segment_layout_t layout, modality_t target,
                                      nk::tensor_view<pixel_t, 3> grid_pixels, f32r1_view_t mean,
-                                     f32r1_view_t inverse_std, bf16r2_span_t patches, nk_stream_t stream) noexcept;
+                                     f32r1_view_t inverse_std, bf16r2_span_t patches, stream_t& stream) noexcept;
     static nk_status_t stage_frames(segment_layout_t layout, nk::tensor_view<f32_t, 2> grid_samples,
-                                    bf16r2_span_t frames, nk_stream_t stream) noexcept;
+                                    bf16r2_span_t frames, stream_t& stream) noexcept;
     static nk_status_t mrope(bf16r2_span_t values, u32_t role_offset, u32_t heads, u32_t head_width,
-                             i16r2_view_t coords, rope_grids_t angles, nk_stream_t stream) noexcept;
+                             i16r2_view_t coords, rope_grids_t angles, stream_t& stream) noexcept;
     static nk_status_t quantize_tokens_e4m3(bf16r2_view_t values, e4m3r2_span_t shadow, f32r1_span_t token_scales,
-                                            nk_stream_t stream) noexcept;
+                                            stream_t& stream) noexcept;
     static nk_status_t quantize_tokens_e4m3(f32r2_view_t values, e4m3r2_span_t shadow, f32r1_span_t token_scales,
-                                            nk_stream_t stream) noexcept;
+                                            stream_t& stream) noexcept;
     static nk_status_t rescale_tokens(f32r2_view_t products, f32r1_view_t token_scales, f32_t weight_descale,
-                                      bf16r2_view_t residual, bf16r2_span_t values, nk_stream_t stream) noexcept;
+                                      bf16r2_view_t residual, bf16r2_span_t values, stream_t& stream) noexcept;
 };
 
 /** AMD's twin of @ref vram_nvidia_entries_kit_t , which @c vram_entries_amd.cpp defines. */
 struct vram_amd_entries_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    static nk_allocator_t policy(nk_stream_t stream, uform_residency_t residency) noexcept;
-    static nk_status_t select(std::size_t vendor_ordinal) noexcept;
-    static nk_status_t synchronize(nk_stream_t stream) noexcept;
-    static nk_status_t describe(std::size_t vendor_ordinal, device_description_t& description) noexcept;
-    static nk_capability_t capabilities_detected(std::size_t vendor_ordinal,
-                                                 device_description_t const& description) noexcept;
-    static nk_capability_t capabilities_compiled(std::size_t vendor_ordinal,
-                                                 device_description_t const& description) noexcept;
-    static nk_status_t copy(uu::bytes_span_t target, uu::bytes_view_t source, nk_stream_t stream) noexcept;
-    static nk_status_t zero(uu::bytes_span_t target, nk_stream_t stream) noexcept;
+    using executor_t = uu::hip_executor_t;
+    using stream_t = executor_t::stream_t;
+    static nk_stream_t raw(stream_t& stream) noexcept {
+        return static_cast<nk_stream_t>(static_cast<void*>(stream.handle)); // vendor-boundary: an opaque handle
+    }
+    static void bind(std::size_t vendor_ordinal) noexcept;
+    static nk_allocator_t policy(stream_t& stream) noexcept;
+    static nk_capability_t capabilities_compiled(uu::gpu_device_t const& device) noexcept;
+    static nk_status_t copy(uu::bytes_span_t target, uu::bytes_view_t source, stream_t& stream) noexcept;
+    static nk_status_t zero(uu::bytes_span_t target, stream_t& stream) noexcept;
     static nk_status_t fill_layout(u32r1_view_t lengths, u32r1_span_t packed_offsets, u32r1_span_t pool_offsets,
-                                   nk_stream_t stream) noexcept;
+                                   stream_t& stream) noexcept;
     static nk_status_t fill_coords(segment_layout_t layout, nk::tensor_view<u16_t, 2> image_shapes,
                                    nk::tensor_view<u16_t, 2> video_shapes, u32_t tube_frames, u32_t frame_stride,
-                                   u32_t positions, i16r2_span_t coords, nk_stream_t stream) noexcept;
+                                   u32_t positions, i16r2_span_t coords, stream_t& stream) noexcept;
     static nk_status_t gather_bytes(segment_layout_t layout, nk::tensor_view<token_id_t, 1> grid_tokens,
-                                    bf16r2_view_t table, bf16r2_span_t rows, nk_stream_t stream) noexcept;
+                                    bf16r2_view_t table, bf16r2_span_t rows, stream_t& stream) noexcept;
     static nk_status_t stage_patches(segment_layout_t layout, modality_t target,
                                      nk::tensor_view<pixel_t, 3> grid_pixels, f32r1_view_t mean,
-                                     f32r1_view_t inverse_std, bf16r2_span_t patches, nk_stream_t stream) noexcept;
+                                     f32r1_view_t inverse_std, bf16r2_span_t patches, stream_t& stream) noexcept;
     static nk_status_t stage_frames(segment_layout_t layout, nk::tensor_view<f32_t, 2> grid_samples,
-                                    bf16r2_span_t frames, nk_stream_t stream) noexcept;
+                                    bf16r2_span_t frames, stream_t& stream) noexcept;
     static nk_status_t mrope(bf16r2_span_t values, u32_t role_offset, u32_t heads, u32_t head_width,
-                             i16r2_view_t coords, rope_grids_t angles, nk_stream_t stream) noexcept;
+                             i16r2_view_t coords, rope_grids_t angles, stream_t& stream) noexcept;
     static nk_status_t quantize_tokens_e4m3(bf16r2_view_t values, e4m3r2_span_t shadow, f32r1_span_t token_scales,
-                                            nk_stream_t stream) noexcept;
+                                            stream_t& stream) noexcept;
     static nk_status_t quantize_tokens_e4m3(f32r2_view_t values, e4m3r2_span_t shadow, f32r1_span_t token_scales,
-                                            nk_stream_t stream) noexcept;
+                                            stream_t& stream) noexcept;
     static nk_status_t rescale_tokens(f32r2_view_t products, f32r1_view_t token_scales, f32_t weight_descale,
-                                      bf16r2_view_t residual, bf16r2_span_t values, nk_stream_t stream) noexcept;
+                                      bf16r2_view_t residual, bf16r2_span_t values, stream_t& stream) noexcept;
 };
 
 /**
@@ -168,44 +145,45 @@ struct vram_amd_entries_kit_t {
  */
 struct vram_apple_entries_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_metal_k;
-    static nk_allocator_t policy(nk_stream_t stream, uform_residency_t residency) noexcept;
+    using executor_t = uu::metal_executor_t;
+    using stream_t = executor_t::stream_t;
 
-    /** Succeeds without a call, as every Metal queue names its own device. */
-    static nk_status_t select(std::size_t vendor_ordinal) noexcept;
-    static nk_status_t synchronize(nk_stream_t stream) noexcept;
+    /** @p stream as the opaque handle Apple's kits take, which they turn back into the record to
+     *  reach its queue, its device and its kernel tables. */
+    static nk_stream_t raw(stream_t& stream) noexcept {
+        return static_cast<nk_stream_t>(static_cast<void*>(&stream)); // vendor-boundary: NumKong's opaque handle
+    }
 
-    static nk_status_t describe(std::size_t vendor_ordinal, device_description_t& description) noexcept;
+    /** Binds nothing, as every Metal queue names its own device. */
+    static void bind(std::size_t) noexcept {}
 
-    /** The Metal families of @p description 's newest family: Metal 3 from family 7, Apple 9 and
-     *  Apple 10 from their own. */
-    static nk_capability_t capabilities_detected(std::size_t vendor_ordinal,
-                                                 device_description_t const& description) noexcept;
+    static nk_allocator_t policy(stream_t& stream) noexcept;
 
-    /** As @ref capabilities_detected , since Apple's kernels compile on the device at first use. */
-    static nk_capability_t capabilities_compiled(std::size_t vendor_ordinal,
-                                                 device_description_t const& description) noexcept;
-    static nk_status_t copy(uu::bytes_span_t target, uu::bytes_view_t source, nk_stream_t stream) noexcept;
-    static nk_status_t zero(uu::bytes_span_t target, nk_stream_t stream) noexcept;
+    /** The Metal families the device's newest family reaches, as its kernels compile there at
+     *  first use. */
+    static nk_capability_t capabilities_compiled(uu::gpu_device_t const& device) noexcept;
+    static nk_status_t copy(uu::bytes_span_t target, uu::bytes_view_t source, stream_t& stream) noexcept;
+    static nk_status_t zero(uu::bytes_span_t target, stream_t& stream) noexcept;
     static nk_status_t fill_layout(u32r1_view_t lengths, u32r1_span_t packed_offsets, u32r1_span_t pool_offsets,
-                                   nk_stream_t stream) noexcept;
+                                   stream_t& stream) noexcept;
     static nk_status_t fill_coords(segment_layout_t layout, nk::tensor_view<u16_t, 2> image_shapes,
                                    nk::tensor_view<u16_t, 2> video_shapes, u32_t tube_frames, u32_t frame_stride,
-                                   u32_t positions, i16r2_span_t coords, nk_stream_t stream) noexcept;
+                                   u32_t positions, i16r2_span_t coords, stream_t& stream) noexcept;
     static nk_status_t gather_bytes(segment_layout_t layout, nk::tensor_view<token_id_t, 1> grid_tokens,
-                                    bf16r2_view_t table, bf16r2_span_t rows, nk_stream_t stream) noexcept;
+                                    bf16r2_view_t table, bf16r2_span_t rows, stream_t& stream) noexcept;
     static nk_status_t stage_patches(segment_layout_t layout, modality_t target,
                                      nk::tensor_view<pixel_t, 3> grid_pixels, f32r1_view_t mean,
-                                     f32r1_view_t inverse_std, bf16r2_span_t patches, nk_stream_t stream) noexcept;
+                                     f32r1_view_t inverse_std, bf16r2_span_t patches, stream_t& stream) noexcept;
     static nk_status_t stage_frames(segment_layout_t layout, nk::tensor_view<f32_t, 2> grid_samples,
-                                    bf16r2_span_t frames, nk_stream_t stream) noexcept;
+                                    bf16r2_span_t frames, stream_t& stream) noexcept;
     static nk_status_t mrope(bf16r2_span_t values, u32_t role_offset, u32_t heads, u32_t head_width,
-                             i16r2_view_t coords, rope_grids_t angles, nk_stream_t stream) noexcept;
+                             i16r2_view_t coords, rope_grids_t angles, stream_t& stream) noexcept;
     static nk_status_t quantize_tokens_e4m3(bf16r2_view_t values, e4m3r2_span_t shadow, f32r1_span_t token_scales,
-                                            nk_stream_t stream) noexcept;
+                                            stream_t& stream) noexcept;
     static nk_status_t quantize_tokens_e4m3(f32r2_view_t values, e4m3r2_span_t shadow, f32r1_span_t token_scales,
-                                            nk_stream_t stream) noexcept;
+                                            stream_t& stream) noexcept;
     static nk_status_t rescale_tokens(f32r2_view_t products, f32r1_view_t token_scales, f32_t weight_descale,
-                                      bf16r2_view_t residual, bf16r2_span_t values, nk_stream_t stream) noexcept;
+                                      bf16r2_view_t residual, bf16r2_span_t values, stream_t& stream) noexcept;
 };
 
 #pragma endregion Entries

@@ -238,7 +238,8 @@ export interface ExecutorForRamConfig {
 
 /** Which devices a VRAM executor drives, and on which streams. */
 export interface ExecutorForVramConfig {
-  /** Device ordinals, positions in {@link gpuDevices}, to drive; absent takes one free device. */
+  /** Device ordinals, positions in {@link gpuDevices}, to drive; absent takes every listed device
+   *  of the first vendor with a known class. */
   devices?: number[];
   /** The newest GPU class every device dispatches as, spelled like "nvidia-hopper": the best
    *  class all of them load at or under it; absent sets no ceiling. */
@@ -248,8 +249,10 @@ export interface ExecutorForVramConfig {
   /** The newest CPU class the host decoders dispatch as, spelled like "intel-haswell"; absent
    *  sets no ceiling. */
   cpuClassCeiling?: string;
-  /** Caller CUDA stream addresses, one per device in `devices` order, which the library refuses
-   *  as unsupported; absent creates its own. */
+  /** Caller stream addresses, one per device in `devices` order; absent opens its own. A CUDA or
+   *  HIP stream becomes the executor's, which synchronizes and destroys it; a Metal queue is
+   *  retained, the executor releasing its own reference while the caller keeps and releases
+   *  theirs. */
   streams?: bigint[];
   /** Ceiling on scratch bytes per device; absent lets scratch grow as batches ask. */
   scratchLimit?: number;

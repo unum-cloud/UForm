@@ -159,7 +159,7 @@ err = threads.Drain(uform.MoodSpinning) // waits until no call holds it, then ke
 
 The class arguments are ceilings: calls dispatch as the best class under them the hardware runs, and the zero class sets none.
 Naming one memory domain spawns the threads near it, while none or several interleave them across the machine.
-`ExecutorForVram` opens one stream per device, which `Close` destroys, and refuses caller streams with `StatusUnsupported`.
+`ExecutorForVram` opens one stream per device, or adopts the caller's streams, one per named device, and `Close` destroys them; naming no devices drives every listed device of the first vendor with a known class.
 `uform.GPUDevices(devices)` fills a slice of `GPUDevice` and answers how many GPUs the process can drive, and a device's position there is the ordinal `ExecutorForVram` and `ModelLoadVram` name it by.
 An executor runs one call at a time, so two goroutines that genuinely overlap take one apiece.
 `Close` waits until no call holds the executor, and a closed one refuses every later verb with `StatusUninitialized`.

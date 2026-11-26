@@ -985,14 +985,14 @@ struct VramOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
     """
 
     var devices: Optional[Pointer[Int32, Self.origin]]
-    """UForm device ordinals, positions in `Library.gpu_devices`; absent derives one free device."""
+    """UForm device ordinals, positions in `Library.gpu_devices`; absent places a model on every device of its executor, while an executor takes every listed device of the first vendor with a known class."""
     var devices_count: Int
-    """Entries in `devices`; zero derives."""
+    """Entries in `devices`; zero takes what absent does."""
     var gpu_class_ceiling: GPUClass
     """The newest class every named device dispatches as, the best all of them load; `UNKNOWN` sets no ceiling."""
 
     def __init__(out self, *, gpu_class_ceiling: GPUClass = GPUClass.UNKNOWN):
-        """Derives one free device."""
+        """Names no devices, which takes what absent `devices` does."""
         self.devices = None
         self.devices_count = 0
         self.gpu_class_ceiling = gpu_class_ceiling
@@ -1153,7 +1153,9 @@ struct Executor:
                 once the call returns.
             ram: The memory domains and CPU class of its host decoders, copied at creation, so the caller
                 may free them once the call returns.
-            streams: Caller CUDA streams, one per device; any but `NULL_ADDRESS` reports `UNSUPPORTED`.
+            streams: Caller streams, one per device, or `NULL_ADDRESS` to open its own: a CUDA or HIP
+                stream becomes the executor's, which synchronizes and destroys it; a Metal queue is
+                retained, the executor releasing its own reference while the caller keeps theirs.
             scratch_limit: Ceiling on scratch bytes per device; zero lets scratch grow as batches ask.
 
         Raises:

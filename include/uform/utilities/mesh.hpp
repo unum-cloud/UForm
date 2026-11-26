@@ -105,7 +105,7 @@
 
 #include "uform/utilities/array.hpp"              // `per_gpu_array` for the device UUIDs
 #include "uform/utilities/blocking_files.hpp"     // `replace_file_durably` — every published exchange file
-#include "uform/utilities/vram_nvidia_device.hpp" // `cuda_failure`
+#include "uform/utilities/vram_nvidia_memory.hpp" // `cuda_failure`
 #include "uform/utilities/types.hpp" // `expected`, `expected_t`, `status_t`, `format_into`, `st::basic_vector`
 
 namespace unum::uform::utilities {

@@ -69,7 +69,7 @@ template <typename tower_type_>
 struct ram_bodies {
     static util::expected<void*> create(util::checkpoint_to_load_t const& checkpoint,
                                         encoder::geometry_t const& geometry, encoder::precision_t precision,
-                                        nk_stream_t) noexcept {
+                                        fu::pool_t&) noexcept {
         auto [tower, status] = tower_type_::make(checkpoint, geometry, precision);
         if (!status) return util::expected<void*>::fail(std::move(status));
         tower_type_* const handle = new (std::nothrow) tower_type_(std::move(tower));
@@ -90,26 +90,22 @@ struct ram_bodies {
     }
 };
 
-/** The verbs of one device tower type, packing in memory its vendor's entries kit allocates and
- *  waiting through that kit for the packs before the tower is handed out. */
+/** The verbs of one device tower type, packing in memory its vendor's entries kit allocates on the
+ *  stream they are handed, and returning once the packs landed. */
 template <typename tower_type_>
 struct vram_bodies {
     using entries_kit_t = typename tower_type_::steps_t::entries_kit_t;
+    using stream_t = typename entries_kit_t::stream_t;
 
     static util::expected<void*> create(util::checkpoint_to_load_t const& checkpoint,
                                         encoder::geometry_t const& geometry, encoder::precision_t precision,
-                                        nk_stream_t stream) noexcept {
-        nk_allocator_t const policy = entries_kit_t::policy(stream, uform_residency_vram_k);
+                                        stream_t& stream) noexcept {
+        nk_allocator_t const policy = entries_kit_t::policy(stream);
         if (!policy.allocate)
             return util::expected<void*>::fail(util::status_code_t::device_k,
                                                "Tower memory setup failed: no device allocator");
         auto [tower, status] = tower_type_::make(checkpoint, geometry, precision, policy, stream);
         if (!status) return util::expected<void*>::fail(std::move(status));
-        // The packs and the operands staged for them land before the tower is handed out
-        nk_status_t const landed = entries_kit_t::synchronize(stream);
-        if (landed != nk_success_k)
-            return util::expected<void*>::fail(encoder::tower_status_of(landed), "load failed: {}",
-                                               nk_status_name(landed));
         tower_type_* const handle = new (std::nothrow) tower_type_(std::move(tower));
         if (!handle) return util::expected<void*>::fail(util::status_code_t::out_of_memory_k, "No room for the tower");
         return util::expected<void*> {handle};
@@ -118,13 +114,12 @@ struct vram_bodies {
     static void destroy(void* tower) noexcept { delete static_cast<tower_type_*>(tower); }
 
     static util::expected<std::size_t> scratch_bytes(void const* tower, std::size_t tokens, std::size_t segments,
-                                                     nk_stream_t) noexcept {
+                                                     stream_t&) noexcept {
         return static_cast<tower_type_ const*>(tower)->scratch_bytes(tokens, segments);
     }
 
     static util::expected_t encode(void const* tower, encoder::multimodal_batch_view_t batch,
-                                   encoder::outputs_t outputs, util::bytes_span_t scratch,
-                                   nk_stream_t stream) noexcept {
+                                   encoder::outputs_t outputs, util::bytes_span_t scratch, stream_t& stream) noexcept {
         return static_cast<tower_type_ const*>(tower)->encode(batch, outputs, scratch, stream);
     }
 };

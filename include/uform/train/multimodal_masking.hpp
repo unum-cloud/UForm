@@ -31,7 +31,7 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
-#include "uform/utilities/vram_nvidia_device.hpp"   // `gpu_arena_t`, `gpu_arena_alloc`
+#include "uform/utilities/vram_nvidia_memory.hpp"   // `gpu_arena_t`, `gpu_arena_alloc`
 #include "uform/encoder/multimodal_batch.hpp"       // `modality_t`, `byte_vocabulary_k`, `byte_pad_k`, `byte_mask_k`
 #include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`, the NumKong products, the view aliases
 #include "uform/utilities/types.hpp" // `expected`, `expected_t`, `status_t`, the scalar aliases, `st::basic_vector`

@@ -242,7 +242,8 @@ typedef struct uform_model_describe_t {
 UFORM_EXPORT void uform_model_describe(uform_model_describe_t* arguments);
 
 /** Frees a model; @c NULL is safe, and it cannot fail, so takes no outcome. Every call using it
- *  must be final. */
+ *  must be final. A VRAM model's weights free on their own device, waiting until it is done with
+ *  them, so a model may outlive the executor that loaded it. */
 UFORM_EXPORT void uform_model_free(uform_model_t model);
 
 #ifdef __cplusplus

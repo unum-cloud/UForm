@@ -56,7 +56,7 @@ export interface ModelLoadVramConfig {
    *  the calling thread. */
   executor?: Executor;
   /** Device ordinals, positions in `gpuDevices()`, to replicate the weights on; absent takes
-   *  one free device. */
+   *  every device of the executor. */
   devices?: number[];
   /** The newest GPU class every replica runs as, spelled like "nvidia-hopper"; absent sets no
    *  ceiling. */

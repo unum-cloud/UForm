@@ -24,8 +24,8 @@ namespace unum::uform {
  *  @brief The verbs one encoder variant compiles in its class unit, over its tower passed as
  *      @c void* , which only these entries cast back to its type.
  *
- *  A host tower ignores the stream its @c create is handed; a device tower packs on it and
- *  returns once its weights are ready.
+ *  A host tower ignores the pool its @c create is handed; a device tower queues its packs on the
+ *  stream and returns once they landed, whether it succeeded or failed.
  */
 template <vendored_residency_t residency_>
 struct encoder_verbs {
@@ -38,7 +38,7 @@ struct encoder_verbs {
     gpu_class_t gpu_class;
 
     util::expected<void*> (*create)(util::checkpoint_to_load_t const& checkpoint, encoder::geometry_t const& geometry,
-                                    encoder::precision_t precision, nk_stream_t stream) noexcept;
+                                    encoder::precision_t precision, executor_t executor) noexcept;
     void (*destroy)(void* tower) noexcept;
     util::expected<std::size_t> (*scratch_bytes)(void const* tower, std::size_t tokens, std::size_t segments,
                                                  executor_t executor) noexcept;
@@ -70,6 +70,10 @@ using entries_kit_of =
     std::conditional_t<residency_ == vendored_residency_t::vram_amd_k, encoder::vram_amd_entries_kit_t,
                        std::conditional_t<residency_ == vendored_residency_t::vram_apple_k,
                                           encoder::vram_apple_entries_kit_t, encoder::vram_nvidia_entries_kit_t>>;
+
+/** The vendor executor whose streams the device verbs of @p residency_ queue on. */
+template <vendored_residency_t residency_>
+using executor_of = typename entries_kit_of<residency_>::executor_t;
 
 /** The newest compiled class on @p ladder that fits under @p ceiling, as its verbs, one of which
  *  @ref pick_cpu_ceiling made sure of. */

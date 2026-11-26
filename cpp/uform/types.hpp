@@ -534,8 +534,10 @@ class executor_t {
         return opened_<executor_t>(uform_executor_for_ram, arguments, &uform_executor_for_ram_t::executor);
     }
 
-    /** Opens one submission stream on every device @p arguments names; caller streams answer
-     *  @c status_code_t::unsupported_k . */
+    /** Opens one submission stream on every device @p arguments names, or adopts the caller's
+     *  @c streams : a CUDA or HIP stream becomes the executor's, which synchronizes and destroys
+     *  it; a Metal queue is retained, the executor releasing its own reference while the caller
+     *  keeps and releases theirs. */
     static expected<executor_t> for_vram(uform_executor_for_vram_t arguments = {}) noexcept {
         return opened_<executor_t>(uform_executor_for_vram, arguments, &uform_executor_for_vram_t::executor);
     }

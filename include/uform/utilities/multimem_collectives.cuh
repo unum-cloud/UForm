@@ -42,7 +42,7 @@
 
 #include <cuda.h> // `cuMulticastCreate`, `cuMulticastBindMem`, `cuMemMap`, `cuMemSetAccess`
 
-#include "uform/utilities/vram_nvidia_device.hpp" // `gpu_arena_t` conventions
+#include "uform/utilities/vram_nvidia_memory.hpp" // `gpu_arena_t` conventions
 #include "uform/utilities/mesh.hpp" // `mesh_topology_t` — the multimem_domain may span processes; the fabric
                                     //     handles ride the mesh rendezvous
 #include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`, `launch_kernel`, `current_context_t`, the rank-1 aliases

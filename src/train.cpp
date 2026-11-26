@@ -81,21 +81,22 @@ struct uform_trainer_handle_t {
     return status_of(failure.status_);
 }
 
-/** Whether @p executor drives GPUs, the only residency training runs on. */
+/** Whether @p executor drives NVIDIA GPUs, the only residency training runs on. */
 [[nodiscard]] static bool drives_vram(uform_executor_t executor) noexcept {
-    return executor && std::holds_alternative<vram_executor_t>(executor->device);
+    return executor && std::holds_alternative<util::cuda_executor_t>(executor->device);
 }
 
 /** The CUDA ordinals of a VRAM @p executor 's devices, the members of its mesh. */
 [[nodiscard]] static bool devices_of(uform_executor_t executor, st::basic_vector<i32_t>& devices) noexcept {
-    for (vram_device_t const& device : std::get<vram_executor_t>(executor->device).devices)
-        if (st::failed(devices.push_back(i32_t {device.vendor_ordinal}))) return false;
+    util::cuda_executor_t const& gpus = std::get<util::cuda_executor_t>(executor->device);
+    for (std::size_t index = 0; index != gpus.size(); ++index)
+        if (st::failed(devices.push_back(static_cast<i32_t>(gpus.stream(index).ordinal)))) return false;
     return true;
 }
 
 /** The NumKong capabilities every GPU of a VRAM @p executor dispatches with, after its pin. */
 [[nodiscard]] static nk_capability_t capabilities_of(uform_executor_t executor) noexcept {
-    return numkong_capabilities_of(std::get<vram_executor_t>(executor->device).gpu_class);
+    return numkong_capabilities_of(executor->gpu_class);
 }
 
 /** Drops one hold on @p mesh , deleting it with the last. */
@@ -364,7 +365,7 @@ static bool propagate_train_error(expected_t const& failure, uform_mesh_handle_t
 /** Land the pooled vertex of every item of the last step in @p memory as @p scalar rows, zero for
  *  items that had no tokens. False once @p outcome records why not. */
 [[nodiscard]] static bool land_embeddings(uform_trainer_handle_t& handle, std::size_t count, uform_scalar_t scalar,
-                                          chunked_arena_t& memory, uform_rows_view_t& rows,
+                                          uform_arena_handle_t& memory, uform_rows_view_t& rows,
                                           uform_outcome_t* outcome) noexcept {
     std::size_t const bytes_per_value = scalar == uform_scalar_f32_k ? 4 : 2;
     if (scalar != uform_scalar_f32_k && scalar != uform_scalar_f16_k && scalar != uform_scalar_bf16_k)
@@ -386,7 +387,10 @@ static bool propagate_train_error(expected_t const& failure, uform_mesh_handle_t
             else bfloats[item, column] = __float2bfloat16(value);
         }
     }
-    void* const landed = memory.allocate(bytes ? bytes : 1);
+    std::size_t const wanted = bytes ? bytes : 1;
+    if (util::status_t const reserved = reserve_arena(memory, chunked_arena_t::footprint(wanted)); reserved.failed())
+        return propagate_error(reserved, outcome, "Failed to allocate the embeddings");
+    void* const landed = memory.chunks.allocate(wanted);
     if (!landed) return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the embeddings");
     switch_to_gpu_t gpu_scope {handle.run.streams[0]};
     if (!gpu_scope.ok() || cuMemcpyHtoD(device_address(landed), staging, bytes) != CUDA_SUCCESS)
@@ -431,8 +435,7 @@ UFORM_EXPORT void uform_mesh_describe(uform_mesh_describe_t* arguments) {
     description.host_domain_index = topology.host_domain_index;
     description.first_gpu_index = topology.first_gpu_index();
     description.multimem_tier = static_cast<uform_multimem_tier_t>(choice.tier);
-    description.gpu_class = static_cast<uform_gpu_class_t>(
-        std::get<vram_executor_t>(arguments->mesh->executor->device).gpu_class);
+    description.gpu_class = static_cast<uform_gpu_class_t>(arguments->mesh->executor->gpu_class);
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
 
@@ -598,7 +601,7 @@ UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t* arguments) {
                              telemetry.dropped};
     }
     if (arguments->embeddings) {
-        if (!land_embeddings(*handle, count, arguments->outputs_scalar, arena->chunks, *arguments->embeddings, outcome))
+        if (!land_embeddings(*handle, count, arguments->outputs_scalar, *arena, *arguments->embeddings, outcome))
             return;
     }
     propagate_error(uform_status_success_k, outcome, nullptr);

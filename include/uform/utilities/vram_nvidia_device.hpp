@@ -2,67 +2,34 @@
  *  @file include/uform/utilities/vram_nvidia_device.hpp
  *  @author Ash Vardanian
  *  @date July 2, 2026
- *  @brief Single-GPU memory allocators of the UForm v4 primitives cell: a growing bump arena + a
- *      stream-ordered allocator, each owning memory of exactly @b one device, and the CUDA driver's
- *      entry points the encoder's own kernels launch through.
+ *  @brief The CUDA driver's entry points, resolved into one table from a library opened at first
+ *      use, and the stream, event and module owners every NVIDIA executor queues through.
  *
  *  The inference library never links @c libcuda : @ref unum::uform::utilities::cuda_api_t::load
- *  opens it at first use and resolves the few entry points the encoder calls into one table, which
- *  stays empty on a machine without the driver. The table spells its own types and prototypes, so
- *  it needs nothing past the headers below; the allocators link the driver, as training does.
- *
- *  Two allocators for the two @b single-GPU memory disciplines the stack needs, both on the CUDA
- *  Driver API (the multi-device symmetric memory of a multimem_domain lives with the multimem
- *  collectives, beside its one consumer):
- *
- *    - @ref unum::uform::utilities::gpu_arena_t — a virtual-memory (VMM) bump arena for
- *      @b homogeneous fixed-shape workloads, where every call allocates the same sequence of sizes
- *      — model training and inference steps. It owns the weights, activations, and step scratch:
- *      reserves a large VA range once, maps physical chunks in on demand, and hands out aligned
- *      allocations as pure pointer arithmetic — no deallocation, only cursor resets, so an
- *      allocation sequence is deterministic across captured-graph replays and legal inside capture.
- *      Growth ( @c cuMemMap ) is a host-immediate init-time operation, never a step-path one.
- *    - @ref unum::uform::utilities::gpu_alloc — a stream-ordered allocator ( @c cuMemAllocAsync /
- *      @c cuMemFreeAsync ) for exactly the opposite: @b heterogeneous shape-varying workloads,
- *      where every call differs — the data loaders' variable-length blobs and decode scratch,
- *      living outside captured graphs. Satisfies @c std::alloc_traits , so it plugs into NumKong's
- *      owning @c nk::tensor<value_type,gpu_alloc<value_type>,rank> directly.
- *    - @ref unum::uform::utilities::gpu_arena_alloc — the same @c std::alloc_traits facade over a
- *      caller-owned arena, so model code instantiates owning tensors whose storage is arena
- *      allocations (deallocation is a no-op; reclamation is the arena's cursor rewind).
- *
- *  There is no in-house memory ledger: the driver already keeps the truth — @c cuMemGetInfo for a
- *  device's totals, the default pool's attributes for the stream-ordered tier's usage and
- *  high-water marks — and @ref unum::uform::utilities::gpu_memory_report reads it on demand.
- *  Per-owner attribution is each owner's own accessors (
- *  @ref unum::uform::utilities::gpu_arena_t::used /
- *  @ref unum::uform::utilities::gpu_arena_t::mapped ).
- *
- *  The arena's physical chunks are created @c gpuDirectRDMACapable wherever the device supports it,
- *  so the same chunks can later be registered as InfiniBand MRs or bound to a multicast object —
- *  symmetric / multimem backing is a property added to @b this arena at creation, not a third
- *  allocator: running the identical allocation program on every rank yields identical offsets,
- *  which is what makes a peer's buffer addressable as @c remote_base+offset .
+ *  opens it at first use and resolves the entry points into one table, which stays empty on a
+ *  machine without the driver. Plain C++ needing no SDK: the table spells its own types, constants
+ *  and prototypes, so any host compiler builds the launches, and the training allocators that link
+ *  the driver live in @c vram_nvidia_memory.hpp . The @c Shared @c VRAM regions are text every
+ *  sibling engine carries word for word, which @c selftest @c --siblings compares.
  */
 #pragma once
 
-#include <cstddef> // `std::size_t`, `std::byte`
+#include <cstddef> // `std::size_t`
+#include <cstdint> // `std::uintptr_t` - the driver's default stream handles
 
-#include <utility>     // `std::exchange`, `std::forward`
-#include <type_traits> // `std::true_type`
-#include <span>        // `std::span` — the `visible_to` device-ID list
+#include <memory>  // `std::unique_ptr` - an executor's stream records
+#include <span>    // `std::span` - the devices an executor opens over, a fatbin's bytes
+#include <utility> // `std::exchange`, `std::swap`, `std::move`
 
-#include <cuda.h>      // `CUdeviceptr`, `cuMemAddressReserve`, `cuMemMap`, `CUresult`, `cuGetErrorString`
-#include <cuda_bf16.h> // `__nv_bfloat16` behind the `bf16_t` alias
-#include <cuda_fp8.h>  // `__nv_fp8_e4m3` behind the `e4m3_t` alias
+#include <forkunion/atomics.hpp> // `fu::standard_atomic_ref` - the executor's claim word
 
 #include "uform/utilities/blocking_files.hpp" // `shared_library_t` - the driver opened at first use
-#include "uform/utilities/types.hpp" // `expected`, `status_t`, `st::basic_vector` for exception-free chunk bookkeeping
-#include "uform/utilities/ram_device.hpp" // `allocate_on_memory_domain` — pinned pages beside the GPU reading them
+#include "uform/utilities/ram_device.hpp"     // `memory_domain_of_pci` - pinned placement
+#include "uform/utilities/types.hpp"          // `status_t`, `byte_t`, `gpu_vendor_t`, `gpu_devices_capacity_k`
 
 namespace unum::uform::utilities {
 
-#pragma region CUDA Driver
+#pragma region Driver ABI
 
 /** The driver's status word, @c CUresult , naming the values UForm tells apart; any other
  *  is a failure. */
@@ -72,29 +39,104 @@ enum cuda_result_t : int {
     cuda_error_invalid_device_k = 101,
     cuda_error_invalid_context_k = 201,
     cuda_error_no_binary_for_gpu_k = 209,
+    cuda_error_not_ready_k = 600,
 };
 
-/** The driver's opaque handles: @c CUcontext , @c CUstream , @c CUmodule and @c CUfunction . */
+/** A device address, @c CUdeviceptr , which unified addressing shares with the host. */
+using cuda_device_address_t = unsigned long long;
+
+/** The driver's opaque handles: @c CUcontext , @c CUstream , @c CUevent , @c CUmodule and
+ *  @c CUfunction . */
 using cuda_context_handle_t = struct cuda_context_opaque_t*;
 using cuda_stream_handle_t = struct cuda_stream_opaque_t*;
+using cuda_event_handle_t = struct cuda_event_opaque_t*;
 using cuda_module_handle_t = struct cuda_module_opaque_t*;
 using cuda_function_handle_t = struct cuda_function_opaque_t*;
 
-/** A device address, @c CUdeviceptr . */
-using cuda_device_address_t = unsigned long long;
-
 /** The @c CUdevice_attribute values UForm queries. */
 enum cuda_device_attribute_t : int {
+    cuda_attribute_warp_size_k = 10,
     cuda_attribute_multiprocessor_count_k = 16,
     cuda_attribute_compute_capability_major_k = 75,
     cuda_attribute_compute_capability_minor_k = 76,
 };
 
+/** The @c CUmem_advise values the table's managed memory takes. */
+enum cuda_memory_advice_t : int {
+    cuda_advise_read_mostly_k = 1,
+    cuda_advise_preferred_location_k = 3,
+    cuda_advise_accessed_by_k = 5,
+};
+
+/** Where memory lives, @c CUmemLocation : a device ordinal, or the host. */
+struct cuda_memory_location_t {
+    inline static constexpr int device_k = 1, host_k = 2;
+    int type = 0;
+    int id = 0;
+};
+
+/** One pitched copy, @c CUDA_MEMCPY2D , both sides named by unified address. */
+struct cuda_copy_2d_t {
+    inline static constexpr int unified_k = 4;
+    std::size_t source_x_bytes = 0, source_y = 0;
+    int source_memory_type = 0;
+    void const* source_host = nullptr;
+    cuda_device_address_t source_device = 0;
+    void* source_array = nullptr;
+    std::size_t source_pitch = 0;
+    std::size_t destination_x_bytes = 0, destination_y = 0;
+    int destination_memory_type = 0;
+    void* destination_host = nullptr;
+    cuda_device_address_t destination_device = 0;
+    void* destination_array = nullptr;
+    std::size_t destination_pitch = 0;
+    std::size_t width_bytes = 0, height = 0;
+};
+
+/** One launch attribute, @c CUlaunchAttribute : its ID, then the driver's 64-byte value union. */
+struct cuda_launch_attribute_t {
+    int id = 0;
+    alignas(8) int value[16] = {};
+};
+
+/** One launch's geometry, @c CUlaunchConfig , and the attributes it holds. */
+struct cuda_launch_config_t {
+    unsigned grid_x = 1, grid_y = 1, grid_z = 1;
+    unsigned block_x = 1, block_y = 1, block_z = 1;
+    unsigned shared_bytes = 0;
+    cuda_stream_handle_t stream = nullptr;
+    cuda_launch_attribute_t* attributes = nullptr;
+    unsigned attributes_count = 0;
+};
+
+/** The flags UForm passes: @c CU_STREAM_NON_BLOCKING , @c CU_EVENT_BLOCKING_SYNC ,
+ *  @c CU_EVENT_DISABLE_TIMING and @c CU_MEMHOSTALLOC_PORTABLE . */
+inline constexpr unsigned cuda_stream_non_blocking_k = 1;
+inline constexpr unsigned cuda_event_blocking_sync_k = 1;
+inline constexpr unsigned cuda_event_disable_timing_k = 2;
+inline constexpr unsigned cuda_host_portable_k = 1;
+
+/** The driver's legacy and per-thread default streams, which no executor adopts. */
+inline cuda_stream_handle_t const cuda_stream_legacy_handle_k = reinterpret_cast<cuda_stream_handle_t>(
+    std::uintptr_t {0x1});
+inline cuda_stream_handle_t const cuda_stream_per_thread_handle_k = reinterpret_cast<cuda_stream_handle_t>(
+    std::uintptr_t {0x2});
+
+#pragma endregion Driver ABI
+
+#pragma region Shared VRAM Driver
+
+/** What the driver calls in stream order once the work queued before it finished, with that work's
+ *  status and the pointer given beside it; it must make no driver call. */
+using cuda_stream_callback_t = void (*)(cuda_stream_handle_t, cuda_result_t, void*);
+
 /**
- *  @brief The driver entry points UForm's kernels launch through, resolved from @c libcuda .
+ *  @brief The driver entry points every engine calls, resolved from @c libcuda once per process.
  *
- *  Every entry is null when the driver is absent or lacks any of them; each spells the prototype of
- *  the exported symbol it is resolved by, the @c _v2 one where @c <cuda.h> maps the name onto it.
+ *  Every entry is null when the driver is absent or lacks any of them, which leaves NVIDIA with no
+ *  devices; each spells the prototype of the exported symbol it is resolved by, the @c _v2 one
+ *  where @c <cuda.h> maps the name onto it. An engine's optional entries resolve apart from these,
+ *  so a driver lacking one keeps this table whole.
  */
 struct cuda_api_t {
     cuda_result_t (*init)(unsigned) = nullptr;
@@ -102,23 +144,57 @@ struct cuda_api_t {
     cuda_result_t (*get_device)(int*, int) = nullptr;
     cuda_result_t (*get_device_attribute)(int*, cuda_device_attribute_t, int) = nullptr;
     cuda_result_t (*get_device_name)(char*, int, int) = nullptr;
+    cuda_result_t (*get_pci_bus_id)(char*, int, int) = nullptr;
     cuda_result_t (*get_device_memory)(std::size_t*, int) = nullptr;
-    cuda_result_t (*get_current_context)(cuda_context_handle_t*) = nullptr;
-    cuda_result_t (*get_context_device)(int*) = nullptr;
+    cuda_result_t (*can_access_peer)(int*, int, int) = nullptr;
     cuda_result_t (*retain_primary_context)(cuda_context_handle_t*, int) = nullptr;
     cuda_result_t (*set_current_context)(cuda_context_handle_t) = nullptr;
+    cuda_result_t (*pointer_attribute)(void*, int, cuda_device_address_t) = nullptr;
+    cuda_result_t (*allocate_async)(cuda_device_address_t*, std::size_t, cuda_stream_handle_t) = nullptr;
+    cuda_result_t (*free_async)(cuda_device_address_t, cuda_stream_handle_t) = nullptr;
+    cuda_result_t (*allocate_managed)(cuda_device_address_t*, std::size_t, unsigned) = nullptr;
+    cuda_result_t (*allocate)(cuda_device_address_t*, std::size_t) = nullptr;
+    cuda_result_t (*memory_advise)(cuda_device_address_t, std::size_t, cuda_memory_advice_t,
+                                   cuda_memory_location_t) = nullptr;
+    cuda_result_t (*free)(cuda_device_address_t) = nullptr;
+    cuda_result_t (*allocate_host)(void**, std::size_t, unsigned) = nullptr;
+    cuda_result_t (*free_host)(void*) = nullptr;
+    cuda_result_t (*register_host)(void const*, std::size_t, unsigned) = nullptr;
+    cuda_result_t (*unregister_host)(void const*) = nullptr;
+    cuda_result_t (*copy)(cuda_device_address_t, cuda_device_address_t, std::size_t) = nullptr;
     cuda_result_t (*copy_async)(cuda_device_address_t, cuda_device_address_t, std::size_t,
                                 cuda_stream_handle_t) = nullptr;
+    cuda_result_t (*copy_2d_async)(cuda_copy_2d_t const*, cuda_stream_handle_t) = nullptr;
+    cuda_result_t (*fill)(cuda_device_address_t, unsigned char, std::size_t) = nullptr;
     cuda_result_t (*fill_async)(cuda_device_address_t, unsigned char, std::size_t, cuda_stream_handle_t) = nullptr;
+    cuda_result_t (*fill_words_async)(cuda_device_address_t, unsigned, std::size_t, cuda_stream_handle_t) = nullptr;
+    cuda_result_t (*stream_create)(cuda_stream_handle_t*, unsigned) = nullptr;
+    cuda_result_t (*stream_destroy)(cuda_stream_handle_t) = nullptr;
+    cuda_result_t (*stream_synchronize)(cuda_stream_handle_t) = nullptr;
+    cuda_result_t (*stream_query)(cuda_stream_handle_t) = nullptr;
+    cuda_result_t (*stream_get_context)(cuda_stream_handle_t, cuda_context_handle_t*) = nullptr;
+    cuda_result_t (*stream_wait_event)(cuda_stream_handle_t, cuda_event_handle_t, unsigned) = nullptr;
+    cuda_result_t (*stream_add_callback)(cuda_stream_handle_t, cuda_stream_callback_t, void*, unsigned) = nullptr;
+    cuda_result_t (*event_create)(cuda_event_handle_t*, unsigned) = nullptr;
+    cuda_result_t (*event_record)(cuda_event_handle_t, cuda_stream_handle_t) = nullptr;
+    cuda_result_t (*event_query)(cuda_event_handle_t) = nullptr;
+    cuda_result_t (*event_synchronize)(cuda_event_handle_t) = nullptr;
+    cuda_result_t (*event_destroy)(cuda_event_handle_t) = nullptr;
     cuda_result_t (*module_load_data)(cuda_module_handle_t*, void const*) = nullptr;
+    cuda_result_t (*module_unload)(cuda_module_handle_t) = nullptr;
     cuda_result_t (*module_get_function)(cuda_function_handle_t*, cuda_module_handle_t,
-                                         char const*) = nullptr; // vendor-boundary: the driver's prototype
-    cuda_result_t (*launch_kernel)(cuda_function_handle_t, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned,
-                                   unsigned, cuda_stream_handle_t, void**, void**) = nullptr;
+                                         char const*) = nullptr; // vendor-boundary
+    cuda_result_t (*function_get_attribute)(int*, int, cuda_function_handle_t) = nullptr;
+    cuda_result_t (*function_set_attribute)(cuda_function_handle_t, int, int) = nullptr;
+    cuda_result_t (*launch_kernel)(cuda_launch_config_t const*, cuda_function_handle_t, void**, void**) = nullptr;
 
     /** Every listed device's primary context by ordinal, retained once as the table loads and never
      *  released, as the driver stays open; null past the listed devices. */
-    cuda_context_handle_t primary_contexts[max_gpus_per_host_k] = {};
+    cuda_context_handle_t primary_contexts[gpu_devices_capacity_k] = {};
+
+    /** The memory domain nearest each listed device, where its pinned host bytes go, or
+     *  @c no_memory_domain_k where none is known. */
+    fu_memory_domain_id_t memory_domains[gpu_devices_capacity_k] = {};
 
     /** Whether the driver loaded and initialized with every entry resolved. */
     explicit operator bool() const noexcept { return launch_kernel != nullptr; }
@@ -126,26 +202,57 @@ struct cuda_api_t {
     /** Opens the driver, resolves every entry and initializes it, or answers the empty table. The
      *  library stays open for the life of the process, as the table points into it. */
     static cuda_api_t load() noexcept {
-        shared_library_t const library = shared_library_t::open("libcuda.so.1");
+        // Each system names the driver its own way, and opening another's name merely fails.
+        shared_library_t library;
+        for (char const* name : {"libcuda.so.1", "nvcuda.dll"}) // vendor-boundary
+            if ((library = shared_library_t::open(name))) break;
+        if (!library) return {};
         cuda_api_t api;
         bool const resolved = //
             library.resolve("cuInit", api.init) && library.resolve("cuDeviceGetCount", api.get_device_count) &&
             library.resolve("cuDeviceGet", api.get_device) &&
             library.resolve("cuDeviceGetAttribute", api.get_device_attribute) &&
             library.resolve("cuDeviceGetName", api.get_device_name) &&
+            library.resolve("cuDeviceGetPCIBusId", api.get_pci_bus_id) &&
             library.resolve("cuDeviceTotalMem_v2", api.get_device_memory) &&
-            library.resolve("cuCtxGetCurrent", api.get_current_context) &&
-            library.resolve("cuCtxGetDevice", api.get_context_device) &&
+            library.resolve("cuDeviceCanAccessPeer", api.can_access_peer) &&
             library.resolve("cuDevicePrimaryCtxRetain", api.retain_primary_context) &&
             library.resolve("cuCtxSetCurrent", api.set_current_context) &&
-            library.resolve("cuMemcpyAsync", api.copy_async) && library.resolve("cuMemsetD8Async", api.fill_async) &&
+            library.resolve("cuPointerGetAttribute", api.pointer_attribute) &&
+            library.resolve("cuMemAllocAsync", api.allocate_async) &&
+            library.resolve("cuMemFreeAsync", api.free_async) &&
+            library.resolve("cuMemAllocManaged", api.allocate_managed) &&
+            library.resolve("cuMemAlloc_v2", api.allocate) && library.resolve("cuMemAdvise_v2", api.memory_advise) &&
+            library.resolve("cuMemFree_v2", api.free) && library.resolve("cuMemHostAlloc", api.allocate_host) &&
+            library.resolve("cuMemFreeHost", api.free_host) &&
+            library.resolve("cuMemHostRegister_v2", api.register_host) &&
+            library.resolve("cuMemHostUnregister", api.unregister_host) && library.resolve("cuMemcpy", api.copy) &&
+            library.resolve("cuMemcpyAsync", api.copy_async) &&
+            library.resolve("cuMemcpy2DAsync_v2", api.copy_2d_async) && library.resolve("cuMemsetD8_v2", api.fill) &&
+            library.resolve("cuMemsetD8Async", api.fill_async) &&
+            library.resolve("cuMemsetD32Async", api.fill_words_async) &&
+            library.resolve("cuStreamCreate", api.stream_create) &&
+            library.resolve("cuStreamDestroy_v2", api.stream_destroy) &&
+            library.resolve("cuStreamSynchronize", api.stream_synchronize) &&
+            library.resolve("cuStreamQuery", api.stream_query) &&
+            library.resolve("cuStreamGetCtx", api.stream_get_context) &&
+            library.resolve("cuStreamWaitEvent", api.stream_wait_event) &&
+            library.resolve("cuStreamAddCallback", api.stream_add_callback) &&
+            library.resolve("cuEventCreate", api.event_create) && library.resolve("cuEventRecord", api.event_record) &&
+            library.resolve("cuEventQuery", api.event_query) &&
+            library.resolve("cuEventSynchronize", api.event_synchronize) &&
+            library.resolve("cuEventDestroy_v2", api.event_destroy) &&
             library.resolve("cuModuleLoadData", api.module_load_data) &&
+            library.resolve("cuModuleUnload", api.module_unload) &&
             library.resolve("cuModuleGetFunction", api.module_get_function) &&
-            library.resolve("cuLaunchKernel", api.launch_kernel);
+            library.resolve("cuFuncGetAttribute", api.function_get_attribute) &&
+            library.resolve("cuFuncSetAttribute", api.function_set_attribute) &&
+            library.resolve("cuLaunchKernelEx", api.launch_kernel);
+        // A driver without a usable GPU fails its initialization, which lists no devices either.
+        if (!resolved || api.init(0) != cuda_success_k) return {};
         int devices_count = 0;
-        if (!resolved || api.init(0) != cuda_success_k || api.get_device_count(&devices_count) != cuda_success_k)
-            return {};
-        for (int ordinal = 0; ordinal != devices_count && static_cast<std::size_t>(ordinal) != max_gpus_per_host_k;
+        if (api.get_device_count(&devices_count) != cuda_success_k) return {};
+        for (int ordinal = 0; ordinal != devices_count && static_cast<std::size_t>(ordinal) != gpu_devices_capacity_k;
              ++ordinal) {
             // A device with no retained context refuses at its own `cuda_set_device`.
             int device = 0;
@@ -153,665 +260,613 @@ struct cuda_api_t {
             if (api.get_device(&device, ordinal) == cuda_success_k &&
                 api.retain_primary_context(&primary, device) == cuda_success_k)
                 api.primary_contexts[ordinal] = primary;
+            // A bus that names no memory domain leaves the device's pinned bytes on the heap.
+            char bus_id[32] = {};
+            [[maybe_unused]] cuda_result_t const named = api.get_pci_bus_id(bus_id, sizeof(bus_id), device);
+            api.memory_domains[ordinal] = memory_domain_of_pci(bus_id);
         }
         return api;
     }
 };
 
-/** Makes the primary context of device @p ordinal , which @p api retained as it loaded, current on
+/** Makes the primary context of device @p ordinal, which @p api retained as it loaded, current on
  *  the calling thread: the driver twin of selecting a device, which every stream, allocation and
- *  launch after it runs on. */
+ *  launch after it runs on. Every entry asks again, rebinding a caller that switched devices. */
 inline cuda_result_t cuda_set_device(cuda_api_t const& api, int ordinal) noexcept {
     if (!api) return cuda_error_not_initialized_k;
-    if (ordinal < 0 || static_cast<std::size_t>(ordinal) >= max_gpus_per_host_k || !api.primary_contexts[ordinal])
+    if (ordinal < 0 || static_cast<std::size_t>(ordinal) >= gpu_devices_capacity_k || !api.primary_contexts[ordinal])
         return cuda_error_invalid_device_k;
     return api.set_current_context(api.primary_contexts[ordinal]);
 }
 
-#pragma endregion CUDA Driver
+/** One device's ordering identity: a non-blocking stream an executor opens or adopts and drains and
+ *  destroys when it dies, or the device's null legacy stream, which owns nothing. */
+struct cuda_stream_t {
 
-using e4m3_t = __nv_fp8_e4m3;
-using bf16_t = __nv_bfloat16;
-
-/** The CUDA-scalar half of the rank-tagged view vocabulary in @c types.hpp . */
-using bf16r1_view_t = nk::tensor_view<bf16_t, 1>;
-using bf16r1_span_t = nk::tensor_span<bf16_t, 1>;
-using bf16r2_view_t = nk::tensor_view<bf16_t, 2>;
-using bf16r2_span_t = nk::tensor_span<bf16_t, 2>;
-using bf16r3_view_t = nk::tensor_view<bf16_t, 3>;
-using bf16r3_span_t = nk::tensor_span<bf16_t, 3>;
-using e4m3r1_view_t = nk::tensor_view<e4m3_t, 1>;
-using e4m3r1_span_t = nk::tensor_span<e4m3_t, 1>;
-using e4m3r2_view_t = nk::tensor_view<e4m3_t, 2>;
-using e4m3r2_span_t = nk::tensor_span<e4m3_t, 2>;
-using e4m3r3_view_t = nk::tensor_view<e4m3_t, 3>;
-using e4m3r3_span_t = nk::tensor_span<e4m3_t, 3>;
-
-/** Failure carrying a CUDA Driver error: @ref expected::fail tagged @c device_k , with the
- *  driver's own error string appended to the description and @p cu_error kept in @c cu_error_ . */
-template <typename value_type_ = void, typename... arg_types_>
-[[nodiscard]] expected<value_type_> cuda_failure(CUresult cu_error, format_at_t format, arg_types_&&... args) noexcept {
-    expected_t failure = expected_t::fail(status_code_t::device_k, format, std::forward<arg_types_>(args)...);
-    failure.cu_error_ = static_cast<i32_t>(cu_error);
-    char const* cu_error_string = nullptr;
-    if (cuGetErrorString(cu_error, &cu_error_string) != CUDA_SUCCESS || cu_error_string == nullptr)
-        cu_error_string = "unknown";
-    [[maybe_unused]] bool const described = format_into(failure.description_, ": {}", cu_error_string);
-    return expected<value_type_>::fail(std::move(failure));
-}
-
-/** The Driver API address of the device @p pointer — the one place a pointer becomes a
- *  @c CUdeviceptr . */
-[[nodiscard]] inline CUdeviceptr device_address(void const* pointer) noexcept {
-    return reinterpret_cast<CUdeviceptr>(pointer); // vendor-boundary: the driver addresses memory as an integer
-}
-
-/** The typed pointer at the Driver API @p address — the inverse of @ref device_address . */
-template <typename value_type_>
-[[nodiscard]] inline value_type_* device_pointer(CUdeviceptr address) noexcept {
-    return reinterpret_cast<value_type_*>(address); // vendor-boundary: the driver addresses memory as an integer
-}
-
-/** Byte alignment of every arena allocation; matches the 256-byte guarantee of the CUDA allocators,
- *  so an allocation base is always vector-load aligned. */
-inline constexpr std::size_t arena_alignment_k = 256u;
-
-/** Cache-line byte count — the region-isolation alignment of symmetric-heap layouts, so flags,
- *  landings, and payloads never false-share a line. */
-inline constexpr std::size_t cache_line_bytes_k = 128u;
-
-/** One device's memory picture, straight from the driver — see
- *  @ref unum::uform::utilities::gpu_memory_report . */
-struct gpu_memory_report_t {
-
-    /** HBM not yet allocated by anyone in any process, per @c cuMemGetInfo . */
-    std::size_t free_bytes = 0;
-
-    /** The device's total HBM. */
-    std::size_t total_bytes = 0;
-
-    /** Bytes currently allocated from the device's default stream-ordered pool. */
-    std::size_t pool_used_bytes = 0;
-
-    /** The pool's high-water mark since its last reset. */
-    std::size_t pool_peak_bytes = 0;
-};
-
-/** Poll the driver for @p device 's memory picture — the diagnostics counterpart of the owners'
- *  own accessors ( @c arena.used()/mapped() ); there is no in-house ledger to keep in sync. The
- *  calling thread must hold a context on @p device (the @c cuMemGetInfo scope). */
-[[nodiscard]] inline expected<gpu_memory_report_t> gpu_memory_report(i32_t device) noexcept {
-    gpu_memory_report_t report;
-    if (CUresult result = cuMemGetInfo(&report.free_bytes, &report.total_bytes); result != CUDA_SUCCESS)
-        return cuda_failure<gpu_memory_report_t>(result, "memory info query failed (device={})", device);
-    CUdevice device_handle = 0;
-    CUmemoryPool pool = nullptr;
-    if (cuDeviceGet(&device_handle, device) == CUDA_SUCCESS &&
-        cuDeviceGetDefaultMemPool(&pool, device_handle) == CUDA_SUCCESS) {
-        cuuint64_t used = 0, peak = 0;
-        if (cuMemPoolGetAttribute(pool, CU_MEMPOOL_ATTR_USED_MEM_CURRENT, &used) == CUDA_SUCCESS)
-            report.pool_used_bytes = static_cast<std::size_t>(used);
-        if (cuMemPoolGetAttribute(pool, CU_MEMPOOL_ATTR_USED_MEM_HIGH, &peak) == CUDA_SUCCESS)
-            report.pool_peak_bytes = static_cast<std::size_t>(peak);
+    /**
+     *  @brief Opens a non-blocking stream in the current context, owned from now on.
+     *
+     *  @par Statuses:
+     *  - @c device_k The driver refused the stream.
+     */
+    static expected<cuda_stream_t> open(cuda_api_t const& api) noexcept {
+        cuda_stream_t stream;
+        stream.api_ = &api;
+        if (!api || api.stream_create(&stream.handle_, cuda_stream_non_blocking_k) != cuda_success_k)
+            return {{}, {status_code_t::device_k, "Driver refused a stream"}};
+        return {std::move(stream), status_code_t::success_k};
     }
-    return expected<gpu_memory_report_t> {report};
-}
 
-/**
- *  @brief Growing bump arena over CUDA virtual memory — the owner of every long-lived device
- *      buffer: weights, activations, step scratch, and (later) the symmetric / multimem-bound heap.
- *
- *  Built for @b homogeneous fixed-shape workloads — model training and inference, where the batch
- *  shape is frozen at step construction and every step allocates the identical sequence of sizes. A
- *  workload whose shapes vary call to call belongs on @ref unum::uform::utilities::gpu_alloc
- *  instead; a bump cursor has no free list, so shape variance here only accretes.
- *
- *  A large VA range is reserved once at @ref make ; physical memory arrives lazily in
- *  granularity-rounded chunks as @ref allocate_bytes outgrows the mapped prefix, so an
- *  over-generous reservation costs address space, not HBM. Allocation is pointer arithmetic
- *  and never fails while the reservation lasts; freeing is only @ref rewind / @ref release
- *  (cursor rewinds — no free list, ever), which keeps every allocation sequence deterministic
- *  across captured-graph replays. Growth must happen @b outside graph capture; a steady-state
- *  step performs none.
- *
- *  Not stream-ordered by design: an allocation orders against nothing (the memory already
- *  exists), and the one hazard — rewinding a cursor while enqueued kernels still read the
- *  allocations above it — is owned by the step schedule, not the allocator. Move-only; the
- *  destructor unmaps and releases everything.
- *
- *  Requires a current CUDA context on the calling thread (retain the device's primary
- *  context at startup).
- */
-struct gpu_arena_t {
+    /**
+     *  @brief Checks that @p handle, a caller's stream, may be adopted as the stream of device
+     *      @p ordinal, without taking it.
+     *
+     *  @par Statuses:
+     *  - @c device_k There is no driver.
+     *  - @c invalid_argument_k The @p handle is null or a default stream, which no owner destroys.
+     *  - @c config_mismatch_k The stream sits off the primary context of @p ordinal.
+     */
+    static status_t adoptable(cuda_api_t const& api, std::size_t ordinal, void* handle) noexcept {
+        if (!api) return {status_code_t::device_k, "No CUDA driver"};
+        auto const stream = static_cast<cuda_stream_handle_t>(handle);
+        if (!stream || stream == cuda_stream_legacy_handle_k || stream == cuda_stream_per_thread_handle_k)
+            return {status_code_t::invalid_argument_k, "A default stream cannot be adopted"};
+        cuda_context_handle_t context = nullptr;
+        if (ordinal >= gpu_devices_capacity_k || api.stream_get_context(stream, &context) != cuda_success_k ||
+            context != api.primary_contexts[ordinal])
+            return {status_code_t::config_mismatch_k, "A stream sits off its device's primary context"};
+        return {};
+    }
 
-    /** One physical backing chunk mapped into the reserved range; kept only for teardown. */
-    struct physical_chunk_t {
-        CUmemGenericAllocationHandle handle = 0;
-        std::size_t bytes = 0;
-    };
+    /** Adopts @p handle, a stream the caller created, which it synchronizes and destroys. */
+    explicit cuda_stream_t(cuda_api_t const& api, cuda_stream_handle_t handle) noexcept : api_(&api), handle_(handle) {}
 
-    /** A cursor position taken with @ref snapshot and rewound to with @ref rewind — a strong type
-     *  so a snapshot can't be confused with any other byte count in flight. */
-    struct snapshot_t {
-        std::size_t bytes = 0;
-    };
-
-    /** Start of the reserved VA range. */
-    CUdeviceptr base_ = 0;
-
-    /** VA reservation — the growth ceiling. */
-    std::size_t reserved_bytes_ = 0;
-
-    /** Physically backed prefix of the reservation. */
-    std::size_t mapped_bytes_ = 0;
-
-    /** Bump cursor within the mapped prefix. */
-    std::size_t used_bytes_ = 0;
-
-    /** Physical allocation granularity of @ref device_ . */
-    std::size_t granularity_ = 0;
-
-    /** Device ordinal the physical chunks live on. */
-    int device_ = 0;
-
-    /** Mapped chunks, in mapping order, for teardown. */
-    st::basic_vector<physical_chunk_t> chunks_ {};
-
-    /** Peer devices named in @c visible_to at @ref make — baked configuration every chunk
-     *  (present and future) is granted to; nothing appends to it after construction. */
-    st::basic_vector<i32_t> visible_to_ {};
-
-  private:
-    gpu_arena_t() noexcept = default;
-
-  public:
-    gpu_arena_t(gpu_arena_t const&) = delete;
-    gpu_arena_t& operator=(gpu_arena_t const&) = delete;
-
-    gpu_arena_t(gpu_arena_t&& other) noexcept
-        : base_(std::exchange(other.base_, 0)), reserved_bytes_(std::exchange(other.reserved_bytes_, 0)),
-          mapped_bytes_(std::exchange(other.mapped_bytes_, 0)), used_bytes_(std::exchange(other.used_bytes_, 0)),
-          granularity_(std::exchange(other.granularity_, 0)), device_(std::exchange(other.device_, 0)),
-          chunks_(std::move(other.chunks_)), visible_to_(std::move(other.visible_to_)) {}
-
-    gpu_arena_t& operator=(gpu_arena_t&& other) noexcept {
-        if (this == &other) return *this;
-        destroy_();
-        base_ = std::exchange(other.base_, 0);
-        reserved_bytes_ = std::exchange(other.reserved_bytes_, 0);
-        mapped_bytes_ = std::exchange(other.mapped_bytes_, 0);
-        used_bytes_ = std::exchange(other.used_bytes_, 0);
-        granularity_ = std::exchange(other.granularity_, 0);
-        device_ = std::exchange(other.device_, 0);
-        chunks_ = std::move(other.chunks_);
-        visible_to_ = std::move(other.visible_to_);
+    cuda_stream_t() noexcept = default;
+    cuda_stream_t(cuda_stream_t&& other) noexcept : api_(other.api_), handle_(std::exchange(other.handle_, nullptr)) {}
+    cuda_stream_t& operator=(cuda_stream_t&& other) noexcept {
+        std::swap(api_, other.api_), std::swap(handle_, other.handle_);
         return *this;
     }
+    cuda_stream_t(cuda_stream_t const&) = delete;
+    cuda_stream_t& operator=(cuda_stream_t const&) = delete;
+    ~cuda_stream_t() noexcept {
+        if (handle_) api_->stream_synchronize(handle_), api_->stream_destroy(handle_);
+    }
 
-    ~gpu_arena_t() noexcept { destroy_(); }
+    /** The driver table every call on this stream goes through. */
+    cuda_api_t const& api() const noexcept { return *api_; }
+
+    operator cuda_stream_handle_t() const noexcept { return handle_; }
+
+  private:
+    cuda_api_t const* api_ = nullptr;
+    cuda_stream_handle_t handle_ = nullptr;
+};
+
+/** Owned event, born in the current context, marking a point on a stream that the host polls or
+ *  awaits. It blocks on sync, so a drain sleeps instead of spinning a core, and destroying it
+ *  never waits for the work it marked. */
+struct cuda_event_t {
+
+    /** An empty event, which records nothing. */
+    cuda_event_t() noexcept = default;
+
+    explicit cuda_event_t(cuda_api_t const& api) noexcept : api_(&api) {
+        if (api) api.event_create(&handle_, cuda_event_blocking_sync_k | cuda_event_disable_timing_k);
+    }
+    cuda_event_t(cuda_event_t&& other) noexcept : api_(other.api_), handle_(std::exchange(other.handle_, nullptr)) {}
+    cuda_event_t& operator=(cuda_event_t&& other) noexcept {
+        std::swap(api_, other.api_), std::swap(handle_, other.handle_);
+        return *this;
+    }
+    cuda_event_t(cuda_event_t const&) = delete;
+    cuda_event_t& operator=(cuda_event_t const&) = delete;
+    ~cuda_event_t() noexcept {
+        if (handle_) api_->event_destroy(handle_);
+    }
+
+    operator cuda_event_handle_t() const noexcept { return handle_; }
 
     /**
-     *  @brief Reserve @p reserve_bytes of VA on @p device ; no physical memory is committed yet.
+     *  @brief Marks everything queued on @p stream so far, which @ref finished and @ref wait
+     *      then await in order.
      *
-     *  The chunks later mapped in are created @c gpuDirectRDMACapable where the device supports it,
-     *  so the arena's allocations can be MR-registered or multicast-bound without re-allocation.
-     *
-     *  Cross-device visibility is @b construction-time configuration: every peer named in
-     *  @p visible_to is granted read-write access to every chunk this arena ever maps (a VMM
-     *  page-table grant — one-time cost, no address motion, capture-stable peer views). There is no
-     *  post-hoc grant; consumers @b validate with @ref is_visible_to and fail loudly.
-     *
-     *  @param[in] device Device ordinal the arena's physical chunks will live on.
-     *  @param[in] reserve_bytes Growth ceiling; rounded up to the device's allocation granularity.
-     *  @param[in] visible_to Peer device ordinals that must be able to read this arena over NVLink:
-     *      the other members of its domain, each refused at once when it has no P2P path to
-     *      @p device .
+     *  @par Statuses:
+     *  - @c device_k The event was never created.
      */
-    [[nodiscard]] static expected<gpu_arena_t> make(int device, std::size_t reserve_bytes,
-                                                    std::span<i32_t const> visible_to = {}) noexcept {
-        gpu_arena_t arena;
-        arena.device_ = device;
-        for (i32_t const peer : visible_to) {
-            if (peer == device) continue;
-            int can_access = 0;
-            if (CUresult result = cuDeviceCanAccessPeer(&can_access, peer, device); result != CUDA_SUCCESS)
-                return cuda_failure<gpu_arena_t>(result, "P2P capability query failed (device={} peer={})", device,
-                                                 peer);
-            if (can_access == 0)
-                return expected<gpu_arena_t>::fail(status_code_t::unsupported_k,
-                                                   "device {} cannot read the arena of device {}: no P2P path", peer,
-                                                   device);
-            if (st::failed(arena.visible_to_.push_back(i32_t {peer})))
-                return expected<gpu_arena_t>::fail(status_code_t::out_of_memory_k, "No room for the peer table");
-        }
-        CUmemAllocationProp properties = allocation_properties_(device);
-        if (CUresult result = cuMemGetAllocationGranularity(&arena.granularity_, &properties,
-                                                            CU_MEM_ALLOC_GRANULARITY_MINIMUM);
-            result != CUDA_SUCCESS)
-            return cuda_failure<gpu_arena_t>(result, "granularity query failed (device={})", device);
-        arena.reserved_bytes_ = round_up_to_multiple(reserve_bytes, arena.granularity_);
-        if (CUresult result = cuMemAddressReserve(&arena.base_, arena.reserved_bytes_, 0, 0, 0); result != CUDA_SUCCESS)
-            return cuda_failure<gpu_arena_t>(result, "VA reservation failed (device={} bytes={})", device,
-                                             arena.reserved_bytes_);
-        return expected<gpu_arena_t> {std::move(arena)};
-    }
-
-    /** Bytes allocated so far. */
-    [[nodiscard]] std::size_t used() const noexcept { return used_bytes_; }
-
-    /** The device ordinal the arena's memory lives on. */
-    [[nodiscard]] int device() const noexcept { return device_; }
-
-    /** Physically committed bytes; grows monotonically, never shrinks before destruction. */
-    [[nodiscard]] std::size_t mapped() const noexcept { return mapped_bytes_; }
-
-    /** The current cursor position, to be rewound to with @ref rewind . */
-    [[nodiscard]] snapshot_t snapshot() const noexcept { return {used_bytes_}; }
-
-    /** Whether @p device can read this arena: the home device, or a peer named in the
-     *  @c visible_to set at @ref make . Consumers needing cross-device reads validate with this
-     *  and fail loudly — visibility is never granted after construction. */
-    [[nodiscard]] bool is_visible_to(int device) const noexcept {
-        if (device == device_) return true;
-        for (i32_t const peer : visible_to_)
-            if (peer == device) return true;
-        return false;
-    }
-
-    /** Allocate @p bytes at @p alignment off the bump cursor, growing the physical backing when the
-     *  mapped prefix is exhausted. Returns @c nullptr when the reservation ceiling is hit or growth
-     *  fails — on a bump arena a null can mean nothing else. */
-    [[nodiscard]] std::byte* allocate_bytes(std::size_t bytes, std::size_t alignment = arena_alignment_k) noexcept {
-        return allocate_object<std::byte>(bytes, alignment);
-    }
-
-    /** Allocate @p count elements of @c value_type_ off the bump cursor — the typed sibling of
-     *  @ref allocate_bytes , mirroring @c std::pmr::polymorphic_allocator::allocate_object . */
-    template <typename value_type_>
-    [[nodiscard]] value_type_* allocate_object(std::size_t count = 1,
-                                               std::size_t alignment = arena_alignment_k) noexcept {
-        std::size_t const bytes = count * sizeof(value_type_);
-        std::size_t const aligned_cursor = round_up_to_multiple(used_bytes_, alignment);
-        if (aligned_cursor + bytes > reserved_bytes_) return nullptr;
-        if (aligned_cursor + bytes > mapped_bytes_)
-            if (grow_to_(aligned_cursor + bytes) != CUDA_SUCCESS) return nullptr;
-        used_bytes_ = aligned_cursor + bytes;
-        return device_pointer<value_type_>(base_ + aligned_cursor);
+    status_t record(cuda_stream_handle_t stream) noexcept {
+        if (!handle_ || api_->event_record(handle_, stream) != cuda_success_k)
+            return {status_code_t::device_k, "The event recorded nothing"};
+        return {};
     }
 
     /**
-     *  @brief Allocate @p bytes guaranteed to lie within @b one physical chunk, so the range can be
-     *      MR-registered: @c nvidia_peermem rejects ( @c EFAULT ) any @c ibv_reg_mr range spanning two
-     *      @c cuMemCreate handles, and a bump allocation crossing the growth boundary does exactly that.
+     *  @brief Polls the recorded work without blocking; nothing recorded has nothing to run.
      *
-     *  Places the range at the virgin mapping frontier — a fresh chunk start — and grows the whole
-     *  extent as a single @c cuMemCreate , skipping the mapped-but-unused tail (under one
-     *  granularity in the wire-at-startup pattern, since growth maps exactly the shortfall). The
-     *  returned pointer is granularity-aligned. @c nullptr on ceiling or growth failure, like
-     *  @ref allocate_bytes .
+     *  @par Statuses:
+     *  - @c deferred_k The recorded work still runs.
+     *  - @c device_k The event was never created.
      */
-    [[nodiscard]] std::byte* allocate_registrable_bytes(std::size_t bytes) noexcept {
-        return allocate_registrable_object<std::byte>(bytes);
+    status_t finished() const noexcept {
+        if (!handle_) return {status_code_t::device_k, "The event was never created"};
+        cuda_result_t const queried = api_->event_query(handle_);
+        if (queried == cuda_error_not_ready_k) return {status_code_t::deferred_k};
+        if (queried != cuda_success_k) return {status_code_t::device_k, "The device failed the recorded work"};
+        return {};
     }
 
-    /** Allocate @p count elements of @c value_type_ inside one physical chunk — the typed sibling
-     *  of @ref allocate_registrable_bytes . */
-    template <typename value_type_>
-    [[nodiscard]] value_type_* allocate_registrable_object(std::size_t count) noexcept {
-        std::size_t const bytes = count * sizeof(value_type_);
-        std::size_t const chunk_start = mapped_bytes_;
-        if (chunk_start + bytes > reserved_bytes_) return nullptr;
-        if (grow_to_(chunk_start + bytes) != CUDA_SUCCESS) return nullptr;
-        used_bytes_ = chunk_start + bytes;
-        return device_pointer<value_type_>(base_ + chunk_start);
-    }
-
-    /** Rewind the cursor to a @ref snapshot ; the physical backing stays mapped. The caller owns
-     *  the hazard of rewinding under allocations still referenced by enqueued work. */
-    void rewind(snapshot_t snapshot) noexcept { used_bytes_ = snapshot.bytes; }
-
-    /** Rewind the cursor to zero, reclaiming every allocation at once — the
-     *  @c std::pmr::monotonic_buffer_resource::release semantic, strengthened: the physical backing
-     *  stays mapped for reuse. */
-    void release() noexcept { used_bytes_ = 0; }
-
-  private:
-
-    /** The one chunk-creation property set: device-resident, pinned, and RDMA-capable wherever the
-     *  device can register VMM memory with an adapter - consumer cards refuse that flag outright,
-     *  and have no adapter. */
-    [[nodiscard]] static CUmemAllocationProp allocation_properties_(int device) noexcept {
-        int rdma_supported = 0;
-        cuDeviceGetAttribute(&rdma_supported, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, device);
-        CUmemAllocationProp properties {};
-        properties.type = CU_MEM_ALLOCATION_TYPE_PINNED;
-        properties.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-        properties.location.id = device;
-        properties.allocFlags.gpuDirectRDMACapable = rdma_supported != 0;
-        return properties;
-    }
-
-    /** Map new granularity-rounded physical chunks until @p target_bytes of the
-     *  reservation is backed. */
-    [[nodiscard]] CUresult grow_to_(std::size_t target_bytes) noexcept {
-        CUmemAllocationProp properties = allocation_properties_(device_);
-        CUmemAccessDesc access {};
-        access.location = properties.location;
-        access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-        while (mapped_bytes_ < target_bytes) {
-            std::size_t const chunk_bytes = round_up_to_multiple(target_bytes - mapped_bytes_, granularity_);
-            CUmemGenericAllocationHandle handle = 0;
-            if (CUresult result = cuMemCreate(&handle, chunk_bytes, &properties, 0); result != CUDA_SUCCESS)
-                return result;
-            if (CUresult result = cuMemMap(base_ + mapped_bytes_, chunk_bytes, 0, handle, 0); result != CUDA_SUCCESS) {
-                cuMemRelease(handle);
-                return result;
-            }
-            if (CUresult result = cuMemSetAccess(base_ + mapped_bytes_, chunk_bytes, &access, 1);
-                result != CUDA_SUCCESS) {
-                cuMemUnmap(base_ + mapped_bytes_, chunk_bytes);
-                cuMemRelease(handle);
-                return result;
-            }
-            // Every chunk honors the `visible_to_` set baked at make.
-            for (i32_t const peer : visible_to_) {
-                CUmemAccessDesc peer_access {};
-                peer_access.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-                peer_access.location.id = peer;
-                peer_access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-                if (CUresult result = cuMemSetAccess(base_ + mapped_bytes_, chunk_bytes, &peer_access, 1);
-                    result != CUDA_SUCCESS) {
-                    cuMemUnmap(base_ + mapped_bytes_, chunk_bytes);
-                    cuMemRelease(handle);
-                    return result;
-                }
-            }
-            if (st::failed(chunks_.push_back({handle, chunk_bytes}))) {
-                cuMemUnmap(base_ + mapped_bytes_, chunk_bytes);
-                cuMemRelease(handle);
-                return CUDA_ERROR_OUT_OF_MEMORY; // Host-side chunk-table growth failed.
-            }
-            mapped_bytes_ += chunk_bytes;
-        }
-        return CUDA_SUCCESS;
-    }
-
-    /** Unmap the whole mapped prefix, release every physical handle, and free
-     *  the VA reservation. */
-    void destroy_() noexcept {
-        if (base_ == 0) return;
-        if (mapped_bytes_ != 0) cuMemUnmap(base_, mapped_bytes_);
-        for (physical_chunk_t const& chunk : chunks_) cuMemRelease(chunk.handle);
-        cuMemAddressFree(base_, reserved_bytes_);
-        base_ = 0;
-        chunks_ = {};
-        reserved_bytes_ = mapped_bytes_ = used_bytes_ = 0;
-    }
-};
-
-/**
- *  @brief Standard-allocator facade over a caller-owned @ref unum::uform::utilities::gpu_arena_t ,
- *      so owning containers size arena allocations without the bespoke allocation spelling.
- *
- *  @c nk::tensor<f32_t,gpu_arena_alloc<f32_t>,2>::uninitialized({rows,cols},gpu_arena_alloc<f32_t>{arena})
- *  allocates — and grows the arena — automatically; @c st::basic_vector composes the same way.
- *
- *  Deallocation is deliberately a no-op: a bump arena reclaims through
- *  @ref unum::uform::utilities::gpu_arena_t::rewind /
- *  @ref unum::uform::utilities::gpu_arena_t::release , never per buffer — so a container backed by
- *  this allocator must not outlive its arena, nor a rewind past its allocation. The handle is
- *  trivially copyable, rebinds freely, and never owns the arena.
- */
-template <typename value_type_ = std::byte>
-struct gpu_arena_alloc {
-    using value_type = value_type_;
-    using size_type = std::size_t;
-    using difference_type = std::ptrdiff_t;
-
-    /** The handle is just an arena pointer — move it with the container so moves stay
-     *  @c noexcept . */
-    using propagate_on_container_move_assignment = std::true_type;
-
-    template <typename other_type_>
-    struct rebind {
-        using other = gpu_arena_alloc<other_type_>;
-    };
-
-    /** The arena every allocation comes from, owned by the caller and outliving this allocator. */
-    gpu_arena_t* arena_ = nullptr;
-
-    constexpr gpu_arena_alloc() noexcept = default;
-    explicit constexpr gpu_arena_alloc(gpu_arena_t& arena) noexcept : arena_(&arena) {}
-    template <typename other_type_>
-    constexpr gpu_arena_alloc(gpu_arena_alloc<other_type_> const& other) noexcept : arena_(other.arena_) {}
-
-    /** Allocate @p count elements off the arena, growing its physical backing if needed; @c nullptr
-     *  on exhaustion or when unbound. */
-    [[nodiscard]] value_type* allocate(std::size_t count) noexcept {
-        return arena_ != nullptr ? arena_->allocate_object<value_type>(count) : nullptr;
-    }
-
-    /** A no-op: bump-arena memory is reclaimed by
-     *  @ref unum::uform::utilities::gpu_arena_t::rewind , never per buffer. */
-    void deallocate(value_type*, std::size_t) noexcept {}
-
-    [[nodiscard]] constexpr bool operator==(gpu_arena_alloc const& other) const noexcept {
-        return arena_ == other.arena_;
-    }
-};
-
-/** The canonical byte-typed arena-allocator handle — what APIs receive and rebind. */
-using gpu_arena_alloc_t = gpu_arena_alloc<b8_t>;
-
-/**
- *  @brief The RDMA-registrable sibling of @ref unum::uform::utilities::gpu_arena_alloc : every
- *      allocation lies within one physical chunk of the arena — the precondition @c nvidia_peermem
- *      places on @c ibv_reg_mr — via @c gpu_arena_t::allocate_registrable_bytes .
- *
- *  For the symmetric heaps the InfiniBand collectives register with their NICs; everything else
- *  stays on the ordinary arena allocator.
- *
- *  Same contract as @ref unum::uform::utilities::gpu_arena_alloc otherwise: caller-owned arena,
- *  no-op deallocate, free rebind.
- */
-template <typename value_type_ = std::byte>
-struct gpu_registrable_alloc {
-    using value_type = value_type_;
-    using size_type = std::size_t;
-    using difference_type = std::ptrdiff_t;
-
-    /** The handle is just an arena pointer — move it with the container so moves stay
-     *  @c noexcept . */
-    using propagate_on_container_move_assignment = std::true_type;
-
-    template <typename other_type_>
-    struct rebind {
-        using other = gpu_registrable_alloc<other_type_>;
-    };
-
-    /** The arena every allocation comes from, owned by the caller and outliving this allocator. */
-    gpu_arena_t* arena_ = nullptr;
-
-    constexpr gpu_registrable_alloc() noexcept = default;
-    explicit constexpr gpu_registrable_alloc(gpu_arena_t& arena) noexcept : arena_(&arena) {}
-    template <typename other_type_>
-    constexpr gpu_registrable_alloc(gpu_registrable_alloc<other_type_> const& other) noexcept : arena_(other.arena_) {}
-
-    /** Allocate @p count elements inside one fresh physical chunk; @c nullptr on exhaustion
-     *  or when unbound. */
-    [[nodiscard]] value_type* allocate(std::size_t count) noexcept {
-        return arena_ != nullptr ? arena_->allocate_registrable_object<value_type>(count) : nullptr;
-    }
-
-    /** A no-op: bump-arena memory is reclaimed by
-     *  @ref unum::uform::utilities::gpu_arena_t::rewind , never per buffer. */
-    void deallocate(value_type*, std::size_t) noexcept {}
-
-    [[nodiscard]] constexpr bool operator==(gpu_registrable_alloc const& other) const noexcept {
-        return arena_ == other.arena_;
-    }
-};
-
-/** The canonical byte-typed registrable-allocator handle — what the collective heaps receive. */
-using gpu_registrable_alloc_t = gpu_registrable_alloc<b8_t>;
-
-/**
- *  @brief Pinned host-memory allocator — page-locked pages the DMA engines read directly, for the
- *      two host-side surfaces of a replayed step: generation staging cells that captured copy nodes
- *      re-read at every launch, and loss landings polled without a stream synchronize.
- *
- *  Holds only the memory domain its pages land on: by default the driver places them wherever it
- *  likes, and a domain, such as the one nearest the GPU that reads them, places them there before
- *  the driver pins them. Needs a current context at the call, like every driver allocation here.
- *  Satisfies @c std::alloc_traits , so NumKong's owning tensor composes directly:
- *
- *      nk::tensor<f32_t, pinned_alloc<f32_t>, 1> landings;
- */
-template <typename value_type_>
-struct pinned_alloc {
-    using value_type = value_type_;
-    using size_type = std::size_t;
-    using difference_type = std::ptrdiff_t;
-    using propagate_on_container_move_assignment = std::true_type;
-
-    template <typename other_type_>
-    struct rebind {
-        using other = pinned_alloc<other_type_>;
-    };
-
-    constexpr pinned_alloc() noexcept = default;
-
-    /** Places every allocation on @p memory_domain , an identifier the operating system gives. */
-    explicit constexpr pinned_alloc(fu_memory_domain_id_t memory_domain) noexcept : memory_domain_(memory_domain) {}
-
-    template <typename other_type_>
-    constexpr pinned_alloc(pinned_alloc<other_type_> const& other) noexcept : memory_domain_(other.memory_domain()) {}
-
-    /** Pin @p count elements of portable host memory; @c nullptr on failure. */
-    [[nodiscard]] value_type* allocate(std::size_t count) noexcept {
-        std::size_t const bytes = count * sizeof(value_type);
-        if (memory_domain_ < 0) {
-            void* base = nullptr;
-            if (cuMemHostAlloc(&base, bytes, CU_MEMHOSTALLOC_PORTABLE) != CUDA_SUCCESS) return nullptr;
-            return static_cast<value_type*>(base);
-        }
-        bytes_span_t const placed = allocate_on_memory_domain(memory_domain_, bytes);
-        if (placed.empty()) return nullptr;
-        if (cuMemHostRegister(placed.data(), bytes, CU_MEMHOSTREGISTER_PORTABLE) != CUDA_SUCCESS) {
-            free_on_memory_domain(memory_domain_, placed);
-            return nullptr;
-        }
-        return nk::as_writable_values<value_type>(placed).data();
-    }
-
-    void deallocate(value_type* base, std::size_t count) noexcept { // vendor-boundary: the allocator traits' shape
-        if (base == nullptr) return;
-        if (memory_domain_ < 0) {
-            [[maybe_unused]] CUresult const freed = cuMemFreeHost(base);
-            return;
-        }
-        [[maybe_unused]] CUresult const unregistered = cuMemHostUnregister(base);
-        free_on_memory_domain(memory_domain_, std::as_writable_bytes(std::span<value_type> {base, count}));
-    }
-
-    /** The memory domain allocations land on, or -1 wherever the driver places them. */
-    [[nodiscard]] constexpr fu_memory_domain_id_t memory_domain() const noexcept { return memory_domain_; }
-
-    [[nodiscard]] constexpr bool operator==(pinned_alloc const& other) const noexcept {
-        return memory_domain_ == other.memory_domain_;
+    /**
+     *  @brief Sleeps until the recorded work finishes and answers whether the device finished it.
+     *
+     *  @par Statuses:
+     *  - @c device_k The event was never created.
+     */
+    status_t wait() noexcept {
+        if (!handle_ || api_->event_synchronize(handle_) != cuda_success_k)
+            return {status_code_t::device_k, "The device failed the recorded work"};
+        return {};
     }
 
   private:
-    fu_memory_domain_id_t memory_domain_ = -1;
+    cuda_api_t const* api_ = nullptr;
+    cuda_event_handle_t handle_ = nullptr;
 };
 
-/** The canonical byte-typed pinned-allocator handle — what APIs receive and rebind. */
-using pinned_alloc_t = pinned_alloc<b8_t>;
+/** One fatbin loaded into one GPU's primary context and unloaded with this owner; kernels are found
+ *  by name. */
+struct cuda_module_t {
+    using function_t = cuda_function_handle_t;
+
+    cuda_module_t() noexcept = default;
+    cuda_module_t(cuda_module_t&& other) noexcept
+        : api_(other.api_), handle_(std::exchange(other.handle_, nullptr)), device_(other.device_) {}
+    cuda_module_t& operator=(cuda_module_t&& other) noexcept {
+        std::swap(api_, other.api_), std::swap(handle_, other.handle_), std::swap(device_, other.device_);
+        return *this;
+    }
+    cuda_module_t(cuda_module_t const&) = delete;
+    cuda_module_t& operator=(cuda_module_t const&) = delete;
+    ~cuda_module_t() noexcept {
+        if (handle_ && cuda_set_device(*api_, device_) == cuda_success_k) api_->module_unload(handle_);
+    }
+
+    /**
+     *  @brief Loads @p fatbin onto device @p device through @p api, binding it first, since
+     *      a module loads into the current context; the driver picks the cubin matching the
+     *      device, or JIT-compiles its PTX.
+     *
+     *  @par Statuses:
+     *  - @c device_k The @p fatbin is empty, or the driver refused it.
+     */
+    static expected<cuda_module_t> load(cuda_api_t const& api, int device, bytes_view_t fatbin) noexcept {
+        cuda_module_t module;
+        module.api_ = &api;
+        module.device_ = device;
+        if (fatbin.empty() || cuda_set_device(api, device) != cuda_success_k ||
+            api.module_load_data(&module.handle_, fatbin.data()) != cuda_success_k)
+            return {{}, {status_code_t::device_k, "The driver refused a fatbin"}};
+        return {std::move(module), status_code_t::success_k};
+    }
+
+    /** The driver table the fatbin was loaded through, which launches of its kernels go through. */
+    cuda_api_t const& api() const noexcept { return *api_; }
+
+    /** The kernel exported as @p name, or null when the fatbin has none. */
+    function_t function(char const* name) const noexcept { // vendor-boundary
+        function_t function = nullptr;
+        return handle_ && api_->module_get_function(&function, handle_, name) == cuda_success_k ? function : nullptr;
+    }
+
+  private:
+    cuda_api_t const* api_ = nullptr;
+    cuda_module_handle_t handle_ = nullptr;
+    int device_ = 0;
+};
+
+#pragma endregion Shared VRAM Driver
+
+#pragma region Listing and Scratch
+
+/** Writes every CUDA device @p api reports into @p into , up to its size, in the driver's order,
+ *  and answers how many it wrote, skipping any device the driver will not describe, and none for
+ *  an empty table. */
+inline std::size_t list_nvidia_gpu_devices(cuda_api_t const& api, std::span<gpu_device_t> into) noexcept {
+    std::size_t count = 0;
+    int devices_count = 0;
+    if (!api || api.get_device_count(&devices_count) != cuda_success_k) return count;
+    for (int ordinal = 0; ordinal != devices_count && count != into.size(); ++ordinal) {
+        int device = 0, warp_lanes = 0, compute_units = 0, major = 0, minor = 0;
+        std::size_t memory_bytes = 0;
+        gpu_device_t listed {gpu_vendor_t::nvidia_k, static_cast<u32_t>(ordinal)};
+        if (api.get_device(&device, ordinal) != cuda_success_k ||
+            api.get_device_name(listed.name, static_cast<int>(sizeof(listed.name)), device) != cuda_success_k ||
+            api.get_device_attribute(&warp_lanes, cuda_attribute_warp_size_k, device) != cuda_success_k ||
+            api.get_device_attribute(&compute_units, cuda_attribute_multiprocessor_count_k, device) != cuda_success_k ||
+            api.get_device_attribute(&major, cuda_attribute_compute_capability_major_k, device) != cuda_success_k ||
+            api.get_device_attribute(&minor, cuda_attribute_compute_capability_minor_k, device) != cuda_success_k ||
+            api.get_device_memory(&memory_bytes, device) != cuda_success_k)
+            continue;
+        listed.architecture_major = static_cast<u32_t>(major), listed.architecture_minor = static_cast<u32_t>(minor);
+        listed.warp_lanes = static_cast<u32_t>(warp_lanes), listed.compute_units = static_cast<u32_t>(compute_units);
+        listed.memory_bytes = memory_bytes;
+        into[count++] = listed;
+    }
+    return count;
+}
+
+/** Where a cuda stream's launches find their functions: the process's one table of UForm's bundle
+ *  per device, which the GPU runtime owns. */
+using cuda_kernels_t = kernel_tables<cuda_module_t>*;
 
 /**
- *  @brief Stream-ordered device allocator for @b heterogeneous shape-varying workloads — the exact
- *      opposite of @ref unum::uform::utilities::gpu_arena_t : every call may bring a different
- *      size, so buffers are individually allocated and freed.
+ *  @brief UForm's queue-ordered memory on one CUDA stream: the activations a call computes in, on
+ *      the device, and the pinned transfers it packs what the device reads into.
  *
- *  The data loaders' tier — variable-length blobs and decode scratch that live @b outside captured
- *  graphs, where @c cuMemAllocAsync is legal.
- *
- *  Allocation and deallocation enqueue on the bound stream, so a loader's alloc → decode → consume
- *  → free chain needs no host fences; the memory is valid only in that stream's order (host access
- *  requires a sync). Satisfies @c std::alloc_traits — a stateful, trivially-copyable handle over
- *  the device's default memory pool — so NumKong's owning tensor composes directly:
- *  @c nk::tensor<f32_t,gpu_alloc<f32_t>,2>::uninitialized({rows,cols},alloc) . Only
- *      @c uninitialized applies:
- *  the other factories ( @c zeros / @c full ) initialize through host writes, which device memory
- *  forbids — fill with a kernel or @c cuMemsetD*Async instead.
+ *  Both only hand out what @ref reserve grew them by, with the stream's device bound, before a call
+ *  allocates, and @ref release frees them after the stream drained, each chunk through the verb
+ *  that made it.
  */
-template <typename value_type_ = std::byte>
-struct gpu_alloc {
-    using value_type = value_type_;
-    using size_type = std::size_t;
-    using difference_type = std::ptrdiff_t;
+struct cuda_scratch_t {
 
-    /** The handle is just a stream — move it with the container so moves stay @c noexcept . */
-    using propagate_on_container_move_assignment = std::true_type;
+    /** Device memory the call's layers compute in, grown in the stream's order. */
+    chunked_arena_t activations;
 
-    template <typename other_type_>
-    struct rebind {
-        using other = gpu_alloc<other_type_>;
-    };
+    /** Pinned host pages both the host and the device address, where a call packs what the device
+     *  reads. */
+    chunked_arena_t transfers;
 
-    /** Stream every allocation and deallocation is ordered on; the default stream when unset. */
-    CUstream stream = nullptr;
+    /** The ceiling on @ref activations , zero for none, which every @ref reserve checks. */
+    std::size_t limit = 0;
 
-    constexpr gpu_alloc() noexcept = default;
-    explicit constexpr gpu_alloc(CUstream stream) noexcept : stream(stream) {}
-    template <typename other_type_>
-    constexpr gpu_alloc(gpu_alloc<other_type_> const& other) noexcept : stream(other.stream) {}
-
-    /** Stream-ordered allocation from the device's default memory pool; @c nullptr on failure, so
-     *  allocation never throws. The pool's own attributes report the usage and high-water marks
-     *  (see @ref unum::uform::utilities::gpu_memory_report ). */
-    [[nodiscard]] value_type* allocate(std::size_t count) noexcept {
-        CUdeviceptr pointer = 0;
-        if (cuMemAllocAsync(&pointer, count * sizeof(value_type), stream) != CUDA_SUCCESS) return nullptr;
-        return device_pointer<value_type>(pointer);
+    /** Points @p record at the bundle table of @p runtime its launches find their functions in,
+     *  and takes the executor's ceiling on activations, zero for none; the arenas start empty and
+     *  grow at the first @ref reserve . */
+    template <typename record_type_, typename runtime_type_>
+    status_t open(record_type_& record, runtime_type_& runtime, std::size_t& scratch_limit) noexcept {
+        record.kernels = &runtime.cuda_kernels;
+        limit = scratch_limit;
+        return {};
     }
 
-    /** Stream-ordered release back to the pool; safe after every enqueued consumer on
-     *  @ref stream . */
-    void deallocate(value_type* pointer, std::size_t) noexcept {
-        if (pointer != nullptr) cuMemFreeAsync(device_address(pointer), stream);
+    /**
+     *  @brief Rewinds both arenas and makes each hold a call's @p activation_bytes and
+     *      @p transfer_bytes , as the allocations' @ref chunked_arena_t::footprint values sum.
+     *
+     *  After the rewind nothing either arena holds is live, so one that falls short frees its
+     *  chunks and takes one chunk sized to the call: the activations never hold more than the
+     *  @ref limit .
+     *
+     *  @par Statuses:
+     *  - @c out_of_memory_k The activations pass the @ref limit , the device or the host refused a
+     *    chunk, or a chunk table could not grow.
+     */
+    template <typename stream_type_>
+    status_t reserve(stream_type_& stream, std::size_t activation_bytes, std::size_t transfer_bytes = 0) noexcept {
+        if (limit && activation_bytes > limit)
+            return {status_code_t::out_of_memory_k, "The executor's scratch limit is too low"};
+        activations.rewind(), transfers.rewind();
+        if (activations.room() < activation_bytes) {
+            free_activations_(stream);
+            auto [address, allocate_status] = stream.allocate_async(activation_bytes);
+            if (allocate_status.failed()) return allocate_status;
+            if (status_t const appended = activations.append({reinterpret_cast<b8_t*>(address), activation_bytes});
+                appended.failed())
+                return stream.free_async(address), appended;
+        }
+        if (transfers.room() < transfer_bytes) {
+            free_transfers_(stream);
+            void* pages = nullptr;
+            if (stream.handle.api().allocate_host(&pages, transfer_bytes, cuda_host_portable_k) != cuda_success_k)
+                return {status_code_t::out_of_memory_k, "The host refused pinned pages"};
+            if (status_t const appended = transfers.append({static_cast<b8_t*>(pages), transfer_bytes});
+                appended.failed())
+                return stream.handle.api().free_host(pages), appended;
+        }
+        return {};
     }
 
-    [[nodiscard]] constexpr bool operator==(gpu_alloc const& other) const noexcept { return stream == other.stream; }
+    /** Frees every chunk of both arenas once @p stream drained, with its device bound. */
+    template <typename stream_type_>
+    void release(stream_type_& stream) noexcept {
+        if (stream.bind().failed()) return activations.forget(), transfers.forget();
+        free_activations_(stream), free_transfers_(stream);
+    }
+
+  private:
+    /** Frees the activations in @p stream 's order, which drained what read them. */
+    template <typename stream_type_>
+    void free_activations_(stream_type_& stream) noexcept {
+        for (bytes_span_t const chunk : activations.chunks())
+            stream.free_async(reinterpret_cast<std::uintptr_t>(chunk.data()));
+        activations.forget();
+    }
+
+    /** Frees the pinned transfers, which the last call's wait left unread. */
+    template <typename stream_type_>
+    void free_transfers_(stream_type_& stream) noexcept {
+        for (bytes_span_t const chunk : transfers.chunks()) stream.handle.api().free_host(chunk.data());
+        transfers.forget();
+    }
 };
 
-/** The canonical byte-typed stream-ordered-allocator handle — what APIs receive and rebind. */
-using gpu_alloc_t = gpu_alloc<b8_t>;
+#pragma endregion Listing and Scratch
 
-/** The rank-tagged owning-tensor vocabulary — @c *_tensor_arena_t owns device memory off a
- *  @ref unum::uform::utilities::gpu_arena_t , @c *_tensor_pinned_t owns page-locked host memory;
- *  the non-owning @c *_view_t / @c *_span_t counterparts live in @c types.hpp , the BFloat16 /
- *  E4M3 ones above. */
-using b8r1_tensor_arena_t = nk::tensor<b8_t, gpu_arena_alloc<b8_t>, 1>;
-using b8r1_tensor_registrable_t = nk::tensor<b8_t, gpu_registrable_alloc<b8_t>, 1>;
-using i16r2_tensor_arena_t = nk::tensor<i16_t, gpu_arena_alloc<i16_t>, 2>;
-using i32r1_tensor_arena_t = nk::tensor<i32_t, gpu_arena_alloc<i32_t>, 1>;
-using u32r1_tensor_arena_t = nk::tensor<u32_t, gpu_arena_alloc<u32_t>, 1>;
-using u32r2_tensor_arena_t = nk::tensor<u32_t, gpu_arena_alloc<u32_t>, 2>;
-using u64r2_tensor_arena_t = nk::tensor<u64_t, gpu_arena_alloc<u64_t>, 2>;
-using f32r1_tensor_arena_t = nk::tensor<f32_t, gpu_arena_alloc<f32_t>, 1>;
-using f32r2_tensor_arena_t = nk::tensor<f32_t, gpu_arena_alloc<f32_t>, 2>;
-using f32r3_tensor_arena_t = nk::tensor<f32_t, gpu_arena_alloc<f32_t>, 3>;
-using f32r4_tensor_arena_t = nk::tensor<f32_t, gpu_arena_alloc<f32_t>, 4>;
-using bf16r1_tensor_arena_t = nk::tensor<bf16_t, gpu_arena_alloc<bf16_t>, 1>;
-using bf16r2_tensor_arena_t = nk::tensor<bf16_t, gpu_arena_alloc<bf16_t>, 2>;
-using bf16r3_tensor_arena_t = nk::tensor<bf16_t, gpu_arena_alloc<bf16_t>, 3>;
-using e4m3r1_tensor_arena_t = nk::tensor<e4m3_t, gpu_arena_alloc<e4m3_t>, 1>;
-using e4m3r2_tensor_arena_t = nk::tensor<e4m3_t, gpu_arena_alloc<e4m3_t>, 2>;
+#pragma region Shared VRAM Executor
 
-using u32r1_tensor_pinned_t = nk::tensor<u32_t, pinned_alloc<u32_t>, 1>;
-using u32r2_tensor_pinned_t = nk::tensor<u32_t, pinned_alloc<u32_t>, 2>;
-using u64r1_tensor_pinned_t = nk::tensor<u64_t, pinned_alloc<u64_t>, 1>;
-using f32r1_tensor_pinned_t = nk::tensor<f32_t, pinned_alloc<f32_t>, 1>;
+/**
+ *  @brief The streams a call queues on, one per entry of the devices it was spawned over, in the
+ *      caller's order, each with the event its waits sleep on, its kernels and the engine's memory.
+ *
+ *  Work is queued, never waited on, so one host thread drives every device. Each stream record is
+ *  built in place on the heap and never moves, so the memory may point at its stream owner; it
+ *  dies draining its stream, then releasing its memory with its device bound, then closing its
+ *  event and its stream.
+ */
+struct cuda_executor_t {
+
+    /** The engine's queue-ordered memory on one stream. */
+    using scratch_t = cuda_scratch_t;
+
+    /** One call's hold on the executor: the word it set, which it clears when it dies. Move-only,
+     *  so exactly one owner releases the hold. */
+    class claim_t {
+      public:
+        claim_t() noexcept = default;
+        explicit claim_t(u32_t& held_word) noexcept : held_word_(&held_word) {}
+        claim_t(claim_t&& other) noexcept : held_word_(std::exchange(other.held_word_, nullptr)) {}
+        claim_t& operator=(claim_t&& other) noexcept {
+            std::swap(held_word_, other.held_word_);
+            return *this;
+        }
+        claim_t(claim_t const&) = delete;
+        claim_t& operator=(claim_t const&) = delete;
+        ~claim_t() noexcept {
+            if (held_word_) fu::standard_atomic_ref<u32_t>(*held_word_).store(0, std::memory_order_release);
+        }
+
+      private:
+        u32_t* held_word_ = nullptr;
+    };
+
+    inline static constexpr gpu_vendor_t vendor_k = gpu_vendor_t::nvidia_k;
+
+    /** One device's stream: what it queues on, the event its waits sleep on, the kernels it
+     *  launches, and the engine's memory, declared last so it dies first. */
+    struct stream_t {
+
+        /** The CUDA ordinal of the device this stream queues on, as the GPU runtime lists it. */
+        std::size_t ordinal = 0;
+
+        /** Opened by the executor, adopted from the caller, or the device's null legacy stream. */
+        cuda_stream_t handle;
+
+        /** What @ref wait records and sleeps on, so a wait frees its core. */
+        cuda_event_t event;
+
+        /** The kernels this stream launches, as the engine resolves them when the record opens. */
+        cuda_kernels_t kernels = {};
+
+        /** The engine's memory, safe to reuse only in this stream's queue order, opened once this
+         *  record sits in the executor. */
+        scratch_t memory;
+
+        /** Takes @p opened as the stream of device @p device, which is current, as the event is
+         *  born there too. */
+        stream_t(std::size_t device, cuda_stream_t&& opened) noexcept
+            : ordinal(device), handle(std::move(opened)), event(handle.api()) {}
+        stream_t(stream_t const&) = delete;
+        stream_t& operator=(stream_t const&) = delete;
+
+        /** Drains an owned stream, then releases the memory in its order with the device bound;
+         *  the event and the stream close after. A record owning none, a placeholder or the
+         *  device's legacy stream, has nothing of its own to drain. */
+        ~stream_t() noexcept {
+            [[maybe_unused]] status_t const ready = handle ? wait() : bind();
+            memory.release(*this);
+        }
+
+        /**
+         *  @brief Makes this stream's device current on the calling thread.
+         *
+         *  @par Statuses:
+         *  - @c device_k The device could not be made current.
+         */
+        status_t bind() const noexcept {
+            if (cuda_set_device(handle.api(), static_cast<int>(ordinal)) != cuda_success_k)
+                return {status_code_t::device_k, "Device selection failed"};
+            return {};
+        }
+
+        /**
+         *  @brief Waits for everything queued on this stream so far, recording the event with the
+         *      device bound and sleeping on it.
+         *
+         *  @par Statuses:
+         *  - @c device_k The device could not be bound, or it failed the work.
+         */
+        status_t wait() noexcept {
+            if (status_t const bound = bind(); bound.failed()) return bound;
+            if (status_t const recorded = event.record(handle); recorded.failed()) return recorded;
+            return event.wait();
+        }
+
+        /**
+         *  @brief Queues an allocation of @p bytes in this stream's order, its device current,
+         *      answering its address.
+         *
+         *  @par Statuses:
+         *  - @c out_of_memory_k The device refused the allocation.
+         */
+        expected<std::uintptr_t> allocate_async(std::size_t bytes) noexcept {
+            cuda_device_address_t address = 0;
+            if (handle.api().allocate_async(&address, bytes, handle) != cuda_success_k)
+                return {0, {status_code_t::out_of_memory_k, "The device refused an allocation"}};
+            return {static_cast<std::uintptr_t>(address), status_code_t::success_k};
+        }
+
+        /** Queues freeing @p address, which @ref allocate_async answered, in this stream's
+         *  order. */
+        void free_async(std::uintptr_t address) noexcept { handle.api().free_async(address, handle); }
+
+        /**
+         *  @brief Queues a copy of @p bytes from @p source to @p target, either side the host's
+         *      or a device's, as unified addressing tells apart; the device is current.
+         *
+         *  @par Statuses:
+         *  - @c device_k The driver refused the copy.
+         */
+        status_t copy_async(std::uintptr_t target, std::uintptr_t source, std::size_t bytes) noexcept {
+            if (handle.api().copy_async(target, source, bytes, handle) != cuda_success_k)
+                return {status_code_t::device_k, "The driver refused a copy"};
+            return {};
+        }
+
+        /** Queues a copy of @p source into device memory at @p target, as @ref copy_async does. */
+        status_t upload_async(std::uintptr_t target, bytes_view_t source) noexcept {
+            return copy_async(target, reinterpret_cast<std::uintptr_t>(source.data()), source.size());
+        }
+
+        /** Queues a copy of device memory at @p source into @p target, as @ref copy_async does. */
+        status_t download_async(bytes_span_t target, std::uintptr_t source) noexcept {
+            return copy_async(reinterpret_cast<std::uintptr_t>(target.data()), source, target.size());
+        }
+
+        /**
+         *  @brief Queues setting @p bytes at @p target to @p value; the device is current.
+         *
+         *  @par Statuses:
+         *  - @c device_k The driver refused the fill.
+         */
+        status_t fill_async(std::uintptr_t target, byte_t value, std::size_t bytes) noexcept {
+            if (handle.api().fill_async(target, static_cast<unsigned char>(value), bytes, handle) != cuda_success_k)
+                return {status_code_t::device_k, "The driver refused a fill"};
+            return {};
+        }
+    };
+
+    cuda_executor_t() noexcept = default;
+    cuda_executor_t(cuda_executor_t&& other) noexcept { swap(other); }
+    cuda_executor_t& operator=(cuda_executor_t&& other) noexcept { return swap(other), *this; }
+    cuda_executor_t(cuda_executor_t const&) = delete;
+    cuda_executor_t& operator=(cuda_executor_t const&) = delete;
+
+    /** Exchanges the stream records and the ceiling, none of which moves in memory; the hold
+     *  stays, since a move with a call in flight is misuse. */
+    void swap(cuda_executor_t& other) noexcept {
+        std::swap(streams_, other.streams_);
+        std::swap(streams_count_, other.streams_count_);
+    }
+
+    /**
+     *  @brief Claims the executor for one call, answering the hold, which releases it when it dies.
+     *
+     *  @par Statuses:
+     *  - @c contended_k Another call holds the executor.
+     */
+    expected<claim_t> claim() noexcept {
+        u32_t idle = 0;
+        if (!fu::standard_atomic_ref<u32_t>(held_).compare_exchange_strong(idle, 1, std::memory_order_acquire,
+                                                                           std::memory_order_relaxed))
+            return {{}, {status_code_t::contended_k, "Another call holds the executor"}};
+        return {claim_t {held_}, status_code_t::success_k};
+    }
+
+    /**
+     *  @brief Spawns one non-blocking stream per entry of @p devices through @p api, or adopts
+     *      @p streams, one per entry and on it.
+     *
+     *  Each stream's memory and kernels open with @p memory_arguments. An adopted stream becomes
+     *  the executor's, which synchronizes and destroys it when it dies. Adoption comes after every
+     *  step that can fail, so a refused spawn leaves every one of @p streams the caller's.
+     *
+     *  @par Statuses:
+     *  - @c invalid_argument_k No device is named, more than a listing holds, the @p streams count
+     *    differs from theirs, or a stream is null or a default one.
+     *  - @c config_mismatch_k A stream sits off its device's primary context.
+     *  - @c device_k There is no driver, or a device refused its stream or its event.
+     *  - @c out_of_memory_k A stream record or its memory could not be allocated.
+     */
+    template <typename... memory_arguments_>
+    static expected<cuda_executor_t> spawn(cuda_api_t const& api, std::span<int const> devices,
+                                           std::span<void* const> streams,
+                                           memory_arguments_&... memory_arguments) noexcept {
+        if (!streams.empty() && streams.size() != devices.size())
+            return {{}, {status_code_t::invalid_argument_k, "One stream per device"}};
+        for (std::size_t index = 0; index != streams.size(); ++index)
+            if (status_t const checked = cuda_stream_t::adoptable(api, static_cast<std::size_t>(devices[index]),
+                                                                  streams[index]);
+                checked.failed())
+                return {{}, checked};
+        // Adopted streams wait on placeholders owning nothing until every fallible step is behind.
+        auto const placeholder = [](cuda_api_t const& table) noexcept -> expected<cuda_stream_t> {
+            return {cuda_stream_t {table, nullptr}, status_code_t::success_k};
+        };
+        auto [executor, build_status] = build(api, devices, streams.empty() ? &cuda_stream_t::open : +placeholder,
+                                              memory_arguments...);
+        if (build_status.failed()) return {{}, build_status};
+        // Every fallible step is behind; each record takes its adopted stream into the same owner,
+        // which its memory already points at.
+        for (std::size_t index = 0; index != streams.size(); ++index)
+            executor.streams_[index]->handle = cuda_stream_t {api, static_cast<cuda_stream_handle_t>(streams[index])};
+        return {std::move(executor), status_code_t::success_k};
+    }
+
+    /** Waits for everything queued on every stream - the fleet's completion - marking each stream
+     *  with its device bound, then sleeping on each mark in turn. */
+    status_t wait() noexcept {
+        for (std::size_t index = 0; index != streams_count_; ++index) {
+            stream_t& opened = *streams_[index];
+            if (status_t const bound = opened.bind(); bound.failed()) return bound;
+            if (status_t const recorded = opened.event.record(opened.handle); recorded.failed()) return recorded;
+        }
+        for (std::size_t index = 0; index != streams_count_; ++index)
+            if (status_t const drained = streams_[index]->event.wait(); drained.failed()) return drained;
+        return {};
+    }
+
+    /** The stream at @p index, in the order the devices were named. */
+    stream_t& stream(std::size_t index) noexcept { return *streams_[index]; }
+    stream_t const& stream(std::size_t index) const noexcept { return *streams_[index]; }
+
+    /** Streams this executor drives, one per device. */
+    std::size_t size() const noexcept { return streams_count_; }
+
+    /** Builds one stream record per entry of @p devices over the stream @p open answers there,
+     *  with that device current, and opens its memory and kernels in place. */
+    template <typename... memory_arguments_>
+    static expected<cuda_executor_t> build(cuda_api_t const& api, std::span<int const> devices,
+                                           expected<cuda_stream_t> (*open)(cuda_api_t const&),
+                                           memory_arguments_&... memory_arguments) noexcept {
+        if (devices.empty() || devices.size() > gpu_devices_capacity_k)
+            return {{}, {status_code_t::invalid_argument_k, "An executor names one to a listing's devices"}};
+        cuda_executor_t executor;
+        for (int const device : devices) {
+            if (cuda_set_device(api, device) != cuda_success_k)
+                return {{}, {status_code_t::device_k, "Device selection failed"}};
+            auto [opened, open_status] = open(api);
+            if (open_status.failed()) return {{}, open_status};
+            std::unique_ptr<stream_t>& record = executor.streams_[executor.streams_count_];
+            record.reset(new (std::nothrow) stream_t {static_cast<std::size_t>(device), std::move(opened)});
+            if (!record) return {{}, {status_code_t::out_of_memory_k, "No room for a stream record"}};
+            ++executor.streams_count_;
+            if (!record->event) return {{}, {status_code_t::device_k, "Driver refused a stream event"}};
+            if (status_t const opened_memory = record->memory.open(*record, memory_arguments...);
+                opened_memory.failed())
+                return {{}, opened_memory};
+        }
+        return {std::move(executor), status_code_t::success_k};
+    }
+
+  private:
+    /** One record per named entry, in the caller's order, each on the heap so it never moves. */
+    std::unique_ptr<stream_t> streams_[gpu_devices_capacity_k];
+    std::size_t streams_count_ = 0;
+
+    /** One while a caller drives the streams, set and cleared through the class's atomic
+     *  reference; never swapped. */
+    u32_t held_ = 0;
+};
+
+#pragma endregion Shared VRAM Executor
 
 } // namespace unum::uform::utilities

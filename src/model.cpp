@@ -24,10 +24,11 @@ uform_model_handle_t::~uform_model_handle_t() noexcept {
     std::visit(
         [&]<vendored_residency_t residency_>(encoder_verbs<residency_> const* verbs) noexcept {
             for (uf::vram_replica_t& replica : towers) {
-                if constexpr (residency_ != vendored_residency_t::ram_k && gpu_vendor_compiled(vendor_of(residency_)))
-                    [[maybe_unused]]
-                    nk_status_t const selected = entries_kit_of<residency_>::select(
-                        static_cast<std::size_t>(replica.vendor_ordinal));
+                // Its weights free on the device they were packed on
+                if constexpr (residency_ != vendored_residency_t::ram_k && gpu_vendor_compiled(vendor_of(residency_))) {
+                    std::span<util::gpu_device_t const> const listed = gpu_devices();
+                    entries_kit_of<residency_>::bind(listed[static_cast<std::size_t>(replica.ordinal)].vendor_ordinal);
+                }
                 verbs->destroy(replica.tower);
             }
         },
@@ -122,8 +123,10 @@ static std::unique_ptr<uform_model_handle_t> start_model(util::expected<util::ch
  *  null once @p outcome records why not. */
 template <vendored_residency_t residency_>
 static void* pack_tower(uform_model_handle_t& model, util::checkpoint_to_load_t const& checkpoint,
-                        encoder_verbs<residency_> const& verbs, nk_stream_t stream, uform_outcome_t* outcome) noexcept {
-    auto [tower, status] = verbs.create(checkpoint, model.geometry, model.precision, stream);
+                        encoder_verbs<residency_> const& verbs,
+                        typename vendored_residency_executor<residency_>::type executor,
+                        uform_outcome_t* outcome) noexcept {
+    auto [tower, status] = verbs.create(checkpoint, model.geometry, model.precision, executor);
     if (!status) return propagate_load_failure(status.status_, load_stage_t::packing_k, outcome), nullptr;
     model.memory_usage += tower_bytes(model.geometry, model.precision);
     return tower;
@@ -159,9 +162,10 @@ static void load_ram(uform_model_t* output, uform_executor_t executor, uform_ram
     std::unique_ptr<uform_model_handle_t> model = start_model(loaded, precision, outcome);
     if (!model) return;
     model->tables = verbs;
-    void* const tower = pack_tower(*model, *loaded, *verbs, nullptr, outcome);
+    fu::pool_t caller; // a host tower packs on the calling thread
+    void* const tower = pack_tower(*model, *loaded, *verbs, caller, outcome);
     if (!tower) return;
-    if (model->towers.push_back(vram_replica_t {-1, -1, tower}) != util::status_code_t::success_k)
+    if (model->towers.push_back(vram_replica_t {-1, tower}) != util::status_code_t::success_k)
         return verbs->destroy(tower),
                propagate_error(uform_status_out_of_memory_k, outcome, "Failed to list the tower"), void();
     if (progress_ticks_t {progress, 1}(1) == continuation_t::cancel_k)
@@ -170,21 +174,28 @@ static void load_ram(uform_model_t* output, uform_executor_t executor, uform_ram
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
 
-/** Packs one replica per device of @p vram that @p options names through the newest class of
- *  @p ladder_type_ every one of them runs; false once @p outcome records why not. */
+/** Packs one replica per stream of @p gpus whose device @p options names, through the newest class
+ *  of @p ladder_type_ under @p gpu_class every one of them runs, waiting on each stream until its
+ *  weights landed; false once @p outcome records why not. */
 template <vendored_residency_t residency_, typename ladder_type_>
 static bool load_replicas(uform_model_handle_t& model, util::checkpoint_to_load_t const& checkpoint,
-                          vram_executor_t& vram, uform_vram_options_t const& options, progress_ticks_t& ticks,
-                          uform_outcome_t* outcome) noexcept {
+                          executor_of<residency_>& gpus, gpu_class_t gpu_class, uform_vram_options_t const& options,
+                          progress_ticks_t& ticks, uform_outcome_t* outcome) noexcept {
     encoder_verbs<residency_> const* verbs = nullptr;
     std::size_t placed = 0;
-    for (vram_device_t& device : vram.devices) {
+    // The executor serializes its streams, so a second call on it answers contended
+    auto [claim, claim_status] = gpus.claim();
+    if (claim_status.failed())
+        return propagate_error(uform_status_contended_k, outcome, "Another call holds the executor");
+    for (std::size_t index = 0; index != gpus.size(); ++index) {
+        auto& stream = gpus.stream(index);
+        util::i32_t const ordinal = listed_ordinal_of<executor_of<residency_>>(stream);
         std::size_t named = !options.devices_count;
         for (std::size_t listed = 0; listed != options.devices_count; ++listed)
-            named += device.ordinal == options.devices[listed];
+            named += ordinal == options.devices[listed];
         if (!named) continue;
         encoder_verbs<residency_> const* const picked = pick_gpu_variant<residency_>(
-            ladder_type_ {}, options.gpu_class_ceiling, numkong_capabilities_of(vram.gpu_class));
+            ladder_type_ {}, options.gpu_class_ceiling, numkong_capabilities_of(gpu_class));
         if (!picked)
             return propagate_error(uform_status_unsupported_k, outcome,
                                    "A device runs no compiled class under the ceiling");
@@ -192,16 +203,14 @@ static bool load_replicas(uform_model_handle_t& model, util::checkpoint_to_load_
             return propagate_error(uform_status_config_mismatch_k, outcome, "The devices differ in class");
         verbs = picked;
         model.tables = verbs;
-        if constexpr (gpu_vendor_compiled(vendor_of(residency_))) // a build without the vendor picks no verbs
-            if (entries_kit_of<residency_>::select(static_cast<std::size_t>(device.vendor_ordinal)) != nk_success_k)
-                return propagate_error(uform_status_device_k, outcome, "A device failed to become current");
-        void* const tower = pack_tower(model, checkpoint, *verbs, device.stream.get(), outcome);
+        if (stream.bind().failed())
+            return propagate_error(uform_status_device_k, outcome, "A device failed to become current");
+        void* const tower = pack_tower(model, checkpoint, *verbs, stream, outcome);
         if (!tower) return false;
-        if (model.towers.push_back(vram_replica_t {device.ordinal, device.vendor_ordinal, tower}) !=
-            util::status_code_t::success_k)
+        if (model.towers.push_back(vram_replica_t {ordinal, tower}) != util::status_code_t::success_k)
             return verbs->destroy(tower),
                    propagate_error(uform_status_out_of_memory_k, outcome, "Failed to list the replicas");
-        if (ticks(++placed, vram.devices.size()) == continuation_t::cancel_k)
+        if (ticks(++placed, gpus.size()) == continuation_t::cancel_k)
             return propagate_error(uform_status_cancelled_k, outcome, "The caller's handler stopped the load");
     }
     return true;
@@ -212,25 +221,39 @@ static bool load_replicas(uform_model_handle_t& model, util::checkpoint_to_load_
 static void load_vram(uform_model_t* output, uform_executor_t executor, uform_vram_options_t const& options,
                       util::expected<util::checkpoint_to_load_t> loaded, ue::precision_t precision,
                       uform_progress_t progress, uform_outcome_t* outcome) noexcept {
-    vram_executor_t* const vram = executor ? std::get_if<vram_executor_t>(&executor->device) : nullptr;
-    if (!vram) return propagate_error(uform_status_device_k, outcome, "A VRAM load needs a VRAM executor"), void();
+    if (!executor || std::holds_alternative<std::monostate>(executor->device))
+        return propagate_error(uform_status_device_k, outcome, "A VRAM load needs a VRAM executor"), void();
     if (options.devices_count && !options.devices)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The devices must not be null"), void();
-    for (std::size_t listed = 0; listed != options.devices_count; ++listed) {
-        std::size_t matches = 0;
-        for (vram_device_t const& device : vram->devices) matches += device.ordinal == options.devices[listed];
-        if (!matches)
-            return propagate_error(uform_status_device_k, outcome, "A device the load names is not the executor's"),
-                   void();
-    }
+    std::size_t streams = 0;
+    bool const named = std::visit(
+        [&]<typename executor_type_>(executor_type_ const& gpus) noexcept {
+            if constexpr (std::is_same_v<executor_type_, std::monostate>) return false;
+            else {
+                streams = gpus.size();
+                for (std::size_t listed = 0; listed != options.devices_count; ++listed) {
+                    std::size_t matches = 0;
+                    for (std::size_t index = 0; index != gpus.size(); ++index)
+                        matches += listed_ordinal_of<executor_type_>(gpus.stream(index)) == options.devices[listed];
+                    if (!matches) return false;
+                }
+                return true;
+            }
+        },
+        executor->device);
+    if (!named)
+        return propagate_error(uform_status_device_k, outcome, "A device the load names is not the executor's"), void();
     std::unique_ptr<uform_model_handle_t> model = start_model(loaded, precision, outcome);
     if (!model) return;
-    progress_ticks_t ticks {progress, vram->devices.size()};
-    bool const packed = visit_vram_residency(numkong_capabilities_of(vram->gpu_class),
-                                             [&]<vendored_residency_t residency_, typename ladder_type_>() noexcept {
-                                                 return load_replicas<residency_, ladder_type_>(
-                                                     *model, *loaded, *vram, options, ticks, outcome);
-                                             });
+    progress_ticks_t ticks {progress, streams};
+    bool const packed = visit_vram_residency(
+        numkong_capabilities_of(executor->gpu_class),
+        [&]<vendored_residency_t residency_, typename ladder_type_>() noexcept {
+            auto* const gpus = std::get_if<executor_of<residency_>>(&executor->device);
+            if (!gpus) return propagate_error(uform_status_device_k, outcome, "The executor drives another vendor");
+            return load_replicas<residency_, ladder_type_>(*model, *loaded, *gpus, executor->gpu_class, options, ticks,
+                                                           outcome);
+        });
     if (!packed) return;
     *output = model.release();
     propagate_error(uform_status_success_k, outcome, nullptr);

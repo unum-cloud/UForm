@@ -15,7 +15,7 @@
 
 #include <span> // `std::span` — the mixer's views of the per-GPU tables the composition root owns
 
-#include "uform/utilities/vram_nvidia_device.hpp"     // `gpu_arena_alloc_t`, `pinned_alloc_t`
+#include "uform/utilities/vram_nvidia_memory.hpp"     // `gpu_arena_alloc_t`, `pinned_alloc_t`
 #include "uform/utilities/infiniband_collectives.cuh" // `colocated_domain_t` — the cross-host_domain queues
 #include "uform/utilities/multimem_collectives.cuh"   // `multimem_domain_t` — the barrier the exchange brackets
 #include "uform/encoder/multimodal_batch.hpp"         // the shape, the batch template, the views, `modality_t`
