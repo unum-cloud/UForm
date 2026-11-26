@@ -27,18 +27,24 @@ using namespace unum::uform;
 namespace ut = unum::uform::train;
 
 using encoder::modality_t;
+using util::b8_t;
 using util::bf16_t;
 using util::bf16r2_view_t;
+using util::bytes_span_t;
 using util::device_address;
+using util::expected_t;
 using util::f32_t;
 using util::gpu_fault_code_t;
 using util::gpu_fault_t;
+using util::i32_t;
 using util::mesh_shape_t;
 using util::mesh_topology_t;
 using util::multimem_tier_choice_t;
 using util::optimizer_step_t;
-using util::switch_to_gpu_t;
+using util::status_code_t;
+using util::status_t;
 using util::u32_t;
+using util::u8_t;
 
 /** What @c uform_mesh_t owns: the bootstrapped mesh over its executor's devices, and who holds
  *  it. */
@@ -392,17 +398,15 @@ static bool propagate_train_error(expected_t const& failure, uform_mesh_handle_t
         return propagate_error(reserved, outcome, "Failed to allocate the embeddings");
     void* const landed = memory.chunks.allocate(wanted);
     if (!landed) return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the embeddings");
-    switch_to_gpu_t gpu_scope {handle.run.streams[0]};
-    if (!gpu_scope.ok() || cuMemcpyHtoD(device_address(landed), staging, bytes) != CUDA_SUCCESS)
+    [[maybe_unused]] status_t const gpu_scope = (handle.run.streams->stream(0)).bind();
+    if (gpu_scope.failed() || cuMemcpyHtoD(device_address(landed), staging, bytes) != CUDA_SUCCESS)
         return propagate_error(uform_status_device_k, outcome, "The embeddings could not land in the arena");
     rows = {landed, hidden * bytes_per_value, hidden, scalar};
     return true;
 }
 
-extern "C" {
-
-UFORM_EXPORT void uform_mesh_bootstrap(uform_mesh_bootstrap_t* arguments) {
-    if (submitted<uform_mesh_bootstrap>(arguments)) return;
+/** The body of @c uform_mesh_bootstrap , which its entry runs inside the caller's context. */
+static void mesh_bootstrap_(uform_mesh_bootstrap_t* arguments) noexcept {
     call_outcome_t outcome(*arguments);
     *arguments->mesh = nullptr;
     if (!drives_vram(arguments->executor))
@@ -414,39 +418,8 @@ UFORM_EXPORT void uform_mesh_bootstrap(uform_mesh_bootstrap_t* arguments) {
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
 
-UFORM_EXPORT void uform_mesh_describe(uform_mesh_describe_t* arguments) {
-    call_outcome_t outcome(arguments->outcome);
-    if (!arguments->mesh)
-        return propagate_error(uform_status_uninitialized_k, outcome, "The mesh must not be null"), void();
-    if (!arguments->description)
-        return propagate_error(uform_status_invalid_argument_k, outcome, "The description must not be null"), void();
-    host_verbs().wait_named_calls(&arguments->mesh->named_calls);
-    mesh_topology_t const& topology = arguments->mesh->engine.topology;
-    mesh_shape_t const& shape = topology.shape;
-    st::basic_vector<i32_t> devices;
-    if (!devices_of(arguments->mesh->executor, devices))
-        return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to list the devices"), void();
-    auto [choice, status] = multimem_tier_choice_t::make(shape.gpus_per_multimem_domain, devices);
-    if (!status) return propagate_error(status.status_, outcome, "The multimem tier could not be probed"), void();
-    uform_mesh_description_t& description = *arguments->description;
-    description.gpus_per_host_domain = shape.gpus_per_host_domain;
-    description.gpus_per_multimem_domain = shape.gpus_per_multimem_domain;
-    description.gpus_per_colocated_domain = shape.gpus_per_colocated_domain;
-    description.host_domain_index = topology.host_domain_index;
-    description.first_gpu_index = topology.first_gpu_index();
-    description.multimem_tier = static_cast<uform_multimem_tier_t>(choice.tier);
-    description.gpu_class = static_cast<uform_gpu_class_t>(arguments->mesh->executor->gpu_class);
-    propagate_error(uform_status_success_k, outcome, nullptr);
-}
-
-UFORM_EXPORT void uform_mesh_free(uform_mesh_t mesh) {
-    if (!mesh) return;
-    host_verbs().wait_named_calls(&mesh->named_calls);
-    leave_mesh(mesh);
-}
-
-UFORM_EXPORT void uform_trainer_init_vram(uform_trainer_init_vram_t* arguments) {
-    if (submitted<uform_trainer_init_vram>(arguments)) return;
+/** The body of @c uform_trainer_init_vram , which its entry runs inside the caller's context. */
+static void trainer_init_vram_(uform_trainer_init_vram_t* arguments) noexcept {
     call_outcome_t outcome(*arguments);
     *arguments->trainer = nullptr;
     uform_executor_t const executor = arguments->executor;
@@ -455,6 +428,10 @@ UFORM_EXPORT void uform_trainer_init_vram(uform_trainer_init_vram_t* arguments) 
     if (arguments->mesh && arguments->mesh->executor != executor)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The mesh was made over another executor"),
                void();
+    // Training drives the executor's streams, so a second call on it answers contended
+    auto [claim, claim_status] = std::get<util::cuda_executor_t>(executor->device).claim();
+    if (claim_status.failed())
+        return propagate_error(uform_status_contended_k, outcome, "Another call holds the executor"), void();
     ut::trainer_config_t config;
     if (char const* refused = configure(*arguments, config))
         return propagate_error(uform_status_invalid_argument_k, outcome, refused), void();
@@ -476,7 +453,8 @@ UFORM_EXPORT void uform_trainer_init_vram(uform_trainer_init_vram_t* arguments) 
     st::basic_vector<i32_t> devices;
     if (!devices_of(executor, devices))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the trainer"), void();
-    if (expected_t const built = ut::trainer_t::make(handle->run, handle->mesh->engine, config, devices,
+    if (expected_t const built = ut::trainer_t::make(handle->run, handle->mesh->engine,
+                                                     std::get<util::cuda_executor_t>(executor->device), config, devices,
                                                      ut::gpu_numerics_of(capabilities_of(executor)));
         !built)
         return propagate_train_error(built, arguments->mesh, outcome, build_failures_k), void();
@@ -501,8 +479,8 @@ UFORM_EXPORT void uform_trainer_init_vram(uform_trainer_init_vram_t* arguments) 
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
 
-UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t* arguments) {
-    if (submitted<uform_trainer_step>(arguments)) return;
+/** The body of @c uform_trainer_step , which its entry runs inside the caller's context. */
+static void trainer_step_(uform_trainer_step_t* arguments) noexcept {
     call_outcome_t outcome(*arguments); // lets go of the arena only when this call holds it
     uform_arena_t const requested = arguments->embeddings ? arguments->arena : nullptr;
     uform_trainer_handle_t* const handle = arguments->trainer;
@@ -510,6 +488,10 @@ UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t* arguments) {
     if (handle->mesh->executor != arguments->executor)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The trainer runs on its own executor"),
                void();
+    // Training drives the executor's streams, so a second call on it answers contended
+    auto [claim, claim_status] = std::get<util::cuda_executor_t>(arguments->executor->device).claim();
+    if (claim_status.failed())
+        return propagate_error(uform_status_contended_k, outcome, "Another call holds the executor"), void();
     ut::trainer_t& trainer = handle->run;
     ut::trainer_config_t const& config = trainer.config;
     std::size_t const count = arguments->count;
@@ -607,8 +589,8 @@ UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t* arguments) {
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
 
-UFORM_EXPORT void uform_trainer_save(uform_trainer_save_t* arguments) {
-    if (submitted<uform_trainer_save>(arguments)) return;
+/** The body of @c uform_trainer_save , which its entry runs inside the caller's context. */
+static void trainer_save_(uform_trainer_save_t* arguments) noexcept {
     call_outcome_t outcome(*arguments);
     uform_trainer_handle_t* const handle = arguments->trainer;
     if (!handle) return propagate_error(uform_status_uninitialized_k, outcome, "The trainer must not be null"), void();
@@ -617,12 +599,85 @@ UFORM_EXPORT void uform_trainer_save(uform_trainer_save_t* arguments) {
                void();
     if (holds_nul(arguments->path))
         return propagate_error(uform_status_invalid_argument_k, outcome, "The path holds a NUL byte"), void();
+    // Training drives the executor's streams, so a second call on it answers contended
+    auto [claim, claim_status] = std::get<util::cuda_executor_t>(arguments->executor->device).claim();
+    if (claim_status.failed())
+        return propagate_error(uform_status_contended_k, outcome, "Another call holds the executor"), void();
     if (expected_t const saved = handle->run.save(text_of(arguments->path)); !saved)
         return propagate_train_error(saved, handle->mesh, outcome, save_failures_k), void();
     std::size_t const tensors = handle->run.replicas[0].weights.size();
     progress_ticks_t ticks(arguments->progress, tensors);
     (void)ticks(tensors);
     propagate_error(uform_status_success_k, outcome, nullptr);
+}
+
+extern "C" {
+
+UFORM_EXPORT void uform_mesh_bootstrap(uform_mesh_bootstrap_t* arguments) {
+    if (submitted<uform_mesh_bootstrap>(arguments)) return;
+    // The caller's context comes back before the call ends, whichever device the body selected
+    CUcontext caller = nullptr;
+    cuCtxGetCurrent(&caller);
+    mesh_bootstrap_(arguments);
+    cuCtxSetCurrent(caller);
+}
+
+UFORM_EXPORT void uform_mesh_describe(uform_mesh_describe_t* arguments) {
+    call_outcome_t outcome(arguments->outcome);
+    if (!arguments->mesh)
+        return propagate_error(uform_status_uninitialized_k, outcome, "The mesh must not be null"), void();
+    if (!arguments->description)
+        return propagate_error(uform_status_invalid_argument_k, outcome, "The description must not be null"), void();
+    host_verbs().wait_named_calls(&arguments->mesh->named_calls);
+    mesh_topology_t const& topology = arguments->mesh->engine.topology;
+    mesh_shape_t const& shape = topology.shape;
+    st::basic_vector<i32_t> devices;
+    if (!devices_of(arguments->mesh->executor, devices))
+        return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to list the devices"), void();
+    auto [choice, status] = multimem_tier_choice_t::make(shape.gpus_per_multimem_domain, devices);
+    if (!status) return propagate_error(status.status_, outcome, "The multimem tier could not be probed"), void();
+    uform_mesh_description_t& description = *arguments->description;
+    description.gpus_per_host_domain = shape.gpus_per_host_domain;
+    description.gpus_per_multimem_domain = shape.gpus_per_multimem_domain;
+    description.gpus_per_colocated_domain = shape.gpus_per_colocated_domain;
+    description.host_domain_index = topology.host_domain_index;
+    description.first_gpu_index = topology.first_gpu_index();
+    description.multimem_tier = static_cast<uform_multimem_tier_t>(choice.tier);
+    description.gpu_class = static_cast<uform_gpu_class_t>(arguments->mesh->executor->gpu_class);
+    propagate_error(uform_status_success_k, outcome, nullptr);
+}
+
+UFORM_EXPORT void uform_mesh_free(uform_mesh_t mesh) {
+    if (!mesh) return;
+    host_verbs().wait_named_calls(&mesh->named_calls);
+    leave_mesh(mesh);
+}
+
+UFORM_EXPORT void uform_trainer_init_vram(uform_trainer_init_vram_t* arguments) {
+    if (submitted<uform_trainer_init_vram>(arguments)) return;
+    // The caller's context comes back before the call ends, whichever device the body selected
+    CUcontext caller = nullptr;
+    cuCtxGetCurrent(&caller);
+    trainer_init_vram_(arguments);
+    cuCtxSetCurrent(caller);
+}
+
+UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t* arguments) {
+    if (submitted<uform_trainer_step>(arguments)) return;
+    // The caller's context comes back before the call ends, whichever device the body selected
+    CUcontext caller = nullptr;
+    cuCtxGetCurrent(&caller);
+    trainer_step_(arguments);
+    cuCtxSetCurrent(caller);
+}
+
+UFORM_EXPORT void uform_trainer_save(uform_trainer_save_t* arguments) {
+    if (submitted<uform_trainer_save>(arguments)) return;
+    // The caller's context comes back before the call ends, whichever device the body selected
+    CUcontext caller = nullptr;
+    cuCtxGetCurrent(&caller);
+    trainer_save_(arguments);
+    cuCtxSetCurrent(caller);
 }
 
 UFORM_EXPORT void uform_trainer_free(uform_trainer_t trainer) {

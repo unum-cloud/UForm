@@ -60,7 +60,7 @@ util::expected_t ul::decode_audios(fu::pool_t& pool, column_view_t tape, util::u
                                    std::span<audio_batch_shape_t const> representations,
                                    audio_samples_span_t audio_samples, util::u32r1_span_t segment_offsets,
                                    util::u32r1_span_t segment_lengths, modality_span_t segment_modality,
-                                   util::u32r1_span_t dropped, util::gpu_stream_t& stream) noexcept {
+                                   util::u32r1_span_t dropped, util::executor_stream_t& stream) noexcept {
     std::size_t const clips = drawn_rows.size();
     if (clips == 0) return {};
     if (representations.empty())
@@ -113,7 +113,7 @@ util::expected_t ul::decode_audios(fu::pool_t& pool, column_view_t tape, util::u
         cursor += blob.size();
     }
     encoded_offsets[clips] = cursor;
-    if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
+    if (cuStreamSynchronize(util::native_stream(stream)) != CUDA_SUCCESS)
         return util::expected_t::fail(util::status_code_t::device_k, "Clip byte staging synchronization failed");
     column_view_t const staged_tape {util::bytes_view_t {encoded}, std::span<util::u64_t const> {encoded_offsets}};
 
@@ -170,7 +170,7 @@ util::expected_t ul::decode_audios(fu::pool_t& pool, column_view_t tape, util::u
                                                   segment_offsets, segment_lengths, segment_modality, dropped,
                                                   static_cast<util::u32_t>(job_count), columns, rows);
     // Retire the whole stream-ordered chain before the pinned decode landing falls out of scope.
-    if (staged && cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
+    if (staged && cuStreamSynchronize(util::native_stream(stream)) != CUDA_SUCCESS)
         staged = util::expected_t::fail(util::status_code_t::device_k, "Audio staging synchronization failed");
     return staged;
 }
@@ -213,7 +213,7 @@ util::expected<audio_loader_parquet_t> audio_loader_parquet_t::make(gpu_direct_s
     return result_t {std::move(loader)};
 }
 
-util::expected_t audio_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, audio_loader_parquet_config_t config,
+util::expected_t audio_loader_parquet_t::fill(util::executor_stream_t& gpu_stream, audio_loader_parquet_config_t config,
                                               util::u32_t gpu_rank, util::u32_t training_step,
                                               std::span<multimodal_batch_on_gpu_t> batches) noexcept {
     if (batches.empty()) return {};
@@ -253,8 +253,8 @@ util::expected_t audio_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, au
                                       "{} pooled rows across {} files cover fewer than the {} clips this fill needs",
                                       pooled_rows, groups_.picked_paths().size(), total_clips);
 
-    util::switch_to_gpu_t gpu_scope {gpu_stream};
-    if (!gpu_scope.ok())
+    [[maybe_unused]] util::status_t const gpu_scope = (gpu_stream).bind();
+    if (gpu_scope.failed())
         return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed for the loader stream");
 
     // The reservoir's clip offsets to the host once — every per-row byte bound is
@@ -269,7 +269,7 @@ util::expected_t audio_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, au
                                                             gpu_stream);
         !landed)
         return landed;
-    if (cuStreamSynchronize(gpu_stream.get()) != CUDA_SUCCESS)
+    if (cuStreamSynchronize(util::native_stream(gpu_stream)) != CUDA_SUCCESS)
         return util::expected_t::fail(util::status_code_t::device_k, "Reservoir offsets readback failed");
 
     // Draw the whole fill's rows on the host — a keyed bijection over the pool.

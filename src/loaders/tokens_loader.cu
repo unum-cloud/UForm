@@ -110,14 +110,14 @@ static __global__ void tokens_gather_kernel_(util::b8r1_view_t reservoir_payload
 util::expected_t ul::pack_tokens(column_view_t texts, util::u64r1_view_t elements, util::b8r1_view_t prefix,
                                  tokens_matrix_span_t tokens, util::u32r1_span_t segment_offsets,
                                  util::u32r1_span_t segment_lengths, modality_span_t segment_modality,
-                                 util::u32r1_span_t dropped, util::gpu_stream_t& gpu_stream) noexcept {
+                                 util::u32r1_span_t dropped, util::executor_stream_t& gpu_stream) noexcept {
     if (elements.extent(0) > segment_lengths.extent(0) || segment_offsets.extent(0) != segment_lengths.extent(0) + 1u ||
         segment_modality.extent(0) != segment_lengths.extent(0))
         return util::expected_t::fail(util::status_code_t::unsupported_k, "{} documents exceed a table of {} segments",
                                       elements.extent(0), segment_lengths.extent(0));
     if (elements.empty()) return {};
-    util::switch_to_gpu_t gpu_scope {gpu_stream};
-    if (!gpu_scope.ok())
+    [[maybe_unused]] util::status_t const gpu_scope = (gpu_stream).bind();
+    if (gpu_scope.failed())
         return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed for the loader stream");
     dim3 const one_block {1u, 1u, 1u};
     util::expected_t packed = util::launch_kernel(&tokens_geometry_kernel_, one_block, one_block, gpu_stream,
@@ -139,20 +139,20 @@ util::expected_t ul::pack_tokens(column_view_t texts, util::u64r1_view_t element
 [[nodiscard]] static util::expected_t pack_reservoir_(column_view_t reservoir_column, std::size_t pool_rows,
                                                       util::u64_t row_key, util::data_epoch_t data_epoch,
                                                       std::span<multimodal_batch_on_gpu_t> batches,
-                                                      util::gpu_stream_t& gpu_stream) noexcept {
+                                                      util::executor_stream_t& gpu_stream) noexcept {
     std::size_t const unroll = batches.size();
     std::size_t const documents = batches[0].segment_lengths.extent(0);
     std::size_t const total_segments = unroll * documents;
 
     // Per-fill device index buffer, drawn on the GPU by the keyed permutation of the whole pool.
     st::basic_vector<util::u64_t, util::gpu_alloc<util::u64_t>> record_indices {
-        util::gpu_alloc<util::u64_t> {gpu_stream.get()}};
+        util::gpu_alloc<util::u64_t> {util::native_stream(gpu_stream)}};
     if (st::failed(record_indices.resize(st::assume_uninitialized, total_segments)))
         return util::expected_t::fail(util::status_code_t::out_of_memory_k, "row index allocation failed ({} draws)",
                                       total_segments);
 
-    util::switch_to_gpu_t gpu_scope {gpu_stream};
-    if (!gpu_scope.ok())
+    [[maybe_unused]] util::status_t const gpu_scope = (gpu_stream).bind();
+    if (gpu_scope.failed())
         return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed for the loader stream");
     nk::tensor_span<util::u64_t, 2> const batch_records {record_indices.data(), unroll, documents};
     if (util::expected_t drawn = util::launch_kernel(&sample_rows_kernel_,
@@ -213,7 +213,7 @@ util::expected<tokens_loader_parquet_t> tokens_loader_parquet_t::make(gpu_direct
     return result_t {std::move(loader)};
 }
 
-util::expected_t tokens_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream,
+util::expected_t tokens_loader_parquet_t::fill(util::executor_stream_t& gpu_stream,
                                                tokens_base_loader_parquet_config_t config, util::u32_t gpu_rank,
                                                util::u32_t training_step,
                                                std::span<multimodal_batch_on_gpu_t> batches) noexcept {
@@ -299,8 +299,9 @@ util::expected<tokens_loader_jsonl_t> tokens_loader_jsonl_t::make(gpu_direct_sto
     return result_t {std::move(loader)};
 }
 
-util::expected_t tokens_loader_jsonl_t::fill(util::gpu_stream_t& gpu_stream, tokens_base_loader_jsonl_config_t config,
-                                             util::u32_t gpu_rank, util::u32_t training_step,
+util::expected_t tokens_loader_jsonl_t::fill(util::executor_stream_t& gpu_stream,
+                                             tokens_base_loader_jsonl_config_t config, util::u32_t gpu_rank,
+                                             util::u32_t training_step,
                                              std::span<multimodal_batch_on_gpu_t> batches) noexcept {
     if (batches.empty()) return {};
     std::size_t const unroll = batches.size();
@@ -369,7 +370,7 @@ util::expected<tokens_loader_csv_t> tokens_loader_csv_t::make(gpu_direct_storage
     return result_t {std::move(loader)};
 }
 
-util::expected_t tokens_loader_csv_t::fill(util::gpu_stream_t& gpu_stream, tokens_base_loader_csv_config_t config,
+util::expected_t tokens_loader_csv_t::fill(util::executor_stream_t& gpu_stream, tokens_base_loader_csv_config_t config,
                                            util::u32_t gpu_rank, util::u32_t training_step,
                                            std::span<multimodal_batch_on_gpu_t> batches) noexcept {
     if (batches.empty()) return {};

@@ -66,7 +66,7 @@
 
 #include "uform/utilities/vram_nvidia_memory.hpp"   // `gpu_arena_t`, `gpu_arena_alloc` backing the owning tensors
 #include "uform/encoder/multimodal_batch.hpp"       // `segment_role_t`, the bag roles the builder reads
-#include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t` ordering the uploads
+#include "uform/utilities/vram_nvidia_schedule.cuh" // `executor_stream_t` ordering the uploads
 #include "uform/utilities/types.hpp"                // `expected`, `expected_t`, `status_t`
 
 namespace unum::uform::train {
@@ -583,7 +583,7 @@ struct contrastive_relations_t {
                                     u32r1_view_t to_vertex_effective_length, u64r1_view_t from_vertex_key,
                                     u64r1_view_t to_vertex_key, std::size_t to_vertices_per_mesh,
                                     std::size_t self_edge_base, f32_t ambient_repulsion_weight,
-                                    gpu_stream_t& stream) noexcept {
+                                    executor_stream_t& stream) noexcept {
 
         if (attract.offsets.extent(0) < 2 || attract.offsets.extent(0) != repel.offsets.extent(0))
             return expected_t::fail( //
@@ -658,7 +658,7 @@ struct contrastive_relations_t {
      *  views are adopted as in @ref upload . */
     [[nodiscard]] expected_t upload_self_edges(u32_t from_vertices_per_gpu, u32r1_view_t from_vertex_effective_length,
                                                u32r1_view_t to_vertex_effective_length, std::size_t self_edge_base,
-                                               f32_t ambient_repulsion_weight, gpu_stream_t& stream) noexcept {
+                                               f32_t ambient_repulsion_weight, executor_stream_t& stream) noexcept {
         bool resized = from_vertices_per_gpu != 0 &&
                        nk::succeeded(attract_offsets_.resize({from_vertices_per_gpu + 1u}));
         resized = resized && nk::succeeded(repel_offsets_.resize({from_vertices_per_gpu + 1u}));

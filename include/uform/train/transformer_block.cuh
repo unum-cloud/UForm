@@ -45,9 +45,9 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
-#include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`, `launch_kernel`, `gpu_numerics_t`, the NumKong products
-#include "uform/encoder/tower_kernels.cuh"          // the rotary and E4M3 scaling bodies, `e4m3_range_k`
-#include "uform/utilities/types.hpp"                // `expected`, `expected_t`, `status_t`, the integer aliases
+#include "uform/utilities/vram_nvidia_schedule.cuh" // `executor_stream_t`, `launch_kernel`, `gpu_numerics_t`, the NumKong products
+#include "uform/encoder/tower_kernels.cuh" // the rotary and E4M3 scaling bodies, `e4m3_range_k`
+#include "uform/utilities/types.hpp"       // `expected`, `expected_t`, `status_t`, the integer aliases
 
 namespace unum::uform::train {
 using namespace unum::uform::utilities;
@@ -320,7 +320,7 @@ struct transformer_block_bf16_t {
      *  gradients' — pure enqueue, capture-safe. Call once per optimizer step, after the
      *  weights change and before the first @ref forward ; every micro-batch and call of the
      *  step reuses the packs. */
-    [[nodiscard]] expected_t pack_weights(gpu_stream_t& stream) noexcept;
+    [[nodiscard]] expected_t pack_weights(executor_stream_t& stream) noexcept;
 
     /**
      *  @brief One block forward — pure enqueue, capture-safe; stashes everything
@@ -336,7 +336,7 @@ struct transformer_block_bf16_t {
      */
     [[nodiscard]] expected_t forward(f32r2_view_t input, f32r2_span_t output, u32r1_view_t segment_offsets,
                                      u32r1_view_t segment_lengths, rope_angles_view_t angles, i16r2_view_t coords,
-                                     gpu_stream_t& stream) noexcept;
+                                     executor_stream_t& stream) noexcept;
 
     /** One block backward, consuming the stashes this block's @ref forward last wrote into the
      *  shared scratch, so it runs right after that forward — pure enqueue, capture-safe. Weight
@@ -344,7 +344,7 @@ struct transformer_block_bf16_t {
      *  token gradient and may not alias @p output_grad . */
     [[nodiscard]] expected_t backward(f32r2_view_t output_grad, f32r2_span_t input_grad, u32r1_view_t segment_offsets,
                                       u32r1_view_t segment_lengths, rope_angles_view_t angles, i16r2_view_t coords,
-                                      gpu_stream_t& stream) noexcept;
+                                      executor_stream_t& stream) noexcept;
 
     /** The baked geometry. */
     [[nodiscard]] transformer_block_config_t const& config() const noexcept { return config_; }
@@ -376,14 +376,14 @@ struct transformer_block_bf16_t {
 
     /** Quantize this block's weights into the E4M3 inference twin — the twin's only constructor. */
     [[nodiscard]] expected<struct transformer_block_e4m3_t> quantize_weights(gpu_arena_t& arena,
-                                                                             gpu_stream_t& stream) noexcept;
+                                                                             executor_stream_t& stream) noexcept;
 
   private:
     friend struct transformer_block_e4m3_t;
 
     /** Pack this block's stashed keys and values into the scratch's @c packed_keys_values . */
     [[nodiscard]] expected_t pack_keys_values_(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
-                                               gpu_stream_t& stream) noexcept;
+                                               executor_stream_t& stream) noexcept;
 
     /** The baked geometry. */
     transformer_block_config_t config_ {};
@@ -435,7 +435,7 @@ struct transformer_block_e4m3_t {
      *  after each product); attention runs unscaled E4M3 over the ragged segments. */
     [[nodiscard]] expected_t forward(bf16r2_view_t input, bf16r2_span_t output, u32r1_view_t segment_offsets,
                                      u32r1_view_t segment_lengths, rope_angles_view_t angles, i16r2_view_t coords,
-                                     gpu_stream_t& stream) noexcept;
+                                     executor_stream_t& stream) noexcept;
 
     /** The baked geometry. */
     [[nodiscard]] transformer_block_config_t const& config() const noexcept { return config_; }
@@ -459,7 +459,7 @@ struct transformer_block_e4m3_t {
      *  @param[in,out] stream The stream every launch enqueues on.
      */
     [[nodiscard]] expected_t project_(std::size_t product, e4m3r2_view_t activations, f32r1_view_t token_scales,
-                                      bf16r2_view_t residual, bf16r2_span_t values, gpu_stream_t& stream) noexcept;
+                                      bf16r2_view_t residual, bf16r2_span_t values, executor_stream_t& stream) noexcept;
 
     /** The baked geometry. */
     transformer_block_config_t config_ {};

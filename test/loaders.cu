@@ -40,7 +40,7 @@
 #include "uform/utilities/vram_nvidia_memory.hpp" // `gpu_arena_t`, `gpu_arena_alloc_t`, `pinned_alloc`, the tensor aliases
 #include "uform/utilities/mesh.hpp"               // `mesh_topology_t`, `host_domain_index_from_environment`
 #include "uform/encoder/multimodal_batch.cuh"     // `multimodal_batch_on_gpu_t`, the shape, `fill_coords`, `modality_t`
-#include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`, `copy_host_to_device`, `copy_device_to_host`
+#include "uform/utilities/vram_nvidia_schedule.cuh" // `executor_stream_t`, `copy_host_to_device`, `copy_device_to_host`
 #include "uform/utilities/types.hpp"        // `splitmix64_hash_t`, `epoch_permutation`, `data_epoch_t`, `to_string`
 #include "uform/loaders/audio_loader.cuh"   // `decode_audios`
 #include "uform/loaders/dataset_shards.hpp" // `column_view_t`, `row_group_draw_t`
@@ -114,7 +114,8 @@ struct fabricated_tape_t {
      *      synchronized before returning.
      *  @param[in] blobs The blobs to pack back to back, one Arrow element each.
      */
-    [[nodiscard]] static util::expected<fabricated_tape_t> make(util::gpu_arena_t& arena, util::gpu_stream_t& stream,
+    [[nodiscard]] static util::expected<fabricated_tape_t> make(util::gpu_arena_t& arena,
+                                                                util::executor_stream_t& stream,
                                                                 std::span<util::bytes_view_t const> blobs) noexcept {
         using result_t = util::expected<fabricated_tape_t>;
         fabricated_tape_t tape;
@@ -138,14 +139,15 @@ struct fabricated_tape_t {
                                                                           util::gpu_arena_alloc<util::b8_t> {arena});
         if (!tape.device_bytes)
             return result_t::fail(util::status_code_t::out_of_memory_k, "tape device buffer alloc failed");
-        if (CUresult reset = cuMemsetD8Async(util::device_address(tape.device_bytes.data()), 0, total, stream.get());
+        if (CUresult reset = cuMemsetD8Async(util::device_address(tape.device_bytes.data()), 0, total,
+                                             util::native_stream(stream));
             reset != CUDA_SUCCESS)
             return util::cuda_failure<fabricated_tape_t>(reset, "tape device buffer reset failed");
         if (util::expected_t staged = util::copy_host_to_device(util::bytes_view_t {host}, tape.device_bytes.span(),
                                                                 stream);
             !staged)
             return result_t::fail(std::move(staged));
-        if (CUresult synced = cuStreamSynchronize(stream.get()); synced != CUDA_SUCCESS)
+        if (CUresult synced = cuStreamSynchronize(util::native_stream(stream)); synced != CUDA_SUCCESS)
             return util::cuda_failure<fabricated_tape_t>(synced, "tape staging sync failed");
         return result_t {std::move(tape)};
     }
@@ -519,7 +521,7 @@ static void test_media_fill_their_rows() {
  *  @param[in,out] arena The device arena the batch and coordinate scratch are allocated from.
  *  @param[in,out] stream The stream every stage enqueues on.
  */
-static void test_fill_coords_routes_every_modality(util::gpu_arena_t& arena, util::gpu_stream_t& stream) {
+static void test_fill_coords_routes_every_modality(util::gpu_arena_t& arena, util::executor_stream_t& stream) {
     util::u32_t const columns = 32u, max_segments = 8u, tube_frames = 2u, frame_stride = 3u;
     multimodal_batch_shape_t shape {};
     shape.max_rows_per_gpu = 1u;
@@ -584,7 +586,7 @@ static void test_fill_coords_routes_every_modality(util::gpu_arena_t& arena, uti
     if (!expect_true(util::copy_device_to_host(coords.view().flatten<1>(), host.span().flatten<1>(), stream),
                      "coords readback copy failed"))
         return;
-    if (CUresult synced = cuStreamSynchronize(stream.get());
+    if (CUresult synced = cuStreamSynchronize(util::native_stream(stream));
         !expect_true(synced == CUDA_SUCCESS, "coords readback sync failed"))
         return;
 
@@ -617,7 +619,7 @@ static void test_fill_coords_routes_every_modality(util::gpu_arena_t& arena, uti
 }
 
 /** `pack_tokens` writes the prefix, then the text, and counts both in the segment's length. */
-static void test_pack_tokens_starts_with_prefix(util::gpu_arena_t& arena, util::gpu_stream_t& stream) {
+static void test_pack_tokens_starts_with_prefix(util::gpu_arena_t& arena, util::executor_stream_t& stream) {
     char const text[] = "abcde", prefix_text[] = "q:";
     util::u64_t const host_offsets[] = {0, 3, 5}, host_elements[] = {1, 0};
     using bytes_t = nk::tensor<util::b8_t, util::gpu_arena_alloc<util::b8_t>, 1>;
@@ -655,7 +657,7 @@ static void test_pack_tokens_starts_with_prefix(util::gpu_arena_t& arena, util::
     bool const landed = util::copy_device_to_host(tokens.view().flatten<1>(), std::span {host_tokens}, stream) &&
                         util::copy_device_to_host(segment_lengths.view(), std::span {host_lengths}, stream) &&
                         util::copy_device_to_host(dropped.view(), std::span {&host_dropped, 1}, stream) &&
-                        cuStreamSynchronize(stream.get()) == CUDA_SUCCESS;
+                        cuStreamSynchronize(util::native_stream(stream)) == CUDA_SUCCESS;
     if (!expect_true(landed, "pack readback failed")) return;
     char const expected[] = "q:deq:abc";
     bool matches = host_lengths[0] == 4u && host_lengths[1] == 5u && host_dropped == 0u;
@@ -676,7 +678,7 @@ static void test_pack_tokens_starts_with_prefix(util::gpu_arena_t& arena, util::
  *  @param[in,out] pool The CPU-decode worker pool.
  */
 static case_result_t test_audio_decode(sz::string_view_t label, st::basic_vector<util::b8_t> const& clip,
-                                       util::gpu_arena_t& arena, util::gpu_stream_t& stream, fu::pool_t& pool) {
+                                       util::gpu_arena_t& arena, util::executor_stream_t& stream, fu::pool_t& pool) {
     if (clip.empty()) return case_result_t::skipped("needs a readable UFORM_TEST_AUDIO fixture");
     util::u32_t const columns = 24u, chunk = 400u, max_segments = 4u, sample_rate = 16000u;
     multimodal_batch_shape_t shape {};
@@ -715,7 +717,7 @@ static case_result_t test_audio_decode(sz::string_view_t label, st::basic_vector
                          util::copy_device_to_host(batch.audio_samples.view().flatten<1>(), samples.span(), stream),
                      "[{}] audio readback copy failed", label))
         return {};
-    if (CUresult synced = cuStreamSynchronize(stream.get());
+    if (CUresult synced = cuStreamSynchronize(util::native_stream(stream));
         !expect_true(synced == CUDA_SUCCESS, "[{}] audio readback sync failed", label))
         return {};
 
@@ -745,8 +747,8 @@ static case_result_t test_audio_decode(sz::string_view_t label, st::basic_vector
  *  @param[in,out] pool The CPU-decode worker pool.
  *  @param[in] clip The real env audio clip; an empty clip skips the case.
  */
-static case_result_t test_audio_fault_isolation(util::gpu_arena_t& arena, util::gpu_stream_t& stream, fu::pool_t& pool,
-                                                st::basic_vector<util::b8_t> const& clip) {
+static case_result_t test_audio_fault_isolation(util::gpu_arena_t& arena, util::executor_stream_t& stream,
+                                                fu::pool_t& pool, st::basic_vector<util::b8_t> const& clip) {
     if (clip.empty()) return case_result_t::skipped("needs a UFORM_TEST_AUDIO fixture");
     util::u32_t const columns = 16u, chunk = 400u, max_segments = 4u, sample_rate = 16000u;
     st::basic_vector<util::b8_t> garbage; // not a decodable container → silence, but not the whole batch
@@ -788,7 +790,7 @@ static case_result_t test_audio_fault_isolation(util::gpu_arena_t& arena, util::
                 util::copy_device_to_host(batch.audio_samples.view().flatten<1>(), samples.span().flatten<1>(), stream),
             "isolation readback copy failed"))
         return {};
-    if (CUresult synced = cuStreamSynchronize(stream.get());
+    if (CUresult synced = cuStreamSynchronize(util::native_stream(stream));
         !expect_true(synced == CUDA_SUCCESS, "isolation readback sync failed"))
         return {};
 
@@ -812,7 +814,7 @@ static case_result_t test_audio_fault_isolation(util::gpu_arena_t& arena, util::
  *  @param[in,out] jpeg This GPU's nvJPEG session.
  */
 static case_result_t test_image_decode(sz::string_view_t label, st::basic_vector<util::b8_t> const& blob,
-                                       util::gpu_arena_t& arena, util::gpu_stream_t& stream, fu::pool_t& pool,
+                                       util::gpu_arena_t& arena, util::executor_stream_t& stream, fu::pool_t& pool,
                                        nvjpeg_session_t& jpeg) {
     if (blob.empty()) return case_result_t::skipped("needs a readable UFORM_TEST_IMAGE fixture");
     util::u32_t const columns = 64u, patch = 16u, channels = 4u, max_segments = 4u;
@@ -856,7 +858,7 @@ static case_result_t test_image_decode(sz::string_view_t label, st::basic_vector
                 util::copy_device_to_host(batch.images.view().flatten<1>(), pixels.span().flatten<1>(), stream),
             "[{}] image readback copy failed", label))
         return {};
-    if (CUresult synced = cuStreamSynchronize(stream.get());
+    if (CUresult synced = cuStreamSynchronize(util::native_stream(stream));
         !expect_true(synced == CUDA_SUCCESS, "[{}] image readback sync failed", label))
         return {};
 
@@ -880,7 +882,7 @@ static case_result_t test_image_decode(sz::string_view_t label, st::basic_vector
 /** Decode every @p blobs image in one batch, then each alone with the same shape, and require each
  *  image's patches to match bit for bit, so no image's decode writes into another's region. */
 static case_result_t test_image_batch_matches_single(std::span<st::basic_vector<util::b8_t> const> blobs,
-                                                     util::gpu_arena_t& arena, util::gpu_stream_t& stream,
+                                                     util::gpu_arena_t& arena, util::executor_stream_t& stream,
                                                      fu::pool_t& pool, nvjpeg_session_t& jpeg) {
     if (blobs.size() < 2) return case_result_t::skipped("needs at least two UFORM_TEST_IMAGE fixtures");
     util::u32_t const columns = 256u, patch = 16u, channels = 4u, images = static_cast<util::u32_t>(blobs.size());
@@ -917,7 +919,7 @@ static case_result_t test_image_batch_matches_single(std::span<st::basic_vector<
                util::copy_device_to_host(batch.segment_offsets.view(), landed.offsets.span(), stream) &&
                util::copy_device_to_host(batch.segment_lengths.view(), landed.lengths.span(), stream) &&
                util::copy_device_to_host(batch.images.view().flatten<1>(), landed.pixels.span(), stream) &&
-               cuStreamSynchronize(stream.get()) == CUDA_SUCCESS;
+               cuStreamSynchronize(util::native_stream(stream)) == CUDA_SUCCESS;
     };
     st::basic_vector<util::u64_t> drawn;
     for (std::size_t row = 0; row != images; ++row)
@@ -974,7 +976,7 @@ static case_result_t test_image_batch_matches_single(std::span<st::basic_vector<
  */
 static case_result_t test_video_decode(sz::string_view_t label, st::basic_vector<util::b8_t> const& clip,
                                        std::span<util::u32_t const> frame_strides, util::gpu_arena_t& arena,
-                                       util::gpu_stream_t& stream, fu::pool_t& pool, nvdec_session_t& nvdec) {
+                                       util::executor_stream_t& stream, fu::pool_t& pool, nvdec_session_t& nvdec) {
     if (clip.empty()) return case_result_t::skipped("needs a readable UFORM_TEST_VIDEO fixture");
     util::u32_t const columns = 4096u, patch = 32u, channels = 3u, tube_frames = 2u, max_segments = 8u;
     multimodal_batch_shape_t shape {};
@@ -1018,7 +1020,7 @@ static case_result_t test_video_decode(sz::string_view_t label, st::basic_vector
                 util::copy_device_to_host(batch.video_shapes.view().flatten<1>(), shapes.span().flatten<1>(), stream),
             "[{}] video readback copy failed", label))
         return {};
-    if (CUresult synced = cuStreamSynchronize(stream.get());
+    if (CUresult synced = cuStreamSynchronize(util::native_stream(stream));
         !expect_true(synced == CUDA_SUCCESS, "[{}] video readback sync failed", label))
         return {};
 
@@ -1057,7 +1059,7 @@ static case_result_t test_video_decode(sz::string_view_t label, st::basic_vector
  *  @param[in] audio_clip The real env audio clip; empty skips the case.
  *  @param[in] image_blob The real env image blob; empty skips the case.
  */
-static case_result_t test_multimodal_packet_routes(util::gpu_arena_t& arena, util::gpu_stream_t& stream,
+static case_result_t test_multimodal_packet_routes(util::gpu_arena_t& arena, util::executor_stream_t& stream,
                                                    fu::pool_t& pool, nvjpeg_session_t& jpeg,
                                                    st::basic_vector<util::b8_t> const& audio_clip,
                                                    st::basic_vector<util::b8_t> const& image_blob) {
@@ -1134,7 +1136,7 @@ static case_result_t test_multimodal_packet_routes(util::gpu_arena_t& arena, uti
                                                    image_grid.span().flatten<1>(), stream),
                      "multimodal: geometry readback copy failed"))
         return {};
-    if (CUresult synced = cuStreamSynchronize(stream.get());
+    if (CUresult synced = cuStreamSynchronize(util::native_stream(stream));
         !expect_true(synced == CUDA_SUCCESS, "multimodal: geometry readback sync failed"))
         return {};
     util::u32_t const audio_length = audio_len[0], image_length = image_len[0];
@@ -1206,7 +1208,7 @@ static case_result_t test_multimodal_packet_routes(util::gpu_arena_t& arena, uti
     if (!expect_true(util::copy_device_to_host(coords.view().flatten<1>(), host.span().flatten<1>(), stream),
                      "multimodal: coords readback copy failed"))
         return {};
-    if (CUresult synced = cuStreamSynchronize(stream.get());
+    if (CUresult synced = cuStreamSynchronize(util::native_stream(stream));
         !expect_true(synced == CUDA_SUCCESS, "multimodal: coords readback sync failed"))
         return {};
 
@@ -1231,7 +1233,7 @@ static case_result_t test_multimodal_packet_routes(util::gpu_arena_t& arena, uti
  *  and require it bitwise equal: a fill frees its reservoir stream-ordered, so the next fill's
  *  read must not land in memory the first fill's queued decode still reads. */
 static void test_paired_fill_replays_after_back_to_back_fills(ut::mixture_entry_t const& entry,
-                                                              util::gpu_arena_t& arena, util::gpu_stream_t& stream,
+                                                              util::gpu_arena_t& arena, util::executor_stream_t& stream,
                                                               fu::pool_t& pool, nvjpeg_session_t& jpeg) {
     sz::string_view_t const name = entry.name.view();
     auto [session, make_session_status] = gpu_direct_storage_session_t::make(1);
@@ -1283,7 +1285,7 @@ static void test_paired_fill_replays_after_back_to_back_fills(ut::mixture_entry_
                     first[batch].tokens.view().flatten<1>(),
                     nk::tensor_span<util::token_id_t, 1> {into_tokens.data() + batch * tokens, tokens}, stream))
                 return false;
-        return cuStreamSynchronize(stream.get()) == CUDA_SUCCESS;
+        return cuStreamSynchronize(util::native_stream(stream)) == CUDA_SUCCESS;
     };
 
     util::expected_t filled = loader.fill(stream, jpeg, 0u, 0u, first);
@@ -1387,13 +1389,15 @@ int main(int argc, char** argv) {
         return finish_test_run();
     }
 
-    auto [stream, make_stream_status] = util::gpu_stream_t::make(0);
+    int const stream_devices[] = {static_cast<int>(0)};
+    auto [stream_executor, make_stream_status] = spawn_test_executor(stream_devices);
     if (!expect_true(make_stream_status, "stream make: {}", make_stream_status.description_)) return finish_test_run();
+    auto& stream = stream_executor.stream(0);
     // Every decode tier below allocates pinned staging, and `cuMemAllocHost` needs a
-    // current context — `gpu_stream_t::make` deliberately pushes and pops, so the suite
+    // current context — the executor binds a device only while it spawns, so the suite
     // holds the scope itself.
-    util::switch_to_gpu_t gpu_scope {stream};
-    if (!expect_true(gpu_scope.ok(), "context entry should succeed")) return finish_test_run();
+    [[maybe_unused]] util::status_t const gpu_scope = (stream).bind();
+    if (!expect_true(gpu_scope.succeeded(), "context entry should succeed")) return finish_test_run();
     auto [arena, make_arena_status] = util::gpu_arena_t::make(0, 2ull << 30);
     if (!expect_true(make_arena_status, "gpu arena make: {}", util::to_string(make_arena_status.status_)))
         return finish_test_run();

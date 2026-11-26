@@ -70,7 +70,7 @@ static __global__ void fill_coords_kernel_(util::u32r1_view_t segment_offsets, u
 util::expected_t ue::fill_coords(util::u32r1_view_t segment_offsets, util::u32r1_view_t segment_lengths,
                                  modality_view_t segment_modality, image_shape_view_t image_shapes,
                                  video_shape_view_t video_shapes, util::u32_t tube_frames, util::u32_t frame_stride,
-                                 util::i16r2_span_t coords, util::gpu_stream_t& stream) noexcept {
+                                 util::i16r2_span_t coords, util::executor_stream_t& stream) noexcept {
     if (coords.extent(1) != 3)
         return util::expected_t::fail(util::status_code_t::unsupported_k, "coordinate table must be [{},3]",
                                       coords.extent(0));
@@ -92,10 +92,10 @@ util::expected_t ue::fill_coords(util::u32r1_view_t segment_offsets, util::u32r1
                                frame_stride == 0u ? 1u : frame_stride, coords);
 }
 
-util::expected_t ue::pad_choices(multimodal_batch_on_gpu_t& batch, util::gpu_stream_t& stream) noexcept {
+util::expected_t ue::pad_choices(multimodal_batch_on_gpu_t& batch, util::executor_stream_t& stream) noexcept {
     if (batch.segment_choices.empty()) return {};
     if (CUresult result = cuMemsetD16Async(util::device_address(batch.segment_choices.data()), byte_pad_k,
-                                           batch.segment_choices.numel(), stream.get());
+                                           batch.segment_choices.numel(), util::native_stream(stream));
         result != CUDA_SUCCESS)
         return util::cuda_failure(result, "choice padding failed");
     return util::zero_async(batch.segment_choice_targets.span().flatten<1>(), stream);
@@ -654,7 +654,7 @@ struct block_copy_t_ {
  *  nulls the same modality, so those bytes are never read. */
 static util::expected_t pack_batch_into_block_(multimodal_batch_on_gpu_t const& loaded, util::b8r1_span_t destination,
                                                batch_block_layout_t_ const& layout,
-                                               util::gpu_stream_t& stream) noexcept {
+                                               util::executor_stream_t& stream) noexcept {
     block_copy_t_ const copies[block_tensor_count_k] = {
         {block_segment_offsets_k, loaded.segment_offsets.data()},
         {block_segment_lengths_k, loaded.segment_lengths.data()},
@@ -681,7 +681,8 @@ static util::expected_t pack_batch_into_block_(multimodal_batch_on_gpu_t const& 
         // spelled by hand here.
         CUdeviceptr const target = util::device_address(destination.data() + layout.offset(copy.tensor));
         CUdeviceptr const source = util::device_address(copy.source);
-        if (CUresult packed = cuMemcpyDtoDAsync(target, source, bytes, stream.get()); packed != CUDA_SUCCESS)
+        if (CUresult packed = cuMemcpyDtoDAsync(target, source, bytes, util::native_stream(stream));
+            packed != CUDA_SUCCESS)
             return util::cuda_failure(packed,
                                       "packing batch tensor {} into the exchanged block failed " //
                                       "(destination=0x{:x} source=0x{:x} bytes={})",
@@ -698,7 +699,7 @@ static util::expected_t mix_(sources_type_ const& sources, util::u32r1_view_t lo
                              multimodal_batch_on_gpu_t& mixed, util::u32r2_span_t world_lengths,
                              util::u32r2_span_t world_sources, util::u64r2_span_t world_keys,
                              util::u32_t gpu_index_in_colocated_domain, util::data_epoch_t data_epoch, util::u64_t seed,
-                             multimodal_batch_shape_t const& shape, util::gpu_stream_t& stream) noexcept {
+                             multimodal_batch_shape_t const& shape, util::executor_stream_t& stream) noexcept {
     util::u32r1_span_t const mixed_sources = world_sources[gpu_index_in_colocated_domain, nk::slice];
     // This member's mixed batch is the scatter target; an absent modality leaves an empty span.
     std::size_t const cells = mixed.tokens.numel();
@@ -744,7 +745,7 @@ static util::expected_t mix_(sources_type_ const& sources, util::u32r1_view_t lo
 
 util::expected<multimodal_batch_mixer_t> multimodal_batch_mixer_t::make(
     util::multimem_domain_t& multimem, util::colocated_domain_t& colocated, std::span<util::gpu_arena_t> arenas,
-    multimodal_batch_shape_t shape, util::u64_t seed, std::span<util::gpu_stream_t> streams,
+    multimodal_batch_shape_t shape, util::u64_t seed, util::cuda_executor_t& streams,
     util::f64_t timeout_seconds) noexcept {
     using result_t = util::expected<multimodal_batch_mixer_t>;
     std::size_t const members = multimem.local_member_count();
@@ -786,8 +787,8 @@ util::expected<multimodal_batch_mixer_t> multimodal_batch_mixer_t::make(
         return result_t::fail(util::status_code_t::out_of_memory_k, "routing table allocation failed ({} members)",
                               members);
     for (std::size_t member = 0; member != members; ++member) {
-        util::switch_to_gpu_t gpu_scope {streams[member]};
-        if (!gpu_scope.ok())
+        [[maybe_unused]] util::status_t const gpu_scope = (streams.stream(member)).bind();
+        if (gpu_scope.failed())
             return result_t::fail(util::status_code_t::device_k, "context entry failed for member {}'s routing tables",
                                   member);
         util::gpu_arena_alloc<util::u32_t> const routing_alloc {arenas[member]};
@@ -811,12 +812,12 @@ util::expected<multimodal_batch_mixer_t> multimodal_batch_mixer_t::make(
         return result_t::fail(util::status_code_t::out_of_memory_k,
                               "all-gather buffer table allocation failed ({} members)", members);
     for (std::size_t member = 0; member != members; ++member) {
-        util::switch_to_gpu_t gpu_scope {streams[member]};
-        if (!gpu_scope.ok())
+        [[maybe_unused]] util::status_t const gpu_scope = (streams.stream(member)).bind();
+        if (gpu_scope.failed())
             return result_t::fail(util::status_code_t::device_k, "context entry failed wiring member {}", member);
         util::u32_t const member_index = static_cast<util::u32_t>(multimem.member_offset() + member);
         auto [gather_buffer, make_status] = util::infiniband_all_gather<util::b8_t>::make(
-            colocated, member_index, arenas[member], block_bytes, streams[member], timeout_seconds);
+            colocated, member_index, arenas[member], block_bytes, streams.stream(member), timeout_seconds);
         if (!make_status) return result_t::fail(std::move(make_status));
         mixer.gather_buffers_[member] = std::move(gather_buffer);
     }
@@ -832,15 +833,15 @@ std::size_t multimodal_batch_mixer_t::payload_scalars_needed(multimodal_batch_sh
 util::expected_t multimodal_batch_mixer_t::operator()(std::size_t local, util::data_epoch_t data_epoch,
                                                       std::span<multimodal_batch_on_gpu_t const> loaded,
                                                       multimodal_batch_on_gpu_t& mixed,
-                                                      util::gpu_stream_t& stream) noexcept {
+                                                      util::executor_stream_t& stream) noexcept {
     std::size_t const members = world_sources_.size();
     if (local >= members)
         return util::expected_t::fail(util::status_code_t::invalid_argument_k, "member {} of {}", local, members);
     if (loaded.size() != members)
         return util::expected_t::fail(util::status_code_t::invalid_argument_k,
                                       "every member needs its loaded batch ({} of {})", loaded.size(), members);
-    util::switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok())
+    [[maybe_unused]] util::status_t const gpu_scope = (stream).bind();
+    if (gpu_scope.failed())
         return util::expected_t::fail(util::status_code_t::device_k, "context entry failed ({})", local);
     std::size_t const member_index = multimem_->member_offset() + local;
 
@@ -901,13 +902,13 @@ util::expected_t multimodal_batch_mixer_t::operator()(std::size_t local, util::d
 util::expected_t multimodal_batch_mixer_t::operator()(util::data_epoch_t data_epoch,
                                                       std::span<multimodal_batch_on_gpu_t const> loaded,
                                                       std::span<multimodal_batch_on_gpu_t> mixed,
-                                                      std::span<util::gpu_stream_t> streams) noexcept {
+                                                      util::cuda_executor_t& streams) noexcept {
     std::size_t const members = world_sources_.size();
     if (streams.size() != members || mixed.size() != members)
         return util::expected_t::fail(util::status_code_t::invalid_argument_k,
                                       "every member needs its stream and mixed batch ({} members)", members);
     for (std::size_t local = 0; local != members; ++local)
-        if (util::expected_t staged = (*this)(local, data_epoch, loaded, mixed[local], streams[local]); !staged)
+        if (util::expected_t staged = (*this)(local, data_epoch, loaded, mixed[local], streams.stream(local)); !staged)
             return staged;
     return {};
 }

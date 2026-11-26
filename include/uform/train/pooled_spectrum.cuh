@@ -110,8 +110,8 @@ struct distributed_pooled_spectrum_t {
      */
     [[nodiscard]] static expected<distributed_pooled_spectrum_t> make(
         multimem_domain_t& domain, colocated_domain_t& colocated, std::span<gpu_arena_t> arenas,
-        std::span<gpu_stream_t> streams, std::span<differentiable_weights_t const> weights,
-        std::size_t weights_per_rank, pooled_spectrum_config_t config, gpu_numerics_t const& numerics,
+        cuda_executor_t& streams, std::span<differentiable_weights_t const> weights, std::size_t weights_per_rank,
+        pooled_spectrum_config_t config, gpu_numerics_t const& numerics,
         f64_t timeout_seconds = peer_timeout_seconds_k) noexcept;
 
     /**
@@ -123,7 +123,7 @@ struct distributed_pooled_spectrum_t {
      *  @param[in,out] stream The rank's stream.
      */
     [[nodiscard]] expected_t operator()(std::size_t rank, bf16r2_view_t pooled, bf16r2_span_t pooled_grad,
-                                        gpu_stream_t& stream) noexcept;
+                                        executor_stream_t& stream) noexcept;
 
     /** Local rank @p rank 's @b [2] terms of the last call on its device: the world coding rate
      *  @c R , identical on every rank, then the rank's top Gram eigenvalue @c σ² . */
@@ -131,7 +131,7 @@ struct distributed_pooled_spectrum_t {
 
     /** Enqueue local rank @p rank 's squared gradient L2 norm and its sum over the world, after
      *  the rank's backward; ranks are enqueued in order within a step. */
-    [[nodiscard]] expected_t measure_gradients(std::size_t rank, gpu_stream_t& stream) noexcept;
+    [[nodiscard]] expected_t measure_gradients(std::size_t rank, executor_stream_t& stream) noexcept;
 
     /**
      *  @brief Read the world's gradient L2 norm off rank 0 through @p stream , its stream, and
@@ -143,7 +143,7 @@ struct distributed_pooled_spectrum_t {
      *  @par Statuses:
      *  - @c status_code_t::internal_k The step's gradient spiked; the optimizer must not apply it.
      */
-    [[nodiscard]] expected_t admit_gradients(gpu_stream_t& stream) noexcept;
+    [[nodiscard]] expected_t admit_gradients(executor_stream_t& stream) noexcept;
 
   private:
 
@@ -194,10 +194,10 @@ struct distributed_pooled_spectrum_t {
      *  @p destination : a barrier, the domain reduce, the gateway's @p world all-reduce and its
      *  publication across domains, and a closing barrier before any member rewrites its window. */
     [[nodiscard]] expected_t world_sum_(std::size_t rank, std::size_t begin, infiniband_all_reduce<f32_t>& world,
-                                        f32r1_span_t destination, gpu_stream_t& stream) noexcept;
+                                        f32r1_span_t destination, executor_stream_t& stream) noexcept;
 
     /** Rank @p rank 's world Gram of @p pooled , its factorization and the coding rate. */
-    [[nodiscard]] expected_t coding_rate_(std::size_t rank, bf16r2_view_t pooled, gpu_stream_t& stream) noexcept;
+    [[nodiscard]] expected_t coding_rate_(std::size_t rank, bf16r2_view_t pooled, executor_stream_t& stream) noexcept;
 
     /** The baked geometry and weights. */
     pooled_spectrum_config_t config_ {};

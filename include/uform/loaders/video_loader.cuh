@@ -74,7 +74,7 @@
 #include "uform/utilities/ram_device.hpp"           // `fu::pool_t` — the root-owned CPU demux / decode-drive pool
 #include "uform/utilities/vram_nvidia_memory.hpp"   // `pinned_alloc`
 #include "uform/encoder/multimodal_batch.cuh"       // `multimodal_batch_on_gpu_t`
-#include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
+#include "uform/utilities/vram_nvidia_schedule.cuh" // `executor_stream_t`, `launch_kernel`
 #include "uform/utilities/types.hpp"                // `expected`, `status_t`, `data_epoch_t`, `epoch_permutation`
 #include "uform/loaders/dataset_shards.hpp"         // `parquet_file_t`, `expand_glob`, `column_view_t`
 #include "uform/loaders/direct_storage.hpp"         // `gpu_direct_storage_session_t`
@@ -164,7 +164,7 @@ struct nvdec_session_t {
                                          std::span<video_batch_shape_t const> representations,
                                          pixel_tubes_span_t videos, video_shape_span_t video_shapes,
                                          u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
-                                         modality_span_t segment_modality, gpu_stream_t& stream) noexcept;
+                                         modality_span_t segment_modality, executor_stream_t& stream) noexcept;
 
   private:
     explicit nvdec_session_t(std::unique_ptr<nvdec_state_t> state) noexcept;
@@ -196,7 +196,7 @@ struct nvdec_session_t {
                                        u64r1_view_t drawn_rows, std::span<video_batch_shape_t const> representations,
                                        pixel_tubes_span_t videos, video_shape_span_t video_shapes,
                                        u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
-                                       modality_span_t segment_modality, gpu_stream_t& stream) noexcept;
+                                       modality_span_t segment_modality, executor_stream_t& stream) noexcept;
 
 /** The Parquet video loader's baked knob — just which column; the video geometry travels on the
  *  loader's @c video_batch_shape_t (fixed at @ref video_loader_parquet_t::make ), not here, so the
@@ -247,7 +247,7 @@ struct video_loader_parquet_t {
      *  @param[out] batches Output batches whose @c videos grid, @c video_shapes , and segment
      *      geometry get populated.
      */
-    [[nodiscard]] expected_t fill(gpu_stream_t& gpu_stream, nvdec_session_t& decoder,
+    [[nodiscard]] expected_t fill(executor_stream_t& gpu_stream, nvdec_session_t& decoder,
                                   video_loader_parquet_config_t config, u32_t gpu_rank, u32_t training_step,
                                   std::span<multimodal_batch_on_gpu_t> batches) noexcept;
 

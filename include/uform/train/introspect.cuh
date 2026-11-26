@@ -35,7 +35,7 @@
 
 #include "uform/utilities/vram_nvidia_memory.hpp"   // `gpu_arena_t`, `gpu_arena_alloc`
 #include "uform/utilities/multimem_collectives.cuh" // `multimem_member_t` — the round probe's subject
-#include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`
+#include "uform/utilities/vram_nvidia_schedule.cuh" // `executor_stream_t`
 #include "uform/utilities/types.hpp" // `expected`, `expected_t`, `status_t`, the scalar aliases, `st::basic_vector`
 
 namespace unum::uform::train {
@@ -148,7 +148,7 @@ struct telemetry_ledger_t {
      *  stream is fine — nothing is retained). @p channels is final — no toggle exists, so a capture
      *  can never bake a mix of armed and unarmed enqueues. */
     [[nodiscard]] static expected<telemetry_ledger_t> make(gpu_arena_t& arena, u32_t channels, u32_t max_probes,
-                                                           gpu_stream_t& stream) noexcept;
+                                                           executor_stream_t& stream) noexcept;
 
     /** Whether @p channel was armed at construction. */
     [[nodiscard]] bool armed(telemetry_channel_t channel) const noexcept { return (channels_ & channel) != 0u; }
@@ -164,12 +164,12 @@ struct telemetry_ledger_t {
      *  traps only on a non-finite value, recording why in @p fault , the record of the GPU
      *  @p stream runs on. Capture-safe — pure enqueue, fixed row address. */
     [[nodiscard]] expected_t probe_signal(telemetry_probe_t probe, f32r1_view_t values, gpu_fault_t* fault,
-                                          gpu_stream_t& stream) noexcept;
+                                          executor_stream_t& stream) noexcept;
 
     /** Enqueue one round probe over @p member 's own barrier-round scalar: records the value and
      *  counts a violation when it moved backwards. Capture-safe, one thread. */
     [[nodiscard]] expected_t probe_round(telemetry_probe_t probe, multimem_member_t member,
-                                         gpu_stream_t& stream) noexcept;
+                                         executor_stream_t& stream) noexcept;
 
     /** Fold one host-side loss reading into the probe's running statistics: @p sum is the
      *  weighted summand, @p count its sample mass — a zero count never scores, so an unscored head
@@ -181,11 +181,11 @@ struct telemetry_ledger_t {
 
     /** The probe's device row, synchronized through @p stream — a quiescent-point read; never
      *  call from inside a capture. */
-    [[nodiscard]] expected<telemetry_row_t> row(telemetry_probe_t probe, gpu_stream_t& stream) noexcept;
+    [[nodiscard]] expected<telemetry_row_t> row(telemetry_probe_t probe, executor_stream_t& stream) noexcept;
 
     /** Drain the device table through @p stream and emit one diagnostic line per registered
      *  probe on the host channel. */
-    [[nodiscard]] expected_t report(gpu_stream_t& stream) noexcept;
+    [[nodiscard]] expected_t report(executor_stream_t& stream) noexcept;
 
   private:
 

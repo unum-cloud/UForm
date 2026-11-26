@@ -43,7 +43,7 @@
 #include "uform/train/introspect.cuh"             // `telemetry_losses_k` and the other ledger channels
 #include "uform/encoder/multimodal_batch.cuh" // `multimodal_batch_shape_t`, `multimodal_batch_on_gpu_t`, `modality_t`
 #include "uform/train/multimodal_masking.hpp" // `masking_recipe_t`, the masked heads
-#include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`, replay graphs
+#include "uform/utilities/vram_nvidia_schedule.cuh" // `executor_stream_t`, replay graphs
 
 namespace unum::uform::train {
 using namespace unum::uform::utilities;
@@ -403,22 +403,22 @@ struct base_replica_t {
      *  the world coordinate, so every world GPU draws distinct data. Pure enqueue onto
      *  @p stream ; never captured. */
     [[nodiscard]] expected_t draw(trainer_config_t const& config, u32_t gpu_index_in_colocated_domain,
-                                  data_epoch_t data_epoch, gpu_stream_t& stream) noexcept;
+                                  data_epoch_t data_epoch, executor_stream_t& stream) noexcept;
 
     /** The eager preamble over a filled @ref batch : snapshot every live head's clean
      *  target, and corrupt each modality in place into the tower's distorted input. A no-op
      *  without masked heads. */
     [[nodiscard]] expected_t prepare(trainer_config_t const& config, data_epoch_t data_epoch,
-                                     gpu_stream_t& stream) noexcept;
+                                     executor_stream_t& stream) noexcept;
 
     /** The captured forward region: tower forward, pooling into @ref vertices when they exist, then
      *  every live head scores its clean target into @ref normalized_grad , and the choices term of
      *  @p config adds its force there. Pure enqueue, shape-stable. */
-    [[nodiscard]] expected_t forward_region(trainer_config_t const& config, gpu_stream_t& stream) noexcept;
+    [[nodiscard]] expected_t forward_region(trainer_config_t const& config, executor_stream_t& stream) noexcept;
 
     /** The captured backward region: the tower's backward from the vertex forces, the masked forces
      *  and the token-vector forces, joined at the final-norm states. Pure enqueue, shape-stable. */
-    [[nodiscard]] expected_t backward_region(gpu_stream_t& stream) noexcept;
+    [[nodiscard]] expected_t backward_region(executor_stream_t& stream) noexcept;
 
     /** The contrastive recipe over this replica's device temperatures and vertex groups. */
     [[nodiscard]] contrastive_recipe_t recipe(trainer_config_t const& config) const noexcept;
@@ -446,7 +446,7 @@ struct base_replica_t {
  *  keyed hash fill of standard deviation @c 1/√fan_in , the blocks' output projections further by
  *  @c 1/√(2 · depth) , and vector scales exactly one. Identical on every replica. */
 [[nodiscard]] expected_t seed_weights(st::basic_vector<differentiable_weights_t> const& weights,
-                                      gpu_stream_t& stream) noexcept;
+                                      executor_stream_t& stream) noexcept;
 
 /**
  *  @brief Upload every matrix of @p weights from @p checkpoint by name, all or nothing, on
@@ -461,13 +461,13 @@ struct base_replica_t {
  */
 [[nodiscard]] expected_t load_weights(checkpoint_to_load_t const& checkpoint,
                                       st::basic_vector<differentiable_weights_t> const& weights,
-                                      gpu_stream_t& stream) noexcept;
+                                      executor_stream_t& stream) noexcept;
 
 /** Snapshot @p weights into @p checkpoint as @c model.* , with @p steps and the geometry a reader
  *  rebuilds the tower from. */
 [[nodiscard]] expected_t save_weights(checkpoint_to_save_t& checkpoint, trainer_config_t const& config,
                                       st::basic_vector<differentiable_weights_t> const& weights, u32_t steps,
-                                      gpu_stream_t& stream) noexcept;
+                                      executor_stream_t& stream) noexcept;
 
 /** Print one line to standard output, newline-terminated. */
 void report_line(sz::string_view_t line) noexcept;

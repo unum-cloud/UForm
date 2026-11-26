@@ -45,7 +45,7 @@
 #include "uform/utilities/vram_nvidia_memory.hpp" // `gpu_arena_t` conventions
 #include "uform/utilities/mesh.hpp" // `mesh_topology_t` — the multimem_domain may span processes; the fabric
                                     //     handles ride the mesh rendezvous
-#include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`, `launch_kernel`, `current_context_t`, the rank-1 aliases
+#include "uform/utilities/vram_nvidia_schedule.cuh" // `executor_stream_t`, `launch_kernel`, `current_context_t`, the rank-1 aliases
 #include "uform/utilities/types.hpp" // `expected`, `expected_t`, `status_t`, `st::basic_vector`, `round_up_to_multiple`
 
 namespace unum::uform::utilities {
@@ -442,14 +442,13 @@ struct multimem_domain_t {
      *      creates and binds.
      *  @param[in] payload_scalars Float32 payload scalars per replica, sized for
      *      every consumer's window.
-     *  @param[in] local_streams One stream per local device; @c local_streams[0] runs
+     *  @param[in] local_streams One stream per local device; @c local_streams.stream(0) runs
      *      the host staging.
      *  @param[in] timeout_seconds Deadline on the rendezvous and on every later barrier's spin.
      */
     [[nodiscard]] static expected<multimem_domain_t> make(mesh_topology_t& topology,
                                                           std::span<i32_t const> local_devices,
-                                                          std::size_t payload_scalars,
-                                                          std::span<gpu_stream_t> local_streams,
+                                                          std::size_t payload_scalars, cuda_executor_t& local_streams,
                                                           f64_t timeout_seconds) noexcept;
 
     /** The reduction tier this domain runs — see @ref multimem_tier_t . */
@@ -538,13 +537,13 @@ struct multimem_domain_t {
     /** Enqueue the domain barrier for @p member_index — one arrival, one acquire-spin against the
      *  member's own round scalar, which the kernel self-advances after the spin. On the peer tier
      *  the arrival walks the members through the symmetric range instead. */
-    [[nodiscard]] expected_t barrier(std::size_t member_index, gpu_stream_t& stream) noexcept;
+    [[nodiscard]] expected_t barrier(std::size_t member_index, executor_stream_t& stream) noexcept;
 
     /** Enqueue member @p member_index 's reduce-scatter shard: @p destination receives the
      *  domain-wide sum of @c [shard_begin,shard_begin+destination.extent(0)) . Call after the
      *  barrier proved every member's payload complete. */
     [[nodiscard]] expected_t reduce_scatter(std::size_t member_index, f32r1_span_t destination, std::size_t shard_begin,
-                                            gpu_stream_t& stream) noexcept;
+                                            executor_stream_t& stream) noexcept;
 
   private:
 

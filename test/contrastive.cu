@@ -20,7 +20,7 @@
 #include <utility> // `std::move`
 #include <vector>  // `std::vector`
 
-#include <cuda.h> // `cuInit`, `cuCtxPushCurrent`, `cuMemcpyHtoD`, `cuMemsetD8` — the raw staging boundary
+#include <cuda.h> // `cuInit`, `cuMemcpyHtoD`, `cuMemsetD8` — the raw staging boundary
 
 #include "uform/train/contrastive_segments.cuh"
 #include "uform/train/contrastive_tokens.cuh" // `contrastive_tokens_t`, `distributed_contrastive_tokens_t`
@@ -263,9 +263,11 @@ static case_result_t test_oracle(std::size_t num_vertices, std::size_t hidden, s
                                  oracle_graph_t graph, bool has_pad, util::f32_t ambient_weight,
                                  contrastive_pair_loss_form_t form, util::f32_t inverse_temperature, util::f32_t bias) {
     if (!cuda_devices_visible_(1)) return case_result_t::skipped(no_gpu_device_k);
-    auto [stream, make_stream_status] = util::gpu_stream_t::make(0);
+    int const stream_devices[] = {static_cast<int>(0)};
+    auto [stream_executor, make_stream_status] = spawn_test_executor(stream_devices);
     if (!expect_true(make_stream_status, "stream: {}", make_stream_status.description_)) return {};
-    cuCtxPushCurrent(stream.context());
+    auto& stream = stream_executor.stream(0);
+    if ((stream).bind().failed()) return {};
     auto [arena, make_arena_status] = util::gpu_arena_t::make(0, 1ull << 30);
     if (!expect_true(make_arena_status, "arena: {}", make_arena_status.description_)) return {};
 
@@ -379,7 +381,7 @@ static case_result_t test_oracle(std::size_t num_vertices, std::size_t hidden, s
                     util::f32r1_span_t {loss_out, 1}, util::bf16r2_span_t {grad, num_vertices, hidden}, stream);
     };
     if (util::expected_t ran = run_once(); !expect_true(ran, "loss enqueue: {}", ran.description_)) return {};
-    cuStreamSynchronize(stream.get());
+    cuStreamSynchronize(util::native_stream(stream));
     util::f32_t device_loss = 0;
     cuMemcpyDtoH(&device_loss, util::device_address(loss_out), sizeof(util::f32_t));
 
@@ -433,7 +435,7 @@ static case_result_t test_oracle(std::size_t num_vertices, std::size_t hidden, s
                                                        {&subgraph, 1}, relations.view(), recipe, stream);
             !expect_true(evaluated, "evaluate over the {} tower: {}", tower_name, evaluated.description_))
             return;
-        cuStreamSynchronize(stream.get());
+        cuStreamSynchronize(util::native_stream(stream));
         std::size_t const columns = std::size_t(retrieval_column_t::count_k);
         std::vector<util::f32_t> table(num_vertices * columns);
         cuMemcpyDtoH(table.data(), util::device_address(loss.retrieval().data()), table.size() * sizeof(util::f32_t));
@@ -533,13 +535,13 @@ static case_result_t test_oracle(std::size_t num_vertices, std::size_t hidden, s
     st::basic_vector<util::f64_t> eager_grad;
     if (!expect_true(!st::failed(eager_grad.assign(host_grad)), "eager gradient staging failed")) return {};
     auto [replay_graph, make_replay_graph_status] = util::gpu_replay_graph_t::make(
-        stream.get(), [&]() noexcept { return run_once(); });
+        util::native_stream(stream), [&]() noexcept { return run_once(); });
     if (!expect_true(make_replay_graph_status, "capture: {}", make_replay_graph_status.description_)) return {};
     for (int replay = 0; replay != 2; ++replay)
-        if (util::expected_t launched = replay_graph.launch(stream.get());
+        if (util::expected_t launched = replay_graph.launch(util::native_stream(stream));
             !expect_true(launched, "replay launch: {}", launched.description_))
             return {};
-    cuStreamSynchronize(stream.get());
+    cuStreamSynchronize(util::native_stream(stream));
     cuMemcpyDtoH(staging.data(), util::device_address(grad), scalars * sizeof(nk_bf16_t));
     if (!expect_true(widen_from_bf16(staging, host_grad), "gradient widening failed")) return {};
     util::f64_t largest = 0.0, worst = 0.0;
@@ -548,16 +550,17 @@ static case_result_t test_oracle(std::size_t num_vertices, std::size_t hidden, s
         worst = fu::max_of(worst, std::fabs(eager_grad[index] - host_grad[index]));
     }
     expect_true(worst <= 1.0e-2 * largest, "captured replays match eager: worst {} over largest {}", worst, largest);
-    cuCtxPopCurrent(nullptr);
     return {};
 }
 
 /** Negative tests: every invalid staging must fail loudly, never fall back. */
 static case_result_t test_negatives() {
     if (!cuda_devices_visible_(1)) return case_result_t::skipped(no_gpu_device_k);
-    auto [stream, make_stream_status] = util::gpu_stream_t::make(0);
+    int const stream_devices[] = {static_cast<int>(0)};
+    auto [stream_executor, make_stream_status] = spawn_test_executor(stream_devices);
     if (!expect_true(make_stream_status, "stream: {}", make_stream_status.description_)) return {};
-    cuCtxPushCurrent(stream.context());
+    auto& stream = stream_executor.stream(0);
+    if ((stream).bind().failed()) return {};
     auto [arena, make_arena_status] = util::gpu_arena_t::make(0, 64ull << 20);
     if (!expect_true(make_arena_status, "arena: {}", make_arena_status.description_)) return {};
     auto [relations, make_relations_status] = contrastive_relations_t::make(arena, 4, 4);
@@ -578,7 +581,6 @@ static case_result_t test_negatives() {
     util::infiniband_coordinates_t coordinates;
     expect_true(!util::infiniband_coordinates_t::from_text("lid banana\n", coordinates),
                 "corrupt coordinates are rejected");
-    cuCtxPopCurrent(nullptr);
     return {};
 }
 
@@ -598,9 +600,11 @@ static case_result_t test_sharded_oracle(oracle_graph_t graph, contrastive_pair_
     constexpr util::u32_t ranks_k = 16, vertices_k = 8, hidden_k = 64, world_k = ranks_k * vertices_k;
     constexpr util::f32_t beta_k = 2.5f, bias_k = -1.5f;
     util::u32_t const prefixes[1] = {hidden_k};
-    auto [stream, make_stream_status] = util::gpu_stream_t::make(0);
+    int const stream_devices[] = {static_cast<int>(0)};
+    auto [stream_executor, make_stream_status] = spawn_test_executor(stream_devices);
     if (!expect_true(make_stream_status, "stream: {}", make_stream_status.description_)) return {};
-    cuCtxPushCurrent(stream.context());
+    auto& stream = stream_executor.stream(0);
+    if ((stream).bind().failed()) return {};
     auto [arena, make_arena_status] = util::gpu_arena_t::make(0, 1ull << 30);
     if (!expect_true(make_arena_status, "arena: {}", make_arena_status.description_)) return {};
 
@@ -657,7 +661,7 @@ static case_result_t test_sharded_oracle(oracle_graph_t graph, contrastive_pair_
                                           world_lengths[owned, nk::slice], world_lengths, world_keys[owned, nk::slice],
                                           world_keys, world_k, first_vertex, 1.0f, stream);
             // The host edges are refilled by the next call, so their copies land first.
-            if (staged && cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
+            if (staged && cuStreamSynchronize(util::native_stream(stream)) != CUDA_SUCCESS)
                 staged = util::expected_t::fail(util::status_code_t::device_k, "relation staging drain failed");
         }
         else
@@ -716,7 +720,7 @@ static case_result_t test_sharded_oracle(oracle_graph_t graph, contrastive_pair_
                        {subgraphs, ranks_k}, rank);
     if (ran) ran = run_call(global_loss, global_relations, global_edges, 0, world_k, {whole, 1}, ranks_k);
     if (!expect_true(ran, "sharded enqueue: {}", ran.description_)) return {};
-    cuStreamSynchronize(stream.get());
+    cuStreamSynchronize(util::native_stream(stream));
     util::f32_t host_outputs[ranks_k + 1][3];
     cuMemcpyDtoH(host_outputs, util::device_address(outputs.data()), sizeof(host_outputs));
     loss_readout_t sharded, global;
@@ -774,7 +778,6 @@ static case_result_t test_sharded_oracle(oracle_graph_t graph, contrastive_pair_
     expect_true(relative(sharded.bias_grad, oracle.bias_grad) < float64_tolerance,
                 "sharded bias gradient {:.9f} vs Float64 {:.9f}: {:.2e}", sharded.bias_grad, oracle.bias_grad,
                 relative(sharded.bias_grad, oracle.bias_grad));
-    cuCtxPopCurrent(nullptr);
     return {};
 }
 
@@ -802,7 +805,8 @@ static case_result_t test_distributed() {
     if (!expect_true(narrow_to_bf16(global_tower, staging), "tower rounding failed")) return {};
     nk::tensor_span<nk_bf16_t, 2> const staging_rows {staging.data(), gpus, scalars_k};
 
-    util::per_gpu_array<util::gpu_stream_t> streams;
+    auto [streams, spawn_status] = spawn_test_executor({devices, gpus});
+    if (!expect_true(spawn_status, "streams: {}", spawn_status.description_)) return {};
     util::per_gpu_array<util::gpu_arena_t> arenas;
     contrastive_relations_t owners[util::max_gpus_per_host_k];
     contrastive_relations_view_t relations[util::max_gpus_per_host_k];
@@ -816,11 +820,7 @@ static case_result_t test_distributed() {
     // The composition-root order: topology → arenas (visibility declared) → streams → the ONE
     // multimem domain → the ONE colocated domain → the consumer, which uses all of it.
     for (std::size_t rank = 0; rank != gpus; ++rank) {
-        auto [stream, make_stream_status] = util::gpu_stream_t::make(devices[rank]);
-        if (!expect_true(make_stream_status && streams.push_back(std::move(stream)) == util::status_code_t::success_k,
-                         "distributed stream make"))
-            return {};
-        cuCtxPushCurrent(streams[rank].context());
+        if ((streams.stream(rank)).bind().failed()) return {};
         auto [arena, make_arena_status] = util::gpu_arena_t::make(devices[rank], 1ull << 30, {devices, gpus});
         if (!expect_true(make_arena_status && arenas.push_back(std::move(arena)) == util::status_code_t::success_k,
                          "distributed arena make"))
@@ -834,10 +834,9 @@ static case_result_t test_distributed() {
         if (!expect_true(status, "distributed relations make: {}", status.description_)) return {};
         owners[rank] = std::move(owner);
         util::expected_t staged = owners[rank].upload_self_edges(vertices_k, {}, {}, rank * std::size_t(vertices_k),
-                                                                 1.0f, streams[rank]);
+                                                                 1.0f, streams.stream(rank));
         if (!expect_true(staged, "distributed relations: {}", staged.description_)) return {};
         relations[rank] = owners[rank].view();
-        cuCtxPopCurrent(nullptr);
     }
     // A one-process world: the whole box is one host_domain and one multimem_domain (D=1), so the
     // colocated domain is the trivial identity and no exchange happens.
@@ -861,12 +860,11 @@ static case_result_t test_distributed() {
     util::expected_t ran = distributed(contrastive_recipe_t {}, streams);
     if (!expect_true(ran, "distributed run: {}", ran.description_)) return {};
     for (std::size_t rank = 0; rank != gpus; ++rank) {
-        cuCtxPushCurrent(streams[rank].context());
-        cuStreamSynchronize(streams[rank].get());
-        cuCtxPopCurrent(nullptr);
+        if ((streams.stream(rank)).bind().failed()) return {};
+        cuStreamSynchronize(util::native_stream(streams.stream(rank)));
     }
     util::f64_t distributed_loss = 0.0;
-    cuCtxPushCurrent(streams[0].context());
+    if ((streams.stream(0)).bind().failed()) return {};
     util::f32_t summands[util::max_gpus_per_host_k] = {};
     cuMemcpyDtoH(summands, util::device_address(distributed.loss_outs().data()), gpus * sizeof(util::f32_t));
     for (std::size_t rank = 0; rank != gpus; ++rank) {
@@ -874,7 +872,6 @@ static case_result_t test_distributed() {
         cuMemcpyDtoH(staging_rows[rank, nk::slice].data(), util::device_address(grads[rank].data()),
                      scalars_k * sizeof(nk_bf16_t));
     }
-    cuCtxPopCurrent(nullptr);
     if (!expect_true(widen_from_bf16(staging, distributed_grad), "gradient widening failed")) return {};
 
     // The Float64 oracle over the SAME global grid — the sum of rank summands must match it.
@@ -938,7 +935,6 @@ static case_result_t test_cross_domain() {
     if (!expect_true(narrow_to_bf16(global_tower, staging), "tower rounding failed")) return {};
     nk::tensor_span<nk_bf16_t, 2> const staging_rows {staging.data(), world_gpus, scalars_k};
 
-    util::per_gpu_array<util::gpu_stream_t> streams;
     util::per_gpu_array<util::gpu_arena_t> arenas;
     std::vector<contrastive_relations_t> owners(gpus);
     std::vector<contrastive_relations_view_t> relations(gpus);
@@ -951,12 +947,10 @@ static case_result_t test_cross_domain() {
     config.gpu_subgraphs_per_step = world_gpus;
     std::vector<util::i32_t> devices(gpus);
     for (util::u32_t rank = 0; rank != gpus; ++rank) devices[rank] = util::i32_t(rank);
+    auto [streams, spawn_status] = spawn_test_executor({devices.data(), gpus});
+    if (!expect_true(spawn_status, "streams: {}", spawn_status.description_)) return {};
     for (util::u32_t rank = 0; rank != gpus; ++rank) {
-        auto [stream, make_stream_status] = util::gpu_stream_t::make(util::i32_t(rank));
-        if (!expect_true(make_stream_status && streams.push_back(std::move(stream)) == util::status_code_t::success_k,
-                         "cross-domain stream make on GPU {}", rank))
-            return {};
-        cuCtxPushCurrent(streams[rank].context());
+        if ((streams.stream(rank)).bind().failed()) return {};
         auto [arena, make_arena_status] = util::gpu_arena_t::make(util::i32_t(rank), 1ull << 30,
                                                                   {devices.data(), gpus});
         if (!expect_true(make_arena_status && arenas.push_back(std::move(arena)) == util::status_code_t::success_k,
@@ -973,10 +967,9 @@ static case_result_t test_cross_domain() {
         if (!expect_true(status, "cross-domain relations make: {}", status.description_)) return {};
         owners[rank] = std::move(owner);
         util::expected_t staged = owners[rank].upload_self_edges(
-            vertices_k, {}, {}, global_rank * std::size_t(vertices_k), 1.0f, streams[rank]);
+            vertices_k, {}, {}, global_rank * std::size_t(vertices_k), 1.0f, streams.stream(rank));
         if (!expect_true(staged, "cross-domain relations: {}", staged.description_)) return {};
         relations[rank] = owners[rank].view();
-        cuCtxPopCurrent(nullptr);
     }
     // The composition roots, in main-order: the ONE multimem domain, the ONE colocated domain.
     auto [multimem, make_multimem_status] = util::multimem_domain_t::make(
@@ -1000,9 +993,8 @@ static case_result_t test_cross_domain() {
     if (!expect_true(ran, "cross-domain run over {} domains on {}: {}", world_domains, tier, ran.description_))
         return {};
     for (util::u32_t rank = 0; rank != gpus; ++rank) {
-        cuCtxPushCurrent(streams[rank].context());
-        CUresult const synchronized = cuStreamSynchronize(streams[rank].get());
-        cuCtxPopCurrent(nullptr);
+        if ((streams.stream(rank)).bind().failed()) return {};
+        CUresult const synchronized = cuStreamSynchronize(util::native_stream(streams.stream(rank)));
         if (!expect_true(synchronized == CUDA_SUCCESS, "cross-domain sync on GPU {}: result {}", rank,
                          static_cast<int>(synchronized)))
             return {};
@@ -1012,10 +1004,9 @@ static case_result_t test_cross_domain() {
     // the global oracle.
     util::f64_t domain_loss = 0.0;
     {
-        cuCtxPushCurrent(streams[0].context());
+        if ((streams.stream(0)).bind().failed()) return {};
         std::vector<util::f32_t> summands(gpus);
         cuMemcpyDtoH(summands.data(), util::device_address(distributed.loss_outs().data()), gpus * sizeof(util::f32_t));
-        cuCtxPopCurrent(nullptr);
         for (util::f32_t const summand : summands) domain_loss += summand;
     }
     sz::string_t loss_text;
@@ -1044,9 +1035,8 @@ static case_result_t test_cross_domain() {
     // Finite-difference one locally-owned channel against the fully-reduced force.
     std::size_t const probe_index = (std::size_t(domain) * gpus + 1) * scalars_k + 321;
     std::vector<nk_bf16_t> local_staging(scalars_k);
-    cuCtxPushCurrent(streams[1 % gpus].context());
+    if ((streams.stream(1 % gpus)).bind().failed()) return {};
     cuMemcpyDtoH(local_staging.data(), util::device_address(grads[1 % gpus].data()), scalars_k * sizeof(nk_bf16_t));
-    cuCtxPopCurrent(nullptr);
     if (!expect_true(widen_from_bf16(local_staging, local_grad), "gradient widening failed")) return {};
     util::f64_t const step_size = 1.0e-2, original = global_tower[probe_index];
     global_tower[probe_index] = original + step_size;
@@ -1077,17 +1067,18 @@ static case_result_t test_pool_parity() {
     if (!cuda_devices_visible_(1)) return case_result_t::skipped(no_gpu_device_k);
     constexpr util::u32_t rows_k = 2, segments_k = 4, columns_k = 8, hidden_k = 256, tokens_k = rows_k * columns_k;
     constexpr util::u32_t heads_k = hidden_k / transformer_head_dim_k;
-    auto [stream, make_stream_status] = util::gpu_stream_t::make(0);
+    int const stream_devices[] = {static_cast<int>(0)};
+    auto [stream_executor, make_stream_status] = spawn_test_executor(stream_devices);
     if (!expect_true(make_stream_status, "pool-parity stream make: {}", make_stream_status.description_)) return {};
+    auto& stream = stream_executor.stream(0);
     nk_capability_t capabilities = 0;
     if (!expect_true(nk_capabilities_enabled_cuda(0, &capabilities) == nk_success_k, "capability query failed"))
         return {};
     util::gpu_numerics_t const numerics = ut::gpu_numerics_of(capabilities);
-    cuCtxPushCurrent(stream.context());
+    if ((stream).bind().failed()) return {};
     auto [arena, make_arena_status] = util::gpu_arena_t::make(0, 1ull << 30, {});
     if (!make_arena_status) {
         expect_true(false, "pool-parity bring-up: {}", make_arena_status.description_);
-        cuCtxPopCurrent(nullptr);
         return {};
     }
 
@@ -1103,7 +1094,6 @@ static case_result_t test_pool_parity() {
     auto [tower, make_tower_status] = encoder_tower_bf16_t::make(arena, config, shape, numerics);
     if (!make_tower_status) {
         expect_true(false, "pool-parity tower make: {}", make_tower_status.description_);
-        cuCtxPopCurrent(nullptr);
         return {};
     }
 
@@ -1112,21 +1102,18 @@ static case_result_t test_pool_parity() {
     st::basic_vector<util::differentiable_weights_t> weights;
     if (!tower.fill(weights)) {
         expect_true(false, "pool-parity registration");
-        cuCtxPopCurrent(nullptr);
         return {};
     }
     st::basic_vector<st::basic_vector<util::f64_t>> host_weights;
     std::vector<nk_bf16_t> staging;
     if (st::failed(host_weights.resize(weights.size()))) {
         expect_true(false, "pool-parity weight staging");
-        cuCtxPopCurrent(nullptr);
         return {};
     }
     for (std::size_t matrix = 0; matrix != weights.size(); ++matrix) {
         std::size_t const scalars = weights[matrix].weights.numel();
         if (st::failed(host_weights[matrix].resize(scalars))) {
             expect_true(false, "pool-parity weight staging");
-            cuCtxPopCurrent(nullptr);
             return {};
         }
         staging.resize(scalars);
@@ -1134,7 +1121,6 @@ static case_result_t test_pool_parity() {
             host_weights[matrix][index] = hash_fill(index, matrix + 101);
         if (!narrow_to_bf16(host_weights[matrix], staging)) {
             expect_true(false, "pool-parity weight rounding");
-            cuCtxPopCurrent(nullptr);
             return {};
         }
         cuMemcpyHtoD(util::device_address(weights[matrix].weights.data()), staging.data(), scalars * sizeof(nk_bf16_t));
@@ -1146,7 +1132,6 @@ static case_result_t test_pool_parity() {
     auto [batch, make_batch_status] = multimodal_batch_on_gpu_t::make(util::gpu_arena_alloc<util::b8_t> {arena}, shape);
     if (!make_batch_status) {
         expect_true(false, "pool-parity batch make: {}", make_batch_status.description_);
-        cuCtxPopCurrent(nullptr);
         return {};
     }
     util::u32_t const host_offsets[segments_k + 1] = {0, 8, 13, 15, 15};
@@ -1169,7 +1154,6 @@ static case_result_t test_pool_parity() {
         {segments_k, hidden_k}, util::gpu_arena_alloc<util::bf16_t> {arena});
     if (!vertices_tensor || !vertices_grad_tensor) {
         expect_true(false, "pool-parity vertices alloc");
-        cuCtxPopCurrent(nullptr);
         return {};
     }
     cuMemsetD8(util::device_address(vertices_tensor.data()), 0,
@@ -1179,11 +1163,8 @@ static case_result_t test_pool_parity() {
     util::expected_t ran = tower.pack_weights(stream);
     if (ran) ran = tower.forward(batch, vertices_tensor.span(), stream);
     expect_true(static_cast<bool>(ran), "pool-parity forward: {}", ran.description_);
-    if (!ran) {
-        cuCtxPopCurrent(nullptr);
-        return {};
-    }
-    cuStreamSynchronize(stream.get());
+    if (!ran) { return {}; }
+    cuStreamSynchronize(util::native_stream(stream));
 
     // The tower's states and vertices, widened once, beside the host replica's own rows.
     st::basic_vector<util::f64_t> host_states, device_vertices, host_pooled, host_force, host_states_grad,
@@ -1196,7 +1177,6 @@ static case_result_t test_pool_parity() {
         st::failed(host_query_grad.resize(hidden_k)) ||
         st::failed(host_vertices.resize(std::size_t(segments_k) * hidden_k))) {
         expect_true(false, "pool-parity host staging");
-        cuCtxPopCurrent(nullptr);
         return {};
     }
     staging.resize(host_states.size());
@@ -1224,7 +1204,6 @@ static case_result_t test_pool_parity() {
     widened = widened && narrow_to_bf16(host_force, host_force_staging);
     if (!widened) {
         expect_true(false, "pool-parity staging conversions");
-        cuCtxPopCurrent(nullptr);
         return {};
     }
     f64r3_view_t const host_force_planes {host_force.data(), {segments_k, heads_k, transformer_head_dim_k}};
@@ -1299,7 +1278,7 @@ static case_result_t test_pool_parity() {
     util::expected_t propagated = tower.backward(vertices_grad_tensor.view(), util::bf16r2_view_t {}, batch, stream);
     expect_true(static_cast<bool>(propagated), "pool-parity backward: {}", propagated.description_);
     if (propagated) {
-        cuStreamSynchronize(stream.get());
+        cuStreamSynchronize(util::native_stream(stream));
         bool all_finite = true;
         double query_grad_energy = 0.0;
         st::basic_vector<util::f64_t> gradient;
@@ -1329,7 +1308,6 @@ static case_result_t test_pool_parity() {
         {hidden_k}, util::gpu_arena_alloc<util::bf16_t> {arena});
     if (!make_pool_status || !states_grad || !value_grad || !query_grad) {
         expect_true(false, "pool-parity pool make: {}", make_pool_status.description_);
-        cuCtxPopCurrent(nullptr);
         return {};
     }
     util::bf16r1_view_t const query {weights[query_index].weights.data(), hidden_k};
@@ -1340,13 +1318,12 @@ static case_result_t test_pool_parity() {
                                query_grad.span(), stream);
     expect_true(static_cast<bool>(pooled), "pool-parity pool backward: {}", pooled.description_);
     if (pooled) {
-        cuStreamSynchronize(stream.get());
+        cuStreamSynchronize(util::native_stream(stream));
         std::vector<util::f32_t> device_states_grad(host_states_grad.size());
         cuMemcpyDtoH(device_states_grad.data(), util::device_address(states_grad.data()),
                      device_states_grad.size() * sizeof(util::f32_t));
         st::basic_vector<util::f64_t> device_query_grad;
         if (!expect_true(!st::failed(device_query_grad.resize(hidden_k)), "pool-parity query gradient staging")) {
-            cuCtxPopCurrent(nullptr);
             return {};
         }
         staging.resize(hidden_k);
@@ -1398,17 +1375,15 @@ static case_result_t test_pool_parity() {
             {segments_k, hidden_k}, util::gpu_arena_alloc<util::bf16_t> {arena});
         if (!twin_vertices) {
             expect_true(false, "twin vertices alloc");
-            cuCtxPopCurrent(nullptr);
             return {};
         }
         util::expected_t twin_ran = twin.forward(batch, twin_vertices.span(), stream);
         expect_true(static_cast<bool>(twin_ran), "twin forward: {}", twin_ran.description_);
         if (twin_ran) {
-            cuStreamSynchronize(stream.get());
+            cuStreamSynchronize(util::native_stream(stream));
             st::basic_vector<util::f64_t> device_twin_vertices;
             if (!expect_true(!st::failed(device_twin_vertices.resize(std::size_t(segments_k) * hidden_k)),
                              "twin vertices staging")) {
-                cuCtxPopCurrent(nullptr);
                 return {};
             }
             staging.resize(device_twin_vertices.size());
@@ -1432,7 +1407,6 @@ static case_result_t test_pool_parity() {
                         "twin vertices stay on the BFloat16 tower's direction: worst cosine {:.4f}", worst_cosine);
         }
     }
-    cuCtxPopCurrent(nullptr);
     return {};
 }
 
@@ -1567,7 +1541,7 @@ struct device_tokens_inputs_t {
  *  matching relation rows of @p host into @p arena . */
 [[nodiscard]] static util::expected<device_tokens_inputs_t> stage_tokens_inputs(
     util::gpu_arena_t& arena, std::vector<nk_bf16_t> const& staging, std::size_t first, std::size_t copies,
-    host_relations_t const& host, std::size_t world_segments, util::gpu_stream_t& stream) {
+    host_relations_t const& host, std::size_t world_segments, util::executor_stream_t& stream) {
     using layout_t = host_tokens_layout_t;
     using result_t = util::expected<device_tokens_inputs_t>;
     std::size_t const segments = copies * layout_t::segments_k, rows = copies * layout_t::head_rows_k;
@@ -1652,9 +1626,11 @@ struct device_tokens_inputs_t {
 static case_result_t test_tokens_oracle() {
     using layout_t = host_tokens_layout_t;
     if (!cuda_devices_visible_(1)) return case_result_t::skipped(no_gpu_device_k);
-    auto [stream, make_stream_status] = util::gpu_stream_t::make(0);
+    int const stream_devices[] = {static_cast<int>(0)};
+    auto [stream_executor, make_stream_status] = spawn_test_executor(stream_devices);
     if (!expect_true(make_stream_status, "stream: {}", make_stream_status.description_)) return {};
-    cuCtxPushCurrent(stream.context());
+    auto& stream = stream_executor.stream(0);
+    if ((stream).bind().failed()) return {};
     auto [arena, make_arena_status] = util::gpu_arena_t::make(0, 1ull << 30);
     if (!expect_true(make_arena_status, "arena: {}", make_arena_status.description_)) return {};
 
@@ -1683,7 +1659,7 @@ static case_result_t test_tokens_oracle() {
     util::expected_t ran = loss(inputs.token_vectors, inputs.token_offsets, inputs.batch, inputs.relations.view(),
                                 recipe, inputs.loss_out, inputs.token_vectors_grad, stream);
     if (!expect_true(ran, "loss run: {}", ran.description_)) return {};
-    cuStreamSynchronize(stream.get());
+    cuStreamSynchronize(util::native_stream(stream));
     util::f32_t device_loss = 0;
     cuMemcpyDtoH(&device_loss, util::device_address(inputs.loss_out.data()), sizeof(util::f32_t));
     util::f64_t const oracle = host_tokens_loss(vectors, 1, host, beta);
@@ -1709,7 +1685,6 @@ static case_result_t test_tokens_oracle() {
             expect_true(std::fabs(numeric - gradient[index]) <= 2.0e-2 * fu::max_of(std::fabs(numeric), 0.02),
                         "token [{},{}] force: numeric {:.5f} analytic {:.5f}", row, channel, numeric, gradient[index]);
         }
-    cuCtxPopCurrent(nullptr);
     return {};
 }
 
@@ -1746,9 +1721,11 @@ static case_result_t test_tokens_distributed() {
     // The single-GPU reference over the whole world on device 0.
     util::f32_t reference_loss = 0;
     {
-        auto [stream, make_stream_status] = util::gpu_stream_t::make(0);
+        int const stream_devices[] = {static_cast<int>(0)};
+        auto [stream_executor, make_stream_status] = spawn_test_executor(stream_devices);
         if (!expect_true(make_stream_status, "stream: {}", make_stream_status.description_)) return {};
-        cuCtxPushCurrent(stream.context());
+        auto& stream = stream_executor.stream(0);
+        if ((stream).bind().failed()) return {};
         auto [arena, make_arena_status] = util::gpu_arena_t::make(0, 1ull << 30);
         if (!expect_true(make_arena_status, "arena: {}", make_arena_status.description_)) return {};
         auto [inputs, stage_status] = stage_tokens_inputs(arena, staging, 0, gpus, host, world_segments, stream);
@@ -1760,35 +1737,29 @@ static case_result_t test_tokens_distributed() {
                                                        inputs.token_vectors_grad, stream)
                                                 : util::expected_t::fail(std::move(make_loss_status));
         if (!expect_true(ran, "reference run: {}", ran.description_)) return {};
-        cuStreamSynchronize(stream.get());
+        cuStreamSynchronize(util::native_stream(stream));
         cuMemcpyDtoH(&reference_loss, util::device_address(inputs.loss_out.data()), sizeof(util::f32_t));
         std::vector<nk_bf16_t> narrowed(vectors.size());
         cuMemcpyDtoH(narrowed.data(), util::device_address(inputs.token_vectors_grad.data()),
                      narrowed.size() * sizeof(nk_bf16_t));
         if (!expect_true(widen_from_bf16(narrowed, reference_gradient), "gradient widening failed")) return {};
-        cuCtxPopCurrent(nullptr);
     }
 
-    util::per_gpu_array<util::gpu_stream_t> streams;
+    auto [streams, spawn_status] = spawn_test_executor({devices, gpus});
+    if (!expect_true(spawn_status, "streams: {}", spawn_status.description_)) return {};
     util::per_gpu_array<util::gpu_arena_t> arenas;
     device_tokens_inputs_t inputs[util::max_gpus_per_host_k];
     for (std::size_t rank = 0; rank != gpus; ++rank) {
-        auto [rank_stream, make_rank_stream_status] = util::gpu_stream_t::make(devices[rank]);
-        if (!expect_true(
-                make_rank_stream_status && streams.push_back(std::move(rank_stream)) == util::status_code_t::success_k,
-                "distributed stream make"))
-            return {};
-        cuCtxPushCurrent(streams[rank].context());
+        if ((streams.stream(rank)).bind().failed()) return {};
         auto [rank_arena, make_rank_arena_status] = util::gpu_arena_t::make(devices[rank], 1ull << 30, {devices, gpus});
         if (!expect_true(
                 make_rank_arena_status && arenas.push_back(std::move(rank_arena)) == util::status_code_t::success_k,
                 "distributed arena make"))
             return {};
         auto [rank_inputs, status] = stage_tokens_inputs(arenas[rank], staging, rank, 1, host, world_segments,
-                                                         streams[rank]);
+                                                         streams.stream(rank));
         if (!expect_true(status, "rank {} inputs: {}", rank, status.description_)) return {};
         inputs[rank] = std::move(rank_inputs);
-        cuCtxPopCurrent(nullptr);
     }
     contrastive_tokens_config_t const config = tokens_config_(1, gpus);
     auto [topology, bootstrap_status] = util::mesh_topology_t::bootstrap(
@@ -1811,7 +1782,7 @@ static case_result_t test_tokens_distributed() {
                              inputs[rank].relations.view(),
                              recipe,
                              inputs[rank].token_vectors_grad};
-    if (util::expected_t ran = distributed({step_inputs, gpus}, streams.span());
+    if (util::expected_t ran = distributed({step_inputs, gpus}, streams);
         !expect_true(ran, "distributed run: {}", ran.description_))
         return {};
     std::size_t const live_scalars = layout_t::live_rows() * layout_t::width_k;
@@ -1820,13 +1791,12 @@ static case_result_t test_tokens_distributed() {
     util::f32_t world_loss = 0;
     std::vector<nk_bf16_t> narrowed(rank_scalars);
     for (std::size_t rank = 0; rank != gpus; ++rank) {
-        cuCtxPushCurrent(streams[rank].context());
-        cuStreamSynchronize(streams[rank].get());
+        if ((streams.stream(rank)).bind().failed()) return {};
+        cuStreamSynchronize(util::native_stream(streams.stream(rank)));
         if (rank == 0)
             cuMemcpyDtoH(&world_loss, util::device_address(distributed.world_loss(0).data()), sizeof(util::f32_t));
         cuMemcpyDtoH(narrowed.data(), util::device_address(inputs[rank].token_vectors_grad.data()),
                      rank_scalars * sizeof(nk_bf16_t));
-        cuCtxPopCurrent(nullptr);
         if (!expect_true(widen_from_bf16(narrowed, widened), "gradient widening failed")) return {};
         for (std::size_t index = 0; index != live_scalars; ++index) {
             util::f64_t const expected = reference_rows[rank, index];
@@ -1893,9 +1863,11 @@ static case_result_t test_tokens_cross_domain() {
     // The single-GPU reference over the whole world on this process's first device.
     util::f32_t reference_loss = 0;
     {
-        auto [stream, make_stream_status] = util::gpu_stream_t::make(0);
+        int const stream_devices[] = {static_cast<int>(0)};
+        auto [stream_executor, make_stream_status] = spawn_test_executor(stream_devices);
         if (!expect_true(make_stream_status, "stream: {}", make_stream_status.description_)) return {};
-        cuCtxPushCurrent(stream.context());
+        auto& stream = stream_executor.stream(0);
+        if ((stream).bind().failed()) return {};
         auto [arena, make_arena_status] = util::gpu_arena_t::make(0, 1ull << 30);
         if (!expect_true(make_arena_status, "arena: {}", make_arena_status.description_)) return {};
         auto [inputs, stage_status] = stage_tokens_inputs(arena, staging, 0, world_gpus, host, world_segments, stream);
@@ -1907,35 +1879,29 @@ static case_result_t test_tokens_cross_domain() {
                                                        inputs.token_vectors_grad, stream)
                                                 : util::expected_t::fail(std::move(make_loss_status));
         if (!expect_true(ran, "reference run: {}", ran.description_)) return {};
-        cuStreamSynchronize(stream.get());
+        cuStreamSynchronize(util::native_stream(stream));
         cuMemcpyDtoH(&reference_loss, util::device_address(inputs.loss_out.data()), sizeof(util::f32_t));
         std::vector<nk_bf16_t> narrowed(reference_gradient.size());
         cuMemcpyDtoH(narrowed.data(), util::device_address(inputs.token_vectors_grad.data()),
                      narrowed.size() * sizeof(nk_bf16_t));
         if (!expect_true(widen_from_bf16(narrowed, reference_gradient), "gradient widening failed")) return {};
-        cuCtxPopCurrent(nullptr);
     }
 
-    util::per_gpu_array<util::gpu_stream_t> streams;
+    auto [streams, spawn_status] = spawn_test_executor({devices, gpus});
+    if (!expect_true(spawn_status, "streams: {}", spawn_status.description_)) return {};
     util::per_gpu_array<util::gpu_arena_t> arenas;
     device_tokens_inputs_t inputs[util::max_gpus_per_host_k];
     for (std::size_t rank = 0; rank != gpus; ++rank) {
-        auto [rank_stream, make_rank_stream_status] = util::gpu_stream_t::make(devices[rank]);
-        if (!expect_true(
-                make_rank_stream_status && streams.push_back(std::move(rank_stream)) == util::status_code_t::success_k,
-                "cross-domain stream make on GPU {}", rank))
-            return {};
-        cuCtxPushCurrent(streams[rank].context());
+        if ((streams.stream(rank)).bind().failed()) return {};
         auto [rank_arena, make_rank_arena_status] = util::gpu_arena_t::make(devices[rank], 1ull << 30, {devices, gpus});
         if (!expect_true(
                 make_rank_arena_status && arenas.push_back(std::move(rank_arena)) == util::status_code_t::success_k,
                 "cross-domain arena make on GPU {}", rank))
             return {};
         auto [rank_inputs, status] = stage_tokens_inputs(arenas[rank], staging, home_domain * gpus + rank, 1, host,
-                                                         world_segments, streams[rank]);
+                                                         world_segments, streams.stream(rank));
         if (!expect_true(status, "rank {} inputs: {}", rank, status.description_)) return {};
         inputs[rank] = std::move(rank_inputs);
-        cuCtxPopCurrent(nullptr);
     }
     contrastive_tokens_config_t const config = tokens_config_(1, world_gpus);
     auto [multimem, make_multimem_status] = util::multimem_domain_t::make(
@@ -1960,20 +1926,19 @@ static case_result_t test_tokens_cross_domain() {
     f64r2_view_t const reference_rows {reference_gradient.data(), world_gpus, live_scalars};
     std::vector<nk_bf16_t> narrowed(rank_scalars);
     for (util::u32_t step = 0; step != 2u; ++step) {
-        if (util::expected_t ran = distributed({step_inputs, gpus}, streams.span());
+        if (util::expected_t ran = distributed({step_inputs, gpus}, streams);
             !expect_true(ran, "cross-domain step {}: {}", step, ran.description_))
             return {};
         if (step == 0u) continue;
         util::f64_t worst = 0, largest = 0;
         util::f32_t world_loss = 0;
         for (std::size_t rank = 0; rank != gpus; ++rank) {
-            cuCtxPushCurrent(streams[rank].context());
-            CUresult const synchronized = cuStreamSynchronize(streams[rank].get());
+            if ((streams.stream(rank)).bind().failed()) return {};
+            CUresult const synchronized = cuStreamSynchronize(util::native_stream(streams.stream(rank)));
             if (rank == 0)
                 cuMemcpyDtoH(&world_loss, util::device_address(distributed.world_loss(0).data()), sizeof(util::f32_t));
             cuMemcpyDtoH(narrowed.data(), util::device_address(inputs[rank].token_vectors_grad.data()),
                          rank_scalars * sizeof(nk_bf16_t));
-            cuCtxPopCurrent(nullptr);
             if (!expect_true(synchronized == CUDA_SUCCESS, "cross-domain sync on GPU {}: result {}", rank,
                              static_cast<int>(synchronized)))
                 return {};
@@ -2031,8 +1996,10 @@ static case_result_t test_items_sides() {
     config.objective = ut::objective_t::contrastive_k;
     config.late_interaction.weight = 1.0f;
     config.late_interaction.width = 32;
+    auto [streams, spawn_status] = spawn_test_executor(devices);
+    if (!expect_true(spawn_status, "streams: {}", spawn_status.description_)) return {};
     ut::trainer_t trainer;
-    if (util::expected_t built = ut::trainer_t::make(trainer, mesh, config, devices,
+    if (util::expected_t built = ut::trainer_t::make(trainer, mesh, streams, config, devices,
                                                      ut::gpu_numerics_of(options.capabilities));
         !expect_true(built, "trainer: {}", built.description_))
         return {};

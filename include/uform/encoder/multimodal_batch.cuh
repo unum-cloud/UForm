@@ -19,7 +19,7 @@
 #include "uform/utilities/infiniband_collectives.cuh" // `colocated_domain_t` — the cross-host_domain queues
 #include "uform/utilities/multimem_collectives.cuh"   // `multimem_domain_t` — the barrier the exchange brackets
 #include "uform/encoder/multimodal_batch.hpp"         // the shape, the batch template, the views, `modality_t`
-#include "uform/utilities/vram_nvidia_schedule.cuh"   // `gpu_stream_t` — the mixer's enqueue surface
+#include "uform/utilities/vram_nvidia_schedule.cuh"   // `executor_stream_t` — the mixer's enqueue surface
 
 namespace unum::uform::encoder {
 using namespace unum::uform::utilities;
@@ -57,11 +57,11 @@ using multimodal_batch_on_cpu_t = multimodal_batch<pinned_alloc_t>;
 [[nodiscard]] expected_t fill_coords(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
                                      modality_view_t segment_modality, image_shape_view_t image_shapes,
                                      video_shape_view_t video_shapes, u32_t tube_frames, u32_t frame_stride,
-                                     i16r2_span_t coords, gpu_stream_t& stream) noexcept;
+                                     i16r2_span_t coords, executor_stream_t& stream) noexcept;
 
 /** Mark every segment of @p batch as making no choice, @c byte_pad_k across its choice rows and
  *  zero targets, for a source that names none; a batch without choice columns stays as it is. */
-[[nodiscard]] expected_t pad_choices(multimodal_batch_on_gpu_t& batch, gpu_stream_t& stream) noexcept;
+[[nodiscard]] expected_t pad_choices(multimodal_batch_on_gpu_t& batch, executor_stream_t& stream) noexcept;
 
 /**
  *  @brief Shuffles the loaded batches between the GPUs of one multimem_domain — and, once wired,
@@ -107,7 +107,7 @@ struct multimodal_batch_mixer_t {
      */
     [[nodiscard]] static expected<multimodal_batch_mixer_t> make(
         multimem_domain_t& multimem, colocated_domain_t& colocated, std::span<gpu_arena_t> arenas,
-        multimodal_batch_shape_t shape, u64_t seed, std::span<gpu_stream_t> streams,
+        multimodal_batch_shape_t shape, u64_t seed, cuda_executor_t& streams,
         f64_t timeout_seconds = peer_timeout_seconds_k) noexcept;
 
     /**
@@ -129,12 +129,11 @@ struct multimodal_batch_mixer_t {
      */
     [[nodiscard]] expected_t operator()(std::size_t local, data_epoch_t data_epoch,
                                         std::span<multimodal_batch_on_gpu_t const> loaded,
-                                        multimodal_batch_on_gpu_t& mixed, gpu_stream_t& stream) noexcept;
+                                        multimodal_batch_on_gpu_t& mixed, executor_stream_t& stream) noexcept;
 
     /** The eager convenience: every member's slice in order over the per-GPU streams. */
     [[nodiscard]] expected_t operator()(data_epoch_t data_epoch, std::span<multimodal_batch_on_gpu_t const> loaded,
-                                        std::span<multimodal_batch_on_gpu_t> mixed,
-                                        std::span<gpu_stream_t> streams) noexcept;
+                                        std::span<multimodal_batch_on_gpu_t> mixed, cuda_executor_t& streams) noexcept;
 
     /** Local member @p local 's @b [world_gpus,max_segments_per_gpu] mixed lengths of every world
      *  GPU's last mix, zero for a PAD segment; flattened, the global vertex indexes them as the

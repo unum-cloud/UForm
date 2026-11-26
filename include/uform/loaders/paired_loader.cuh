@@ -113,7 +113,7 @@ struct paired_loader_parquet_t {
      *  @par Statuses:
      *  - @c status_code_t::invalid_argument_k The loader's media are not images.
      */
-    [[nodiscard]] expected_t fill(gpu_stream_t& gpu_stream, nvjpeg_session_t& decoder, u32_t gpu_rank,
+    [[nodiscard]] expected_t fill(executor_stream_t& gpu_stream, nvjpeg_session_t& decoder, u32_t gpu_rank,
                                   u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept;
 
     /**
@@ -127,7 +127,7 @@ struct paired_loader_parquet_t {
      *  @par Statuses:
      *  - @c status_code_t::invalid_argument_k The loader's media are not videos.
      */
-    [[nodiscard]] expected_t fill(gpu_stream_t& gpu_stream, nvdec_session_t& decoder, u32_t gpu_rank,
+    [[nodiscard]] expected_t fill(executor_stream_t& gpu_stream, nvdec_session_t& decoder, u32_t gpu_rank,
                                   u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept;
 
     /**
@@ -141,7 +141,7 @@ struct paired_loader_parquet_t {
      *  @par Statuses:
      *  - @c status_code_t::invalid_argument_k The loader's positives are images or videos.
      */
-    [[nodiscard]] expected_t fill(gpu_stream_t& gpu_stream, u32_t gpu_rank, u32_t training_step,
+    [[nodiscard]] expected_t fill(executor_stream_t& gpu_stream, u32_t gpu_rank, u32_t training_step,
                                   std::span<multimodal_batch_on_gpu_t> batches) noexcept;
 
     /** The modality of the loader's positives. */
@@ -168,7 +168,7 @@ struct paired_loader_parquet_t {
     /** Read and draw the pairs, decode the positives and negatives through @p decode , pack the
      *  anchors, and pair the segments. */
     template <typename decode_type_>
-    [[nodiscard]] expected_t fill_(gpu_stream_t& gpu_stream, u32_t gpu_rank, u32_t training_step,
+    [[nodiscard]] expected_t fill_(executor_stream_t& gpu_stream, u32_t gpu_rank, u32_t training_step,
                                    std::span<multimodal_batch_on_gpu_t> batches, decode_type_&& decode) noexcept;
 
     /** The configured KvikIO / GDS storage session the reader needs, owned by the composition

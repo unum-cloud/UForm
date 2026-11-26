@@ -67,7 +67,7 @@ struct video_decode_context_t {
     pixel_frames_span_t frames {};
 
     /** The caller's stream every display-callback conversion enqueues on (the engines own none). */
-    util::gpu_stream_t* stream = nullptr;
+    util::executor_stream_t* stream = nullptr;
 
     /** The frame budget this job keeps — the display callback stops once this many are decoded. */
     std::size_t frames_requested = 0;
@@ -846,12 +846,10 @@ struct cursor_plan_t {
  *  per-job (tg,pr,pc) descriptor to the batch's device spans, then zero the whole tube grid so PAD
  *  cells and every failed/short clip stay PAD-zero. The tile and NV12 → RGB kernels write on the
  *  same stream, so this memset is their fence — no event. */
-[[nodiscard]] static util::expected_t upload_geometry_(cursor_plan_t const& plan, pixel_tubes_span_t videos,
-                                                       video_shape_span_t video_shapes,
-                                                       util::u32r1_span_t segment_offsets,
-                                                       util::u32r1_span_t segment_lengths,
-                                                       modality_span_t segment_modality, std::size_t job_count,
-                                                       std::size_t max_segments, util::gpu_stream_t& stream) noexcept {
+[[nodiscard]] static util::expected_t upload_geometry_(
+    cursor_plan_t const& plan, pixel_tubes_span_t videos, video_shape_span_t video_shapes,
+    util::u32r1_span_t segment_offsets, util::u32r1_span_t segment_lengths, modality_span_t segment_modality,
+    std::size_t job_count, std::size_t max_segments, util::executor_stream_t& stream) noexcept {
     util::expected_t uploaded = util::copy_host_to_device(
         std::span<util::u32_t const> {plan.offsets}.first(max_segments + 1u), segment_offsets, stream);
     if (uploaded)
@@ -898,7 +896,7 @@ struct decode_jobs_t {
     util::u32_t patch_size = 0;
 
     /** The caller's stream every NV12 → RGB conversion enqueues on. */
-    util::gpu_stream_t* stream = nullptr;
+    util::executor_stream_t* stream = nullptr;
 };
 
 /** The outcome of opening one group on an engine: a chunk-fed clip is @c opened (its Annex-B tail
@@ -996,7 +994,7 @@ struct engine_cursor_t {
  *  NV12 → RGB conversion enqueues on the caller's one stream, so there are no per-engine streams,
  *  events, or workers.
  */
-[[nodiscard]] static util::expected_t drive_decode_(decode_jobs_t& drive, util::gpu_stream_t& stream) noexcept {
+[[nodiscard]] static util::expected_t drive_decode_(decode_jobs_t& drive, util::executor_stream_t& stream) noexcept {
     nvdec_state_t* const state = drive.state;
     std::size_t const engine_count = state->engines.size();
     st::basic_vector<engine_cursor_t> cursors;
@@ -1075,12 +1073,13 @@ struct engine_cursor_t {
 [[nodiscard]] static util::expected_t tile_and_sync_(video_grid_geometry_t const& geometry, pixel_tubes_span_t videos,
                                                      util::pixel_t* frames_base, std::span<tile_job_t const> jobs,
                                                      std::span<util::u64_t const> prefix,
-                                                     util::gpu_stream_t& stream) noexcept {
+                                                     util::executor_stream_t& stream) noexcept {
     std::size_t const job_count = jobs.size();
     util::u64_t const output_elements = prefix[job_count]; // the tile's total output-element count, the grid's extent
-    st::basic_vector<tile_job_t, util::gpu_alloc<tile_job_t>> device_jobs {util::gpu_alloc<tile_job_t> {stream.get()}};
+    st::basic_vector<tile_job_t, util::gpu_alloc<tile_job_t>> device_jobs {
+        util::gpu_alloc<tile_job_t> {util::native_stream(stream)}};
     st::basic_vector<util::u64_t, util::gpu_alloc<util::u64_t>> device_prefix {
-        util::gpu_alloc<util::u64_t> {stream.get()}};
+        util::gpu_alloc<util::u64_t> {util::native_stream(stream)}};
     if (st::failed(device_jobs.resize(st::assume_uninitialized, job_count)) ||
         st::failed(device_prefix.resize(st::assume_uninitialized, job_count + 1u)))
         return util::expected_t::fail(util::status_code_t::out_of_memory_k, "No room for the tile job device");
@@ -1097,7 +1096,7 @@ struct engine_cursor_t {
                 geometry.tube_frames, geometry.patch_size, geometry.channels);
             !tiled)
             return tiled;
-    if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
+    if (cuStreamSynchronize(util::native_stream(stream)) != CUDA_SUCCESS)
         return util::expected_t::fail(util::status_code_t::device_k, "Tube tile synchronization failed");
     return {};
 }
@@ -1106,7 +1105,8 @@ util::expected_t nvdec_session_t::decode_into(fu::pool_t& pool, column_view_t cl
                                               std::span<video_batch_shape_t const> representations,
                                               pixel_tubes_span_t videos, video_shape_span_t video_shapes,
                                               util::u32r1_span_t segment_offsets, util::u32r1_span_t segment_lengths,
-                                              modality_span_t segment_modality, util::gpu_stream_t& stream) noexcept {
+                                              modality_span_t segment_modality,
+                                              util::executor_stream_t& stream) noexcept {
     if (state_ == nullptr)
         return util::expected_t::fail(util::status_code_t::invalid_argument_k, "Moved-from NVDEC session");
     std::size_t const clip_count = clips.size();
@@ -1166,8 +1166,8 @@ util::expected_t nvdec_session_t::decode_into(fu::pool_t& pool, column_view_t cl
     auto [plan, build_status] = build_token_cursor_(geometry, representations, demuxed_view, max_segments);
     if (!build_status) return util::expected_t::fail(std::move(build_status));
 
-    util::switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok())
+    [[maybe_unused]] util::status_t const gpu_scope = (stream).bind();
+    if (gpu_scope.failed())
         return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed for the loader stream");
 
     if (util::expected_t staged = upload_geometry_(plan, videos, video_shapes, segment_offsets, segment_lengths,
@@ -1178,7 +1178,8 @@ util::expected_t nvdec_session_t::decode_into(fu::pool_t& pool, column_view_t cl
     // Shared frame scratch: one contiguous [frames_to_decode,pr·P,pc·P,C] block per decode
     // group, at `plan.groups[g].frames_offset`. Zeroed so a short clip's missing frames stay
     // PAD-zero once tiled.
-    st::basic_vector<util::u8_t, util::gpu_alloc<util::u8_t>> frames {util::gpu_alloc<util::u8_t> {stream.get()}};
+    st::basic_vector<util::u8_t, util::gpu_alloc<util::u8_t>> frames {
+        util::gpu_alloc<util::u8_t> {util::native_stream(stream)}};
     std::size_t const frames_bytes = static_cast<std::size_t>(plan.frame_prefix);
     if (st::failed(frames.resize(st::assume_uninitialized, frames_bytes == 0 ? 1u : frames_bytes)))
         return util::expected_t::fail(util::status_code_t::out_of_memory_k,
@@ -1215,7 +1216,7 @@ util::expected_t ul::decode_videos(nvdec_session_t& nvdec, fu::pool_t& pool, col
                                    util::u64r1_view_t drawn_rows, std::span<video_batch_shape_t const> representations,
                                    pixel_tubes_span_t videos, video_shape_span_t video_shapes,
                                    util::u32r1_span_t segment_offsets, util::u32r1_span_t segment_lengths,
-                                   modality_span_t segment_modality, util::gpu_stream_t& stream) noexcept {
+                                   modality_span_t segment_modality, util::executor_stream_t& stream) noexcept {
     std::size_t const clips = drawn_rows.size();
     if (clips == 0) return {};
 
@@ -1241,7 +1242,7 @@ util::expected_t ul::decode_videos(nvdec_session_t& nvdec, fu::pool_t& pool, col
         cursor += blob.size();
         offsets[index + 1] = static_cast<util::u64_t>(cursor);
     }
-    if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
+    if (cuStreamSynchronize(util::native_stream(stream)) != CUDA_SUCCESS)
         return util::expected_t::fail(util::status_code_t::device_k, "Clip byte staging synchronization failed");
 
     column_view_t const pinned {util::bytes_view_t {encoded}, std::span<util::u64_t const> {offsets}};
@@ -1279,7 +1280,7 @@ util::expected<video_loader_parquet_t> video_loader_parquet_t::make(gpu_direct_s
     return result_t {std::move(loader)};
 }
 
-util::expected_t video_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, nvdec_session_t& decoder,
+util::expected_t video_loader_parquet_t::fill(util::executor_stream_t& gpu_stream, nvdec_session_t& decoder,
                                               video_loader_parquet_config_t config, util::u32_t gpu_rank,
                                               util::u32_t training_step,
                                               std::span<multimodal_batch_on_gpu_t> batches) noexcept {
@@ -1323,8 +1324,8 @@ util::expected_t video_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, nv
                                       "{} pooled rows across {} files cover fewer than the {} clips this fill needs",
                                       pooled_rows, groups_.picked_paths().size(), total_clips);
 
-    util::switch_to_gpu_t gpu_scope {gpu_stream};
-    if (!gpu_scope.ok())
+    [[maybe_unused]] util::status_t const gpu_scope = (gpu_stream).bind();
+    if (gpu_scope.failed())
         return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed for the loader stream");
 
     column_view_t const column = reservoir.column(0);
@@ -1337,7 +1338,7 @@ util::expected_t video_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, nv
                                                             gpu_stream);
         !landed)
         return landed;
-    if (cuStreamSynchronize(gpu_stream.get()) != CUDA_SUCCESS)
+    if (cuStreamSynchronize(util::native_stream(gpu_stream)) != CUDA_SUCCESS)
         return util::expected_t::fail(util::status_code_t::device_k, "Reservoir offsets readback failed");
 
     util::u64_t const row_key = hash(seed_, gpu_rank, row_draw_salt_k);

@@ -29,7 +29,7 @@
 #include "uform/utilities/mesh.hpp"                   // `mesh_topology_t`, `host_domain_index_from_environment`
 #include "uform/utilities/multimem_collectives.cuh"   // `multimem_domain_t`
 #include "uform/encoder/multimodal_batch.cuh"         // `multimodal_batch_on_gpu_t`, the shape, the mixer
-#include "uform/utilities/vram_nvidia_schedule.cuh"   // `gpu_stream_t`, `switch_to_gpu_t`, `copy_host_to_device`
+#include "uform/utilities/vram_nvidia_schedule.cuh"   // `executor_stream_t`, `copy_host_to_device`
 #include "uform/utilities/types.hpp"                  // `epoch_permutation`, `data_epoch_t`, `token_id_t`, `modality_t`
 
 #include "harness.hpp" // `run_test_case`, `expect_true`
@@ -77,13 +77,13 @@ using pinned1_t = nk::tensor<value_type_, util::pinned_alloc<value_type_>, 1>;
  *  @param[in,out] stream The member's stream the staging enqueues on.
  */
 [[nodiscard]] static util::expected_t fabricate_loaded_(multimodal_batch_on_gpu_t& batch, util::u32_t member,
-                                                        util::gpu_stream_t& stream) noexcept {
+                                                        util::executor_stream_t& stream) noexcept {
     util::u32_t const S = segments_per_member_k, L = tokens_per_segment_k;
     util::u32_t const rows = static_cast<util::u32_t>(batch.tokens.extent(0));
     util::u32_t const columns = static_cast<util::u32_t>(batch.tokens.extent(1));
 
-    util::switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok())
+    [[maybe_unused]] util::status_t const gpu_scope = (stream).bind();
+    if (gpu_scope.failed())
         return util::expected_t::fail(util::status_code_t::device_k, "context entry failed for member {}", member);
 
     pinned1_t<util::u32_t> offsets = make_zeros<pinned1_t<util::u32_t>>({static_cast<std::size_t>(S) + 1u});
@@ -114,7 +114,7 @@ using pinned1_t = nk::tensor<value_type_, util::pinned_alloc<value_type_>, 1>;
     if (util::expected_t staged = util::copy_host_to_device(tokens.view(), batch.tokens.span().flatten<1>(), stream);
         !staged)
         return staged;
-    if (CUresult synced = cuStreamSynchronize(stream.get()); synced != CUDA_SUCCESS)
+    if (CUresult synced = cuStreamSynchronize(util::native_stream(stream)); synced != CUDA_SUCCESS)
         return util::cuda_failure(synced, "loaded fabrication sync failed for member {}", member);
     return {};
 }
@@ -134,13 +134,14 @@ using pinned1_t = nk::tensor<value_type_, util::pinned_alloc<value_type_>, 1>;
  */
 [[nodiscard]] static util::expected_t verify_mixed_(multimodal_batch_on_gpu_t& mixed, util::u32_t member,
                                                     util::u32_t member_count, util::u64_t seed,
-                                                    util::data_epoch_t epoch, util::gpu_stream_t& stream) noexcept {
+                                                    util::data_epoch_t epoch,
+                                                    util::executor_stream_t& stream) noexcept {
     util::u32_t const S = segments_per_member_k, L = tokens_per_segment_k;
     util::u32_t const rows = static_cast<util::u32_t>(mixed.tokens.extent(0));
     util::u32_t const columns = static_cast<util::u32_t>(mixed.tokens.extent(1));
 
-    util::switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok())
+    [[maybe_unused]] util::status_t const gpu_scope = (stream).bind();
+    if (gpu_scope.failed())
         return util::expected_t::fail(util::status_code_t::device_k, "context entry failed for member {}", member);
 
     pinned1_t<util::u32_t> offsets = make_zeros<pinned1_t<util::u32_t>>({static_cast<std::size_t>(S) + 1u});
@@ -161,7 +162,7 @@ using pinned1_t = nk::tensor<value_type_, util::pinned_alloc<value_type_>, 1>;
     if (util::expected_t read = util::copy_device_to_host(mixed.tokens.view().flatten<1>(), tokens.span(), stream);
         !read)
         return read;
-    if (CUresult synced = cuStreamSynchronize(stream.get()); synced != CUDA_SUCCESS)
+    if (CUresult synced = cuStreamSynchronize(util::native_stream(stream)); synced != CUDA_SUCCESS)
         return util::cuda_failure(synced, "mixed readback sync failed for member {}", member);
 
     std::size_t const world = static_cast<std::size_t>(S) * member_count;
@@ -232,11 +233,11 @@ inline constexpr util::u32_t pad_bag_k = bags_per_member_k;
  *  @param[in,out] stream The member's stream the staging enqueues on.
  */
 [[nodiscard]] static util::expected_t fabricate_bagged_(multimodal_batch_on_gpu_t& batch, util::u32_t member,
-                                                        util::gpu_stream_t& stream) noexcept {
+                                                        util::executor_stream_t& stream) noexcept {
     util::u32_t const S = segments_per_member_k, L = tokens_per_segment_k;
 
-    util::switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok())
+    [[maybe_unused]] util::status_t const gpu_scope = (stream).bind();
+    if (gpu_scope.failed())
         return util::expected_t::fail(util::status_code_t::device_k, "context entry failed for member {}", member);
 
     pinned1_t<util::u32_t> offsets = make_zeros<pinned1_t<util::u32_t>>({static_cast<std::size_t>(S) + 1u});
@@ -279,7 +280,7 @@ inline constexpr util::u32_t pad_bag_k = bags_per_member_k;
     if (util::expected_t staged = util::copy_host_to_device(tokens.view(), batch.tokens.span().flatten<1>(), stream);
         !staged)
         return staged;
-    if (CUresult synced = cuStreamSynchronize(stream.get()); synced != CUDA_SUCCESS)
+    if (CUresult synced = cuStreamSynchronize(util::native_stream(stream)); synced != CUDA_SUCCESS)
         return util::cuda_failure(synced, "bagged fabrication sync failed for member {}", member);
     return {};
 }
@@ -384,13 +385,14 @@ using mirrored_geometry_t = util::stack_array<mirrored_segment_t, segments_per_m
  */
 [[nodiscard]] static util::expected_t verify_bagged_(multimodal_batch_on_gpu_t& mixed, util::u32_t member,
                                                      util::u32_t world_member_count, util::u64_t seed,
-                                                     util::data_epoch_t epoch, util::gpu_stream_t& stream) noexcept {
+                                                     util::data_epoch_t epoch,
+                                                     util::executor_stream_t& stream) noexcept {
     util::u32_t const S = segments_per_member_k, L = tokens_per_segment_k;
     util::u32_t const rows = static_cast<util::u32_t>(mixed.tokens.extent(0));
     util::u32_t const columns = static_cast<util::u32_t>(mixed.tokens.extent(1));
 
-    util::switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok())
+    [[maybe_unused]] util::status_t const gpu_scope = (stream).bind();
+    if (gpu_scope.failed())
         return util::expected_t::fail(util::status_code_t::device_k, "context entry failed for member {}", member);
 
     pinned1_t<util::u32_t> offsets = make_uninitialized<pinned1_t<util::u32_t>>({static_cast<std::size_t>(S) + 1u});
@@ -413,7 +415,7 @@ using mirrored_geometry_t = util::stack_array<mirrored_segment_t, segments_per_m
     if (util::expected_t read = util::copy_device_to_host(mixed.tokens.view().flatten<1>(), tokens.span(), stream);
         !read)
         return read;
-    if (CUresult synced = cuStreamSynchronize(stream.get()); synced != CUDA_SUCCESS)
+    if (CUresult synced = cuStreamSynchronize(util::native_stream(stream)); synced != CUDA_SUCCESS)
         return util::cuda_failure(synced, "bagged readback sync failed for member {}", member);
 
     util::u32_t mirrored_dropped = 0;
@@ -451,8 +453,9 @@ struct mixer_members_t {
     /** The visible device ordinals, table-shaped for the arena visibility lists. */
     st::basic_vector<util::i32_t> devices {};
 
-    /** One stream per member — every fabrication, mix, and readback enqueues here. */
-    st::basic_vector<util::gpu_stream_t> streams {};
+    /** The executor with one stream per member - every fabrication, mix, and readback enqueues
+     *  here. */
+    util::cuda_executor_t streams {};
 
     /** One peer-visible arena per member — the batches and the mixer's scratch live off these. */
     st::basic_vector<util::gpu_arena_t> arenas {};
@@ -474,15 +477,14 @@ struct mixer_members_t {
         return result_t::fail(util::status_code_t::out_of_memory_k, "device table alloc failed");
     for (util::u32_t member = 0; member != member_count; ++member)
         members.devices[member] = static_cast<util::i32_t>(member);
-    if (st::failed(members.streams.reserve(member_count)) || st::failed(members.arenas.reserve(member_count)) ||
-        st::failed(members.loaded.reserve(member_count)) || st::failed(members.mixed.reserve(member_count)))
+    auto [streams, spawn_status] = spawn_test_executor({members.devices.data(), member_count});
+    if (!spawn_status) return result_t::fail(std::move(spawn_status));
+    members.streams = std::move(streams);
+    if (st::failed(members.arenas.reserve(member_count)) || st::failed(members.loaded.reserve(member_count)) ||
+        st::failed(members.mixed.reserve(member_count)))
         return result_t::fail(util::status_code_t::out_of_memory_k, "per-member table reservation failed");
     for (util::u32_t member = 0; member != member_count; ++member) {
-        auto [stream, make_stream_status] = util::gpu_stream_t::make(static_cast<int>(member));
-        if (!make_stream_status) return result_t::fail(std::move(make_stream_status));
-        if (st::failed(members.streams.push_back(std::move(stream))))
-            return result_t::fail(util::status_code_t::out_of_memory_k, "member {} stream append failed", member);
-        util::switch_to_gpu_t gpu_scope {members.streams[member]};
+        [[maybe_unused]] util::status_t const gpu_scope = (members.streams.stream(member)).bind();
         auto [arena, make_arena_status] = util::gpu_arena_t::make(static_cast<int>(member), 512ull << 20,
                                                                   members.devices);
         if (!make_arena_status) return result_t::fail(std::move(make_arena_status));
@@ -498,8 +500,9 @@ struct mixer_members_t {
         if (!make_mixed_batch_status) return result_t::fail(std::move(make_mixed_batch_status));
         if (st::failed(members.mixed.push_back(std::move(mixed_batch))))
             return result_t::fail(util::status_code_t::out_of_memory_k, "member {} mixed batch append failed", member);
-        util::expected_t zeroed = util::zero_async(members.loaded[member].dropped.span(), members.streams[member]);
-        if (zeroed) zeroed = util::zero_async(members.mixed[member].dropped.span(), members.streams[member]);
+        util::expected_t zeroed = util::zero_async(members.loaded[member].dropped.span(),
+                                                   members.streams.stream(member));
+        if (zeroed) zeroed = util::zero_async(members.mixed[member].dropped.span(), members.streams.stream(member));
         if (!zeroed) return result_t::fail(std::move(zeroed));
     }
     return result_t {std::move(members)};
@@ -542,7 +545,7 @@ static case_result_t test_routes_segments() {
     if (!expect_true(stand_up_status, "member stand-up: {}", stand_up_status.description_)) return {};
     for (util::u32_t member = 0; member != member_count; ++member)
         if (util::expected_t built = fabricate_loaded_(
-                members.loaded[member], first_gpu_index_in_colocated_domain + member, members.streams[member]);
+                members.loaded[member], first_gpu_index_in_colocated_domain + member, members.streams.stream(member));
             !expect_true(built, "fabricate loaded on GPU {}: {}", member, built.description_))
             return {};
 
@@ -568,7 +571,7 @@ static case_result_t test_routes_segments() {
     for (util::u32_t member = 0; member != member_count; ++member)
         if (util::expected_t verified = verify_mixed_(members.mixed[member],
                                                       first_gpu_index_in_colocated_domain + member, world_member_count,
-                                                      seed, epoch, members.streams[member]);
+                                                      seed, epoch, members.streams.stream(member));
             !verified)
             expect_true(false, "verify mixed on GPU {}: {}", member, verified.description_);
     return {};
@@ -610,7 +613,7 @@ static case_result_t test_routes_bags(util::u32_t rows, util::u32_t columns_per_
     if (!expect_true(stand_up_status, "member stand-up: {}", stand_up_status.description_)) return {};
     for (util::u32_t member = 0; member != member_count; ++member)
         if (util::expected_t built = fabricate_bagged_(
-                members.loaded[member], first_gpu_index_in_colocated_domain + member, members.streams[member]);
+                members.loaded[member], first_gpu_index_in_colocated_domain + member, members.streams.stream(member));
             !expect_true(built, "fabricate bagged on GPU {}: {}", member, built.description_))
             return {};
 
@@ -634,7 +637,7 @@ static case_result_t test_routes_bags(util::u32_t rows, util::u32_t columns_per_
     for (util::u32_t member = 0; member != member_count; ++member)
         if (util::expected_t verified = verify_bagged_(members.mixed[member],
                                                        first_gpu_index_in_colocated_domain + member, world_member_count,
-                                                       seed, epoch, members.streams[member]);
+                                                       seed, epoch, members.streams.stream(member));
             !verified)
             expect_true(false, "verify bagged on GPU {}: {}", member, verified.description_);
     return {};

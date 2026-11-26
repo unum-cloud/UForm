@@ -59,8 +59,9 @@
 
 #include "uform/types.h" // `uform_version_name`, `uform_capabilities_available`, `uform_gpu_devices`
 
-#include "uform/utilities/array.hpp" // `per_gpu_array` — the devices
-#include "uform/utilities/types.hpp" // `format_at_t`, `format_into_t`, `sz`, the scalar aliases
+#include "uform/utilities/array.hpp"       // `per_gpu_array` — the devices
+#include "uform/utilities/types.hpp"       // `format_at_t`, `format_into_t`, `sz`, the scalar aliases
+#include "uform/utilities/vram_device.hpp" // `cuda_executor_t`, `kernel_tables` - a test's GPU streams
 
 #if UFORM_OS_WINDOWS_
 /*  Winsock 2 first keeps Winsock 1.1 out, unless a user's earlier `<windows.h>` brought it in. */
@@ -95,6 +96,30 @@ struct fmt::formatter<ashvardanian::stringzilla::string_t> : fmt::formatter<std:
 };
 
 namespace unum::uform::test {
+
+/** The harness's stand-in for the library's GPU runtime, which the training tests cannot reach, as
+ *  they link the training stack alone: the CUDA driver table and the kernels the harness's own
+ *  executors launch, loaded once by the first test that opens a stream. */
+struct gpu_harness_t {
+    util::cuda_api_t cuda = util::cuda_api_t::load();
+    util::kernel_tables<util::cuda_module_t> cuda_kernels;
+
+    /** The ceiling a harness executor's scratch grows to, zero for none. */
+    std::size_t scratch_limit = 0;
+};
+
+/** The one harness GPU state, built by the first test that opens a stream. */
+inline gpu_harness_t& gpu_harness() noexcept {
+    static gpu_harness_t harness;
+    return harness;
+}
+
+/** An executor opening one stream on each of @p devices , which a test's steps queue on as the
+ *  trainer's do, through the harness's driver table and kernels. */
+inline util::expected<util::cuda_executor_t> spawn_test_executor(std::span<int const> devices) noexcept {
+    gpu_harness_t& harness = gpu_harness();
+    return util::cuda_executor_t::spawn(harness.cuda, devices, {}, harness, harness.scratch_limit);
+}
 
 /** Stops in an attached debugger, or dumps core without one; crash handlers leave SIGTRAP alone. */
 inline void trap_into_debugger() noexcept {

@@ -339,7 +339,7 @@ static __global__ void __launch_bounds__(util::kernel_block_size_default_k, 1)
  *  because the pageable host table dies on return. */
 [[nodiscard]] static util::expected_t upload_gradient_table_(
     std::span<util::differentiable_weights_t const> rank_weights, nk::tensor_span<spectrum_gradient_range_t, 1> table,
-    std::size_t rank, util::gpu_stream_t& stream) noexcept {
+    std::size_t rank, util::executor_stream_t& stream) noexcept {
     st::basic_vector<spectrum_gradient_range_t> ranges;
     if (st::failed(ranges.resize(rank_weights.size())))
         return util::expected_t::fail(util::status_code_t::out_of_memory_k, "gradient table staging failed (rank={})",
@@ -355,14 +355,14 @@ static __global__ void __launch_bounds__(util::kernel_block_size_default_k, 1)
     util::expected_t uploaded = util::copy_host_to_device<spectrum_gradient_range_t>(
         std::span<spectrum_gradient_range_t const> {ranges}, table, stream);
     if (!uploaded) return uploaded;
-    if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
+    if (CUresult result = cuStreamSynchronize(util::native_stream(stream)); result != CUDA_SUCCESS)
         return util::cuda_failure(result, "gradient table upload failed (rank={})", rank);
     return uploaded;
 }
 
 util::expected<distributed_pooled_spectrum_t> distributed_pooled_spectrum_t::make(
     util::multimem_domain_t& domain, util::colocated_domain_t& colocated, std::span<util::gpu_arena_t> arenas,
-    std::span<util::gpu_stream_t> streams, std::span<util::differentiable_weights_t const> weights,
+    util::cuda_executor_t& streams, std::span<util::differentiable_weights_t const> weights,
     std::size_t weights_per_rank, pooled_spectrum_config_t config, util::gpu_numerics_t const& numerics,
     util::f64_t timeout_seconds) noexcept {
     using result_t = util::expected<distributed_pooled_spectrum_t>;
@@ -414,8 +414,8 @@ util::expected<distributed_pooled_spectrum_t> distributed_pooled_spectrum_t::mak
     std::size_t const energy_blocks =
         gated ? util::divide_round_up(std::size_t {util::kernel_grid_cap_k}, weights_per_rank) : 0u;
     for (std::size_t rank = 0; rank != gpus; ++rank) {
-        util::switch_to_gpu_t gpu_scope {streams[rank]};
-        if (!gpu_scope.ok())
+        [[maybe_unused]] util::status_t const gpu_scope = (streams.stream(rank)).bind();
+        if (gpu_scope.failed())
             return result_t::fail(util::status_code_t::device_k, "context entry failed (rank={})", rank);
         spectrum_rank_t& state = spectrum.ranks_[rank];
         util::gpu_arena_alloc<util::f32_t> f32_alloc {arenas[rank]};
@@ -441,26 +441,26 @@ util::expected<distributed_pooled_spectrum_t> distributed_pooled_spectrum_t::mak
         if (!allocated)
             return result_t::fail(util::status_code_t::out_of_memory_k, "spectrum scratch allocation failed (rank={})",
                                   rank);
-        util::expected_t staged = util::zero_async(state.terms.span(), streams[rank]);
-        if (staged) staged = util::zero_async(state.transposed.span(), streams[rank]);
+        util::expected_t staged = util::zero_async(state.terms.span(), streams.stream(rank));
+        if (staged) staged = util::zero_async(state.transposed.span(), streams.stream(rank));
         if (staged && gated)
             staged = upload_gradient_table_(weights.subspan(rank * weights_per_rank, weights_per_rank),
-                                            state.gradients.span(), rank, streams[rank]);
+                                            state.gradients.span(), rank, streams.stream(rank));
         if (!staged) return result_t::fail(std::move(staged));
     }
 
     if (coding_rate || gated) {
-        util::switch_to_gpu_t gpu_scope {streams[0]};
-        if (!gpu_scope.ok()) return result_t::fail(util::status_code_t::device_k, "Context entry failed (rank=0)");
+        [[maybe_unused]] util::status_t const gpu_scope = (streams.stream(0)).bind();
+        if (gpu_scope.failed()) return result_t::fail(util::status_code_t::device_k, "Context entry failed (rank=0)");
         if (coding_rate) {
             auto [gram_reduce, status] = util::infiniband_all_reduce<util::f32_t>::make(
-                colocated, 0, arenas[0], gram_scalars_(config), streams[0], timeout_seconds);
+                colocated, 0, arenas[0], gram_scalars_(config), streams.stream(0), timeout_seconds);
             if (!status) return result_t::fail(std::move(status));
             spectrum.gram_reduce_ = std::move(gram_reduce);
         }
         if (gated) {
             auto [energy_reduce, status] = util::infiniband_all_reduce<util::f32_t>::make(
-                colocated, 0, arenas[0], energy_scalars_(config), streams[0], timeout_seconds);
+                colocated, 0, arenas[0], energy_scalars_(config), streams.stream(0), timeout_seconds);
             if (!status) return result_t::fail(std::move(status));
             spectrum.energy_reduce_ = std::move(energy_reduce);
             if (!util::allocate_uninitialized(spectrum.energy_staging_, {1}, util::pinned_alloc<util::f32_t> {}))
@@ -473,7 +473,7 @@ util::expected<distributed_pooled_spectrum_t> distributed_pooled_spectrum_t::mak
 util::expected_t distributed_pooled_spectrum_t::world_sum_(std::size_t rank, std::size_t begin,
                                                            util::infiniband_all_reduce<util::f32_t>& world,
                                                            util::f32r1_span_t destination,
-                                                           util::gpu_stream_t& stream) noexcept {
+                                                           util::executor_stream_t& stream) noexcept {
     std::size_t const member = domain_->member_offset() + rank, scalars = destination.extent(0);
     util::expected_t summed = domain_->barrier(member, stream);
     if (world.identity()) {
@@ -499,7 +499,7 @@ util::expected_t distributed_pooled_spectrum_t::world_sum_(std::size_t rank, std
 }
 
 util::expected_t distributed_pooled_spectrum_t::coding_rate_(std::size_t rank, util::bf16r2_view_t pooled,
-                                                             util::gpu_stream_t& stream) noexcept {
+                                                             util::executor_stream_t& stream) noexcept {
     spectrum_rank_t& state = ranks_[rank];
     std::size_t const rows = config_.rows_per_gpu, hidden = config_.hidden, tiles = hidden / util::warp_size_k;
     std::size_t const rows_padded = state.transposed.extent(1);
@@ -520,7 +520,7 @@ util::expected_t distributed_pooled_spectrum_t::coding_rate_(std::size_t rank, u
         staged = util::numkong_result(
             numerics_.symmetric_bf16(nk::as_values<nk_bf16_t>(nk::as_bytes(state.transposed.view())).data(), hidden,
                                      rows_padded, rows_padded * sizeof(util::bf16_t), gram.data(),
-                                     hidden * sizeof(util::f32_t), 0, hidden, nullptr, 0, stream.numkong()),
+                                     hidden * sizeof(util::f32_t), 0, hidden, nullptr, 0, util::numkong_stream(stream)),
             "pooled Gram");
     if (staged) staged = world_sum_(rank, window_.offset, gram_reduce_, factor.flatten<1>(), stream);
     if (staged)
@@ -546,7 +546,7 @@ util::expected_t distributed_pooled_spectrum_t::coding_rate_(std::size_t rank, u
 
 util::expected_t distributed_pooled_spectrum_t::operator()(std::size_t rank, util::bf16r2_view_t pooled,
                                                            util::bf16r2_span_t pooled_grad,
-                                                           util::gpu_stream_t& stream) noexcept {
+                                                           util::executor_stream_t& stream) noexcept {
     std::size_t const rows = config_.rows_per_gpu, hidden = config_.hidden;
     bool const coding_rate = config_.coding_rate_weight > 0.0f, lipschitz = config_.lipschitz_weight > 0.0f;
     if (rank >= ranks_.size())
@@ -557,8 +557,8 @@ util::expected_t distributed_pooled_spectrum_t::operator()(std::size_t rank, uti
         return util::expected_t::fail(util::status_code_t::unsupported_k,
                                       "pooled rows [{},{}] and gradient [{},{}] must be [{},{}]", pooled.extent(0),
                                       pooled.extent(1), pooled_grad.extent(0), pooled_grad.extent(1), rows, hidden);
-    util::switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok())
+    [[maybe_unused]] util::status_t const gpu_scope = (stream).bind();
+    if (gpu_scope.failed())
         return util::expected_t::fail(util::status_code_t::device_k, "context entry failed ({})", rank);
 
     spectrum_rank_t& state = ranks_[rank];
@@ -586,14 +586,14 @@ util::expected_t distributed_pooled_spectrum_t::operator()(std::size_t rank, uti
 }
 
 util::expected_t distributed_pooled_spectrum_t::measure_gradients(std::size_t rank,
-                                                                  util::gpu_stream_t& stream) noexcept {
+                                                                  util::executor_stream_t& stream) noexcept {
     if (rank >= ranks_.size())
         return util::expected_t::fail(util::status_code_t::invalid_argument_k, "rank {} of {}", rank, ranks_.size());
     if (!(config_.spike_threshold > 0.0f))
         return util::expected_t::fail(util::status_code_t::invalid_argument_k,
                                       "Spike gate is off, nothing measures gradients");
-    util::switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok())
+    [[maybe_unused]] util::status_t const gpu_scope = (stream).bind();
+    if (gpu_scope.failed())
         return util::expected_t::fail(util::status_code_t::device_k, "context entry failed ({})", rank);
     spectrum_rank_t& state = ranks_[rank];
     std::size_t const begin = window_.offset + gram_scalars_(config_);
@@ -611,16 +611,17 @@ util::expected_t distributed_pooled_spectrum_t::measure_gradients(std::size_t ra
     return measured;
 }
 
-util::expected_t distributed_pooled_spectrum_t::admit_gradients(util::gpu_stream_t& stream) noexcept {
+util::expected_t distributed_pooled_spectrum_t::admit_gradients(util::executor_stream_t& stream) noexcept {
     if (ranks_.size() == 0 || energy_staging_.empty())
         return util::expected_t::fail(util::status_code_t::invalid_argument_k,
                                       "Spike gate is off, nothing admits gradients");
-    util::switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed (rank=0)");
+    [[maybe_unused]] util::status_t const gpu_scope = (stream).bind();
+    if (gpu_scope.failed())
+        return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed (rank=0)");
     if (util::expected_t copied = util::copy_device_to_host(ranks_[0].energy.view(), energy_staging_.span(), stream);
         !copied)
         return copied;
-    if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
+    if (CUresult result = cuStreamSynchronize(util::native_stream(stream)); result != CUDA_SUCCESS)
         return util::cuda_failure(result, "gradient energy download failed");
     util::f32_t const gradient_l2 = std::sqrt(energy_staging_[0]);
     if (!std::isfinite(gradient_l2) ||

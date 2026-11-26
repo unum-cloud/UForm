@@ -41,7 +41,7 @@ static __global__ void choices_states_kernel_(util::b8r1_view_t states, util::u6
 
 /** Land the device offsets @p offsets on the host into @p landed . */
 [[nodiscard]] static util::expected_t land_offsets_(util::u64r1_view_t offsets, st::basic_vector<util::u64_t>& landed,
-                                                    util::gpu_stream_t& stream) noexcept {
+                                                    util::executor_stream_t& stream) noexcept {
     if (st::failed(landed.resize(st::assume_uninitialized, offsets.extent(0))))
         return util::expected_t::fail(util::status_code_t::out_of_memory_k, "offset landing failed ({} entries)",
                                       offsets.extent(0));
@@ -50,7 +50,7 @@ static __global__ void choices_states_kernel_(util::b8r1_view_t states, util::u6
 
 /** Land the device bytes @p payload on the host into @p landed . */
 [[nodiscard]] static util::expected_t land_bytes_(util::b8r1_view_t payload, st::basic_vector<util::u8_t>& landed,
-                                                  util::gpu_stream_t& stream) noexcept {
+                                                  util::executor_stream_t& stream) noexcept {
     if (st::failed(landed.resize(st::assume_uninitialized, payload.extent(0))))
         return util::expected_t::fail(util::status_code_t::out_of_memory_k, "byte landing failed ({} bytes)",
                                       payload.extent(0));
@@ -92,7 +92,7 @@ util::expected<choices_loader_parquet_t> choices_loader_parquet_t::make(
     return result_t {std::move(loader)};
 }
 
-util::expected_t choices_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, util::u32_t gpu_rank,
+util::expected_t choices_loader_parquet_t::fill(util::executor_stream_t& gpu_stream, util::u32_t gpu_rank,
                                                 util::u32_t training_step,
                                                 std::span<multimodal_batch_on_gpu_t> batches) noexcept {
     if (batches.empty()) return {};
@@ -115,8 +115,8 @@ util::expected_t choices_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, 
     std::size_t const pooled_rows = reservoir.rows();
     column_view_t const states = reservoir.column(0);
 
-    util::switch_to_gpu_t gpu_scope {gpu_stream};
-    if (!gpu_scope.ok())
+    [[maybe_unused]] util::status_t const gpu_scope = (gpu_stream).bind();
+    if (gpu_scope.failed())
         return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed for the loader stream");
     st::basic_vector<util::u64_t> state_offsets, choice_offsets, target_offsets;
     st::basic_vector<util::u8_t> choice_bytes, target_bytes;
@@ -126,7 +126,7 @@ util::expected_t choices_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, 
     if (landed) landed = land_offsets_(reservoir.column(2).offsets, target_offsets, gpu_stream);
     if (landed) landed = land_bytes_(reservoir.column(2).payload, target_bytes, gpu_stream);
     if (!landed) return landed;
-    if (CUresult result = cuStreamSynchronize(gpu_stream.get()); result != CUDA_SUCCESS)
+    if (CUresult result = cuStreamSynchronize(util::native_stream(gpu_stream)); result != CUDA_SUCCESS)
         return util::cuda_failure(result, "reservoir readback failed");
 
     // A row offers distinct bytes that fit a segment, each with one Float32 target.
@@ -174,7 +174,7 @@ util::expected_t choices_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, 
     st::basic_vector<util::token_id_t> choices;
     st::basic_vector<util::f32_t> targets;
     st::basic_vector<util::u64_t, util::gpu_alloc<util::u64_t>> sources_on_gpu {
-        util::gpu_alloc<util::u64_t> {gpu_stream.get()}};
+        util::gpu_alloc<util::u64_t> {util::native_stream(gpu_stream)}};
     if (st::failed(offsets.resize(segments + 1)) || st::failed(lengths.resize(segments)) ||
         st::failed(modalities.resize(segments)) || st::failed(sources.resize(segments)) ||
         st::failed(choices.resize(segments * width)) || st::failed(targets.resize(segments * width)) ||
@@ -252,7 +252,7 @@ util::expected_t choices_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, 
                                          loaded.tokens.span().flatten<1>());
         // The next batch rewrites the host tables and the sources, so this one's copies land first.
         if (staged)
-            if (CUresult result = cuStreamSynchronize(gpu_stream.get()); result != CUDA_SUCCESS)
+            if (CUresult result = cuStreamSynchronize(util::native_stream(gpu_stream)); result != CUDA_SUCCESS)
                 staged = util::cuda_failure(result, "choice fill drain failed (batch={})", batch);
         if (!staged) return staged;
     }

@@ -306,28 +306,24 @@ static case_result_t test_barrier_traps_past_deadline(util::u32_t local_devices)
         0, 1, &pause_between_polls, local_devices, base.c_str(), "barrier_deadline", wait_limit_k.count());
     if (!expect_true(bootstrap_status, "single-box bootstrap: {}", bootstrap_status.description_)) return {};
     util::per_gpu_array<util::i32_t> devices;
-    util::per_gpu_array<util::gpu_stream_t> streams;
-    for (util::u32_t device = 0; device != local_devices; ++device) {
-        auto [stream, status] = util::gpu_stream_t::make(static_cast<util::i32_t>(device));
-        if (!expect_true(status, "stream on GPU {}: {}", device, status.description_)) return {};
-        if (!expect_true(devices.push_back(static_cast<util::i32_t>(device)) == util::status_code_t::success_k &&
-                             streams.push_back(std::move(stream)) == util::status_code_t::success_k,
+    for (util::u32_t device = 0; device != local_devices; ++device)
+        if (!expect_true(devices.push_back(static_cast<util::i32_t>(device)) == util::status_code_t::success_k,
                          "member tables full"))
             return {};
-    }
+    auto [streams, spawn_status] = spawn_test_executor(devices.view());
+    if (!expect_true(spawn_status, "streams on {} GPUs: {}", local_devices, spawn_status.description_)) return {};
     util::f64_t const timeout_seconds = 1.0;
-    auto [domain, make_status] = util::multimem_domain_t::make(topology, devices.view(), 1u, streams.span(),
-                                                               timeout_seconds);
+    auto [domain, make_status] = util::multimem_domain_t::make(topology, devices.view(), 1u, streams, timeout_seconds);
     if (!expect_true(make_status, "multimem domain make: {}", make_status.description_)) return {};
 
-    util::switch_to_gpu_t gpu_scope {streams[0]};
-    if (!expect_true(gpu_scope.ok(), "context entry failed")) return {};
+    [[maybe_unused]] util::status_t const gpu_scope = (streams.stream(0)).bind();
+    if (!expect_true(gpu_scope.succeeded(), "context entry failed")) return {};
     if (!expect_true(cuMemsetD32(util::device_address(domain.member(0).round), 1u, 1) == CUDA_SUCCESS,
                      "round scalar advance failed"))
         return {};
     auto const started = std::chrono::steady_clock::now();
-    util::expected_t const launched = domain.barrier(0, streams[0]);
-    CUresult const drained = cuStreamSynchronize(streams[0]);
+    util::expected_t const launched = domain.barrier(0, streams.stream(0));
+    CUresult const drained = cuStreamSynchronize(util::native_stream(streams.stream(0)));
     std::chrono::duration<util::f64_t> const waited = std::chrono::steady_clock::now() - started;
     expect_true(static_cast<bool>(launched), "barrier launch: {}", launched.description_);
     expect_true(drained != CUDA_SUCCESS, "the starved barrier should trap, not pass");

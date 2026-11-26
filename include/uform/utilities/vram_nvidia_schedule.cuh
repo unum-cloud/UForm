@@ -2,17 +2,20 @@
  *  @file include/uform/utilities/vram_nvidia_schedule.cuh
  *  @author Ash Vardanian
  *  @date July 2, 2026
- *  @brief Execution scheduling: owning CUDA streams and capture-once / replay-forever graphs.
+ *  @brief Execution scheduling: the executor's CUDA streams as the toolkit takes them, and
+ *      capture-once / replay-forever graphs.
  *
  *  Two artifacts every step loop keys on:
  *
- *      1. @ref gpu_stream_t — a move-only owning wrapper over a real (non-null) @c CUstream ,
- *         holding the device's primary context retained, so ordering is explicit and capture is
- *         legal (stream capture rejects the legacy null stream).
+ *      1. @ref executor_stream_t — one stream of the executor the trainer runs on.
  *      2. @ref unum::uform::utilities::gpu_replay_graph_t — the capture-once / replay-forever
  *         contract: @c make captures a body of kernel launches into a @c CUgraph , instantiates it,
  *         uploads the executable, and keeps only that; every later step is one @c cuGraphLaunch
  *         with @b zero host-side re-derivation.
+ *
+ *  The executor stream, @ref executor_stream_t , is a real non-blocking stream the CUDA executor
+ *  owns, so ordering is explicit and capture is legal, as stream capture rejects the legacy null
+ *  stream; @ref native_stream hands its handle to the toolkit, and its @c bind selects its device.
  *
  *  @section schedule_contract The capture contract
  *
@@ -64,12 +67,26 @@
 #include <numkong/capabilities.h> // `nk_dots_pack_size_punned_t`, `nk_kernel_cast_punned_t` — the untyped kernel shapes
 #include <numkong/tensor.hpp>     // `nk::tensor_view`, `nk::tensor_span` for the typed transfer helpers
 
+#include "uform/utilities/vram_nvidia_device.hpp" // `cuda_executor_t` - the streams every step queues on
 #include "uform/utilities/vram_nvidia_memory.hpp" // `gpu_arena_alloc`, `bf16_t`, `cuda_failure`
 #include "uform/utilities/types.hpp" // `expected`, `expected_t`, `status_t`, `st::basic_vector` for the node-guard walk
 
 namespace unum::uform::utilities {
 
 namespace nk = ashvardanian::numkong;
+
+/** One stream of a CUDA executor, which a training step queues on and the executor owns. */
+using executor_stream_t = cuda_executor_t::stream_t;
+
+/** The toolkit's handle of @p stream , which launches, copies and graph captures take. */
+inline CUstream native_stream(executor_stream_t const& stream) noexcept {
+    return reinterpret_cast<CUstream>(static_cast<cuda_stream_handle_t>(stream.handle)); // vendor-boundary
+}
+
+/** The stream's handle in the opaque type the vector kernels take, so they queue on it. */
+inline nk_stream_t numkong_stream(executor_stream_t const& stream) noexcept {
+    return reinterpret_cast<nk_stream_t>(static_cast<cuda_stream_handle_t>(stream.handle)); // vendor-boundary
+}
 
 /** Rank-1 token-id device / host view — the batch's token currency. */
 using tokens_view_t = nk::tensor_view<token_id_t, 1>;
@@ -102,100 +119,6 @@ struct differentiable_weights_t {
     }
 };
 
-/**
- *  @brief A move-only owning wrapper over a real (non-null) @c CUstream on one device.
- *
- *  Creation retains the device's primary context and creates the stream inside it, so a caller
- *  never juggles contexts to use the stream; destruction destroys the stream and releases the
- *  retained context. Non-blocking by default: an explicit stream never implicitly synchronizes with
- *  the legacy stream.
- */
-struct gpu_stream_t {
-
-  private:
-    gpu_stream_t() noexcept = default;
-
-  public:
-    gpu_stream_t(gpu_stream_t const&) = delete;
-    gpu_stream_t& operator=(gpu_stream_t const&) = delete;
-
-    gpu_stream_t(gpu_stream_t&& other) noexcept
-        : stream_(std::exchange(other.stream_, nullptr)), context_(std::exchange(other.context_, nullptr)),
-          device_(std::exchange(other.device_, -1)) {}
-    gpu_stream_t& operator=(gpu_stream_t&& other) noexcept {
-        if (this != &other) {
-            destroy_();
-            stream_ = std::exchange(other.stream_, nullptr);
-            context_ = std::exchange(other.context_, nullptr);
-            device_ = std::exchange(other.device_, -1);
-        }
-        return *this;
-    }
-    ~gpu_stream_t() noexcept { destroy_(); }
-
-    /**
-     *  @brief Retain @p device 's primary context and create a stream inside it.
-     *  @param[in] device The CUDA device ordinal the stream belongs to.
-     *  @param[in] flags @c CU_STREAM_NON_BLOCKING by default — no implicit legacy-stream ordering.
-     *  @param[in] priority Stream priority; 0 is the default tier, negative is more urgent.
-     */
-    [[nodiscard]] static expected<gpu_stream_t> make(int device, unsigned flags = CU_STREAM_NON_BLOCKING,
-                                                     int priority = 0) noexcept {
-        CUdevice device_handle = 0;
-        if (CUresult result = cuDeviceGet(&device_handle, device); result != CUDA_SUCCESS)
-            return cuda_failure<gpu_stream_t>(result, "device handle query failed (device={})", device);
-        gpu_stream_t stream;
-        stream.device_ = device;
-        if (CUresult result = cuDevicePrimaryCtxRetain(&stream.context_, device_handle); result != CUDA_SUCCESS)
-            return cuda_failure<gpu_stream_t>(result, "primary context retain failed (device={})", device);
-        if (CUresult result = cuCtxPushCurrent(stream.context_); result != CUDA_SUCCESS)
-            return cuda_failure<gpu_stream_t>(result, "context push failed (device={})", device);
-        CUresult const created = cuStreamCreateWithPriority(&stream.stream_, flags, priority);
-        cuCtxPopCurrent(nullptr);
-        if (created != CUDA_SUCCESS)
-            return cuda_failure<gpu_stream_t>(created, "stream creation failed (device={} priority={})", device,
-                                              priority);
-        return expected<gpu_stream_t> {std::move(stream)};
-    }
-
-    /** The wrapped stream handle. */
-    [[nodiscard]] CUstream get() const noexcept { return stream_; }
-
-    /** Implicit handle access — the stream passes straight into launchers. */
-    operator CUstream() const noexcept { return stream_; }
-
-    /** The same handle as NumKong's opaque stream, for its kernels and runtime calls. */
-    [[nodiscard]] nk_stream_t numkong() const noexcept {
-        return reinterpret_cast<nk_stream_t>(stream_); // vendor-boundary: NumKong's opaque stream handle
-    }
-
-    /** The retained primary context the stream lives in. */
-    [[nodiscard]] CUcontext context() const noexcept { return context_; }
-
-    /** The device ordinal the stream belongs to. */
-    [[nodiscard]] int device() const noexcept { return device_; }
-
-  private:
-    void destroy_() noexcept {
-        if (stream_ != nullptr) {
-            cuCtxPushCurrent(context_);
-            cuStreamDestroy(stream_);
-            cuCtxPopCurrent(nullptr);
-            stream_ = nullptr;
-        }
-        if (context_ != nullptr) {
-            CUdevice device_handle = 0;
-            if (cuDeviceGet(&device_handle, device_) == CUDA_SUCCESS) cuDevicePrimaryCtxRelease(device_handle);
-            context_ = nullptr;
-        }
-        device_ = -1;
-    }
-
-    CUstream stream_ = nullptr;
-    CUcontext context_ = nullptr;
-    int device_ = -1;
-};
-
 /** Enqueue a host → device copy of a rank-1 view into a same-typed device span on @p stream — the
  *  typed spelling of @c cuMemcpyHtoDAsync , with the arguments in the order the name reads: host
  *  source, device destination. Extents and element sizes travel with the views, never as
@@ -205,14 +128,14 @@ struct gpu_stream_t {
 template <typename value_type_>
 [[nodiscard]] inline expected_t copy_host_to_device(std::type_identity_t<nk::tensor_view<value_type_, 1>> host_source,
                                                     nk::tensor_span<value_type_, 1> device_destination,
-                                                    gpu_stream_t& stream) noexcept {
+                                                    executor_stream_t& stream) noexcept {
     if (host_source.empty()) return {};
     if (device_destination.extent(0) < host_source.extent(0))
         return expected_t::fail(status_code_t::invalid_argument_k,
                                 "device destination ({} scalars) is smaller than the host source ({})",
                                 device_destination.extent(0), host_source.extent(0));
     if (CUresult result = cuMemcpyHtoDAsync(device_address(device_destination.data()), host_source.data(),
-                                            host_source.extent(0) * sizeof(value_type_), stream.get());
+                                            host_source.extent(0) * sizeof(value_type_), native_stream(stream));
         result != CUDA_SUCCESS)
         return cuda_failure(result, "host-to-device copy failed ({} scalars)", host_source.extent(0));
     return {};
@@ -227,14 +150,14 @@ template <typename value_type_>
 template <typename value_type_>
 [[nodiscard]] inline expected_t copy_device_to_host(
     nk::tensor_view<value_type_, 1> device_source,
-    std::type_identity_t<nk::tensor_span<value_type_, 1>> host_destination, gpu_stream_t& stream) noexcept {
+    std::type_identity_t<nk::tensor_span<value_type_, 1>> host_destination, executor_stream_t& stream) noexcept {
     if (device_source.empty()) return {};
     if (host_destination.extent(0) < device_source.extent(0))
         return expected_t::fail(status_code_t::invalid_argument_k,
                                 "host destination ({} scalars) is smaller than the device source ({})",
                                 host_destination.extent(0), device_source.extent(0));
     if (CUresult result = cuMemcpyDtoHAsync(host_destination.data(), device_address(device_source.data()),
-                                            device_source.extent(0) * sizeof(value_type_), stream.get());
+                                            device_source.extent(0) * sizeof(value_type_), native_stream(stream));
         result != CUDA_SUCCESS)
         return cuda_failure(result, "device-to-host copy failed ({} scalars)", device_source.extent(0));
     return {};
@@ -247,14 +170,14 @@ template <typename value_type_>
 template <typename value_type_>
 [[nodiscard]] inline expected_t copy_device_to_device(std::type_identity_t<nk::tensor_view<value_type_, 1>> source,
                                                       nk::tensor_span<value_type_, 1> destination,
-                                                      gpu_stream_t& stream) noexcept {
+                                                      executor_stream_t& stream) noexcept {
     if (source.empty()) return {};
     if (destination.extent(0) < source.extent(0))
         return expected_t::fail(status_code_t::invalid_argument_k,
                                 "device destination ({} scalars) is smaller than the source ({})",
                                 destination.extent(0), source.extent(0));
     if (CUresult result = cuMemcpyDtoDAsync(device_address(destination.data()), device_address(source.data()),
-                                            source.extent(0) * sizeof(value_type_), stream.get());
+                                            source.extent(0) * sizeof(value_type_), native_stream(stream));
         result != CUDA_SUCCESS)
         return cuda_failure(result, "device-to-device copy failed ({} scalars)", source.extent(0));
     return {};
@@ -264,12 +187,12 @@ template <typename value_type_>
  *  spelling of @c cuMemsetD8Async . A strided @p destination is a loud failure. */
 template <typename value_type_, std::size_t rank_>
 [[nodiscard]] inline expected_t zero_async(nk::tensor_span<value_type_, rank_> destination,
-                                           gpu_stream_t& stream) noexcept {
+                                           executor_stream_t& stream) noexcept {
     if (destination.empty()) return {};
     if (!destination.is_contiguous())
         return expected_t::fail(status_code_t::invalid_argument_k, "Cannot zero a strided device span");
     if (CUresult result = cuMemsetD8Async(device_address(destination.data()), 0,
-                                          destination.numel() * sizeof(value_type_), stream.get());
+                                          destination.numel() * sizeof(value_type_), native_stream(stream));
         result != CUDA_SUCCESS)
         return cuda_failure(result, "device zeroing failed ({} scalars)", destination.numel());
     return {};
@@ -401,13 +324,13 @@ inline constexpr unsigned kernel_grid_cap_k = 4096u;
  *  driver copies raw bytes. */
 template <typename... arg_types_>
 [[nodiscard]] inline expected_t launch_function(CUfunction function, dim3 grid_size, dim3 block_size,
-                                                gpu_stream_t& stream, arg_types_... args) noexcept {
+                                                executor_stream_t& stream, arg_types_... args) noexcept {
     static_assert(sizeof...(arg_types_) != 0, "a kernel without arguments has nothing to compute");
     static_assert((std::is_trivially_copyable_v<arg_types_> && ...), "kernels take their arguments by bytes");
     if (function == nullptr) return expected_t::fail(status_code_t::invalid_argument_k, "No kernel to launch");
     void* argument_addresses[] = {&args...};
     if (CUresult result = cuLaunchKernel(function, grid_size.x, grid_size.y, grid_size.z, block_size.x, block_size.y,
-                                         block_size.z, 0, stream.get(), argument_addresses, nullptr);
+                                         block_size.z, 0, native_stream(stream), argument_addresses, nullptr);
         result != CUDA_SUCCESS)
         return cuda_failure(result, "kernel launch failed (grid=[{},{},{}] block=[{},{},{}])", grid_size.x, grid_size.y,
                             grid_size.z, block_size.x, block_size.y, block_size.z);
@@ -434,7 +357,7 @@ template <typename... arg_types_>
  */
 template <typename... arg_types_>
 [[nodiscard]] inline expected_t launch_kernel(void const* kernel_symbol, dim3 grid_size, dim3 block_size,
-                                              gpu_stream_t& stream, arg_types_ const&... args) noexcept {
+                                              executor_stream_t& stream, arg_types_ const&... args) noexcept {
     CUfunction function = nullptr;
     if (int result = static_cast<int>(cudaGetFuncBySymbol(&function, kernel_symbol)); result != 0)
         return expected_t::fail(status_code_t::device_k, "kernel symbol resolution failed (code={})", result);
@@ -446,7 +369,7 @@ template <typename... arg_types_>
  *  become views, and an argument no parameter accepts fails to compile. */
 template <typename... parameter_types_>
 [[nodiscard]] inline expected_t launch_kernel(void (*kernel)(parameter_types_...), dim3 grid_size, dim3 block_size,
-                                              gpu_stream_t& stream,
+                                              executor_stream_t& stream,
                                               std::type_identity_t<parameter_types_> const&... arguments) noexcept {
     return launch_kernel(reinterpret_cast<void const*>(kernel), grid_size, block_size, stream, // vendor-boundary
                          arguments...);
@@ -469,7 +392,7 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
 /** Enqueue @p destination = @p source ᵀ for BFloat16 matrices: one capture-safe launch of
  *  @ref transpose_bf16_kernel on @p stream . */
 [[nodiscard]] inline expected_t transpose_bf16(bf16r2_view_t source, bf16r2_span_t destination,
-                                               gpu_stream_t& stream) noexcept {
+                                               executor_stream_t& stream) noexcept {
     if (destination.extent(0) != source.extent(1) || destination.extent(1) != source.extent(0))
         return expected_t::fail(status_code_t::unsupported_k, "[{}x{}] cannot hold the transposed [{}x{}]",
                                 destination.extent(0), destination.extent(1), source.extent(0), source.extent(1));
@@ -498,13 +421,13 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
 /** Enqueue NumKong's pack of @p b , read row-major as the @b [columns,depth] B operand of
  *  @ref multiply_bf16 , into @p packed , sized by @ref pack_bytes_bf16 . */
 [[nodiscard]] expected_t pack_bf16(bf16r2_view_t b, b8r1_span_t packed, gpu_numerics_t const& numerics,
-                                   gpu_stream_t& stream) noexcept;
+                                   executor_stream_t& stream) noexcept;
 
 /** Enqueue the Float32 product @c c=a · Bᵀ against @p packed_b , the pack of a
  *  @b [columns,depth] B with @c columns=c.extent(1) and @c depth=a.extent(1) . NumKong
  *  products replay bit-identically. */
 [[nodiscard]] expected_t multiply_bf16(bf16r2_view_t a, b8r1_view_t packed_b, f32r2_span_t c,
-                                       gpu_numerics_t const& numerics, gpu_stream_t& stream) noexcept;
+                                       gpu_numerics_t const& numerics, executor_stream_t& stream) noexcept;
 
 /**
  *  @brief Pack @p weight @b [outputs,inputs] as the B operand of its forward product into @p packed , and its
@@ -514,7 +437,7 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
  */
 [[nodiscard]] expected_t pack_weight_bf16(bf16r2_view_t weight, bf16r1_span_t transposed, b8r1_span_t packed,
                                           b8r1_span_t packed_transposed, gpu_numerics_t const& numerics,
-                                          gpu_stream_t& stream) noexcept;
+                                          executor_stream_t& stream) noexcept;
 
 /** The workspace bytes @ref weight_gradient_bf16 takes for a @b [outputs,inputs] weight over
  *  @p tokens under @p numerics , where NumKong splits the token depth into slices it sums in
@@ -541,7 +464,7 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
 [[nodiscard]] expected_t weight_gradient_bf16(bf16r2_view_t output_grad, bf16r2_view_t input, bf16r2_span_t weight_grad,
                                               bf16r1_span_t transposed_grad, bf16r1_span_t transposed_input,
                                               b8r1_span_t packed_input, f32r1_span_t product, b8r1_span_t workspace,
-                                              gpu_numerics_t const& numerics, gpu_stream_t& stream) noexcept;
+                                              gpu_numerics_t const& numerics, executor_stream_t& stream) noexcept;
 
 /**
  *  @brief All-lanes-get-the-total shuffle sum of one warp — the fixed-order tree every
@@ -829,39 +752,6 @@ struct gpu_replay_graph_t {
     CUgraphExec exec_ = nullptr;
 };
 
-/** A move-only owning wrapper over a @c CUevent — the cross-stream ordering token (fork / join
- *  boundaries, gather-ready signals) with the timing machinery disabled. */
-struct gpu_event_t {
-    gpu_event_t() noexcept = default;
-    gpu_event_t(gpu_event_t const&) = delete;
-    gpu_event_t& operator=(gpu_event_t const&) = delete;
-    gpu_event_t(gpu_event_t&& other) noexcept : event_(std::exchange(other.event_, nullptr)) {}
-    gpu_event_t& operator=(gpu_event_t&& other) noexcept {
-        if (this != &other) {
-            if (event_ != nullptr) cuEventDestroy(event_);
-            event_ = std::exchange(other.event_, nullptr);
-        }
-        return *this;
-    }
-    ~gpu_event_t() noexcept {
-        if (event_ != nullptr) cuEventDestroy(event_);
-    }
-
-    /** Create the event — once, at setup. */
-    [[nodiscard]] static expected<gpu_event_t> make() noexcept {
-        gpu_event_t event;
-        if (CUresult result = cuEventCreate(&event.event_, CU_EVENT_DISABLE_TIMING); result != CUDA_SUCCESS)
-            return cuda_failure<gpu_event_t>(result, "event creation failed");
-        return expected<gpu_event_t> {std::move(event)};
-    }
-
-    /** The wrapped handle for record / wait calls. */
-    [[nodiscard]] CUevent get() const noexcept { return event_; }
-
-  private:
-    CUevent event_ = nullptr;
-};
-
 /**
  *  @brief The monotonic step counter of one collective surface — the device round scalar @b is
  *      the count, and it is the sole source of truth (no host shadow, no pinned cell).
@@ -890,13 +780,14 @@ struct barrier_round_t {
      *      first @ref advance.
      */
     [[nodiscard]] static expected<barrier_round_t> make(u32r1_span_t device_round, u32_t increment,
-                                                        gpu_stream_t& stream) noexcept {
+                                                        executor_stream_t& stream) noexcept {
         barrier_round_t counter;
         counter.device_round_ = device_round;
         counter.increment_ = increment;
         // Seed one increment below zero so the first advance yields round 0 (device is the sole
         // source of truth).
-        if (CUresult result = cuMemsetD32Async(device_address(device_round.data()), 0u - increment, 1, stream.get());
+        if (CUresult result = cuMemsetD32Async(device_address(device_round.data()), 0u - increment, 1,
+                                               native_stream(stream));
             result != CUDA_SUCCESS)
             return cuda_failure<barrier_round_t>(result, "round seed failed");
         return expected<barrier_round_t> {std::move(counter)};
@@ -904,7 +795,7 @@ struct barrier_round_t {
 
     /** Enqueue the one-thread device increment — once per step, on the surface's lead stream,
      *  before any barrier. Capture-safe: a captured region re-runs the bump on every replay. */
-    [[nodiscard]] expected_t advance(gpu_stream_t& stream) noexcept;
+    [[nodiscard]] expected_t advance(executor_stream_t& stream) noexcept;
 
   private:
 
@@ -916,30 +807,6 @@ struct barrier_round_t {
     u32_t increment_ = 0;
 };
 
-/**
- *  @brief For this scope, the calling thread switches to @p stream 's GPU — and switches back
- *      at scope end.
- *
- *  The Driver API needs a current context for every allocation, module load, and launch, and one
- *  process drives many GPUs from one thread, so per-device work must enter that device's context
- *  for its duration; the context comes from the object that already owns it (the stream), never
- *  from a separate retain path. Check @ref ok() before relying on the scope.
- */
-struct switch_to_gpu_t {
-    explicit switch_to_gpu_t(gpu_stream_t& stream) noexcept : ok_(cuCtxPushCurrent(stream.context()) == CUDA_SUCCESS) {}
-    switch_to_gpu_t(switch_to_gpu_t const&) = delete;
-    switch_to_gpu_t& operator=(switch_to_gpu_t const&) = delete;
-    ~switch_to_gpu_t() noexcept {
-        if (ok_) cuCtxPopCurrent(nullptr);
-    }
-
-    /** Whether the switch happened — a false scope must fail the caller loudly. */
-    [[nodiscard]] bool ok() const noexcept { return ok_; }
-
-  private:
-    bool ok_ = false;
-};
-
 /** The unifying shape across the collective tiers — a typed handle bundling specialized symmetric
  *  memory with an enqueue-only collective op. Every buffer names its element type and is invocable
  *  on a stream (multimem or infiniband); the per-buffer typed memory accessors ( @c payload /
@@ -947,7 +814,7 @@ struct switch_to_gpu_t {
  *  @c static_assert s it, so a drifted signature fails at compile time and generic code (mixer,
  *  telemetry, tests) can name any collective uniformly. */
 template <typename buffer_type_>
-concept a_collective_buffer = requires(buffer_type_ buffer, gpu_stream_t& stream) {
+concept a_collective_buffer = requires(buffer_type_ buffer, executor_stream_t& stream) {
     typename buffer_type_::value_type;
     { buffer(stream) };
 };

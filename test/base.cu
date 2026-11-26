@@ -102,10 +102,11 @@ enum class test_mixture_t : bool { tokens_k, omni_k };
     return config;
 }
 
-/** One width tier: the mesh every cell of the tier builds its trainer over, the devices it drives,
- *  and the kernels they call. */
+/** One width tier: the mesh every cell of the tier builds its trainer over, the executor whose
+ *  streams it queues on, the devices it drives, and the kernels they call. */
 struct tier_t {
     mesh_t& mesh;
+    util::cuda_executor_t& streams;
     std::span<util::i32_t const> devices;
     util::gpu_numerics_t numerics;
 };
@@ -166,7 +167,8 @@ inline constexpr char const* world_unhealthy_k = "needs a healthy world";
         expect_true(false, "peer domain unresponsive — aborting the remaining cases");
         return false;
     }
-    auto [probe, status] = util::gpu_stream_t::make(0);
+    int const lead[] = {0};
+    auto [probe, status] = spawn_test_executor(lead);
     if (status) return true;
     health.alive = false;
     expect_true(false, "device context poisoned — aborting the remaining cases: {}", status.description_);
@@ -176,7 +178,7 @@ inline constexpr char const* world_unhealthy_k = "needs a healthy world";
 /** Build @p placed over @p tier for @p config , tallying bring-up failures into @p health . */
 [[nodiscard]] static util::expected_t make_trainer_(trainer_t& placed, tier_t tier, trainer_config_t const& config,
                                                     world_health_t& health) noexcept {
-    util::expected_t built = trainer_t::make(placed, tier.mesh, config, tier.devices, tier.numerics);
+    util::expected_t built = trainer_t::make(placed, tier.mesh, tier.streams, config, tier.devices, tier.numerics);
     health.consecutive_setup_failures = built ? 0u : health.consecutive_setup_failures + 1u;
     return built;
 }
@@ -195,10 +197,10 @@ inline constexpr char const* world_unhealthy_k = "needs a healthy world";
 /** DtoH one replica's whole registration list into a byte-comparable host array — the snapshot
  *  behind assertions A, C, and the gradient-propagation check. */
 [[nodiscard]] static util::expected<st::basic_vector<util::bf16_t>> snapshot_weights_(
-    st::basic_vector<util::differentiable_weights_t> const& weights, util::gpu_stream_t& stream) noexcept {
+    st::basic_vector<util::differentiable_weights_t> const& weights, util::executor_stream_t& stream) noexcept {
     using result_t = util::expected<st::basic_vector<util::bf16_t>>;
-    util::switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return result_t::fail(util::status_code_t::device_k, "context entry failed");
+    [[maybe_unused]] util::status_t const gpu_scope = (stream).bind();
+    if (gpu_scope.failed()) return result_t::fail(util::status_code_t::device_k, "context entry failed");
     std::span<util::differentiable_weights_t const> const list = weights;
     std::size_t total = 0, largest = 0;
     for (util::differentiable_weights_t const& matrix : list) {
@@ -220,7 +222,7 @@ inline constexpr char const* world_unhealthy_k = "needs a healthy world";
         nk::tensor_view<util::bf16_t, 1> const source = matrix.weights.flatten<1>();
         if (util::expected_t copied = util::copy_device_to_host(source, staging.span(), stream); !copied)
             return result_t::fail(std::move(copied));
-        cuStreamSynchronize(stream.get());
+        cuStreamSynchronize(util::native_stream(stream));
         std::memcpy(host.data() + cursor, staging.data(), scalars * sizeof(util::bf16_t));
         cursor += scalars;
     }
@@ -230,10 +232,10 @@ inline constexpr char const* world_unhealthy_k = "needs a healthy world";
 /** DtoH the lead replica's shared @c d(normalized) - the score output whose two captured
  *  replays must agree. */
 [[nodiscard]] static util::expected<st::basic_vector<util::bf16_t>> snapshot_grad_(
-    base_replica_t& replica, util::gpu_stream_t& stream) noexcept {
+    base_replica_t& replica, util::executor_stream_t& stream) noexcept {
     using result_t = util::expected<st::basic_vector<util::bf16_t>>;
-    util::switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return result_t::fail(util::status_code_t::device_k, "context entry failed");
+    [[maybe_unused]] util::status_t const gpu_scope = (stream).bind();
+    if (gpu_scope.failed()) return result_t::fail(util::status_code_t::device_k, "context entry failed");
     util::bf16r2_view_t const view = replica.normalized_grad.view();
     std::size_t const scalars = static_cast<std::size_t>(view.extent(0)) * view.extent(1);
     nk::tensor<util::bf16_t, util::pinned_alloc<util::bf16_t>, 1> staging =
@@ -241,7 +243,7 @@ inline constexpr char const* world_unhealthy_k = "needs a healthy world";
     if (!staging) return result_t::fail(util::status_code_t::out_of_memory_k, "pinned staging allocation failed");
     if (util::expected_t copied = util::copy_device_to_host(view.flatten<1>(), staging.span(), stream); !copied)
         return result_t::fail(std::move(copied));
-    cuStreamSynchronize(stream.get());
+    cuStreamSynchronize(util::native_stream(stream));
     st::basic_vector<util::bf16_t> host;
     if (st::failed(host.resize(st::assume_uninitialized, scalars)))
         return result_t::fail(util::status_code_t::out_of_memory_k, "snapshot allocation failed");
@@ -367,7 +369,7 @@ static case_result_t test_base_conformance(world_health_t& health, char const* l
         // Assertion F's reference: the lead replica's freshly seeded weights, untouched
         // by the capture.
         auto [seed_lead, snapshot_seed_lead_status] = snapshot_weights_(trainer.replicas[0].weights,
-                                                                        trainer.streams[0]);
+                                                                        trainer.streams->stream(0));
         if (!expect_true(snapshot_seed_lead_status, "[{}] seed snapshot: {}", label,
                          snapshot_seed_lead_status.description_))
             return {};
@@ -442,7 +444,7 @@ static case_result_t test_base_conformance(world_health_t& health, char const* l
         if (util::expected_t drained = trainer.synchronize();
             !expect_true(drained, "[{}] drain: {}", label, drained.description_))
             return {};
-        auto [lead, snapshot_lead_status] = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
+        auto [lead, snapshot_lead_status] = snapshot_weights_(trainer.replicas[0].weights, trainer.streams->stream(0));
         if (!expect_true(snapshot_lead_status, "[{}] lead snapshot: {}", label, snapshot_lead_status.description_))
             return {};
         captured_lead = std::move(lead);
@@ -452,7 +454,7 @@ static case_result_t test_base_conformance(world_health_t& health, char const* l
         bool replicas_identical = true;
         for (util::u32_t member_index = 1; member_index < gpus; ++member_index) {
             auto [peer, snapshot_peer_status] = snapshot_weights_(trainer.replicas[member_index].weights,
-                                                                  trainer.streams[member_index]);
+                                                                  trainer.streams->stream(member_index));
             replicas_identical = replicas_identical && snapshot_peer_status && snapshots_match_(peer, captured_lead);
         }
         expect_true(replicas_identical, "[{}] every replica matches the lead bitwise (A)", label);
@@ -460,11 +462,12 @@ static case_result_t test_base_conformance(world_health_t& health, char const* l
         // B — every member's own barrier round advanced off zero, never moved backwards, and they
         // all agree: the ledger's monotone round rows hold all three (each member's scalar counts
         // its own barriers).
-        auto [lead_round, read_lead_round_status] = trainer.ledger.row(trainer.probes.rounds[0], trainer.streams[0]);
+        auto [lead_round, read_lead_round_status] = trainer.ledger.row(trainer.probes.rounds[0],
+                                                                       trainer.streams->stream(0));
         bool rounds_read = static_cast<bool>(read_lead_round_status), round_uniform = true, round_monotone = true;
         for (util::u32_t member_index = 0; member_index < gpus; ++member_index) {
             auto [member_round, read_member_round_status] = trainer.ledger.row(trainer.probes.rounds[member_index],
-                                                                               trainer.streams[member_index]);
+                                                                               trainer.streams->stream(member_index));
             rounds_read = rounds_read && read_member_round_status;
             round_uniform = round_uniform && read_member_round_status && read_lead_round_status &&
                             member_round.last_scalar == lead_round.last_scalar;
@@ -526,7 +529,7 @@ static case_result_t test_base_conformance(world_health_t& health, char const* l
     if (util::expected_t drained = eager.synchronize();
         !expect_true(drained, "[{}] eager drain: {}", label, drained.description_))
         return {};
-    auto [eager_lead, status] = snapshot_weights_(eager.replicas[0].weights, eager.streams[0]);
+    auto [eager_lead, status] = snapshot_weights_(eager.replicas[0].weights, eager.streams->stream(0));
     expect_true(status && snapshots_near_(eager_lead, captured_lead), "[{}] captured replay lands on the eager run (C)",
                 label);
     return {};
@@ -643,22 +646,23 @@ static case_result_t test_packed_rows(world_health_t& health, tier_t tier) {
     if (util::expected_t built = make_trainer_(trainer, tier, config, health);
         !expect_true(built, "packed trainer bring-up: {}", built.description_))
         return {};
-    util::switch_to_gpu_t gpu_scope {trainer.streams[0]};
-    if (!expect_true(gpu_scope.ok(), "packed context entry")) return {};
+    [[maybe_unused]] util::status_t const gpu_scope = (trainer.streams->stream(0)).bind();
+    if (!expect_true(gpu_scope.succeeded(), "packed context entry")) return {};
     base_replica_t& lead = trainer.replicas[0];
-    if (util::expected_t drawn = lead.draw(config, 0u, util::data_epoch_t {0u}, trainer.streams[0]);
+    if (util::expected_t drawn = lead.draw(config, 0u, util::data_epoch_t {0u}, trainer.streams->stream(0));
         !expect_true(drawn, "packed draw: {}", drawn.description_))
         return {};
     std::size_t const rows = config.batch.max_rows_per_gpu, columns = config.batch.max_columns_per_row;
     std::size_t const segments = config.batch.max_segments_per_gpu;
     util::u32r1_tensor_pinned_t offsets = make_uninitialized<util::u32r1_tensor_pinned_t>({segments + 1});
     util::u32r1_tensor_pinned_t lengths = make_uninitialized<util::u32r1_tensor_pinned_t>({segments});
-    if (!expect_true(
-            offsets && lengths &&
-                util::copy_device_to_host(lead.batch.segment_offsets.view(), offsets.span(), trainer.streams[0]) &&
-                util::copy_device_to_host(lead.batch.segment_lengths.view(), lengths.span(), trainer.streams[0]) &&
-                cuStreamSynchronize(trainer.streams[0].get()) == CUDA_SUCCESS,
-            "packed readback"))
+    if (!expect_true(offsets && lengths &&
+                         util::copy_device_to_host(lead.batch.segment_offsets.view(), offsets.span(),
+                                                   trainer.streams->stream(0)) &&
+                         util::copy_device_to_host(lead.batch.segment_lengths.view(), lengths.span(),
+                                                   trainer.streams->stream(0)) &&
+                         cuStreamSynchronize(util::native_stream(trainer.streams->stream(0))) == CUDA_SUCCESS,
+                     "packed readback"))
         return {};
     bool covered = segments == 3u * rows && offsets[segments] == rows * columns;
     for (std::size_t row = 0; covered && row != rows; ++row) {
@@ -695,27 +699,27 @@ static case_result_t test_graph_capture(world_health_t& health, tier_t tier) {
                 trainer.forward_graphs.size(), trainer.backward_graphs.size(), gpus);
     if (trainer.forward_graphs.size() != gpus) return {};
 
-    util::switch_to_gpu_t gpu_scope {trainer.streams[0]};
-    if (!expect_true(gpu_scope.ok(), "capture context entry")) return {};
+    [[maybe_unused]] util::status_t const gpu_scope = (trainer.streams->stream(0)).bind();
+    if (!expect_true(gpu_scope.succeeded(), "capture context entry")) return {};
     base_replica_t& lead = trainer.replicas[0];
-    util::expected_t prepared = lead.draw(config, 0u, util::data_epoch_t {0u}, trainer.streams[0]);
-    if (prepared) prepared = lead.prepare(config, util::data_epoch_t {0u}, trainer.streams[0]);
+    util::expected_t prepared = lead.draw(config, 0u, util::data_epoch_t {0u}, trainer.streams->stream(0));
+    if (prepared) prepared = lead.prepare(config, util::data_epoch_t {0u}, trainer.streams->stream(0));
     if (!expect_true(prepared, "capture preamble: {}", prepared.description_)) return {};
-    if (util::expected_t first = trainer.forward_graphs[0].launch(trainer.streams[0].get());
+    if (util::expected_t first = trainer.forward_graphs[0].launch(util::native_stream(trainer.streams->stream(0)));
         !expect_true(first, "first replay: {}", first.description_))
         return {};
-    auto [first_grad, snapshot_first_grad_status] = snapshot_grad_(lead, trainer.streams[0]);
-    if (util::expected_t second = trainer.forward_graphs[0].launch(trainer.streams[0].get());
+    auto [first_grad, snapshot_first_grad_status] = snapshot_grad_(lead, trainer.streams->stream(0));
+    if (util::expected_t second = trainer.forward_graphs[0].launch(util::native_stream(trainer.streams->stream(0)));
         !expect_true(second, "second replay: {}", second.description_))
         return {};
-    auto [second_grad, snapshot_second_grad_status] = snapshot_grad_(lead, trainer.streams[0]);
+    auto [second_grad, snapshot_second_grad_status] = snapshot_grad_(lead, trainer.streams->stream(0));
     expect_true(snapshot_first_grad_status && snapshot_second_grad_status && snapshots_near_(first_grad, second_grad),
                 "two captured replays agree");
     return {};
 }
 
 /** Download one replica's @b [groups] Float32 temperatures, β then bias, into @p host . */
-[[nodiscard]] static bool read_temperatures_(base_replica_t& replica, util::gpu_stream_t& stream,
+[[nodiscard]] static bool read_temperatures_(base_replica_t& replica, util::executor_stream_t& stream,
                                              st::basic_vector<util::f32_t>& host) noexcept {
     std::size_t const groups = replica.token_inverse_temperatures.numel();
     if (st::failed(host.resize(st::assume_uninitialized, 2u * groups))) return false;
@@ -727,7 +731,7 @@ static case_result_t test_graph_capture(world_health_t& health, tier_t tier) {
         !util::copy_device_to_host(replica.token_biases.view(), halves[nk::range(groups, 2u * groups), nk::slice],
                                    stream))
         return false;
-    cuStreamSynchronize(stream.get());
+    cuStreamSynchronize(util::native_stream(stream));
     std::memcpy(host.data(), staging.data(), 2u * groups * sizeof(util::f32_t));
     return true;
 }
@@ -753,8 +757,8 @@ static case_result_t test_late_interaction_resume(world_health_t& health, tier_t
         if (util::expected_t built = make_trainer_(trainer, tier, config, health);
             !expect_true(built, "late-interaction trainer bring-up: {}", built.description_))
             return {};
-        util::switch_to_gpu_t gpu_scope {trainer.streams[0]};
-        util::expected_t stepped = read_temperatures_(trainer.replicas[0], trainer.streams[0], started)
+        [[maybe_unused]] util::status_t const gpu_scope = (trainer.streams->stream(0)).bind();
+        util::expected_t stepped = read_temperatures_(trainer.replicas[0], trainer.streams->stream(0), started)
                                        ? run_steps_(trainer, 0, 3)
                                        : util::expected_t::fail(util::status_code_t::device_k,
                                                                 "temperature download failed");
@@ -762,7 +766,7 @@ static case_result_t test_late_interaction_resume(world_health_t& health, tier_t
         if (stepped) stepped = trainer.save(path.view());
         if (stepped) stepped = run_steps_(trainer, 3, 4);
         if (stepped) stepped = trainer.synchronize();
-        if (!expect_true(stepped && read_temperatures_(trainer.replicas[0], trainer.streams[0], continued),
+        if (!expect_true(stepped && read_temperatures_(trainer.replicas[0], trainer.streams->stream(0), continued),
                          "late-interaction steps: {}", stepped.description_))
             return {};
     }
@@ -770,11 +774,11 @@ static case_result_t test_late_interaction_resume(world_health_t& health, tier_t
     if (util::expected_t built = make_trainer_(trainer, tier, config, health);
         !expect_true(built, "resumed trainer bring-up: {}", built.description_))
         return {};
-    util::switch_to_gpu_t gpu_scope {trainer.streams[0]};
+    [[maybe_unused]] util::status_t const gpu_scope = (trainer.streams->stream(0)).bind();
     util::expected_t stepped = trainer.resume(path.view());
     if (stepped) stepped = run_steps_(trainer, 3, 4);
     if (stepped) stepped = trainer.synchronize();
-    if (!expect_true(stepped && read_temperatures_(trainer.replicas[0], trainer.streams[0], resumed),
+    if (!expect_true(stepped && read_temperatures_(trainer.replicas[0], trainer.streams->stream(0), resumed),
                      "resumed step: {}", stepped.description_))
         return {};
     expect_true(std::memcmp(started.data(), continued.data(), started.size() * sizeof(util::f32_t)) != 0,
@@ -856,20 +860,20 @@ static case_result_t test_spectrum_spike(world_health_t& health, tier_t tier) {
     if (util::expected_t first = run_steps_(trainer, 0u, 1u);
         !expect_true(first, "the first step, with nothing to spike against: {}", first.description_))
         return {};
-    util::switch_to_gpu_t gpu_scope {trainer.streams[0]};
+    [[maybe_unused]] util::status_t const gpu_scope = (trainer.streams->stream(0)).bind();
     util::f32_t terms[2] = {};
     if (util::expected_t copied = util::copy_device_to_host(trainer.spectrum.terms(0), std::span<util::f32_t> {terms},
-                                                            trainer.streams[0]);
+                                                            trainer.streams->stream(0));
         !expect_true(copied, "terms download: {}", copied.description_))
         return {};
-    cuStreamSynchronize(trainer.streams[0].get());
+    cuStreamSynchronize(util::native_stream(trainer.streams->stream(0)));
     expect_true(std::isfinite(terms[0]) && terms[0] > 0.0f && std::isfinite(terms[1]) && terms[1] > 0.0f,
                 "the coding rate {} and the top eigenvalue {} read finite and positive", terms[0], terms[1]);
     auto [weights_before, snapshot_weights_before_status] = snapshot_weights_(trainer.replicas[0].weights,
-                                                                              trainer.streams[0]);
+                                                                              trainer.streams->stream(0));
     util::expected_t const spiked = run_steps_(trainer, 1u, 2u);
     auto [weights_after, snapshot_weights_after_status] = snapshot_weights_(trainer.replicas[0].weights,
-                                                                            trainer.streams[0]);
+                                                                            trainer.streams->stream(0));
     expect_true(!spiked && spiked.status_ == util::status_code_t::internal_k,
                 "a threshold of {} refuses the second step", config.grad_spike_threshold);
     expect_true(snapshot_weights_before_status && snapshot_weights_after_status &&
@@ -906,15 +910,12 @@ static case_result_t test_spectrum_world(world_health_t& health, tier_t wide, ti
         config.hidden = static_cast<util::u32_t>(hidden);
         config.rows_per_world = static_cast<util::u32_t>(world_rows);
         config.coding_rate_weight = 1.0f;
-        util::per_gpu_array<util::gpu_stream_t> streams;
+        auto [streams, spawn_status] = spawn_test_executor(devices);
+        if (!spawn_status) return util::expected_t::fail(std::move(spawn_status));
         util::per_gpu_array<util::gpu_arena_t> arenas;
         util::per_gpu_array<util::bf16r2_tensor_arena_t> pooled, pooled_grad;
         for (std::size_t rank = 0; rank != devices.size(); ++rank) {
-            auto [stream, make_stream_status] = util::gpu_stream_t::make(devices[rank]);
-            if (!make_stream_status) return util::expected_t::fail(std::move(make_stream_status));
-            if (streams.push_back(std::move(stream)) != util::status_code_t::success_k)
-                return util::expected_t::fail(util::status_code_t::out_of_memory_k, "stream table full");
-            util::switch_to_gpu_t gpu_scope {streams[rank]};
+            [[maybe_unused]] util::status_t const gpu_scope = (streams.stream(rank)).bind();
             auto [arena, make_arena_status] = util::gpu_arena_t::make(devices[rank], 1ull << 28, devices);
             if (!make_arena_status) return util::expected_t::fail(std::move(make_arena_status));
             if (arenas.push_back(std::move(arena)) != util::status_code_t::success_k)
@@ -929,29 +930,31 @@ static case_result_t test_spectrum_world(world_health_t& health, tier_t wide, ti
             std::size_t const begin = (first_row + rank * rows_per_gpu) * hidden;
             cuMemcpyHtoD(util::device_address(pooled[rank].data()), world_pooled.data() + begin,
                          rows_per_gpu * hidden * sizeof(nk_bf16_t));
-            if (util::expected_t zeroed = util::zero_async(pooled_grad[rank].span(), streams[rank]); !zeroed)
+            if (util::expected_t zeroed = util::zero_async(pooled_grad[rank].span(), streams.stream(rank)); !zeroed)
                 return zeroed;
         }
         auto [domain, make_domain_status] = util::multimem_domain_t::make(
-            mesh.topology, devices, distributed_pooled_spectrum_t::payload_scalars_needed(config), streams.span(),
+            mesh.topology, devices, distributed_pooled_spectrum_t::payload_scalars_needed(config), streams,
             wait_limit_k.count());
         if (!make_domain_status) return util::expected_t::fail(std::move(make_domain_status));
         auto [spectrum, make_spectrum_status] = distributed_pooled_spectrum_t::make(
-            domain, mesh.colocated, arenas.span(), streams.span(), {}, 0, config, numerics, wait_limit_k.count());
+            domain, mesh.colocated, arenas.span(), streams, {}, 0, config, numerics, wait_limit_k.count());
         if (!make_spectrum_status) return util::expected_t::fail(std::move(make_spectrum_status));
         for (std::size_t rank = 0; rank != devices.size(); ++rank)
-            if (util::expected_t shaped = spectrum(rank, pooled[rank].view(), pooled_grad[rank].span(), streams[rank]);
+            if (util::expected_t shaped = spectrum(rank, pooled[rank].view(), pooled_grad[rank].span(),
+                                                   streams.stream(rank));
                 !shaped)
                 return shaped;
         rates.assign(devices.size(), 0.0f);
         for (std::size_t rank = 0; rank != devices.size(); ++rank) {
-            util::switch_to_gpu_t gpu_scope {streams[rank]};
+            [[maybe_unused]] util::status_t const gpu_scope = (streams.stream(rank)).bind();
             util::f32_t terms[2] = {};
-            if (util::expected_t copied = util::copy_device_to_host(spectrum.terms(rank),
-                                                                    std::span<util::f32_t> {terms}, streams[rank]);
+            if (util::expected_t copied = util::copy_device_to_host(
+                    spectrum.terms(rank), std::span<util::f32_t> {terms}, streams.stream(rank));
                 !copied)
                 return copied;
-            if (CUresult result = cuStreamSynchronize(streams[rank].get()); result != CUDA_SUCCESS)
+            if (CUresult result = cuStreamSynchronize(util::native_stream(streams.stream(rank)));
+                result != CUDA_SUCCESS)
                 return util::cuda_failure(result, "rank {} drain failed", rank);
             rates[rank] = terms[0];
         }
@@ -1026,8 +1029,13 @@ int main(int argc, char** argv) {
         !expect_true(narrowed, "narrowed mesh: {}", narrowed.description_))
         return finish_test_run();
     util::gpu_numerics_t const numerics = gpu_numerics_of(options.capabilities);
-    tier_t const wide {wide_mesh, devices, numerics};
-    tier_t const cheap {cheap_mesh, std::span<util::i32_t const> {devices}.first(1), numerics};
+    auto [wide_streams, wide_spawn_status] = spawn_test_executor(devices);
+    auto [cheap_streams, cheap_spawn_status] = spawn_test_executor({devices.data(), 1});
+    if (!expect_true(wide_spawn_status && cheap_spawn_status, "tier executors: {}{}", wide_spawn_status.description_,
+                     cheap_spawn_status.description_))
+        return finish_test_run();
+    tier_t const wide {wide_mesh, wide_streams, devices, numerics};
+    tier_t const cheap {cheap_mesh, cheap_streams, std::span<util::i32_t const> {devices}.first(1), numerics};
 
     world_health_t health;
     run_test_case("test_packed_rows", test_packed_rows, health, cheap);

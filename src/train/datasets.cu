@@ -409,8 +409,8 @@ util::expected_t dataset_source_t::make(dataset_source_t& placed, trainer_t& tra
         shape.max_bags_per_gpu = static_cast<util::u32_t>(shape.max_segments_per_gpu / 2u);
 
     for (std::size_t member = 0; member != gpus; ++member) {
-        util::switch_to_gpu_t gpu_scope {trainer.streams[member]};
-        if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+        [[maybe_unused]] util::status_t const gpu_scope = (trainer.streams->stream(member)).bind();
+        if (gpu_scope.failed()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
         st::basic_vector<multimodal_batch_on_gpu_t> filled;
         for (std::size_t batch_index = 0; batch_index != batches_per_fill; ++batch_index) {
             auto [batch, status] = multimodal_batch_on_gpu_t::make(util::gpu_arena_alloc_t {trainer.arenas[member]},
@@ -438,7 +438,7 @@ util::expected_t dataset_source_t::make(dataset_source_t& placed, trainer_t& tra
     }
     auto [mixer, make_mixer_status] = multimodal_batch_mixer_t::make(trainer.domain, trainer.mesh->colocated,
                                                                      trainer.arenas, shape, config.seed,
-                                                                     trainer.streams, trainer.mesh->timeout_seconds);
+                                                                     *trainer.streams, trainer.mesh->timeout_seconds);
     if (!make_mixer_status) return util::expected_t::fail(std::move(make_mixer_status));
     placed.mixer_ = std::move(mixer);
     std::size_t const world_gpus = trainer.mesh->topology.shape.gpus_per_colocated_domain;
@@ -494,7 +494,8 @@ util::expected_t dataset_source_t::fill(trainer_t& trainer, util::data_epoch_t d
         std::swap(loaded_[member], filled_[member][batch_of(member)]);
     util::expected_t mixed;
     for (std::size_t member = 0; member != gpus && mixed; ++member)
-        mixed = mixer_(member, data_epoch, loaded_.view(), trainer.replicas[member].batch, trainer.streams[member]);
+        mixed = mixer_(member, data_epoch, loaded_.view(), trainer.replicas[member].batch,
+                       trainer.streams->stream(member));
     for (std::size_t member = 0; member != gpus; ++member)
         std::swap(loaded_[member], filled_[member][batch_of(member)]);
     ++served_steps_;
@@ -511,7 +512,10 @@ util::expected_t dataset_source_t::fill_member_(trainer_t& trainer, std::size_t 
                                             trainer.mesh->topology.is_lead() ? &report_line : nullptr);
     mixture_entry_t const& dataset = mixture_.datasets[entry];
     std::span<multimodal_batch_on_gpu_t> const batches = filled_[member];
-    util::gpu_stream_t& stream = trainer.streams[member];
+    util::executor_stream_t& stream = trainer.streams->stream(member);
+    // The zero fills below queue on the member's stream, so its device is current first
+    if (util::status_t const bound = stream.bind(); bound.failed())
+        return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
     util::u32_t const step = data_epoch.ordinal;
     util::expected_t filled;
     for (multimodal_batch_on_gpu_t& batch : batches)
@@ -558,13 +562,14 @@ util::expected_t dataset_source_t::relate_(trainer_t& trainer) noexcept {
     bool const pairs = !mixture_.datasets[0].anchor.empty();
     if (!pairs) {
         for (std::size_t member = 0; member != gpus; ++member) {
-            util::switch_to_gpu_t gpu_scope {trainer.streams[member]};
-            if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+            [[maybe_unused]] util::status_t const gpu_scope = (trainer.streams->stream(member)).bind();
+            if (gpu_scope.failed())
+                return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
             base_replica_t& replica = trainer.replicas[member];
             if (util::expected_t related = replica.relations.upload_self_edges(
                     segments, replica.batch.segment_lengths.view(), mixer_.world_lengths(member).flatten<1>(),
                     std::size_t {first + member} * segments, config.contrastive.ambient_repulsion_weight,
-                    trainer.streams[member]);
+                    trainer.streams->stream(member));
                 !related)
                 return related;
             trainer.contrastive.rebind_relations(member, replica.relations.view());
@@ -573,17 +578,17 @@ util::expected_t dataset_source_t::relate_(trainer_t& trainer) noexcept {
     }
 
     for (std::size_t member = 0; member != gpus; ++member) {
-        util::switch_to_gpu_t gpu_scope {trainer.streams[member]};
-        if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+        [[maybe_unused]] util::status_t const gpu_scope = (trainer.streams->stream(member)).bind();
+        if (gpu_scope.failed()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
         multimodal_batch_on_gpu_t const& mixed = trainer.replicas[member].batch;
         util::expected_t copied = util::copy_device_to_host(mixed.segment_bag.view(), bags_[member, nk::slice],
-                                                            trainer.streams[member]);
+                                                            trainer.streams->stream(member));
         if (copied)
             copied = util::copy_device_to_host(mixed.segment_lengths.view(), lengths_[member, nk::slice],
-                                               trainer.streams[member]);
+                                               trainer.streams->stream(member));
         if (copied)
             copied = util::copy_device_to_host(mixed.segment_role.view(), roles_[member, nk::slice],
-                                               trainer.streams[member]);
+                                               trainer.streams->stream(member));
         if (!copied) return copied;
     }
     if (util::expected_t drained = trainer.synchronize(); !drained) return drained;
@@ -597,16 +602,16 @@ util::expected_t dataset_source_t::relate_(trainer_t& trainer) noexcept {
             return related;
 
         base_replica_t& replica = trainer.replicas[member];
-        util::gpu_stream_t& stream = trainer.streams[member];
-        util::switch_to_gpu_t gpu_scope {stream};
-        if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+        util::executor_stream_t& stream = trainer.streams->stream(member);
+        [[maybe_unused]] util::status_t const gpu_scope = (stream).bind();
+        if (gpu_scope.failed()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
         util::expected_t staged = replica.relations.upload(
             edges_.attract(), edges_.repel(), edges_.ignore(), replica.batch.segment_lengths.view(),
             mixer_.world_lengths(member).flatten<1>(), replica.batch.segment_key.view(),
             mixer_.world_keys(member).flatten<1>(), world_segments, vertex_base,
             config.contrastive.ambient_repulsion_weight, stream);
         if (staged) // the host columns are reused for the next GPU, so their copies land first
-            if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
+            if (CUresult result = cuStreamSynchronize(util::native_stream(stream)); result != CUDA_SUCCESS)
                 staged = util::cuda_failure(result, "relation staging drain failed (member={})", member);
         if (!staged) return staged;
         trainer.contrastive.rebind_relations(member, replica.relations.view());

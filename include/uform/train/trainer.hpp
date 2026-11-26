@@ -336,8 +336,9 @@ struct trainer_t {
     /** The measured envelope @ref config 's batch was sized from. */
     envelope_t envelope {};
 
-    /** One owning stream per GPU — the ordered chain a replica's whole step enqueues onto. */
-    per_gpu_array<gpu_stream_t> streams {};
+    /** The executor whose stream per GPU each replica's whole step queues on; the caller owns it,
+     *  and it outlives the run. */
+    cuda_executor_t* streams = nullptr;
 
     /** One owning arena per GPU, visible to every local peer — the allocation budget its
      *  replica draws from. */
@@ -412,8 +413,9 @@ struct trainer_t {
      *  @par Statuses:
      *  - @c status_code_t::out_of_memory_k The envelope does not fit, with the measured numbers.
      */
-    [[nodiscard]] static expected_t make(trainer_t& placed, mesh_t& mesh, trainer_config_t const& requested,
-                                         std::span<i32_t const> devices, gpu_numerics_t const& numerics) noexcept;
+    [[nodiscard]] static expected_t make(trainer_t& placed, mesh_t& mesh, cuda_executor_t& executor,
+                                         trainer_config_t const& requested, std::span<i32_t const> devices,
+                                         gpu_numerics_t const& numerics) noexcept;
 
     /**
      *  @brief Load every replica from the checkpoint at @p path and continue from its saved step,

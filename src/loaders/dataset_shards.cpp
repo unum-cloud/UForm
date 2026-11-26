@@ -225,10 +225,10 @@ inline constexpr char tar_length_column_k[] = "tar_byte_length";
         st::failed(row_runs.resize(rows)))
         return result_t::fail(util::status_code_t::out_of_memory_k, "tar index allocation failed ({} rows)", rows);
     if (cuMemcpyDtoHAsync(offsets.data(), util::device_address(byte_offsets.data<util::i64_t>()),
-                          rows * sizeof(util::i64_t), stream.get()) != CUDA_SUCCESS ||
+                          rows * sizeof(util::i64_t), util::native_stream(stream)) != CUDA_SUCCESS ||
         cuMemcpyDtoHAsync(lengths.data(), util::device_address(byte_lengths.data<util::i64_t>()),
-                          rows * sizeof(util::i64_t), stream.get()) != CUDA_SUCCESS ||
-        cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
+                          rows * sizeof(util::i64_t), util::native_stream(stream)) != CUDA_SUCCESS ||
+        cuStreamSynchronize(util::native_stream(stream)) != CUDA_SUCCESS)
         return result_t::fail(util::status_code_t::device_k, "tar index landing failed ({} rows)", rows);
 
     // The members land back to back in row order, so each one starts at the running sum of lengths.
@@ -310,8 +310,9 @@ inline constexpr char tar_length_column_k[] = "tar_byte_length";
         // before the staging they read is freed for it.
         if ((row_end != row_begin &&
              cuMemcpyBatchAsync(destinations.data() + row_begin, sources.data() + row_begin, sizes.data() + row_begin,
-                                row_end - row_begin, &attributes, &attribute_index, 1, stream.get()) != CUDA_SUCCESS) ||
-            cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
+                                row_end - row_begin, &attributes, &attribute_index, 1,
+                                util::native_stream(stream)) != CUDA_SUCCESS) ||
+            cuStreamSynchronize(util::native_stream(stream)) != CUDA_SUCCESS)
             return result_t::fail(util::status_code_t::device_k, "tar member gather failed for {}", paths[shard]);
         row_begin = row_end;
     }
@@ -427,7 +428,8 @@ util::tape_view<util::u32_t const> row_group_draw_t::picked_groups() const noexc
 std::size_t row_group_draw_t::rows() const noexcept { return group_prefix_.empty() ? 0 : group_prefix_.back(); }
 
 util::expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const& storage, sz::string_view_t path,
-                                                    sz::strings_view_t columns, util::gpu_stream_t& stream) noexcept {
+                                                    sz::strings_view_t columns,
+                                                    util::executor_stream_t& stream) noexcept {
     // The single-shard convenience over the concatenating read.
     return make(storage, std::span<sz::string_view_t const> {&path, 1}, columns, {}, stream);
 }
@@ -435,7 +437,7 @@ util::expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t
 util::expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const&, sz::strings_view_t paths,
                                                     sz::strings_view_t columns,
                                                     util::tape_view<util::u32_t const> row_groups,
-                                                    util::gpu_stream_t& stream) noexcept {
+                                                    util::executor_stream_t& stream) noexcept {
     using result_t = util::expected<parquet_file_t>;
     if (paths.empty() || columns.empty())
         return result_t::fail(util::status_code_t::invalid_argument_k, "A read needs a shard path and column");
@@ -452,12 +454,14 @@ util::expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t
         names.reserve(columns.size());
         for (sz::string_view_t path : paths) path_texts.emplace_back(path.data(), path.size());
         for (sz::string_view_t column : columns) names.emplace_back(column.data(), column.size());
-        util::switch_to_gpu_t gpu_scope {stream}; // cuDF allocates and launches in the current context
-        if (!gpu_scope.ok()) return result_t::fail(util::status_code_t::device_k, "Context entry failed for the read");
+        [[maybe_unused]] util::status_t const gpu_scope =
+            (stream).bind(); // cuDF allocates and launches in the current context
+        if (gpu_scope.failed())
+            return result_t::fail(util::status_code_t::device_k, "Context entry failed for the read");
         // GPU Direct reads land out of stream order, in pool memory a queued kernel may still read.
-        if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
+        if (cuStreamSynchronize(util::native_stream(stream)) != CUDA_SUCCESS)
             return result_t::fail(util::status_code_t::device_k, "Stream drain before the read failed");
-        cuda::stream_ref const cudf_stream {stream.get()};
+        cuda::stream_ref const cudf_stream {util::native_stream(stream)};
 
         // A column the sidecar lacks is each row's member of its sibling tar, read through the byte
         // index, whose two columns take its place and the end of the read.
@@ -663,15 +667,17 @@ std::span<util::u64_t const> jsonl_file_t::groups() const noexcept {
 }
 
 util::expected<jsonl_file_t> jsonl_file_t::make(gpu_direct_storage_session_t const&, sz::string_view_t path,
-                                                sz::string_view_t field, util::gpu_stream_t& stream) noexcept {
+                                                sz::string_view_t field, util::executor_stream_t& stream) noexcept {
     using result_t = util::expected<jsonl_file_t>;
     try {
-        util::switch_to_gpu_t gpu_scope {stream}; // cuDF allocates and launches in the current context
-        if (!gpu_scope.ok()) return result_t::fail(util::status_code_t::device_k, "Context entry failed for the read");
+        [[maybe_unused]] util::status_t const gpu_scope =
+            (stream).bind(); // cuDF allocates and launches in the current context
+        if (gpu_scope.failed())
+            return result_t::fail(util::status_code_t::device_k, "Context entry failed for the read");
         // GPU Direct reads land out of stream order, in pool memory a queued kernel may still read.
-        if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
+        if (cuStreamSynchronize(util::native_stream(stream)) != CUDA_SUCCESS)
             return result_t::fail(util::status_code_t::device_k, "Stream drain before the read failed");
-        cuda::stream_ref const cudf_stream {stream.get()};
+        cuda::stream_ref const cudf_stream {util::native_stream(stream)};
         // One JSON object per line; KvikIO / GDS streams the bytes, cuDF decodes on the GPU.
         auto options = cudf::io::json_reader_options::builder(
                            cudf::io::source_info {std::string {path}}) // vendor-boundary
@@ -710,14 +716,16 @@ util::expected<jsonl_file_t> jsonl_file_t::make(gpu_direct_storage_session_t con
 }
 
 util::expected<jsonl_file_t> jsonl_file_t::concat(std::span<jsonl_file_t const> parts,
-                                                  util::gpu_stream_t& stream) noexcept {
+                                                  util::executor_stream_t& stream) noexcept {
     using result_t = util::expected<jsonl_file_t>;
     if (parts.empty())
         return result_t::fail(util::status_code_t::invalid_argument_k, "JSONL concat needs at least one shard");
     try {
-        util::switch_to_gpu_t gpu_scope {stream}; // cuDF allocates and launches in the current context
-        if (!gpu_scope.ok()) return result_t::fail(util::status_code_t::device_k, "Context entry failed for the read");
-        cuda::stream_ref const cudf_stream {stream.get()};
+        [[maybe_unused]] util::status_t const gpu_scope =
+            (stream).bind(); // cuDF allocates and launches in the current context
+        if (gpu_scope.failed())
+            return result_t::fail(util::status_code_t::device_k, "Context entry failed for the read");
+        cuda::stream_ref const cudf_stream {util::native_stream(stream)};
         std::vector<cudf::column_view> fields; // vendor-boundary: cudf::concatenate takes a column-view list
         fields.reserve(parts.size());
         for (jsonl_file_t const& part : parts) fields.push_back(part.state_->field->view());
@@ -759,15 +767,17 @@ std::span<util::u64_t const> csv_file_t::groups() const noexcept {
 
 util::expected<csv_file_t> csv_file_t::make(gpu_direct_storage_session_t const&, sz::string_view_t path,
                                             sz::string_view_t column, char delimiter, csv_header_t header,
-                                            util::gpu_stream_t& stream) noexcept {
+                                            util::executor_stream_t& stream) noexcept {
     using result_t = util::expected<csv_file_t>;
     try {
-        util::switch_to_gpu_t gpu_scope {stream}; // cuDF allocates and launches in the current context
-        if (!gpu_scope.ok()) return result_t::fail(util::status_code_t::device_k, "Context entry failed for the read");
+        [[maybe_unused]] util::status_t const gpu_scope =
+            (stream).bind(); // cuDF allocates and launches in the current context
+        if (gpu_scope.failed())
+            return result_t::fail(util::status_code_t::device_k, "Context entry failed for the read");
         // GPU Direct reads land out of stream order, in pool memory a queued kernel may still read.
-        if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
+        if (cuStreamSynchronize(util::native_stream(stream)) != CUDA_SUCCESS)
             return result_t::fail(util::status_code_t::device_k, "Stream drain before the read failed");
-        cuda::stream_ref const cudf_stream {stream.get()};
+        cuda::stream_ref const cudf_stream {util::native_stream(stream)};
         std::string const name {column}; // vendor-boundary
         // Read only the wanted column, forced to string so type inference cannot surprise us;
         // KvikIO / GDS streams the bytes, cuDF decodes on the GPU.
@@ -800,14 +810,17 @@ util::expected<csv_file_t> csv_file_t::make(gpu_direct_storage_session_t const&,
     }
 }
 
-util::expected<csv_file_t> csv_file_t::concat(std::span<csv_file_t const> parts, util::gpu_stream_t& stream) noexcept {
+util::expected<csv_file_t> csv_file_t::concat(std::span<csv_file_t const> parts,
+                                              util::executor_stream_t& stream) noexcept {
     using result_t = util::expected<csv_file_t>;
     if (parts.empty())
         return result_t::fail(util::status_code_t::invalid_argument_k, "CSV concat needs at least one shard");
     try {
-        util::switch_to_gpu_t gpu_scope {stream}; // cuDF allocates and launches in the current context
-        if (!gpu_scope.ok()) return result_t::fail(util::status_code_t::device_k, "Context entry failed for the read");
-        cuda::stream_ref const cudf_stream {stream.get()};
+        [[maybe_unused]] util::status_t const gpu_scope =
+            (stream).bind(); // cuDF allocates and launches in the current context
+        if (gpu_scope.failed())
+            return result_t::fail(util::status_code_t::device_k, "Context entry failed for the read");
+        cuda::stream_ref const cudf_stream {util::native_stream(stream)};
         std::vector<cudf::column_view> columns; // vendor-boundary: cudf::concatenate takes a column-view list
         columns.reserve(parts.size());
         for (csv_file_t const& part : parts) columns.push_back(part.state_->field->view());

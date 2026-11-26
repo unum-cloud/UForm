@@ -233,7 +233,7 @@ multimodal_batch_shape_t ut::batch_capacity(multimodal_batch_shape_t shape, std:
  *  position, so a matrix re-seeded alone matches the one a whole-list seed writes. */
 [[nodiscard]] static util::expected_t seed_matrix_(std::span<util::differentiable_weights_t const> list,
                                                    std::size_t weight_index, std::size_t residual_writers,
-                                                   util::gpu_stream_t& stream) noexcept {
+                                                   util::executor_stream_t& stream) noexcept {
     util::differentiable_weights_t const& matrix = list[weight_index];
     std::size_t const rows = matrix.weights.extent(0), columns = matrix.weights.extent(1);
     // Matrices are [outputs,inputs]; the residual writers split one unit of variance
@@ -252,12 +252,12 @@ multimodal_batch_shape_t ut::batch_capacity(multimodal_batch_shape_t shape, std:
         !copied)
         return copied;
     // The staging tensor dies with this call — the enqueued copy must land first.
-    cuStreamSynchronize(stream.get());
+    cuStreamSynchronize(util::native_stream(stream));
     return {};
 }
 
 util::expected_t ut::seed_weights(st::basic_vector<util::differentiable_weights_t> const& weights,
-                                  util::gpu_stream_t& stream) noexcept {
+                                  util::executor_stream_t& stream) noexcept {
     std::span<util::differentiable_weights_t const> const list {weights};
     std::size_t const residual_writers = residual_writers_(list);
     for (std::size_t weight_index = 0; weight_index != list.size(); ++weight_index)
@@ -370,7 +370,7 @@ struct row_partition_t {
 
 util::expected_t ut::load_weights(util::checkpoint_to_load_t const& checkpoint,
                                   st::basic_vector<util::differentiable_weights_t> const& weights,
-                                  util::gpu_stream_t& stream) noexcept {
+                                  util::executor_stream_t& stream) noexcept {
     std::span<util::differentiable_weights_t const> const list {weights};
     std::size_t const residual_writers = residual_writers_(list);
     sz::string_t name_text;
@@ -396,7 +396,7 @@ util::expected_t ut::load_weights(util::checkpoint_to_load_t const& checkpoint,
                 util::status_code_t::unsupported_k, "{} is [{},{}] in the checkpoint, [{},{}] live", name_text.view(),
                 saved.extent(0), saved.extent(1), matrix.weights.extent(0), matrix.weights.extent(1));
         if (CUresult result = cuMemcpyHtoDAsync(util::device_address(matrix.weights.data()), saved.data(),
-                                                saved.numel() * sizeof(nk_bf16_t), stream.get());
+                                                saved.numel() * sizeof(nk_bf16_t), util::native_stream(stream));
             result != CUDA_SUCCESS)
             return util::cuda_failure(result, "{} upload failed", name_text.view());
     }
@@ -405,9 +405,9 @@ util::expected_t ut::load_weights(util::checkpoint_to_load_t const& checkpoint,
 
 util::expected_t ut::save_weights(util::checkpoint_to_save_t& checkpoint, trainer_config_t const& config,
                                   st::basic_vector<util::differentiable_weights_t> const& weights, util::u32_t steps,
-                                  util::gpu_stream_t& stream) noexcept {
-    util::switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+                                  util::executor_stream_t& stream) noexcept {
+    [[maybe_unused]] util::status_t const gpu_scope = (stream).bind();
+    if (gpu_scope.failed()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
     std::span<util::differentiable_weights_t const> const list {weights};
     util::u64_t largest_scalars = 0;
     for (util::differentiable_weights_t const& matrix : list)
@@ -424,10 +424,10 @@ util::expected_t ut::save_weights(util::checkpoint_to_save_t& checkpoint, traine
                                           matrix.name);
         std::size_t const rows = matrix.weights.extent(0), cols = matrix.weights.extent(1);
         if (CUresult result = cuMemcpyDtoHAsync(staging.data(), util::device_address(matrix.weights.data()),
-                                                rows * cols * sizeof(nk_bf16_t), stream.get());
+                                                rows * cols * sizeof(nk_bf16_t), util::native_stream(stream));
             result != CUDA_SUCCESS)
             return util::cuda_failure(result, "{} download failed", name_text.view());
-        if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
+        if (CUresult result = cuStreamSynchronize(util::native_stream(stream)); result != CUDA_SUCCESS)
             return util::cuda_failure(result, "{} download drain failed", name_text.view());
         if (util::expected_t inserted = checkpoint.insert(name_text.view(), {staging.data(), rows, cols}); !inserted)
             return inserted;
@@ -642,7 +642,7 @@ util::expected<base_replica_t> base_replica_t::make(util::gpu_arena_t& arena, tr
 }
 
 util::expected_t base_replica_t::draw(trainer_config_t const& config, util::u32_t gpu_index_in_colocated_domain,
-                                      util::data_epoch_t data_epoch, util::gpu_stream_t& stream) noexcept {
+                                      util::data_epoch_t data_epoch, util::executor_stream_t& stream) noexcept {
     multimodal_batch_shape_t const& shape = config.batch;
     row_partition_t const partition = partition_rows_(config, gpu_index_in_colocated_domain, data_epoch);
     grid_factor_t const factor = square_factor_(shape.max_columns_per_row);
@@ -667,7 +667,7 @@ util::expected_t base_replica_t::draw(trainer_config_t const& config, util::u32_
     // retrieves each segment's own tokens, as the self-edge relations pair them.
     if (CUresult result = cuMemsetD8Async(util::device_address(batch.segment_side.data()),
                                           static_cast<util::u8_t>(late_interaction_side_t::query_and_document_k),
-                                          batch.segment_side.numel(), stream.get());
+                                          batch.segment_side.numel(), util::native_stream(stream));
         result != CUDA_SUCCESS)
         return util::cuda_failure(result, "synthetic side fill failed");
     if (util::expected_t cleared = util::zero_async(batch.segment_prefix_length.span(), stream); !cleared)
@@ -708,7 +708,7 @@ util::expected_t base_replica_t::draw(trainer_config_t const& config, util::u32_
 }
 
 util::expected_t base_replica_t::prepare(trainer_config_t const& config, util::data_epoch_t data_epoch,
-                                         util::gpu_stream_t& stream) noexcept {
+                                         util::executor_stream_t& stream) noexcept {
     if (config.report_every != 0 && data_epoch.ordinal % config.report_every == 0) // the step after a report
         for (util::f32r1_tensor_arena_t* pair : summand_pairs_()) {
             if (pair->empty()) continue;
@@ -784,7 +784,8 @@ util::expected_t base_replica_t::prepare(trainer_config_t const& config, util::d
     return {};
 }
 
-util::expected_t base_replica_t::forward_region(trainer_config_t const& config, util::gpu_stream_t& stream) noexcept {
+util::expected_t base_replica_t::forward_region(trainer_config_t const& config,
+                                                util::executor_stream_t& stream) noexcept {
     // A head is live iff its summand pair was allocated at make.
     bool const reconstructs = tokens_summands.data() != nullptr;
     bool const chooses = choices_summands.data() != nullptr;
@@ -838,7 +839,7 @@ util::expected_t base_replica_t::forward_region(trainer_config_t const& config, 
     return {};
 }
 
-util::expected_t base_replica_t::backward_region(util::gpu_stream_t& stream) noexcept {
+util::expected_t base_replica_t::backward_region(util::executor_stream_t& stream) noexcept {
     return tower.backward(vertices_grad.view(), normalized_grad.view(), batch, stream, token_vectors_grad.view());
 }
 

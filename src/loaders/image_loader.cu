@@ -196,7 +196,7 @@ util::expected<nvjpeg_session_t> nvjpeg_session_t::make() noexcept {
 }
 
 util::expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> entries,
-                                                     util::gpu_stream_t& stream) noexcept {
+                                                     util::executor_stream_t& stream) noexcept {
     std::size_t const count = entries.size();
     if (count == 0) return {};
     // The owning entry table fills nvJPEG's parallel arrays here, at the vendor boundary only.
@@ -218,10 +218,10 @@ util::expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t cons
         return util::expected_t::fail(util::status_code_t::device_k, "nvJPEG batch init failed ({} images)", count);
     // The hardware backend writes the destinations from streams not ordered after `stream`, so the
     // stream-ordered destinations, and the work that last held their memory, must retire first.
-    if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
+    if (CUresult result = cuStreamSynchronize(util::native_stream(stream)); result != CUDA_SUCCESS)
         return util::cuda_failure(result, "nvJPEG destination drain failed ({} images)", count);
-    if (nvjpegDecodeBatched(handle_, jpeg_state_, data.data(), lengths.data(), destinations.data(), stream.get()) !=
-        NVJPEG_STATUS_SUCCESS)
+    if (nvjpegDecodeBatched(handle_, jpeg_state_, data.data(), lengths.data(), destinations.data(),
+                            util::native_stream(stream)) != NVJPEG_STATUS_SUCCESS)
         return util::expected_t::fail(util::status_code_t::device_k, "nvJPEG batched decode failed");
     return {};
 }
@@ -229,17 +229,17 @@ util::expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t cons
 /** Fill an @c NppStreamContext from the driver — NPP needs the device's launch limits, which come
  *  from @c cuDeviceGetAttribute (no CUDA Runtime), and the driver stream, which is already a
  *  @c cudaStream_t . */
-[[nodiscard]] static util::expected<NppStreamContext> npp_context_(util::gpu_stream_t const& stream) noexcept {
+[[nodiscard]] static util::expected<NppStreamContext> npp_context_(util::executor_stream_t const& stream) noexcept {
     using result_t = util::expected<NppStreamContext>;
     NppStreamContext context {};
-    context.hStream = stream.get();
+    context.hStream = util::native_stream(stream);
     CUdevice device = 0;
     if (cuCtxGetDevice(&device) != CUDA_SUCCESS)
         return result_t::fail(util::status_code_t::device_k, "NPP device query failed");
     context.nCudaDeviceId = device;
     // Accumulate the first failing driver result and push it up typed — never collapse it to
     // a bare bool.
-    CUresult result = cuStreamGetFlags(stream.get(), &context.nStreamFlags);
+    CUresult result = cuStreamGetFlags(util::native_stream(stream), &context.nStreamFlags);
     auto attribute = [&](CUdevice_attribute which, int& into) {
         if (result == CUDA_SUCCESS) result = cuDeviceGetAttribute(&into, which, device);
     };
@@ -265,7 +265,7 @@ util::expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t cons
 [[nodiscard]] static util::expected<std::size_t> triage_images_(column_view_t tape, util::u64r1_view_t drawn_rows,
                                                                 util::u32_t patch_size, util::u32_t max_columns,
                                                                 std::span<image_plan_t> plans,
-                                                                util::gpu_stream_t& stream) noexcept {
+                                                                util::executor_stream_t& stream) noexcept {
     using result_t = util::expected<std::size_t>;
     std::size_t const images = drawn_rows.size();
     // Each round lifts one header window per pending image, a device source pointer and a capped
@@ -274,8 +274,9 @@ util::expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t cons
     // per EXIF or ICC segment.
     st::basic_vector<gather_entry_t> host_entries;
     st::basic_vector<gather_entry_t, util::gpu_alloc<gather_entry_t>> device_entries {
-        util::gpu_alloc<gather_entry_t> {stream.get()}};
-    st::basic_vector<util::b8_t, util::gpu_alloc<util::b8_t>> staging {util::gpu_alloc<util::b8_t> {stream.get()}};
+        util::gpu_alloc<gather_entry_t> {util::native_stream(stream)}};
+    st::basic_vector<util::b8_t, util::gpu_alloc<util::b8_t>> staging {
+        util::gpu_alloc<util::b8_t> {util::native_stream(stream)}};
     st::basic_vector<util::b8_t, util::pinned_alloc<util::b8_t>> probe;
     st::basic_vector<um::image_probe_t> probes;
     st::basic_vector<std::size_t> pending;
@@ -319,7 +320,7 @@ util::expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t cons
                 util::bytes_view_t {staging}.first(count * header_probe_bytes_k), util::bytes_span_t {probe}, stream);
             !read)
             return result_t::fail(std::move(read));
-        if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
+        if (cuStreamSynchronize(util::native_stream(stream)) != CUDA_SUCCESS)
             return result_t::fail(util::status_code_t::device_k, "Header gather readback failed");
         std::size_t still_pending = 0;
         for (std::size_t entry = 0; entry != count; ++entry) {
@@ -406,7 +407,7 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const* entries, u
 [[nodiscard]] static util::expected_t decode_jpeg_plans_(nvjpeg_session_t& jpeg, std::span<image_plan_t> plans,
                                                          util::u8_t* scratch, column_view_t tape,
                                                          util::u64r1_view_t drawn_rows,
-                                                         util::gpu_stream_t& stream) noexcept {
+                                                         util::executor_stream_t& stream) noexcept {
     constexpr util::u32_t rgb_channels_k = 3u; // nvJPEG's interleaved-RGB output, widened to RGBA afterward
     st::basic_vector<jpeg_entry_t> entries;
     std::size_t rgb_bytes = 0;
@@ -423,7 +424,8 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const* entries, u
 
     // The nvJPEG batch lands packed RGB into this temporary; the widen kernel then fills each
     // RGBA scratch region.
-    st::basic_vector<util::u8_t, util::gpu_alloc<util::u8_t>> rgb_scratch {util::gpu_alloc<util::u8_t> {stream.get()}};
+    st::basic_vector<util::u8_t, util::gpu_alloc<util::u8_t>> rgb_scratch {
+        util::gpu_alloc<util::u8_t> {util::native_stream(stream)}};
     if (st::failed(rgb_scratch.resize(st::assume_uninitialized, rgb_bytes)))
         return util::expected_t::fail(util::status_code_t::out_of_memory_k,
                                       "JPEG RGB scratch allocation failed ({} bytes)", rgb_bytes);
@@ -448,7 +450,7 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const* entries, u
     // entry, uploaded once.
     st::basic_vector<rgba_expand_entry_t> host_expand;
     st::basic_vector<rgba_expand_entry_t, util::gpu_alloc<rgba_expand_entry_t>> device_expand {
-        util::gpu_alloc<rgba_expand_entry_t> {stream.get()}};
+        util::gpu_alloc<rgba_expand_entry_t> {util::native_stream(stream)}};
     if (st::failed(host_expand.resize(entries.size())) ||
         st::failed(device_expand.resize(st::assume_uninitialized, entries.size())))
         return util::expected_t::fail(util::status_code_t::out_of_memory_k,
@@ -479,7 +481,7 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const* entries, u
 [[nodiscard]] static util::expected_t decode_cpu_plans_(fu::pool_t& pool, std::span<image_plan_t> plans,
                                                         util::u8_t* scratch, column_view_t tape,
                                                         util::u64r1_view_t drawn_rows,
-                                                        util::gpu_stream_t& stream) noexcept {
+                                                        util::executor_stream_t& stream) noexcept {
     struct cpu_task_t {
 
         /** The plan this task decodes. */
@@ -525,7 +527,7 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const* entries, u
             !copied)
             return copied;
     }
-    if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
+    if (cuStreamSynchronize(util::native_stream(stream)) != CUDA_SUCCESS)
         return util::expected_t::fail(util::status_code_t::device_k, "CPU blob synchronization failed");
 
     cpu_task_t const* const task_base = tasks.data();
@@ -559,7 +561,7 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const* entries, u
     // Hold for the uploads: the pinned decode tape (`blobs` / `decoded`) frees synchronously
     // on return, so it must outlive its in-flight `cuMemcpyHtoDAsync` into the device scratch
     // (a use-after-free otherwise).
-    if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
+    if (cuStreamSynchronize(util::native_stream(stream)) != CUDA_SUCCESS)
         return util::expected_t::fail(util::status_code_t::device_k, "CPU pixel upload synchronization failed");
     return {};
 }
@@ -623,7 +625,7 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, util::p
                                                     pixel_patches_span_t pixels, image_shape_view_t image_shapes,
                                                     util::u32r1_view_t segment_offsets,
                                                     util::u32r1_view_t segment_lengths,
-                                                    util::gpu_stream_t& stream) noexcept {
+                                                    util::executor_stream_t& stream) noexcept {
     std::size_t const images = plans.size();
     util::u32_t const patch_size = static_cast<util::u32_t>(
         pixels.extent(2)); // the square patch side, straight off the grid
@@ -646,7 +648,8 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, util::p
     // The batched resize lands each image contiguously in a scratch tape; a tile kernel then
     // scatters it into the patch grid, since a resized image's row-major pixels are not the
     // batch's [columns,P,P,C] order.
-    st::basic_vector<util::u8_t, util::gpu_alloc<util::u8_t>> resized {util::gpu_alloc<util::u8_t> {stream.get()}};
+    st::basic_vector<util::u8_t, util::gpu_alloc<util::u8_t>> resized {
+        util::gpu_alloc<util::u8_t> {util::native_stream(stream)}};
     if (st::failed(resized.resize(st::assume_uninitialized, resized_elements)))
         return util::expected_t::fail(util::status_code_t::out_of_memory_k,
                                       "resized pixel scratch allocation failed ({} bytes)", resized_elements);
@@ -679,7 +682,7 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, util::p
     // reads each segment's column count straight from the device-side `image_shapes`, no
     // second copy here.
     st::basic_vector<util::u32_t, util::gpu_alloc<util::u32_t>> device_resized_offsets {
-        util::gpu_alloc<util::u32_t> {stream.get()}};
+        util::gpu_alloc<util::u32_t> {util::native_stream(stream)}};
     if (st::failed(device_resized_offsets.resize(st::assume_uninitialized, images)))
         return util::expected_t::fail(util::status_code_t::out_of_memory_k, "No room for the device resize offsets");
     if (util::expected_t uploaded = util::copy_host_to_device<util::u32_t>(
@@ -703,7 +706,7 @@ util::expected_t ul::decode_images(nvjpeg_session_t& jpeg, fu::pool_t& pool, col
                                    pixel_patches_span_t pixels, image_shape_span_t shapes,
                                    util::u32r1_span_t segment_offsets, util::u32r1_span_t segment_lengths,
                                    modality_span_t segment_modality, util::u32r1_span_t dropped,
-                                   util::gpu_stream_t& stream) noexcept {
+                                   util::executor_stream_t& stream) noexcept {
     std::size_t const images = drawn_rows.size();
     if (images == 0) return {};
     // The batch grid names the geometry: columns is the row width, extent(2) the square patch side,
@@ -743,7 +746,7 @@ util::expected_t ul::decode_images(nvjpeg_session_t& jpeg, fu::pool_t& pool, col
     // read placement off the device.
     st::basic_vector<patch_grid_t> host_grids;
     st::basic_vector<patch_grid_t, util::gpu_alloc<patch_grid_t>> device_grids {
-        util::gpu_alloc<patch_grid_t> {stream.get()}};
+        util::gpu_alloc<patch_grid_t> {util::native_stream(stream)}};
     if (st::failed(host_grids.resize(images)) || st::failed(device_grids.resize(st::assume_uninitialized, images)))
         return util::expected_t::fail(util::status_code_t::out_of_memory_k, "No room for the segment grid staging");
     for (std::size_t index = 0; index != images; ++index) host_grids[index] = plans[index].grid;
@@ -760,7 +763,8 @@ util::expected_t ul::decode_images(nvjpeg_session_t& jpeg, fu::pool_t& pool, col
 
     // One native-sized RGBA device scratch holds every image's decoded pixels, laid out by drawn
     // order — owning, so it frees itself after the resize's sync.
-    st::basic_vector<util::u8_t, util::gpu_alloc<util::u8_t>> scratch {util::gpu_alloc<util::u8_t> {stream.get()}};
+    st::basic_vector<util::u8_t, util::gpu_alloc<util::u8_t>> scratch {
+        util::gpu_alloc<util::u8_t> {util::native_stream(stream)}};
     if (st::failed(scratch.resize(st::assume_uninitialized, scratch_bytes)))
         return util::expected_t::fail(util::status_code_t::out_of_memory_k,
                                       "decoded pixel scratch allocation failed ({} bytes)", scratch_bytes);
@@ -804,7 +808,7 @@ util::expected<image_loader_parquet_t> image_loader_parquet_t::make(gpu_direct_s
     return result_t {std::move(loader)};
 }
 
-util::expected_t image_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, nvjpeg_session_t& decoder,
+util::expected_t image_loader_parquet_t::fill(util::executor_stream_t& gpu_stream, nvjpeg_session_t& decoder,
                                               image_loader_parquet_config_t config, util::u32_t gpu_rank,
                                               util::u32_t training_step,
                                               std::span<multimodal_batch_on_gpu_t> batches) noexcept {
@@ -834,8 +838,8 @@ util::expected_t image_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, nv
                                       "{} pooled rows across {} files cover fewer than the {} images this fill needs",
                                       pooled_rows, groups_.picked_paths().size(), total_images);
 
-    util::switch_to_gpu_t gpu_scope {gpu_stream};
-    if (!gpu_scope.ok())
+    [[maybe_unused]] util::status_t const gpu_scope = (gpu_stream).bind();
+    if (gpu_scope.failed())
         return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed for the loader stream");
 
     // The reservoir's blob offsets to the host once — every per-row byte bound is
@@ -850,7 +854,7 @@ util::expected_t image_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, nv
                                                             gpu_stream);
         !landed)
         return landed;
-    if (cuStreamSynchronize(gpu_stream.get()) != CUDA_SUCCESS)
+    if (cuStreamSynchronize(util::native_stream(gpu_stream)) != CUDA_SUCCESS)
         return util::expected_t::fail(util::status_code_t::device_k, "Reservoir offsets readback failed");
 
     // Draw the whole fill's rows on the host — a keyed bijection over the pool, so each batch

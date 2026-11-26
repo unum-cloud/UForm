@@ -263,7 +263,7 @@ static __global__ void transformer_rope_rows_kernel_(util::f32r2_span_t cosines,
                                                           rope_angles_view_t angles, util::i16r2_view_t coords,
                                                           util::u32_t heads, util::f32_t angle_sign,
                                                           util::gpu_numerics_t const& numerics,
-                                                          util::gpu_stream_t& stream) noexcept {
+                                                          util::executor_stream_t& stream) noexcept {
     std::size_t const tokens = values.extent(0), pairs_per_head = transformer_head_dim_k / 2u;
     util::f32r2_span_t const cosines {rows.data(), tokens, pairs_per_head};
     util::f32r2_span_t const sines {rows.data() + tokens * pairs_per_head, tokens, pairs_per_head};
@@ -278,7 +278,7 @@ static __global__ void transformer_rope_rows_kernel_(util::f32r2_span_t cosines,
             numerics.rope_bf16(nk::as_values<nk_bf16_t>(nk::as_bytes(values)).data(), cosines.data(), sines.data(),
                                nk::as_writable_values<nk_bf16_t>(nk::as_writable_bytes(values)).data(), tokens,
                                2u * heads, transformer_head_dim_k, values.stride_bytes(0), values.stride_bytes(0),
-                               stream.numkong()),
+                               util::numkong_stream(stream)),
             "rotary embedding");
     return staged;
 }
@@ -582,7 +582,8 @@ util::expected<transformer_block_bf16_t> transformer_block_bf16_t::make(util::gp
 util::expected_t transformer_block_bf16_t::forward(util::f32r2_view_t input, util::f32r2_span_t output,
                                                    util::u32r1_view_t segment_offsets,
                                                    util::u32r1_view_t segment_lengths, rope_angles_view_t angles,
-                                                   util::i16r2_view_t coords, util::gpu_stream_t& stream) noexcept {
+                                                   util::i16r2_view_t coords,
+                                                   util::executor_stream_t& stream) noexcept {
     std::size_t const tokens = input.extent(0);
     util::u32_t const hidden = config_.hidden;
     util::u32_t const ffn = config_.ffn_expansion * hidden;
@@ -637,19 +638,20 @@ util::expected_t transformer_block_bf16_t::forward(util::f32r2_view_t input, uti
 
     // The norms read Float32 γ, widened from the trained BFloat16 scales every step.
     util::expected_t staged = util::numkong_result(
-        numerics_.cast(pre_norm_scale_.data(), nk_bf16_k, pre_scale, nk_f32_k, hidden, stream.numkong()),
+        numerics_.cast(pre_norm_scale_.data(), nk_bf16_k, pre_scale, nk_f32_k, hidden, util::numkong_stream(stream)),
         "pre-attention scale widening");
     if (staged)
-        staged = util::numkong_result(
-            numerics_.cast(post_norm_scale_.data(), nk_bf16_k, post_scale, nk_f32_k, hidden, stream.numkong()),
-            "post-attention scale widening");
+        staged = util::numkong_result(numerics_.cast(post_norm_scale_.data(), nk_bf16_k, post_scale, nk_f32_k, hidden,
+                                                     util::numkong_stream(stream)),
+                                      "post-attention scale widening");
     // Pre-attention norm narrows the residual stream into the fused QKV product's operand.
     if (staged)
         staged = util::numkong_result(
             numerics_.rmscast_bf16(
                 input.data(), pre_scale,
                 nk::as_writable_values<nk_bf16_t>(nk::as_writable_bytes(scratch_->normalized.span())).data(), tokens, 1,
-                hidden, hidden * sizeof(util::f32_t), hidden * sizeof(util::bf16_t), epsilon, stream.numkong()),
+                hidden, hidden * sizeof(util::f32_t), hidden * sizeof(util::bf16_t), epsilon,
+                util::numkong_stream(stream)),
             "pre-attention norm");
     if (staged)
         staged = util::multiply_bf16(scratch_->normalized.view(), packed_weights_[product_qkv_k].view(),
@@ -657,14 +659,14 @@ util::expected_t transformer_block_bf16_t::forward(util::f32r2_view_t input, uti
     // `nk_cast` has no row stride, so narrowing V narrows whole rows; the QK-norm then overwrites the Q|K slices.
     if (staged)
         staged = util::numkong_result(numerics_.cast(scratch_->qkv_products.data(), nk_f32_k, packed_qkv.data(),
-                                                     nk_bf16_k, tokens * 3 * hidden, stream.numkong()),
+                                                     nk_bf16_k, tokens * 3 * hidden, util::numkong_stream(stream)),
                                       "QKV narrowing");
     if (staged)
         staged = util::numkong_result(
             numerics_.rmscast_bf16(scratch_->qkv_products.data(), NUMKONG_NULL,
                                    nk::as_writable_values<nk_bf16_t>(nk::as_writable_bytes(packed_qkv)).data(), tokens,
                                    2 * heads, transformer_head_dim_k, qkv_stride, qkv_narrow_stride, epsilon,
-                                   stream.numkong()),
+                                   util::numkong_stream(stream)),
             "QK-norm");
     // The rotary rows reuse the storage of the SwiGLU products, which the MLP below writes only
     // after the rotation read them.
@@ -681,7 +683,7 @@ util::expected_t transformer_block_bf16_t::forward(util::f32r2_view_t input, uti
                 NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, nk::as_values<nk_bf16_t>(nk::as_bytes(scratch_->qkv.view())).data(),
                 qkv_narrow_stride, scratch_->packed_keys_values.data(), scratch_->attention_products.data(),
                 hidden * sizeof(util::f32_t), scratch_->softmax_log_sum_exp.data(), 0, NUMKONG_SIZE_MAX, NUMKONG_NULL,
-                0, stream.numkong()),
+                0, util::numkong_stream(stream)),
             "attention");
     dim3 const segment_grid {static_cast<util::u32_t>(segment_lengths.extent(0)), 1u, 1u};
     if (staged)
@@ -690,7 +692,7 @@ util::expected_t transformer_block_bf16_t::forward(util::f32r2_view_t input, uti
     if (staged)
         staged = util::numkong_result(
             numerics_.cast(scratch_->attention_products.data(), nk_f32_k, scratch_->attn_output.data(), nk_bf16_k,
-                           tokens * hidden, stream.numkong()),
+                           tokens * hidden, util::numkong_stream(stream)),
             "attention narrowing");
     if (!staged) return staged;
 
@@ -700,7 +702,7 @@ util::expected_t transformer_block_bf16_t::forward(util::f32r2_view_t input, uti
                                  scratch_->attn_residual.span(), numerics_, stream);
     if (staged)
         staged = util::numkong_result(numerics_.sum_f32(scratch_->attn_residual.data(), input.data(), tokens * hidden,
-                                                        scratch_->attn_residual.data(), stream.numkong()),
+                                                        scratch_->attn_residual.data(), util::numkong_stream(stream)),
                                       "attention residual");
     if (staged)
         staged = util::numkong_result(
@@ -708,7 +710,7 @@ util::expected_t transformer_block_bf16_t::forward(util::f32r2_view_t input, uti
                 scratch_->attn_residual.data(), post_scale,
                 nk::as_writable_values<nk_bf16_t>(nk::as_writable_bytes(scratch_->mlp_normalized.span())).data(),
                 tokens, 1, hidden, hidden * sizeof(util::f32_t), hidden * sizeof(util::bf16_t), epsilon,
-                stream.numkong()),
+                util::numkong_stream(stream)),
             "post-attention norm");
 
     // SwiGLU MLP: fused gate/up product, SiLU·up in Float32 narrowed by a cast,
@@ -721,18 +723,18 @@ util::expected_t transformer_block_bf16_t::forward(util::f32r2_view_t input, uti
     if (staged)
         staged = util::numkong_result(
             numerics_.swiglu_f32(gate, gate + ffn, scratch_->products.data(), tokens, ffn, gate_up_stride,
-                                 gate_up_stride, ffn * sizeof(util::f32_t), 1.0f, 1.0f, stream.numkong()),
+                                 gate_up_stride, ffn * sizeof(util::f32_t), 1.0f, 1.0f, util::numkong_stream(stream)),
             "SwiGLU");
     if (staged)
         staged = util::numkong_result(numerics_.cast(scratch_->products.data(), nk_f32_k, scratch_->silu_up.data(),
-                                                     nk_bf16_k, tokens * ffn, stream.numkong()),
+                                                     nk_bf16_k, tokens * ffn, util::numkong_stream(stream)),
                                       "SwiGLU narrowing");
     if (staged)
         staged = util::multiply_bf16(scratch_->silu_up.view(), packed_weights_[product_down_k].view(), output,
                                      numerics_, stream);
     if (staged)
         staged = util::numkong_result(numerics_.sum_f32(output.data(), scratch_->attn_residual.data(), tokens * hidden,
-                                                        output.data(), stream.numkong()),
+                                                        output.data(), util::numkong_stream(stream)),
                                       "MLP residual");
     return staged;
 }
@@ -740,7 +742,8 @@ util::expected_t transformer_block_bf16_t::forward(util::f32r2_view_t input, uti
 util::expected_t transformer_block_bf16_t::backward(util::f32r2_view_t output_grad, util::f32r2_span_t input_grad,
                                                     util::u32r1_view_t segment_offsets,
                                                     util::u32r1_view_t segment_lengths, rope_angles_view_t angles,
-                                                    util::i16r2_view_t coords, util::gpu_stream_t& stream) noexcept {
+                                                    util::i16r2_view_t coords,
+                                                    util::executor_stream_t& stream) noexcept {
     std::size_t const tokens = input_stash_.extent(0);
     util::u32_t const hidden = config_.hidden;
     util::u32_t const ffn = config_.ffn_expansion * hidden;
@@ -782,9 +785,10 @@ util::expected_t transformer_block_bf16_t::backward(util::f32r2_view_t output_gr
 
     // MLP backward: the output gradient narrows into the A operand of
     // both down-projection gradients.
-    util::expected_t staged = util::numkong_result(numerics_.cast(output_grad.data(), nk_f32_k, hidden_narrowed.data(),
-                                                                  nk_bf16_k, tokens * hidden, stream.numkong()),
-                                                   "output gradient narrowing");
+    util::expected_t staged = util::numkong_result(
+        numerics_.cast(output_grad.data(), nk_f32_k, hidden_narrowed.data(), nk_bf16_k, tokens * hidden,
+                       util::numkong_stream(stream)),
+        "output gradient narrowing");
     if (staged)
         staged = util::multiply_bf16(hidden_narrowed, packed_weights_transposed_[product_down_k].view(), silu_up_grad,
                                      numerics_, stream);
@@ -813,7 +817,7 @@ util::expected_t transformer_block_bf16_t::backward(util::f32r2_view_t output_gr
     // Out-projection backward, whose Float32 data gradient is the attention's output gradient.
     if (staged)
         staged = util::numkong_result(numerics_.cast(scratch.residual_grad.data(), nk_f32_k, hidden_narrowed.data(),
-                                                     nk_bf16_k, tokens * hidden, stream.numkong()),
+                                                     nk_bf16_k, tokens * hidden, util::numkong_stream(stream)),
                                       "residual gradient narrowing");
     if (staged)
         staged = util::multiply_bf16(hidden_narrowed, packed_weights_transposed_[product_out_k].view(), hidden_products,
@@ -838,11 +842,12 @@ util::expected_t transformer_block_bf16_t::backward(util::f32r2_view_t output_gr
                 3 * hidden * sizeof(util::bf16_t), scratch.packed_keys_values.data(),
                 scratch_->attention_products.data(), hidden_products.data(), hidden * sizeof(util::f32_t),
                 scratch_->softmax_log_sum_exp.data(), qkv_grad.data(), qkv_grad_stride, qkv_grad.data() + hidden,
-                qkv_grad.data() + 2 * hidden, qkv_grad_stride, 0, NUMKONG_SIZE_MAX, NUMKONG_NULL, 0, stream.numkong()),
+                qkv_grad.data() + 2 * hidden, qkv_grad_stride, 0, NUMKONG_SIZE_MAX, NUMKONG_NULL, 0,
+                util::numkong_stream(stream)),
             "attention backward");
     if (staged)
         staged = util::numkong_result(numerics_.cast(qkv_grad.data(), nk_f32_k, scratch.packed_qkv.data(), nk_bf16_k,
-                                                     tokens * 3 * hidden, stream.numkong()),
+                                                     tokens * 3 * hidden, util::numkong_stream(stream)),
                                       "attention gradient narrowing");
     if (!staged) return staged;
     std::size_t const head_vectors = tokens * heads;
@@ -874,7 +879,7 @@ util::expected_t transformer_block_bf16_t::backward(util::f32r2_view_t output_gr
     return staged;
 }
 
-util::expected_t transformer_block_bf16_t::pack_weights(util::gpu_stream_t& stream) noexcept {
+util::expected_t transformer_block_bf16_t::pack_weights(util::executor_stream_t& stream) noexcept {
     util::bf16r2_tensor_arena_t const* const weights[] = {&qkv_weight_, &out_weight_, &gate_up_weight_, &down_weight_};
     for (std::size_t product = 0; product != 4; ++product)
         if (util::expected_t packed = util::pack_weight_bf16(
@@ -887,21 +892,23 @@ util::expected_t transformer_block_bf16_t::pack_weights(util::gpu_stream_t& stre
 
 util::expected_t transformer_block_bf16_t::pack_keys_values_(util::u32r1_view_t segment_offsets,
                                                              util::u32r1_view_t segment_lengths,
-                                                             util::gpu_stream_t& stream) noexcept {
+                                                             util::executor_stream_t& stream) noexcept {
     util::u32_t const hidden = config_.hidden, heads = hidden / transformer_head_dim_k;
     std::size_t const segments = segment_lengths.extent(0), stride = 3 * hidden * sizeof(util::bf16_t);
     nk_bf16_t const* const qkv = nk::as_values<nk_bf16_t>(nk::as_bytes(scratch_->qkv.view())).data();
     return util::numkong_result(
         numerics_.attention_pack_bf16(heads, transformer_head_dim_k, segment_offsets.data(), segment_lengths.data(),
                                       segments, qkv + hidden, stride, qkv + 2 * hidden, stride,
-                                      scratch_->packed_keys_values.data(), 0, segments * heads, stream.numkong()),
+                                      scratch_->packed_keys_values.data(), 0, segments * heads,
+                                      util::numkong_stream(stream)),
         "attention key-value pack");
 }
 
 util::expected_t transformer_block_e4m3_t::forward(util::bf16r2_view_t input, util::bf16r2_span_t output,
                                                    util::u32r1_view_t segment_offsets,
                                                    util::u32r1_view_t segment_lengths, rope_angles_view_t angles,
-                                                   util::i16r2_view_t coords, util::gpu_stream_t& stream) noexcept {
+                                                   util::i16r2_view_t coords,
+                                                   util::executor_stream_t& stream) noexcept {
     std::size_t const tokens = input.extent(0);
     util::u32_t const hidden = config_.hidden;
     util::u32_t const ffn = config_.ffn_expansion * hidden;
@@ -935,7 +942,7 @@ util::expected_t transformer_block_e4m3_t::forward(util::bf16r2_view_t input, ut
         nk_status_t const status = numerics_.rmsnorm_bf16(
             nk::as_values<nk_bf16_t>(nk::as_bytes(source)).data(), gamma.data(),
             nk::as_writable_values<nk_bf16_t>(nk::as_writable_bytes(target)).data(), tokens, groups, columns,
-            source.stride_bytes(0), target.stride_bytes(0), config_.rms_eps, stream.numkong());
+            source.stride_bytes(0), target.stride_bytes(0), config_.rms_eps, util::numkong_stream(stream));
         if (status != nk_success_k)
             return util::expected_t::fail(util::status_code_t::device_k, "RMSNorm failed: {}", nk_status_name(status));
         return {};
@@ -964,7 +971,7 @@ util::expected_t transformer_block_e4m3_t::forward(util::bf16r2_view_t input, ut
     // before; nothing reads them.
     std::size_t const segments = segment_lengths.extent(0);
     if (nk_status_t const status = numerics_.cast(qkv_.data(), nk_bf16_k, qkv_e4m3_.data(), nk_e4m3_k,
-                                                  tokens * 3 * hidden, stream.numkong());
+                                                  tokens * 3 * hidden, util::numkong_stream(stream));
         status != nk_success_k)
         return util::expected_t::fail(util::status_code_t::device_k, "Q/K/V cast failed: {}", nk_status_name(status));
     if (nk::failed(products_.resize({tokens, hidden})))
@@ -972,14 +979,16 @@ util::expected_t transformer_block_e4m3_t::forward(util::bf16r2_view_t input, ut
                                       tokens, hidden);
     nk_e4m3_t const* const qkv_e4m3 = nk::as_values<nk_e4m3_t>(nk::as_bytes(qkv_e4m3_.view())).data();
     std::size_t const qkv_bytes = 3 * hidden * sizeof(util::e4m3_t);
-    nk_status_t status = numerics_.attention_pack_e4m3(
-        heads, transformer_head_dim_k, segment_offsets.data(), segment_lengths.data(), segments, qkv_e4m3 + hidden,
-        qkv_bytes, qkv_e4m3 + 2 * hidden, qkv_bytes, packed_keys_values_.data(), 0, segments * heads, stream.numkong());
+    nk_status_t status = numerics_.attention_pack_e4m3(heads, transformer_head_dim_k, segment_offsets.data(),
+                                                       segment_lengths.data(), segments, qkv_e4m3 + hidden, qkv_bytes,
+                                                       qkv_e4m3 + 2 * hidden, qkv_bytes, packed_keys_values_.data(), 0,
+                                                       segments * heads, util::numkong_stream(stream));
     if (status == nk_success_k)
-        status = numerics_.attend_e4m3(
-            heads, heads, transformer_head_dim_k, segment_offsets.data(), tokens, transformer_attention_scale(),
-            NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, qkv_e4m3, qkv_bytes, packed_keys_values_.data(), products_.data(),
-            hidden * sizeof(util::f32_t), NUMKONG_NULL, 0, NUMKONG_SIZE_MAX, NUMKONG_NULL, 0, stream.numkong());
+        status = numerics_.attend_e4m3(heads, heads, transformer_head_dim_k, segment_offsets.data(), tokens,
+                                       transformer_attention_scale(), NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, qkv_e4m3,
+                                       qkv_bytes, packed_keys_values_.data(), products_.data(),
+                                       hidden * sizeof(util::f32_t), NUMKONG_NULL, 0, NUMKONG_SIZE_MAX, NUMKONG_NULL, 0,
+                                       util::numkong_stream(stream));
     if (status != nk_success_k)
         return util::expected_t::fail(util::status_code_t::device_k, "E4M3 attention failed: {}",
                                       nk_status_name(status));
@@ -1004,7 +1013,7 @@ util::expected_t transformer_block_e4m3_t::forward(util::bf16r2_view_t input, ut
     if (nk_status_t const status = numerics_.swiglu_bf16(
             gate_up, gate_up + ffn, nk::as_writable_values<nk_bf16_t>(nk::as_writable_bytes(silu_up_.span())).data(),
             tokens, ffn, 2 * ffn * sizeof(util::bf16_t), 2 * ffn * sizeof(util::bf16_t), ffn * sizeof(util::bf16_t),
-            1.0f, 1.0f, stream.numkong());
+            1.0f, 1.0f, util::numkong_stream(stream));
         status != nk_success_k)
         return util::expected_t::fail(util::status_code_t::device_k, "SwiGLU failed: {}", nk_status_name(status));
     if (launched)
@@ -1016,7 +1025,8 @@ util::expected_t transformer_block_e4m3_t::forward(util::bf16r2_view_t input, ut
 
 util::expected_t transformer_block_e4m3_t::project_(std::size_t product, util::e4m3r2_view_t activations,
                                                     util::f32r1_view_t token_scales, util::bf16r2_view_t residual,
-                                                    util::bf16r2_span_t values, util::gpu_stream_t& stream) noexcept {
+                                                    util::bf16r2_span_t values,
+                                                    util::executor_stream_t& stream) noexcept {
     std::size_t const tokens = activations.extent(0), depth = activations.extent(1), width = values.extent(1);
     if (nk::failed(products_.resize({tokens, width})))
         return util::expected_t::fail(util::status_code_t::unsupported_k, "product scratch cannot hold [{}x{}]", tokens,
@@ -1024,7 +1034,7 @@ util::expected_t transformer_block_e4m3_t::project_(std::size_t product, util::e
     nk_status_t const status = numerics_.multiply_e4m3(nk::as_values<nk_e4m3_t>(nk::as_bytes(activations)).data(),
                                                        packed_weights_[product].data(), products_.data(), tokens, width,
                                                        depth, depth * sizeof(util::e4m3_t), width * sizeof(util::f32_t),
-                                                       NUMKONG_NULL, 0, stream.numkong());
+                                                       NUMKONG_NULL, 0, util::numkong_stream(stream));
     if (status != nk_success_k)
         return util::expected_t::fail(util::status_code_t::device_k, "E4M3 product {} failed: {}", product,
                                       nk_status_name(status));
@@ -1037,7 +1047,7 @@ util::expected_t transformer_block_e4m3_t::project_(std::size_t product, util::e
 }
 
 util::expected<transformer_block_e4m3_t> transformer_block_bf16_t::quantize_weights(
-    util::gpu_arena_t& arena, util::gpu_stream_t& stream) noexcept {
+    util::gpu_arena_t& arena, util::executor_stream_t& stream) noexcept {
     using result_t = util::expected<transformer_block_e4m3_t>;
     transformer_block_e4m3_t block;
     block.config_ = config_;
@@ -1101,10 +1111,10 @@ util::expected<transformer_block_e4m3_t> transformer_block_bf16_t::quantize_weig
 
     // Norm scales widen exactly from BFloat16, the Float32 γ NumKong's RMSNorm reads.
     nk_status_t widened = numerics_.cast(pre_norm_scale_.data(), nk_bf16_k, block.pre_norm_scale_.data(), nk_f32_k,
-                                         hidden, stream.numkong());
+                                         hidden, util::numkong_stream(stream));
     if (widened == nk_success_k)
         widened = numerics_.cast(post_norm_scale_.data(), nk_bf16_k, block.post_norm_scale_.data(), nk_f32_k, hidden,
-                                 stream.numkong());
+                                 util::numkong_stream(stream));
     if (widened != nk_success_k)
         return result_t::fail(util::status_code_t::device_k, "norm scale widening failed: {}", nk_status_name(widened));
 
@@ -1154,7 +1164,7 @@ util::expected<transformer_block_e4m3_t> transformer_block_bf16_t::quantize_weig
                                   packed_bytes);
         if (nk_status_t const status = numerics_.pack_e4m3(
                 nk::as_values<nk_e4m3_t>(nk::as_bytes(job.shadow->view())).data(), columns, depth,
-                depth * sizeof(util::e4m3_t), packed.data(), 0, columns, stream.numkong());
+                depth * sizeof(util::e4m3_t), packed.data(), 0, columns, util::numkong_stream(stream));
             status != nk_success_k)
             return result_t::fail(util::status_code_t::device_k, "E4M3 weight packing failed: {}",
                                   nk_status_name(status));

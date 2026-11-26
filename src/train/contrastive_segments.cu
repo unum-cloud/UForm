@@ -744,7 +744,7 @@ util::expected<contrastive_pair_loss_t> contrastive_pair_loss_t::make(util::gpu_
 
 util::expected_t contrastive_pair_loss_t::operator()(util::f32r4_span_t logits, contrastive_relations_view_t relations,
                                                      contrastive_recipe_t recipe, util::f32r1_view_t live_anchors,
-                                                     util::f32r1_span_t loss_out, util::gpu_stream_t& stream,
+                                                     util::f32r1_span_t loss_out, util::executor_stream_t& stream,
                                                      util::f32r1_span_t log_inverse_temperature_grad,
                                                      util::f32r1_span_t bias_grad) noexcept {
     std::size_t const rows = from_vertex_accumulator_.extent(1);
@@ -882,7 +882,7 @@ util::expected<contrastive_segments_t> contrastive_segments_t::make(util::gpu_ar
 util::expected_t contrastive_segments_t::score_(util::bf16r2_view_t vertices,
                                                 nk::tensor_view<gpu_subgraph_t, 1> gpu_subgraphs,
                                                 contrastive_relations_view_t relations, contrastive_recipe_t recipe,
-                                                util::gpu_stream_t& stream) noexcept {
+                                                util::executor_stream_t& stream) noexcept {
     if (vertices.extent(0) != config_.from_vertices_per_gpu || vertices.extent(1) != config_.hidden)
         return util::expected_t::fail(util::status_code_t::unsupported_k,
                                       "vertex tower [{}x{}] disagrees with the baked [{}x{}]", vertices.extent(0),
@@ -966,7 +966,7 @@ util::expected_t contrastive_segments_t::score_(util::bf16r2_view_t vertices,
                 util::f32r2_view_t const previous_plane = raw_dot_[segment - 1u, subgraph_index, nk::slice];
                 product = util::numkong_result(
                     numerics_.sum_f32(raw_dot_plane.data(), previous_plane.data(), cells_per_prefix,
-                                      raw_dot_plane.data(), stream.numkong()),
+                                      raw_dot_plane.data(), util::numkong_stream(stream)),
                     "prefix dot nesting");
             }
             if (!product) return product;
@@ -983,7 +983,7 @@ util::expected_t contrastive_segments_t::score_(util::bf16r2_view_t vertices,
 util::expected_t contrastive_segments_t::evaluate(util::bf16r2_view_t vertices,
                                                   nk::tensor_view<gpu_subgraph_t, 1> gpu_subgraphs,
                                                   contrastive_relations_view_t relations, contrastive_recipe_t recipe,
-                                                  util::gpu_stream_t& stream) noexcept {
+                                                  util::executor_stream_t& stream) noexcept {
     if (util::expected_t scored = score_(vertices, gpu_subgraphs, relations, recipe, stream); !scored) return scored;
     // The world's centre over the full-width prefix, summed subgraph by subgraph in order, and
     // every unit vertex's alignment with it.
@@ -1028,7 +1028,7 @@ util::expected_t contrastive_segments_t::operator()(util::bf16r2_view_t vertices
                                                     nk::tensor_view<gpu_subgraph_t, 1> gpu_subgraphs,
                                                     contrastive_relations_view_t relations, contrastive_recipe_t recipe,
                                                     util::f32r1_span_t loss_out, util::bf16r2_span_t from_vertices_grad,
-                                                    util::gpu_stream_t& stream,
+                                                    util::executor_stream_t& stream,
                                                     util::f32r1_span_t log_inverse_temperature_grad,
                                                     util::f32r1_span_t bias_grad) noexcept {
 
@@ -1154,7 +1154,7 @@ util::expected_t contrastive_segments_t::operator()(util::bf16r2_view_t vertices
         }
         launched = util::numkong_result(
             numerics_.sum_f32(from_vertices_grad_f32_.data(), from_vertices_grad_products_.data(), rows * hidden,
-                              from_vertices_grad_f32_.data(), stream.numkong()),
+                              from_vertices_grad_f32_.data(), util::numkong_stream(stream)),
             "vertex force addition");
         if (!launched) return launched;
 
@@ -1171,7 +1171,7 @@ util::expected_t contrastive_segments_t::operator()(util::bf16r2_view_t vertices
     // Cast the owned-vertex force to BFloat16 — every vertex is owned by exactly one rank.
     if (from_vertices_grad.is_contiguous())
         return util::numkong_result(numerics_.cast(from_vertices_grad_f32_.data(), nk_f32_k, from_vertices_grad.data(),
-                                                   nk_bf16_k, rows * hidden, stream.numkong()),
+                                                   nk_bf16_k, rows * hidden, util::numkong_stream(stream)),
                                     "vertex force narrowing");
     return util::launch_kernel(&contrastive_cast_f32_to_bf16_kernel_, dim3 {util::grid_size_for(rows * hidden), 1u, 1u},
                                block_shape, stream, from_vertices_grad_f32_.view(), from_vertices_grad);
@@ -1195,7 +1195,7 @@ static __global__ void contrastive_column_fold_kernel_(util::bf16r1_span_t desti
 
 util::expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t::make(
     util::multimem_domain_t& domain, util::colocated_domain_t& colocated, std::span<util::gpu_arena_t> arenas,
-    std::span<util::gpu_stream_t> streams, std::span<util::bf16r2_view_t const> towers,
+    util::cuda_executor_t& streams, std::span<util::bf16r2_view_t const> towers,
     std::span<contrastive_relations_view_t const> relations, std::span<util::bf16r2_span_t const> from_vertices_grads,
     contrastive_segments_config_t config, util::u32r1_view_t prefix_dims, util::gpu_numerics_t const& numerics,
     util::f64_t timeout_seconds) noexcept {
@@ -1269,8 +1269,8 @@ util::expected<distributed_contrastive_segments_t> distributed_contrastive_segme
     // Every rank: the loss object and the cross-domain reduce member, both on its own device —
     // entered through the context the rank's stream already owns.
     for (std::size_t rank = 0; rank != gpus; ++rank) {
-        util::switch_to_gpu_t gpu_scope {streams[rank]};
-        if (!gpu_scope.ok())
+        [[maybe_unused]] util::status_t const gpu_scope = (streams.stream(rank)).bind();
+        if (gpu_scope.failed())
             return result_t::fail(util::status_code_t::device_k, "context entry failed (rank={})", rank);
         auto [loss, make_loss_status] = contrastive_segments_t::make(arenas[rank], config, prefix_dims, numerics);
         if (!make_loss_status) return result_t::fail(std::move(make_loss_status));
@@ -1281,7 +1281,8 @@ util::expected<distributed_contrastive_segments_t> distributed_contrastive_segme
                                   rank);
         util::u32_t const member = static_cast<util::u32_t>(domain.member_offset() + rank);
         auto [reduce_buffer, make_reduce_buffer_status] = util::infiniband_all_reduce<util::f32_t>::make(
-            colocated, member, arenas[rank], domains * tower_scalars + world_scalars, streams[rank], timeout_seconds);
+            colocated, member, arenas[rank], domains * tower_scalars + world_scalars, streams.stream(rank),
+            timeout_seconds);
         if (!make_reduce_buffer_status) return result_t::fail(std::move(make_reduce_buffer_status));
         distributed.reduce_buffers_[rank] = std::move(reduce_buffer);
     }
@@ -1289,10 +1290,10 @@ util::expected<distributed_contrastive_segments_t> distributed_contrastive_segme
     // The gather member, wired only where member 0 lives, and the per-rank loss summands on
     // the lead device.
     {
-        util::switch_to_gpu_t gpu_scope {streams[0]};
-        if (!gpu_scope.ok()) return result_t::fail(util::status_code_t::device_k, "Context entry failed (rank=0)");
+        [[maybe_unused]] util::status_t const gpu_scope = (streams.stream(0)).bind();
+        if (gpu_scope.failed()) return result_t::fail(util::status_code_t::device_k, "Context entry failed (rank=0)");
         auto [gather_buffer, make_status] = util::infiniband_all_gather<util::bf16_t>::make(
-            colocated, 0, arenas[0], members * tower_scalars, streams[0], timeout_seconds);
+            colocated, 0, arenas[0], members * tower_scalars, streams.stream(0), timeout_seconds);
         if (!make_status) return result_t::fail(std::move(make_status));
         distributed.gather_buffer_ = std::move(gather_buffer);
         util::gpu_arena_alloc<util::f32_t> f32_alloc {arenas[0]};
@@ -1320,7 +1321,7 @@ util::expected<distributed_contrastive_segments_t> distributed_contrastive_segme
 }
 
 util::expected_t distributed_contrastive_segments_t::stage_world_tower_(std::size_t rank,
-                                                                        util::gpu_stream_t& stream) noexcept {
+                                                                        util::executor_stream_t& stream) noexcept {
     std::size_t const member = domain_->member_offset() + rank;
     // A whole world is read in place from the peers' towers, so every peer's forward
     // must have landed.
@@ -1337,11 +1338,11 @@ util::expected_t distributed_contrastive_segments_t::stage_world_tower_(std::siz
 }
 
 util::expected_t distributed_contrastive_segments_t::evaluate(std::size_t rank, contrastive_recipe_t recipe,
-                                                              util::gpu_stream_t& stream) noexcept {
+                                                              util::executor_stream_t& stream) noexcept {
     if (rank >= losses_.size())
         return util::expected_t::fail(util::status_code_t::invalid_argument_k, "rank {} of {}", rank, losses_.size());
-    util::switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok())
+    [[maybe_unused]] util::status_t const gpu_scope = (stream).bind();
+    if (gpu_scope.failed())
         return util::expected_t::fail(util::status_code_t::device_k, "context entry failed ({})", rank);
     std::size_t const member = domain_->member_offset() + rank;
     util::bf16r2_view_t const own_tower = world_tower_window_.scalars != 0 ? gather_sources_[rank]
@@ -1356,7 +1357,7 @@ util::expected_t distributed_contrastive_segments_t::evaluate(std::size_t rank, 
 }
 
 util::expected_t distributed_contrastive_segments_t::operator()(std::size_t rank, contrastive_recipe_t recipe,
-                                                                util::gpu_stream_t& stream) noexcept {
+                                                                util::executor_stream_t& stream) noexcept {
     std::size_t const gpus = losses_.size();
     std::size_t const subgraphs = config_.gpu_subgraphs_per_step;
     std::size_t const tower_scalars = static_cast<std::size_t>(config_.from_vertices_per_gpu) * config_.hidden;
@@ -1368,8 +1369,8 @@ util::expected_t distributed_contrastive_segments_t::operator()(std::size_t rank
                                       "the recipe selects {} temperature groups of {}",
                                       recipe.temperature_group_count(), groups);
 
-    util::switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok())
+    [[maybe_unused]] util::status_t const gpu_scope = (stream).bind();
+    if (gpu_scope.failed())
         return util::expected_t::fail(util::status_code_t::device_k, "context entry failed ({})", rank);
 
     std::size_t const member = domain_->member_offset() + rank;
@@ -1423,17 +1424,17 @@ util::expected_t distributed_contrastive_segments_t::operator()(std::size_t rank
 }
 
 util::expected_t distributed_contrastive_segments_t::operator()(contrastive_recipe_t recipe,
-                                                                std::span<util::gpu_stream_t> streams) noexcept {
+                                                                util::cuda_executor_t& streams) noexcept {
     std::size_t const gpus = losses_.size();
     if (streams.size() != gpus)
         return util::expected_t::fail(util::status_code_t::invalid_argument_k, "every rank needs its stream ({} ranks)",
                                       gpus);
     for (std::size_t rank = 0; rank != gpus; ++rank)
-        if (util::expected_t staged = (*this)(rank, recipe, streams[rank]); !staged) return staged;
+        if (util::expected_t staged = (*this)(rank, recipe, streams.stream(rank)); !staged) return staged;
     return {};
 }
 
-util::expected_t distributed_contrastive_segments_t::gather_world_tower_(util::gpu_stream_t& stream) noexcept {
+util::expected_t distributed_contrastive_segments_t::gather_world_tower_(util::executor_stream_t& stream) noexcept {
     util::bf16r1_span_t const own_block = gather_buffer_.own_block();
     util::bf16r1_span_t const world_tower = world_tower_().flatten<1>();
     util::bf16r2_span_t const world_tower_rows = world_tower.reshape<2>(
@@ -1445,7 +1446,8 @@ util::expected_t distributed_contrastive_segments_t::gather_world_tower_(util::g
     return staged;
 }
 
-util::expected_t distributed_contrastive_segments_t::reduce_world_columns_(std::size_t rank, util::gpu_stream_t& stream,
+util::expected_t distributed_contrastive_segments_t::reduce_world_columns_(std::size_t rank,
+                                                                           util::executor_stream_t& stream,
                                                                            util::f32r1_view_t& column_force) noexcept {
     std::size_t const members = domain_->member_count();
     std::size_t const member = domain_->member_offset() + rank;

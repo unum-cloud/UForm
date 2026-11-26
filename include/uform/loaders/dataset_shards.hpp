@@ -29,7 +29,7 @@
 #include <memory> // `std::unique_ptr` — the pimpl owning the cuDF table
 #include <span>   // `std::span`
 
-#include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`
+#include "uform/utilities/vram_nvidia_schedule.cuh" // `executor_stream_t`
 #include "uform/utilities/types.hpp"        // `expected`, `status_t`, the scalar aliases, `b8r1_view_t`, `sz::string_t`
 #include "uform/loaders/direct_storage.hpp" // `gpu_direct_storage_session_t` — the reader's GDS precondition
 
@@ -185,7 +185,7 @@ struct parquet_file_t {
      */
     [[nodiscard]] static expected<parquet_file_t> make(gpu_direct_storage_session_t const& storage,
                                                        sz::string_view_t path, sz::strings_view_t columns,
-                                                       gpu_stream_t& stream) noexcept;
+                                                       executor_stream_t& stream) noexcept;
 
     /** Decode @p columns of @b several shards at once into @b one concatenated file, the row draw's
      *  reservoir, whose rows follow the paths, then their groups, back to back. @p row_groups holds
@@ -193,7 +193,7 @@ struct parquet_file_t {
     [[nodiscard]] static expected<parquet_file_t> make(gpu_direct_storage_session_t const& storage,
                                                        sz::strings_view_t paths, sz::strings_view_t columns,
                                                        tape_view<u32_t const> row_groups,
-                                                       gpu_stream_t& stream) noexcept;
+                                                       executor_stream_t& stream) noexcept;
 
     /** Read only the shard's Parquet footer at @p path — @c num_rows , the @b whole table's summed
      *  column-chunk byte size, and each row group's rows, bytes and rows @p complete_columns all
@@ -252,12 +252,12 @@ struct jsonl_file_t {
      *  files by instead. */
     [[nodiscard]] static expected<jsonl_file_t> make(gpu_direct_storage_session_t const& storage,
                                                      sz::string_view_t path, sz::string_view_t field,
-                                                     gpu_stream_t& stream) noexcept;
+                                                     executor_stream_t& stream) noexcept;
 
     /** Concatenate several decoded shards' fields into one reservoir — the footerless coverage
      *  loop decodes one file at a time, then merges them here (a cuDF concatenate, one copy). */
     [[nodiscard]] static expected<jsonl_file_t> concat(std::span<jsonl_file_t const> parts,
-                                                       gpu_stream_t& stream) noexcept;
+                                                       executor_stream_t& stream) noexcept;
 
     /** Rows decoded — one per JSON line. */
     [[nodiscard]] std::size_t rows() const noexcept;
@@ -302,11 +302,12 @@ struct csv_file_t {
      *  always decoded to learn its rows; @ref file_size_bytes is the loader's cheap weight. */
     [[nodiscard]] static expected<csv_file_t> make(gpu_direct_storage_session_t const& storage, sz::string_view_t path,
                                                    sz::string_view_t column, char delimiter, csv_header_t header,
-                                                   gpu_stream_t& stream) noexcept;
+                                                   executor_stream_t& stream) noexcept;
 
     /** Concatenate several decoded shards' columns into one reservoir — the footerless coverage
      *  loop decodes one file at a time, then merges them here (a cuDF concatenate, one copy). */
-    [[nodiscard]] static expected<csv_file_t> concat(std::span<csv_file_t const> parts, gpu_stream_t& stream) noexcept;
+    [[nodiscard]] static expected<csv_file_t> concat(std::span<csv_file_t const> parts,
+                                                     executor_stream_t& stream) noexcept;
 
     /** Rows decoded — one per CSV record. */
     [[nodiscard]] std::size_t rows() const noexcept;

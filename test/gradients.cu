@@ -108,7 +108,8 @@ using namespace unum::uform::test;
 /** The GPU every case uses, owned by @c main : one stream whose context the cases enter, and the
  *  kernels they call. Each case allocates its own arena, so a case's allocations die with it. */
 struct device_t {
-    util::gpu_stream_t stream;
+    util::cuda_executor_t& executor;
+    util::executor_stream_t& stream;
     util::gpu_numerics_t numerics {};
 };
 
@@ -153,7 +154,7 @@ inline constexpr util::f64_t finite_difference_tolerance_k = 0x1.0p-4;
 
 /** Draw and corrupt the batch of epoch @p epoch into an existing @p replica . */
 [[nodiscard]] static util::expected_t redraw_(base_replica_t& replica, trainer_config_t const& config,
-                                              util::data_epoch_t epoch, util::gpu_stream_t& stream) noexcept {
+                                              util::data_epoch_t epoch, util::executor_stream_t& stream) noexcept {
     util::expected_t staged = replica.draw(config, 0, epoch, stream);
     if (staged) staged = replica.prepare(config, epoch, stream);
     return staged;
@@ -174,7 +175,7 @@ struct summand_pair_t {
 /** Run the forward region of @p config from zeroed summands and return the composite loss the
  *  backward differentiates: every live head's weighted sum over its own count. */
 [[nodiscard]] static util::expected<util::f64_t> forward_loss_(base_replica_t& replica, trainer_config_t const& config,
-                                                               util::gpu_stream_t& stream) noexcept {
+                                                               util::executor_stream_t& stream) noexcept {
     util::f32r1_tensor_arena_t* const pairs[] = {&replica.tokens_summands, &replica.image_summands,
                                                  &replica.video_summands, &replica.audio_summands};
     for (util::f32r1_tensor_arena_t* pair : pairs)
@@ -183,7 +184,7 @@ struct summand_pair_t {
                 return util::expected<util::f64_t>::fail(std::move(zeroed));
     if (util::expected_t forwarded = replica.forward_region(config, stream); !forwarded)
         return util::expected<util::f64_t>::fail(std::move(forwarded));
-    if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
+    if (CUresult result = cuStreamSynchronize(util::native_stream(stream)); result != CUDA_SUCCESS)
         return util::cuda_failure<util::f64_t>(result, "forward drain failed");
     util::f64_t loss = 0;
     for (util::f32r1_tensor_arena_t* pair : pairs) {
@@ -196,7 +197,7 @@ struct summand_pair_t {
 /** Perturb every registered matrix along its own gradient and compare the central difference of the
  *  composite loss with the gradient's dot product with the BFloat16-rounded step. */
 static void finite_differences(device_t& device, bool is_omni) {
-    util::switch_to_gpu_t scope {device.stream};
+    [[maybe_unused]] util::status_t const scope = (device.stream).bind();
     // One block keeps every perturbed matrix's loss change far above the BFloat16 noise of a deeper
     // stack; the block's own backward is checked exactly by block_host_replay.
     trainer_config_t config = test_geometry_(is_omni);
@@ -211,7 +212,7 @@ static void finite_differences(device_t& device, bool is_omni) {
     if (util::expected_t backward = replica.backward_region(device.stream);
         !expect_true(backward, "backward: {}", backward.description_))
         return;
-    cuStreamSynchronize(device.stream.get());
+    cuStreamSynchronize(util::native_stream(device.stream));
 
     st::basic_vector<util::f64_t> weights, gradient, plus, minus;
     st::basic_vector<nk_bf16_t> staging;
@@ -290,11 +291,11 @@ struct host_segments_t {
 [[nodiscard]] static util::expected<util::f64_t> token_head_loss_(base_replica_t& replica,
                                                                   st::basic_vector<util::f64_t> const& direction,
                                                                   st::basic_vector<util::f32_t>& rows,
-                                                                  util::gpu_stream_t& stream) noexcept {
+                                                                  util::executor_stream_t& stream) noexcept {
     util::expected_t forwarded = replica.tower.pack_weights(stream);
     if (forwarded) forwarded = replica.tower.forward(replica.batch, {}, stream);
     if (!forwarded) return util::expected<util::f64_t>::fail(std::move(forwarded));
-    cuStreamSynchronize(stream.get());
+    cuStreamSynchronize(util::native_stream(stream));
     util::f32r2_view_t const projections = replica.tower.token_projections();
     std::size_t const tokens = projections.extent(0), width = projections.extent(1);
     if (st::failed(rows.resize(st::assume_uninitialized, tokens * width)))
@@ -321,7 +322,7 @@ struct host_segments_t {
  *  norm, and the norm scale against a Float64 replay, with each segment's prefix and the side-less
  *  segments left out of the compact rows. */
 static void test_token_head_finite_differences(device_t& device) {
-    util::switch_to_gpu_t scope {device.stream};
+    [[maybe_unused]] util::status_t const scope = (device.stream).bind();
     trainer_config_t config = test_geometry_(false);
     config.depth = 1;
     config.seed = test_run.settings.seed;
@@ -336,7 +337,7 @@ static void test_token_head_finite_differences(device_t& device) {
                                                   : util::expected_t::fail(std::move(make_replica_status));
     if (staged) staged = replica.draw(config, 0, util::data_epoch_t {0}, device.stream);
     if (!expect_true(staged, "replica: {}", staged.description_)) return;
-    cuStreamSynchronize(device.stream.get());
+    cuStreamSynchronize(util::native_stream(device.stream));
 
     // Sides and prefixes over the four drawn segments: a query, a document, a side-less segment and
     // one of both.
@@ -380,7 +381,7 @@ static void test_token_head_finite_differences(device_t& device) {
                                                            replica.token_vectors_grad.view());
         !expect_true(backward, "backward: {}", backward.description_))
         return;
-    cuStreamSynchronize(device.stream.get());
+    cuStreamSynchronize(util::native_stream(device.stream));
 
     // The norm scale's gradient against a Float64 replay of the head over the same states: through
     // the L2 normalization it moves the loss only at second order along most directions, too little
@@ -487,7 +488,7 @@ static void test_token_head_finite_differences(device_t& device) {
 /** Every text row with bytes has at least one masked position, over sixteen 64-byte rows
  *  and eight epochs. */
 static void test_masked_text_rows(device_t& device) {
-    util::switch_to_gpu_t scope {device.stream};
+    [[maybe_unused]] util::status_t const scope = (device.stream).bind();
     trainer_config_t config = test_geometry_(false);
     config.batch = multimodal_batch_shape_t {16u, 16u, 64u};
     config.seed = test_run.settings.seed;
@@ -501,7 +502,7 @@ static void test_masked_text_rows(device_t& device) {
                                                 : redraw_(replica, config, util::data_epoch_t {epoch}, device.stream);
             !expect_true(drawn, "epoch {}: {}", epoch, drawn.description_))
             return;
-        cuStreamSynchronize(device.stream.get());
+        cuStreamSynchronize(util::native_stream(device.stream));
         std::size_t const tokens = replica.token_loss_weights.extent(0);
         if (!expect_true(!st::failed(weights.resize(tokens)), "weights staging failed")) return;
         cuMemcpyDtoH(weights.data(), util::device_address(replica.token_loss_weights.data()),
@@ -523,7 +524,7 @@ static void test_masked_text_rows(device_t& device) {
 /** Each media head counts only masked cells of its own modality, and some of them,
  *  across four epochs. */
 static void test_masked_media_rows(device_t& device) {
-    util::switch_to_gpu_t scope {device.stream};
+    [[maybe_unused]] util::status_t const scope = (device.stream).bind();
     trainer_config_t config = test_geometry_(true);
     config.seed = test_run.settings.seed;
     auto [arena, make_arena_status] = util::gpu_arena_t::make(0, case_arena_bytes_k);
@@ -560,7 +561,7 @@ static void test_masked_media_rows(device_t& device) {
 /** A freshly seeded six-block tower predicts uniform random bytes at about the uniform
  *  cross-entropy: logits of unit variance add half a nat over @c ln(258) . */
 static void test_chance_cross_entropy(device_t& device) {
-    util::switch_to_gpu_t scope {device.stream};
+    [[maybe_unused]] util::status_t const scope = (device.stream).bind();
     trainer_config_t config = test_geometry_(false);
     config.batch = multimodal_batch_shape_t {8u, 8u, 64u};
     config.depth = 6;
@@ -616,7 +617,7 @@ struct optimized_matrix_t {
  *  host replay from the device's rounded weights, so the comparison allows one BFloat16 spacing. A
  *  kept first moment must also survive a save and a load into a fresh optimizer unchanged. */
 static void test_adafactor_reference(device_t& device, util::f32_t beta1) {
-    util::switch_to_gpu_t scope {device.stream};
+    [[maybe_unused]] util::status_t const scope = (device.stream).bind();
     auto [arena, make_arena_status] = util::gpu_arena_t::make(0, 64ull << 20);
     if (!expect_true(make_arena_status, "arena: {}", make_arena_status.description_)) return;
     std::size_t const shapes[2][2] = {{24, 40}, {1, 40}};
@@ -667,7 +668,7 @@ static void test_adafactor_reference(device_t& device, util::f32_t beta1) {
         if (util::expected_t stepped = optimizer.step(learning_rate, device.stream);
             !expect_true(stepped, "step {}: {}", step, stepped.description_))
             return;
-        cuStreamSynchronize(device.stream.get());
+        cuStreamSynchronize(util::native_stream(device.stream));
         util::f64_t const decay = fu::min_of<util::f64_t>(
             config.beta2, 1.0 - std::pow(static_cast<util::f64_t>(step), -config.decay_exponent));
         for (util::u32_t matrix = 0; matrix != 2u; ++matrix) {
@@ -773,7 +774,7 @@ static void test_adafactor_reference(device_t& device, util::f32_t beta1) {
  *  the BFloat16 spacing below one: the weights must move by that step on average instead of
  *  rounding back to one. */
 static void test_adafactor_small_steps(device_t& device) {
-    util::switch_to_gpu_t scope {device.stream};
+    [[maybe_unused]] util::status_t const scope = (device.stream).bind();
     auto [arena, make_arena_status] = util::gpu_arena_t::make(0, 64ull << 20);
     if (!expect_true(make_arena_status, "arena: {}", make_arena_status.description_)) return;
     std::size_t const rows = 64, columns = 256;
@@ -800,7 +801,7 @@ static void test_adafactor_small_steps(device_t& device) {
     if (util::expected_t stepped = optimizer.step(static_cast<util::f32_t>(learning_rate), device.stream);
         !expect_true(stepped, "step: {}", stepped.description_))
         return;
-    cuStreamSynchronize(device.stream.get());
+    cuStreamSynchronize(util::native_stream(device.stream));
     if (!expect_true(download_widened_({matrix.weights.data(), rows * columns}, staging, matrix.host_weights),
                      "weights readback failed"))
         return;
@@ -841,7 +842,7 @@ static void test_adafactor_small_steps(device_t& device) {
  *  there, the decoder's gradient is added onto too, and a central difference of the loss along
  *  that gradient agrees with it. */
 static void test_choices_cross_entropy(device_t& device) {
-    util::switch_to_gpu_t scope {device.stream};
+    [[maybe_unused]] util::status_t const scope = (device.stream).bind();
     util::u32_t const rows = 4, columns = 64, hidden = 256, width = 4, tokens = rows * columns;
     std::size_t const decoder_scalars = std::size_t {byte_vocabulary_k} * hidden;
     auto [arena, make_arena_status] = util::gpu_arena_t::make(0, case_arena_bytes_k);
@@ -907,7 +908,7 @@ static void test_choices_cross_entropy(device_t& device) {
             chosen = head.choose(normalized.view(), batch.view(), config, summands.span(), normalized_grad.span(),
                                  device.stream);
         if (!chosen) return util::expected<summand_pair_t>::fail(std::move(chosen));
-        cuStreamSynchronize(device.stream.get());
+        cuStreamSynchronize(util::native_stream(device.stream));
         return util::expected<summand_pair_t> {read_pair_(summands)};
     };
     auto [summand_pair, choose_summand_pair_status] = choose();
@@ -1075,7 +1076,7 @@ static void rotate_(auto&& values, nk::tensor_view<util::i16_t, 1> coordinates, 
  *  Float64 host replay, the output of every token, and the dQ, dK and dV every segment's softmax
  *  owes back through the inverse rotation and the QK-norm, zero past each segment's length. */
 static void test_block_host_replay(device_t& device) {
-    util::switch_to_gpu_t scope {device.stream};
+    [[maybe_unused]] util::status_t const scope = (device.stream).bind();
     std::size_t const hidden = 256, sequence = 64, segments = 4, tokens = sequence * segments;
     std::size_t const heads = hidden / transformer_head_dim_k, ffn = 2 * hidden;
     auto [arena, make_arena_status] = util::gpu_arena_t::make(0, case_arena_bytes_k);
@@ -1155,7 +1156,7 @@ static void test_block_host_replay(device_t& device) {
                                 util::f32r2_span_t {device_input_grad, tokens, hidden}, segment_offsets,
                                 segment_lengths, angles.view(), coordinate_view, device.stream);
     if (!expect_true(staged, "block step: {}", staged.description_)) return;
-    cuStreamSynchronize(device.stream.get());
+    cuStreamSynchronize(util::native_stream(device.stream));
     cuMemcpyDtoH(output.data(), util::device_address(device_output), output.size() * sizeof(util::f32_t));
     st::basic_vector<util::f64_t> narrowed_grad, packed_grad;
     if (!expect_true(download_widened_({scratch.narrowed_grad.data(), tokens * hidden}, staging, narrowed_grad) &&
@@ -1307,7 +1308,7 @@ static void test_block_host_replay(device_t& device) {
  *  overwrote their shared scratch reproduces its backward bitwise, as the tower's
  *  recomputing backward relies on. */
 static void test_block_recompute_replays(device_t& device) {
-    util::switch_to_gpu_t scope {device.stream};
+    [[maybe_unused]] util::status_t const scope = (device.stream).bind();
     std::size_t const hidden = 256, sequence = 64, segments = 2, tokens = sequence * segments;
     auto [arena, make_arena_status] = util::gpu_arena_t::make(0, case_arena_bytes_k);
     if (!expect_true(make_arena_status, "arena: {}", make_arena_status.description_)) return;
@@ -1379,7 +1380,7 @@ static void test_block_recompute_replays(device_t& device) {
             staged = block.backward(output_grad, input_grad, segment_offsets, segment_lengths, angles.view(),
                                     coordinate_view, device.stream);
         if (!staged) break;
-        cuStreamSynchronize(device.stream.get());
+        cuStreamSynchronize(util::native_stream(device.stream));
         if (!expect_true(!st::failed(input_grads[pass].resize(tokens * hidden)), "host staging failed")) return;
         cuMemcpyDtoH(input_grads[pass].data(), util::device_address(device_input_grad),
                      tokens * hidden * sizeof(util::f32_t));
@@ -1464,7 +1465,7 @@ static void normalize_rows_(f64r2_view_t pooled, f64r2_span_t units, std::span<u
  *  row, with an all-zero row taking none. The replay's own force is checked by central differences
  *  of its loss, and a second call reproduces the terms bitwise and doubles the force. */
 static void test_spectrum_replay(device_t& device) {
-    util::switch_to_gpu_t scope {device.stream};
+    [[maybe_unused]] util::status_t const scope = (device.stream).bind();
     // Three tiles of channels run the panel, the trailing update and the mirror; 37 rows pad to 40.
     std::size_t const rows = 37, hidden = 96, empty_row = 5;
     pooled_spectrum_config_t config;
@@ -1587,7 +1588,7 @@ static void test_spectrum_replay(device_t& device) {
         0, 1, &pause_between_polls, 0, "/tmp/uform_exchange_local", "spectrum_replay");
     if (!expect_true(bootstrap_status, "single-domain bootstrap: {}", bootstrap_status.description_)) return;
     util::i32_t const devices[1] = {0};
-    std::span<util::gpu_stream_t> const streams {&device.stream, 1};
+    util::cuda_executor_t& streams = device.executor;
     auto [domain, make_domain_status] = util::multimem_domain_t::make(
         topology, devices, distributed_pooled_spectrum_t::payload_scalars_needed(config), streams,
         wait_limit_k.count());
@@ -1608,7 +1609,7 @@ static void test_spectrum_replay(device_t& device) {
                                                                 device.stream);
             !expect_true(copied, "terms download: {}", copied.description_))
             return;
-        cuStreamSynchronize(device.stream.get());
+        cuStreamSynchronize(util::native_stream(device.stream));
         if (!expect_true(download_widened_({pooled_grad.data(), rows * hidden}, staging, gradient),
                          "gradient download failed"))
             return;
@@ -1656,13 +1657,15 @@ int main(int argc, char** argv) {
         for (char const* label : labels) run_test_case(label, [] { return case_result_t::skipped(no_gpu_device_k); });
         return finish_test_run();
     }
-    auto [stream, status] = util::gpu_stream_t::make(0);
+    int const stream_devices[] = {static_cast<int>(0)};
+    auto [stream_executor, status] = spawn_test_executor(stream_devices);
     if (!expect_true(status, "stream: {}", status.description_)) return finish_test_run();
-    util::switch_to_gpu_t scope {stream};
+    auto& stream = stream_executor.stream(0);
+    [[maybe_unused]] util::status_t const scope = (stream).bind();
     nk_capability_t capabilities = 0;
     if (!expect_true(nk_capabilities_enabled_cuda(0, &capabilities) == nk_success_k, "NumKong cannot query device 0"))
         return finish_test_run();
-    device_t device {std::move(stream), gpu_numerics_of(capabilities)};
+    device_t device {stream_executor, stream, gpu_numerics_of(capabilities)};
     run_test_case("test_finite_differences_tokens", test_finite_differences_tokens, device);
     run_test_case("test_finite_differences_omni", test_finite_differences_omni, device);
     run_test_case("test_token_head_finite_differences", test_token_head_finite_differences, device);

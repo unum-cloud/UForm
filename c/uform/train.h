@@ -405,7 +405,8 @@ typedef struct uform_mesh_options_t {
  *  trainer, so no consumer wires its own adapters. The NVLink multicast domain is not here: its
  *  size is the sum of what its consumers reserve, so each trainer makes its own over the mesh's
  *  devices. Bootstrap is a one-time rendezvous through files in @c directory; after it, processes
- *  talk only over NVLink and InfiniBand.
+ *  talk only over NVLink and InfiniBand. A mesh must not outlive the executor it was made over:
+ *  free it, and every trainer over it, before that executor.
  */
 typedef struct uform_mesh_handle_t* uform_mesh_t;
 
@@ -518,7 +519,9 @@ UFORM_EXPORT uform_status_t uform_late_interaction_side_from_name(uform_bytes_vi
                                                                   uform_late_interaction_side_t* side);
 
 /** A training run: the tower replicas, gradients, optimizer moments, heads, temperatures and the
- *  collectives sized by them, on the executor's devices. */
+ *  collectives sized by them, queued on the streams of the executor it was made with. It must not
+ *  outlive that executor: free every trainer before it. Every call naming the trainer names that
+ *  executor too, and one naming another is refused with @c uform_status_invalid_argument_k . */
 typedef struct uform_trainer_handle_t* uform_trainer_t;
 
 /** The arguments of @c uform_trainer_init_vram. */

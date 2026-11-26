@@ -86,7 +86,7 @@ static __global__ void telemetry_round_probe_kernel_(util::multimem_member_t mem
 
 util::expected<telemetry_ledger_t> telemetry_ledger_t::make(util::gpu_arena_t& arena, util::u32_t channels,
                                                             util::u32_t max_probes,
-                                                            util::gpu_stream_t& stream) noexcept {
+                                                            util::executor_stream_t& stream) noexcept {
     using result_t = util::expected<telemetry_ledger_t>;
     telemetry_ledger_t ledger;
     ledger.channels_ = channels;
@@ -97,11 +97,11 @@ util::expected<telemetry_ledger_t> telemetry_ledger_t::make(util::gpu_arena_t& a
                        .value;
     if (!ledger.rows_)
         return result_t::fail(util::status_code_t::out_of_memory_k, "ledger row table allocation failed ({})", rows);
-    util::switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return result_t::fail(util::status_code_t::device_k, "Ledger context entry failed");
+    [[maybe_unused]] util::status_t const gpu_scope = (stream).bind();
+    if (gpu_scope.failed()) return result_t::fail(util::status_code_t::device_k, "Ledger context entry failed");
     if (util::expected_t reset = util::zero_async(ledger.rows_.span(), stream); !reset)
         return result_t::fail(std::move(reset));
-    if (CUresult synced = cuStreamSynchronize(stream.get()); synced != CUDA_SUCCESS)
+    if (CUresult synced = cuStreamSynchronize(util::native_stream(stream)); synced != CUDA_SUCCESS)
         return util::cuda_failure<telemetry_ledger_t>(synced, "ledger row table reset drain failed");
     if (st::failed(ledger.names_.reserve(rows)) || st::failed(ledger.policies_.reserve(rows)) ||
         st::failed(ledger.loss_stats_.reserve(rows)))
@@ -133,7 +133,7 @@ util::expected<telemetry_probe_t> telemetry_ledger_t::register_probe(sz::string_
 }
 
 util::expected_t telemetry_ledger_t::probe_signal(telemetry_probe_t probe, util::f32r1_view_t values,
-                                                  util::gpu_fault_t* fault, util::gpu_stream_t& stream) noexcept {
+                                                  util::gpu_fault_t* fault, util::executor_stream_t& stream) noexcept {
     if (probe.row == 0u || values.extent(0) == 0) return {};
     nk::tensor_span<telemetry_row_t, 1> const row {rows_.data() + probe.row, 1u};
     return util::launch_kernel(&telemetry_signal_probe_kernel_, dim3 {1u, 1u, 1u}, dim3 {32u, 1u, 1u}, stream, values,
@@ -141,7 +141,7 @@ util::expected_t telemetry_ledger_t::probe_signal(telemetry_probe_t probe, util:
 }
 
 util::expected_t telemetry_ledger_t::probe_round(telemetry_probe_t probe, util::multimem_member_t member,
-                                                 util::gpu_stream_t& stream) noexcept {
+                                                 util::executor_stream_t& stream) noexcept {
     if (probe.row == 0u) return {};
     nk::tensor_span<telemetry_row_t, 1> const row {rows_.data() + probe.row, 1u};
     return util::launch_kernel(&telemetry_round_probe_kernel_, dim3 {1u, 1u, 1u}, dim3 {32u, 1u, 1u}, stream, member,
@@ -164,12 +164,13 @@ telemetry_loss_stats_t telemetry_ledger_t::losses(telemetry_probe_t probe) const
     return loss_stats_[probe.row];
 }
 
-util::expected<telemetry_row_t> telemetry_ledger_t::row(telemetry_probe_t probe, util::gpu_stream_t& stream) noexcept {
+util::expected<telemetry_row_t> telemetry_ledger_t::row(telemetry_probe_t probe,
+                                                        util::executor_stream_t& stream) noexcept {
     using result_t = util::expected<telemetry_row_t>;
     if (probe.row == 0u) return result_t {telemetry_row_t {}};
-    util::switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return result_t::fail(util::status_code_t::device_k, "Ledger row context entry failed");
-    if (CUresult synced = cuStreamSynchronize(stream.get()); synced != CUDA_SUCCESS)
+    [[maybe_unused]] util::status_t const gpu_scope = (stream).bind();
+    if (gpu_scope.failed()) return result_t::fail(util::status_code_t::device_k, "Ledger row context entry failed");
+    if (CUresult synced = cuStreamSynchronize(util::native_stream(stream)); synced != CUDA_SUCCESS)
         return util::cuda_failure<telemetry_row_t>(synced, "ledger row synchronization failed");
     telemetry_row_t state;
     if (CUresult copied = cuMemcpyDtoH(&state, util::device_address(rows_.data() + probe.row), sizeof(telemetry_row_t));
@@ -178,12 +179,12 @@ util::expected<telemetry_row_t> telemetry_ledger_t::row(telemetry_probe_t probe,
     return result_t {state};
 }
 
-util::expected_t telemetry_ledger_t::report(util::gpu_stream_t& stream) noexcept {
+util::expected_t telemetry_ledger_t::report(util::executor_stream_t& stream) noexcept {
     if (channels_ == 0u || registered_ == 0u) return {};
-    util::switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok())
+    [[maybe_unused]] util::status_t const gpu_scope = (stream).bind();
+    if (gpu_scope.failed())
         return util::expected_t::fail(util::status_code_t::device_k, "Ledger report context entry failed");
-    if (CUresult synced = cuStreamSynchronize(stream.get()); synced != CUDA_SUCCESS)
+    if (CUresult synced = cuStreamSynchronize(util::native_stream(stream)); synced != CUDA_SUCCESS)
         return util::cuda_failure(synced, "ledger report synchronization failed");
     st::basic_vector<telemetry_row_t> states;
     if (st::failed(states.resize(registered_ + 1u)))

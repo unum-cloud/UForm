@@ -145,11 +145,11 @@ struct summand_pair_t {
 /** Read one head's @b [2] @c {λ · Σ, count} summands back to host. Best-effort: a slipped readback
  *  reports zeros, never fails the run. Caller holds the stream's context. */
 [[nodiscard]] static summand_pair_t read_summands_(util::f32r1_tensor_arena_t& summands,
-                                                   util::gpu_stream_t& stream) noexcept {
+                                                   util::executor_stream_t& stream) noexcept {
     util::f32r1_tensor_pinned_t staging;
     if (!util::allocate_uninitialized(staging, {2}, util::pinned_alloc<util::f32_t> {})) return {};
     if (!util::copy_device_to_host(summands.view(), staging.span(), stream)) return {};
-    cuStreamSynchronize(stream.get());
+    cuStreamSynchronize(util::native_stream(stream));
     return summand_pair_t {static_cast<util::f64_t>(staging[0]), static_cast<util::f64_t>(staging[1])};
 }
 
@@ -283,8 +283,8 @@ struct device_budget_t {
 /** Bind @p placed to @p mesh , @p config , @p devices and @p numerics , make one stream per
  *  device, and record what each device has free and this process holds into @p budgets — the part
  *  of @ref trainer_t::make before the envelope is known. */
-[[nodiscard]] static util::expected_t prepare_(trainer_t& placed, mesh_t& mesh, trainer_config_t const& config,
-                                               std::span<util::i32_t const> devices,
+[[nodiscard]] static util::expected_t prepare_(trainer_t& placed, mesh_t& mesh, util::cuda_executor_t& executor,
+                                               trainer_config_t const& config, std::span<util::i32_t const> devices,
                                                util::gpu_numerics_t const& numerics,
                                                std::span<device_budget_t> budgets) noexcept {
     util::mesh_topology_t const& topology = mesh.topology;
@@ -304,15 +304,12 @@ struct device_budget_t {
     placed.config = config;
     placed.mesh = &mesh;
     placed.numerics = numerics;
+    placed.streams = &executor;
     if (st::failed(placed.devices.assign(devices)))
         return util::expected_t::fail(util::status_code_t::out_of_memory_k, "No room for the device table");
     for (std::size_t member = 0; member != gpus; ++member) {
-        auto [stream, make_status] = util::gpu_stream_t::make(devices[member]);
-        if (!make_status) return util::expected_t::fail(std::move(make_status));
-        if (placed.streams.push_back(std::move(stream)) != util::status_code_t::success_k)
-            return util::expected_t::fail(util::status_code_t::out_of_memory_k, "Stream table full");
-        util::switch_to_gpu_t gpu_scope {placed.streams[member]};
-        if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+        [[maybe_unused]] util::status_t const gpu_scope = (placed.streams->stream(member)).bind();
+        if (gpu_scope.failed()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
         auto [memory, query_status] = util::gpu_memory_report(devices[member]);
         if (!query_status) return util::expected_t::fail(std::move(query_status));
         auto [held_bytes, measure_status] = held_bytes_(devices[member]);
@@ -352,15 +349,16 @@ struct device_budget_t {
 /** Build a trainer over @p config at @p rows rows and segments per GPU, its arenas reserving all
  *  the free memory, take one synthetic step, and read every device's footprint against
  *  @p budgets , what it had free and held before the first probe. */
-[[nodiscard]] static util::expected_t probe_footprint_(mesh_t& mesh, trainer_config_t config,
-                                                       std::span<util::i32_t const> devices,
+[[nodiscard]] static util::expected_t probe_footprint_(mesh_t& mesh, util::cuda_executor_t& executor,
+                                                       trainer_config_t config, std::span<util::i32_t const> devices,
                                                        util::gpu_numerics_t const& numerics, util::u32_t rows,
                                                        std::span<device_budget_t const> budgets,
                                                        std::span<footprint_t> footprints) noexcept {
     config.batch = batch_capacity(config.batch, rows, segments_per_row_(config));
     trainer_t probe;
     device_budget_t probe_budgets[util::max_gpus_per_host_k] = {};
-    util::expected_t built = prepare_(probe, mesh, config, devices, numerics, {probe_budgets, devices.size()});
+    util::expected_t built = prepare_(probe, mesh, executor, config, devices, numerics,
+                                      {probe_budgets, devices.size()});
     if (built) built = assemble_(probe, mesh, probe.envelope.free_bytes);
     if (!built) return built;
     synthetic_source_t source;
@@ -376,22 +374,23 @@ struct device_budget_t {
     st::basic_vector<multimodal_batch_mixer_t> mixers;
     for (std::size_t source_index = 0; source_index != sources; ++source_index) {
         for (std::size_t member = 0; member != devices.size(); ++member) {
-            util::switch_to_gpu_t gpu_scope {probe.streams[member]};
-            if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+            [[maybe_unused]] util::status_t const gpu_scope = (probe.streams->stream(member)).bind();
+            if (gpu_scope.failed())
+                return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
             std::size_t const batches = source_index == 0 ? config.batches_per_fill : 1; // held-out refills per eval
             if (util::expected_t allocated = allocate_batches_(probe.arenas[member], config.batch, batches, filled);
                 !allocated)
                 return allocated;
         }
         auto [mixer, status] = multimodal_batch_mixer_t::make(probe.domain, mesh.colocated, probe.arenas, config.batch,
-                                                              config.seed, probe.streams, mesh.timeout_seconds);
+                                                              config.seed, *probe.streams, mesh.timeout_seconds);
         if (!status) return util::expected_t::fail(std::move(status));
         if (st::failed(mixers.push_back(std::move(mixer))))
             return util::expected_t::fail(util::status_code_t::out_of_memory_k, "No room for the mixer table");
     }
     for (std::size_t member = 0; member != devices.size(); ++member) {
-        util::switch_to_gpu_t gpu_scope {probe.streams[member]};
-        if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+        [[maybe_unused]] util::status_t const gpu_scope = (probe.streams->stream(member)).bind();
+        if (gpu_scope.failed()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
         auto [held_bytes, status] = held_bytes_(devices[member]);
         if (!status) return util::expected_t::fail(std::move(status));
         footprints[member].device_bytes = held_bytes - fu::min_of(held_bytes, budgets[member].held_bytes);
@@ -463,7 +462,8 @@ struct device_budget_t {
  *  @par Statuses:
  *  - @c status_code_t::out_of_memory_k The configured rows do not fit, with the measured numbers.
  */
-[[nodiscard]] static util::expected<envelope_t> measure_envelope_(mesh_t& mesh, trainer_config_t const& config,
+[[nodiscard]] static util::expected<envelope_t> measure_envelope_(mesh_t& mesh, util::cuda_executor_t& executor,
+                                                                  trainer_config_t const& config,
                                                                   std::span<util::i32_t const> devices,
                                                                   util::gpu_numerics_t const& numerics,
                                                                   std::span<device_budget_t const> budgets) noexcept {
@@ -480,10 +480,14 @@ struct device_budget_t {
     util::u32_t const middle_probe_rows = fu::min_of(middle_probe_rows_k, larger_probe_rows - 1u);
     footprint_t smaller[util::max_gpus_per_host_k] = {}, middle[util::max_gpus_per_host_k] = {},
                 larger[util::max_gpus_per_host_k] = {};
-    util::expected_t probed = probe_footprint_(mesh, config, devices, numerics, smaller_probe_rows_k, budgets,
+    util::expected_t probed = probe_footprint_(mesh, executor, config, devices, numerics, smaller_probe_rows_k, budgets,
                                                {smaller, gpus});
-    if (probed) probed = probe_footprint_(mesh, config, devices, numerics, middle_probe_rows, budgets, {middle, gpus});
-    if (probed) probed = probe_footprint_(mesh, config, devices, numerics, larger_probe_rows, budgets, {larger, gpus});
+    if (probed)
+        probed = probe_footprint_(mesh, executor, config, devices, numerics, middle_probe_rows, budgets,
+                                  {middle, gpus});
+    if (probed)
+        probed = probe_footprint_(mesh, executor, config, devices, numerics, larger_probe_rows, budgets,
+                                  {larger, gpus});
     if (!probed) return result_t::fail(std::move(probed));
 
     util::f64_t const low_rows = smaller_probe_rows_k, middle_rows = middle_probe_rows, high_rows = larger_probe_rows;
@@ -558,8 +562,8 @@ struct device_budget_t {
     std::span<util::i32_t const> const devices = placed.devices;
     std::size_t const gpus = devices.size();
     for (std::size_t member = 0; member != gpus; ++member) {
-        util::switch_to_gpu_t gpu_scope {placed.streams[member]};
-        if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+        [[maybe_unused]] util::status_t const gpu_scope = (placed.streams->stream(member)).bind();
+        if (gpu_scope.failed()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
         auto [arena, status] = util::gpu_arena_t::make(devices[member], reserve_bytes, devices);
         if (!status) return util::expected_t::fail(std::move(status));
         if (placed.arenas.push_back(std::move(arena)) != util::status_code_t::success_k)
@@ -567,10 +571,10 @@ struct device_budget_t {
     }
 
     { // rows stay inert zero handles when the channel is dark or the head absent, so feeding never branches
-        util::switch_to_gpu_t gpu_scope {placed.streams[0]};
-        if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+        [[maybe_unused]] util::status_t const gpu_scope = (placed.streams->stream(0)).bind();
+        if (gpu_scope.failed()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
         auto [ledger, status] = telemetry_ledger_t::make(placed.arenas[0], config.telemetry_channels, 256u,
-                                                         placed.streams[0]);
+                                                         placed.streams->stream(0));
         if (!status) return util::expected_t::fail(std::move(status));
         placed.ledger = std::move(ledger);
     }
@@ -606,8 +610,8 @@ struct device_budget_t {
     std::size_t const segments = config.batch.max_segments_per_gpu;
     std::size_t const vertices_per_mesh = segments * topology.shape.gpus_per_colocated_domain;
     for (std::size_t member = 0; member != gpus; ++member) {
-        util::switch_to_gpu_t gpu_scope {placed.streams[member]};
-        if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+        [[maybe_unused]] util::status_t const gpu_scope = (placed.streams->stream(member)).bind();
+        if (gpu_scope.failed()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
         auto [replica, status] = base_replica_t::make(placed.arenas[member], config, vertices_per_mesh,
                                                       placed.numerics);
         if (!status) return util::expected_t::fail(std::move(status));
@@ -678,20 +682,20 @@ struct device_budget_t {
             util::multimem_domain_t::window_scalars(force_scalars) +
             util::multimem_domain_t::window_scalars(token_scalars) +
             util::multimem_domain_t::window_scalars(spectrum_scalars) + mixer_scalars,
-        placed.streams, mesh.timeout_seconds);
+        *placed.streams, mesh.timeout_seconds);
     if (!make_domain_status) return util::expected_t::fail(std::move(make_domain_status));
     placed.domain = std::move(domain);
     {
-        util::switch_to_gpu_t gpu_scope {placed.streams[0]};
-        if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+        [[maybe_unused]] util::status_t const gpu_scope = (placed.streams->stream(0)).bind();
+        if (gpu_scope.failed()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
         auto [world_reduce, make_world_reduce_status] = util::infiniband_all_reduce<util::f32_t>::make(
-            mesh.colocated, 0, placed.arenas[0], gradient_scalars, placed.streams[0], mesh.timeout_seconds);
+            mesh.colocated, 0, placed.arenas[0], gradient_scalars, placed.streams->stream(0), mesh.timeout_seconds);
         if (!make_world_reduce_status) return util::expected_t::fail(std::move(make_world_reduce_status));
         placed.world_reduce = std::move(world_reduce);
     }
     auto [optimizer, make_optimizer_status] = distributed_adafactor_t::make(
         placed.domain, placed.world_reduce, placed.arenas, registrations, lead_weights.size(),
-        adafactor_config_t {.beta1 = config.adafactor_beta1}, placed.numerics, placed.streams, placed.ledger);
+        adafactor_config_t {.beta1 = config.adafactor_beta1}, placed.numerics, *placed.streams, placed.ledger);
     if (!make_optimizer_status) return util::expected_t::fail(std::move(make_optimizer_status));
     placed.optimizer = std::move(optimizer);
 
@@ -712,16 +716,17 @@ struct device_budget_t {
                                                                       config.contrastive.matryoshka_count}
                                                 : util::u32r1_view_t {full_width, 1};
         auto [contrastive, make_contrastive_status] = distributed_contrastive_segments_t::make(
-            placed.domain, mesh.colocated, placed.arenas, placed.streams, towers.view(), relations.view(),
+            placed.domain, mesh.colocated, placed.arenas, *placed.streams, towers.view(), relations.view(),
             forces.view(), contrastive_config, prefixes, placed.numerics, mesh.timeout_seconds);
         if (!make_contrastive_status) return util::expected_t::fail(std::move(make_contrastive_status));
         placed.contrastive = std::move(contrastive);
         for (std::size_t member = 0; member != gpus; ++member) {
-            util::switch_to_gpu_t gpu_scope {placed.streams[member]};
-            if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+            [[maybe_unused]] util::status_t const gpu_scope = (placed.streams->stream(member)).bind();
+            if (gpu_scope.failed())
+                return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
             auto [temperatures, make_temperatures_status] = adafactor_temperatures_t::make(
                 placed.arenas[member], contrastive_config.temperature_groups, adafactor_config_t {}, "contrastive",
-                placed.streams[member]);
+                placed.streams->stream(member));
             if (!make_temperatures_status) return util::expected_t::fail(std::move(make_temperatures_status));
             if (placed.temperatures.push_back(std::move(temperatures)) != util::status_code_t::success_k)
                 return util::expected_t::fail(util::status_code_t::out_of_memory_k, "Temperature optimizer table full");
@@ -729,16 +734,17 @@ struct device_budget_t {
     }
     if (config.late_interacts()) {
         auto [tokens, make_tokens_status] = distributed_contrastive_tokens_t::make(
-            placed.domain, mesh.colocated, placed.arenas, placed.streams, tokens_config, placed.numerics,
+            placed.domain, mesh.colocated, placed.arenas, *placed.streams, tokens_config, placed.numerics,
             mesh.timeout_seconds);
         if (!make_tokens_status) return util::expected_t::fail(std::move(make_tokens_status));
         placed.late_interaction = std::move(tokens);
         for (std::size_t member = 0; member != gpus; ++member) {
-            util::switch_to_gpu_t gpu_scope {placed.streams[member]};
-            if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+            [[maybe_unused]] util::status_t const gpu_scope = (placed.streams->stream(member)).bind();
+            if (gpu_scope.failed())
+                return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
             auto [temperatures, make_temperatures_status] = adafactor_temperatures_t::make(
                 placed.arenas[member], tokens_config.temperature_groups, adafactor_config_t {}, "late_interaction",
-                placed.streams[member]);
+                placed.streams->stream(member));
             if (!make_temperatures_status) return util::expected_t::fail(std::move(make_temperatures_status));
             if (placed.token_temperatures.push_back(std::move(temperatures)) != util::status_code_t::success_k)
                 return util::expected_t::fail(util::status_code_t::out_of_memory_k,
@@ -747,7 +753,7 @@ struct device_budget_t {
     }
     if (config.regularizes() || config.gates_spikes()) {
         auto [spectrum, make_spectrum_status] = distributed_pooled_spectrum_t::make(
-            placed.domain, mesh.colocated, placed.arenas, placed.streams, registrations, lead_weights.size(),
+            placed.domain, mesh.colocated, placed.arenas, *placed.streams, registrations, lead_weights.size(),
             spectrum_config, placed.numerics, mesh.timeout_seconds);
         if (!make_spectrum_status) return util::expected_t::fail(std::move(make_spectrum_status));
         placed.spectrum = std::move(spectrum);
@@ -756,13 +762,16 @@ struct device_budget_t {
     return {};
 }
 
-util::expected_t trainer_t::make(trainer_t& placed, mesh_t& mesh, trainer_config_t const& requested,
-                                 std::span<util::i32_t const> devices, util::gpu_numerics_t const& numerics) noexcept {
+util::expected_t trainer_t::make(trainer_t& placed, mesh_t& mesh, util::cuda_executor_t& executor,
+                                 trainer_config_t const& requested, std::span<util::i32_t const> devices,
+                                 util::gpu_numerics_t const& numerics) noexcept {
     device_budget_t budgets[util::max_gpus_per_host_k] = {};
-    if (util::expected_t prepared = prepare_(placed, mesh, requested, devices, numerics, {budgets, devices.size()});
+    if (util::expected_t prepared = prepare_(placed, mesh, executor, requested, devices, numerics,
+                                             {budgets, devices.size()});
         !prepared)
         return prepared;
-    auto [envelope, status] = measure_envelope_(mesh, requested, devices, numerics, {budgets, devices.size()});
+    auto [envelope, status] = measure_envelope_(mesh, executor, requested, devices, numerics,
+                                                {budgets, devices.size()});
     if (!status) return util::expected_t::fail(std::move(status));
     placed.envelope = envelope;
     if (!requested.batch.max_rows_per_gpu || !requested.batch.max_segments_per_gpu)
@@ -787,7 +796,7 @@ util::expected_t trainer_t::make(trainer_t& placed, mesh_t& mesh, trainer_config
  *  @p stream . */
 [[nodiscard]] static util::expected_t restore_vector_(util::checkpoint_to_load_t const& checkpoint,
                                                       sz::string_view_t name, util::f32r1_span_t destination,
-                                                      util::gpu_stream_t& stream) noexcept {
+                                                      util::executor_stream_t& stream) noexcept {
     util::f32r2_view_t const saved = checkpoint.float32(name);
     if (saved.empty()) return {};
     if (saved.extent(0) != 1u || saved.extent(1) != destination.extent(0))
@@ -799,45 +808,49 @@ util::expected_t trainer_t::make(trainer_t& placed, mesh_t& mesh, trainer_config
 /** Download the device vector @p values into @p checkpoint as the @b [1,n] Float32 entry
  *  @p name . */
 [[nodiscard]] static util::expected_t insert_vector_(util::checkpoint_to_save_t& checkpoint, sz::string_view_t name,
-                                                     util::f32r1_view_t values, util::gpu_stream_t& stream) noexcept {
+                                                     util::f32r1_view_t values,
+                                                     util::executor_stream_t& stream) noexcept {
     st::basic_vector<util::f32_t> staging;
     if (st::failed(staging.resize(st::assume_uninitialized, values.extent(0))))
         return util::expected_t::fail(util::status_code_t::out_of_memory_k, "{} staging failed", name);
     if (util::expected_t copied = util::copy_device_to_host(values, std::span<util::f32_t> {staging}, stream); !copied)
         return copied;
-    if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
+    if (CUresult result = cuStreamSynchronize(util::native_stream(stream)); result != CUDA_SUCCESS)
         return util::cuda_failure(result, "{} download failed", name);
     return checkpoint.insert(name, util::f32r2_view_t {staging.data(), 1, staging.size()});
 }
 
 util::expected_t trainer_t::resume(sz::string_view_t path) noexcept {
-    util::switch_to_gpu_t lead_scope {streams[0]};
-    if (!lead_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+    [[maybe_unused]] util::status_t const lead_scope = (streams->stream(0)).bind();
+    if (lead_scope.failed()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
     auto [checkpoint, status] = util::checkpoint_to_load_t::make(path);
     if (!status) return util::expected_t::fail(std::move(status));
     for (std::size_t member = 0; member != replicas.size(); ++member) {
-        util::switch_to_gpu_t gpu_scope {streams[member]};
-        if (util::expected_t warmed = load_weights(checkpoint, replicas[member].weights, streams[member]); !warmed)
+        if (util::status_t const bound = streams->stream(member).bind(); bound.failed())
+            return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+        if (util::expected_t warmed = load_weights(checkpoint, replicas[member].weights, streams->stream(member));
+            !warmed)
             return warmed;
         if (!config.contrasts()) continue;
         base_replica_t& replica = replicas[member];
         util::expected_t restored = restore_vector_(checkpoint, "contrastive.inverse_temperatures",
-                                                    replica.inverse_temperatures.span(), streams[member]);
+                                                    replica.inverse_temperatures.span(), streams->stream(member));
         if (restored)
-            restored = restore_vector_(checkpoint, "contrastive.biases", replica.biases.span(), streams[member]);
-        if (restored) restored = temperatures[member].load(checkpoint, streams[member]);
+            restored = restore_vector_(checkpoint, "contrastive.biases", replica.biases.span(),
+                                       streams->stream(member));
+        if (restored) restored = temperatures[member].load(checkpoint, streams->stream(member));
         if (restored && config.late_interacts())
             restored = restore_vector_(checkpoint, "late_interaction.inverse_temperatures",
-                                       replica.token_inverse_temperatures.span(), streams[member]);
+                                       replica.token_inverse_temperatures.span(), streams->stream(member));
         if (restored && config.late_interacts())
             restored = restore_vector_(checkpoint, "late_interaction.biases", replica.token_biases.span(),
-                                       streams[member]);
+                                       streams->stream(member));
         if (restored && config.late_interacts())
-            restored = token_temperatures[member].load(checkpoint, streams[member]);
+            restored = token_temperatures[member].load(checkpoint, streams->stream(member));
         if (!restored) return restored;
     }
     // After the weights, since every state the file misses restarts from them.
-    if (util::expected_t restored = optimizer.load(checkpoint, streams); !restored) return restored;
+    if (util::expected_t restored = optimizer.load(checkpoint, *streams); !restored) return restored;
     if (util::expected_t drained = synchronize(); !drained)
         return drained; // the uploads read the payload `loaded` maps
     completed_steps = static_cast<util::u32_t>(checkpoint.step());
@@ -846,13 +859,15 @@ util::expected_t trainer_t::resume(sz::string_view_t path) noexcept {
 
 util::expected_t trainer_t::capture() noexcept {
     for (std::size_t member = 0; member != replicas.size(); ++member) {
-        util::switch_to_gpu_t gpu_scope {streams[member]};
-        if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+        [[maybe_unused]] util::status_t const gpu_scope = (streams->stream(member)).bind();
+        if (gpu_scope.failed()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
         auto [forward, make_forward_status] = util::gpu_replay_graph_t::make(
-            streams[member].get(), [&]() noexcept { return replicas[member].forward_region(config, streams[member]); });
+            util::native_stream(streams->stream(member)),
+            [&]() noexcept { return replicas[member].forward_region(config, streams->stream(member)); });
         if (!make_forward_status) return util::expected_t::fail(std::move(make_forward_status));
         auto [backward, make_backward_status] = util::gpu_replay_graph_t::make(
-            streams[member].get(), [&]() noexcept { return replicas[member].backward_region(streams[member]); });
+            util::native_stream(streams->stream(member)),
+            [&]() noexcept { return replicas[member].backward_region(streams->stream(member)); });
         if (!make_backward_status) return util::expected_t::fail(std::move(make_backward_status));
         if (forward_graphs.push_back(std::move(forward)) != util::status_code_t::success_k ||
             backward_graphs.push_back(std::move(backward)) != util::status_code_t::success_k)
@@ -870,17 +885,19 @@ util::expected_t trainer_t::step(batch_source_t source, util::optimizer_step_t o
     if (util::expected_t filled = source.fill(source.state, *this, data_epoch, report); !filled) return filled;
     std::size_t const gpus = replicas.size();
     for (std::size_t member = 0; member != gpus; ++member) {
-        util::switch_to_gpu_t gpu_scope {streams[member]};
-        if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
-        util::expected_t stepped = replicas[member].prepare(config, data_epoch, streams[member]);
+        [[maybe_unused]] util::status_t const gpu_scope = (streams->stream(member)).bind();
+        if (gpu_scope.failed()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+        util::expected_t stepped = replicas[member].prepare(config, data_epoch, streams->stream(member));
         if (stepped)
-            stepped = forward_graphs.size() ? forward_graphs[member].launch(streams[member].get())
-                                            : replicas[member].forward_region(config, streams[member]);
+            stepped = forward_graphs.size()
+                          ? forward_graphs[member].launch(util::native_stream(streams->stream(member)))
+                          : replicas[member].forward_region(config, streams->stream(member));
         if (!stepped) return stepped;
     }
     if (config.contrasts())
         for (std::size_t member = 0; member != gpus; ++member)
-            if (util::expected_t contrasted = contrastive(member, replicas[member].recipe(config), streams[member]);
+            if (util::expected_t contrasted = contrastive(member, replicas[member].recipe(config),
+                                                          streams->stream(member));
                 !contrasted)
                 return contrasted;
     if (config.late_interacts()) {
@@ -894,38 +911,38 @@ util::expected_t trainer_t::step(batch_source_t source, util::optimizer_step_t o
                 return util::expected_t::fail(util::status_code_t::out_of_memory_k,
                                               "Late-interaction input table full");
         }
-        if (util::expected_t contrasted = late_interaction(inputs.view(), streams.span()); !contrasted)
-            return contrasted;
+        if (util::expected_t contrasted = late_interaction(inputs.view(), *streams); !contrasted) return contrasted;
     }
     if (config.regularizes())
         for (std::size_t member = 0; member != gpus; ++member)
             if (util::expected_t shaped = spectrum(member, replicas[member].vertices.view(),
-                                                   replicas[member].vertices_grad.span(), streams[member]);
+                                                   replicas[member].vertices_grad.span(), streams->stream(member));
                 !shaped)
                 return shaped;
     for (std::size_t member = 0; member != gpus; ++member) {
-        util::switch_to_gpu_t gpu_scope {streams[member]};
-        if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
-        util::expected_t stepped = backward_graphs.size() ? backward_graphs[member].launch(streams[member].get())
-                                                          : replicas[member].backward_region(streams[member]);
-        if (stepped && config.gates_spikes()) stepped = spectrum.measure_gradients(member, streams[member]);
+        [[maybe_unused]] util::status_t const gpu_scope = (streams->stream(member)).bind();
+        if (gpu_scope.failed()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+        util::expected_t stepped = backward_graphs.size()
+                                       ? backward_graphs[member].launch(util::native_stream(streams->stream(member)))
+                                       : replicas[member].backward_region(streams->stream(member));
+        if (stepped && config.gates_spikes()) stepped = spectrum.measure_gradients(member, streams->stream(member));
         if (!stepped) return stepped;
     }
     // Every process reads the same world norm, so all refuse the same step before any applies it.
     if (config.gates_spikes())
-        if (util::expected_t admitted = spectrum.admit_gradients(streams[0]); !admitted) return admitted;
+        if (util::expected_t admitted = spectrum.admit_gradients(streams->stream(0)); !admitted) return admitted;
     for (std::size_t member = 0; member != gpus; ++member) {
-        util::switch_to_gpu_t gpu_scope {streams[member]};
-        if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
-        util::expected_t stepped = optimizer.step(member, report.learning_rate, streams[member]);
+        [[maybe_unused]] util::status_t const gpu_scope = (streams->stream(member)).bind();
+        if (gpu_scope.failed()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+        util::expected_t stepped = optimizer.step(member, report.learning_rate, streams->stream(member));
         if (stepped && config.contrasts())
             stepped = temperatures[member].step(replicas[member].inverse_temperatures.span(),
                                                 replicas[member].biases.span(), contrastive.temperature_grads(member),
-                                                report.learning_rate, streams[member]);
+                                                report.learning_rate, streams->stream(member));
         if (stepped && config.late_interacts())
             stepped = token_temperatures[member].step(
                 replicas[member].token_inverse_temperatures.span(), replicas[member].token_biases.span(),
-                late_interaction.temperature_grads(member), report.learning_rate, streams[member]);
+                late_interaction.temperature_grads(member), report.learning_rate, streams->stream(member));
         if (!stepped) return stepped;
     }
     completed_steps = optimizer_step.ordinal + 1u;
@@ -941,15 +958,16 @@ util::expected<retrieval_t> trainer_t::evaluate(batch_source_t source, util::dat
         return result_t::fail(std::move(filled));
     std::size_t const gpus = replicas.size(), columns = std::size_t(retrieval_column_t::count_k);
     for (std::size_t member = 0; member != gpus; ++member) {
-        util::switch_to_gpu_t gpu_scope {streams[member]};
-        if (!gpu_scope.ok()) return result_t::fail(util::status_code_t::device_k, "Context entry failed");
+        [[maybe_unused]] util::status_t const gpu_scope = (streams->stream(member)).bind();
+        if (gpu_scope.failed()) return result_t::fail(util::status_code_t::device_k, "Context entry failed");
         base_replica_t& replica = replicas[member];
-        util::expected_t encoded = replica.tower.pack_weights(streams[member]);
-        if (encoded) encoded = replica.tower.forward(replica.batch, replica.vertices.span(), streams[member]);
+        util::expected_t encoded = replica.tower.pack_weights(streams->stream(member));
+        if (encoded) encoded = replica.tower.forward(replica.batch, replica.vertices.span(), streams->stream(member));
         if (!encoded) return result_t::fail(std::move(encoded));
     }
     for (std::size_t member = 0; member != gpus; ++member)
-        if (util::expected_t scored = contrastive.evaluate(member, replicas[member].recipe(config), streams[member]);
+        if (util::expected_t scored = contrastive.evaluate(member, replicas[member].recipe(config),
+                                                           streams->stream(member));
             !scored)
             return result_t::fail(std::move(scored));
     std::size_t const rows = config.batch.max_segments_per_gpu;
@@ -957,10 +975,11 @@ util::expected<retrieval_t> trainer_t::evaluate(batch_source_t source, util::dat
     if (!util::allocate_uninitialized(tables, {gpus, rows, columns}, util::pinned_alloc<util::f32_t> {}))
         return result_t::fail(util::status_code_t::out_of_memory_k, "No room for the retrieval staging");
     for (std::size_t member = 0; member != gpus; ++member) {
-        util::switch_to_gpu_t gpu_scope {streams[member]};
-        if (!gpu_scope.ok()) return result_t::fail(util::status_code_t::device_k, "Context entry failed");
-        if (util::expected_t copied = util::copy_device_to_host(
-                contrastive.retrieval(member).flatten<1>(), tables[member, nk::slice].flatten<1>(), streams[member]);
+        [[maybe_unused]] util::status_t const gpu_scope = (streams->stream(member)).bind();
+        if (gpu_scope.failed()) return result_t::fail(util::status_code_t::device_k, "Context entry failed");
+        if (util::expected_t copied = util::copy_device_to_host(contrastive.retrieval(member).flatten<1>(),
+                                                                tables[member, nk::slice].flatten<1>(),
+                                                                streams->stream(member));
             !copied)
             return result_t::fail(std::move(copied));
     }
@@ -1004,25 +1023,26 @@ util::expected_t trainer_t::reseed() noexcept {
             token_biases[group] = config.late_interaction.bias;
     }
     for (std::size_t member = 0; member != replicas.size(); ++member) {
-        util::switch_to_gpu_t gpu_scope {streams[member]};
-        if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+        [[maybe_unused]] util::status_t const gpu_scope = (streams->stream(member)).bind();
+        if (gpu_scope.failed()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
         base_replica_t& replica = replicas[member];
-        if (util::expected_t seeded = seed_weights(replica.weights, streams[member]); !seeded) return seeded;
+        if (util::expected_t seeded = seed_weights(replica.weights, streams->stream(member)); !seeded) return seeded;
         if (!config.contrasts()) continue;
         util::expected_t staged = util::copy_host_to_device(util::f32r1_view_t {inverse_temperatures.data(), groups},
-                                                            replica.inverse_temperatures.span(), streams[member]);
+                                                            replica.inverse_temperatures.span(),
+                                                            streams->stream(member));
         if (staged)
             staged = util::copy_host_to_device(util::f32r1_view_t {biases.data(), groups}, replica.biases.span(),
-                                               streams[member]);
-        if (staged) staged = util::zero_async(replica.temperature_groups.span(), streams[member]);
+                                               streams->stream(member));
+        if (staged) staged = util::zero_async(replica.temperature_groups.span(), streams->stream(member));
         if (staged && config.late_interacts())
             staged = util::copy_host_to_device(util::f32r1_view_t {token_inverse_temperatures.data(), groups},
-                                               replica.token_inverse_temperatures.span(), streams[member]);
+                                               replica.token_inverse_temperatures.span(), streams->stream(member));
         if (staged && config.late_interacts())
             staged = util::copy_host_to_device(util::f32r1_view_t {token_biases.data(), groups},
-                                               replica.token_biases.span(), streams[member]);
+                                               replica.token_biases.span(), streams->stream(member));
         if (!staged) return staged;
-        cuStreamSynchronize(streams[member].get());
+        cuStreamSynchronize(util::native_stream(streams->stream(member)));
     }
     return {};
 }
@@ -1037,29 +1057,29 @@ telemetry_t trainer_t::telemetry(util::optimizer_step_t optimizer_step) noexcept
     // ledger's loss rows accumulate.
     summand_pair_t token {}, image {}, video {}, audio {}, choices {};
     auto accumulate = [](summand_pair_t& into, util::f32r1_tensor_arena_t& summands,
-                         util::gpu_stream_t& stream) noexcept {
+                         util::executor_stream_t& stream) noexcept {
         if (summands.empty()) return;
         summand_pair_t const read = read_summands_(summands, stream);
         into.sum += read.sum;
         into.count += read.count;
     };
     for (std::size_t member = 0; member != gpus; ++member) {
-        util::switch_to_gpu_t gpu_scope {streams[member]};
-        if (!gpu_scope.ok()) continue;
-        cuStreamSynchronize(streams[member].get());
+        [[maybe_unused]] util::status_t const gpu_scope = (streams->stream(member)).bind();
+        if (gpu_scope.failed()) continue;
+        cuStreamSynchronize(util::native_stream(streams->stream(member)));
         base_replica_t& replica = replicas[member];
         util::u32_t dropped = 0; // pageable, so the copy has landed once the call returns
         if (util::copy_device_to_host(replica.batch.dropped.view(), std::span<util::u32_t> {&dropped, 1},
-                                      streams[member]) &&
-            util::zero_async(replica.batch.dropped.span(), streams[member]))
+                                      streams->stream(member)) &&
+            util::zero_async(replica.batch.dropped.span(), streams->stream(member)))
             telemetry.dropped += dropped;
-        accumulate(token, replica.tokens_summands, streams[member]);
-        accumulate(image, replica.image_summands, streams[member]);
-        accumulate(video, replica.video_summands, streams[member]);
-        accumulate(audio, replica.audio_summands, streams[member]);
-        accumulate(choices, replica.choices_summands, streams[member]);
+        accumulate(token, replica.tokens_summands, streams->stream(member));
+        accumulate(image, replica.image_summands, streams->stream(member));
+        accumulate(video, replica.video_summands, streams->stream(member));
+        accumulate(audio, replica.audio_summands, streams->stream(member));
+        accumulate(choices, replica.choices_summands, streams->stream(member));
         (void)ledger.probe_round(probes.rounds[member], domain.member(domain.member_offset() + member),
-                                 streams[member]);
+                                 streams->stream(member));
     }
     telemetry.token_ce = token.count != 0.0 ? static_cast<util::f32_t>(token.sum / token.count) : 0.0f;
     telemetry.image_mse = image.count != 0.0 ? static_cast<util::f32_t>(image.sum / image.count) : 0.0f;
@@ -1072,13 +1092,13 @@ telemetry_t trainer_t::telemetry(util::optimizer_step_t optimizer_step) noexcept
     ledger.scalar(probes.audio, audio.sum, audio.count);
     ledger.scalar(probes.choices, choices.sum, choices.count);
 
-    util::switch_to_gpu_t gpu_scope {streams[0]};
-    if (!gpu_scope.ok()) return telemetry;
+    [[maybe_unused]] util::status_t const gpu_scope = (streams->stream(0)).bind();
+    if (gpu_scope.failed()) return telemetry;
     if (config.contrasts()) {
         util::f32r1_tensor_pinned_t staging;
         bool const allocated = util::allocate_uninitialized(staging, {1}, util::pinned_alloc<util::f32_t> {});
-        if (allocated && util::copy_device_to_host(contrastive.world_loss(0), staging.span(), streams[0])) {
-            cuStreamSynchronize(streams[0].get());
+        if (allocated && util::copy_device_to_host(contrastive.world_loss(0), staging.span(), streams->stream(0))) {
+            cuStreamSynchronize(util::native_stream(streams->stream(0)));
             telemetry.contrastive = staging[0];
             ledger.scalar(probes.contrastive, staging[0], 1.0);
         }
@@ -1086,8 +1106,9 @@ telemetry_t trainer_t::telemetry(util::optimizer_step_t optimizer_step) noexcept
     if (config.late_interacts()) {
         util::f32r1_tensor_pinned_t staging;
         bool const allocated = util::allocate_uninitialized(staging, {1}, util::pinned_alloc<util::f32_t> {});
-        if (allocated && util::copy_device_to_host(late_interaction.world_loss(0), staging.span(), streams[0])) {
-            cuStreamSynchronize(streams[0].get());
+        if (allocated &&
+            util::copy_device_to_host(late_interaction.world_loss(0), staging.span(), streams->stream(0))) {
+            cuStreamSynchronize(util::native_stream(streams->stream(0)));
             telemetry.late_interaction = staging[0];
             ledger.scalar(probes.late_interaction, staging[0], 1.0);
         }
@@ -1096,8 +1117,8 @@ telemetry_t trainer_t::telemetry(util::optimizer_step_t optimizer_step) noexcept
         util::u32r1_tensor_pinned_t staging;
         bool const allocated = util::allocate_uninitialized(staging, {1}, util::pinned_alloc<util::u32_t> {});
         nk::tensor_view<util::u32_t, 1> const source {round, 1};
-        if (allocated && util::copy_device_to_host(source, staging.span(), streams[0])) {
-            cuStreamSynchronize(streams[0].get());
+        if (allocated && util::copy_device_to_host(source, staging.span(), streams->stream(0))) {
+            cuStreamSynchronize(util::native_stream(streams->stream(0)));
             telemetry.concurrency_round = util::concurrency_round_t {staging[0]};
         }
     }
@@ -1106,33 +1127,34 @@ telemetry_t trainer_t::telemetry(util::optimizer_step_t optimizer_step) noexcept
 
 util::expected_t trainer_t::save(sz::string_view_t path) noexcept {
     if (!mesh->topology.is_lead()) return {};
-    util::switch_to_gpu_t gpu_scope {streams[0]};
-    if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+    [[maybe_unused]] util::status_t const gpu_scope = (streams->stream(0)).bind();
+    if (gpu_scope.failed()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
     util::checkpoint_to_save_t checkpoint; // the Float32 state goes first, so every entry lands aligned
-    util::expected_t saved = optimizer.save(checkpoint, streams[0]);
+    util::expected_t saved = optimizer.save(checkpoint, streams->stream(0));
     if (saved && config.contrasts())
         saved = insert_vector_(checkpoint, "contrastive.inverse_temperatures", replicas[0].inverse_temperatures.view(),
-                               streams[0]);
+                               streams->stream(0));
     if (saved && config.contrasts())
-        saved = insert_vector_(checkpoint, "contrastive.biases", replicas[0].biases.view(), streams[0]);
-    if (saved && config.contrasts()) saved = temperatures[0].save(checkpoint, streams[0]);
+        saved = insert_vector_(checkpoint, "contrastive.biases", replicas[0].biases.view(), streams->stream(0));
+    if (saved && config.contrasts()) saved = temperatures[0].save(checkpoint, streams->stream(0));
     if (saved && config.late_interacts())
         saved = insert_vector_(checkpoint, "late_interaction.inverse_temperatures",
-                               replicas[0].token_inverse_temperatures.view(), streams[0]);
+                               replicas[0].token_inverse_temperatures.view(), streams->stream(0));
     if (saved && config.late_interacts())
-        saved = insert_vector_(checkpoint, "late_interaction.biases", replicas[0].token_biases.view(), streams[0]);
-    if (saved && config.late_interacts()) saved = token_temperatures[0].save(checkpoint, streams[0]);
-    if (saved) saved = save_weights(checkpoint, config, replicas[0].weights, completed_steps, streams[0]);
+        saved = insert_vector_(checkpoint, "late_interaction.biases", replicas[0].token_biases.view(),
+                               streams->stream(0));
+    if (saved && config.late_interacts()) saved = token_temperatures[0].save(checkpoint, streams->stream(0));
+    if (saved) saved = save_weights(checkpoint, config, replicas[0].weights, completed_steps, streams->stream(0));
     if (saved) saved = checkpoint.save(path);
     return saved;
 }
 
 util::expected_t trainer_t::synchronize() noexcept {
-    for (std::size_t member = 0; member != streams.size(); ++member) {
-        util::switch_to_gpu_t gpu_scope {streams[member]};
-        if (!gpu_scope.ok())
+    for (std::size_t member = 0; member != streams->size(); ++member) {
+        [[maybe_unused]] util::status_t const gpu_scope = (streams->stream(member)).bind();
+        if (gpu_scope.failed())
             return util::expected_t::fail(util::status_code_t::device_k, "context entry failed (member={})", member);
-        if (CUresult result = cuStreamSynchronize(streams[member].get()); result != CUDA_SUCCESS)
+        if (CUresult result = cuStreamSynchronize(util::native_stream(streams->stream(member))); result != CUDA_SUCCESS)
             return util::cuda_failure(result, "stream drain failed (member={})", member);
     }
     return {};
@@ -1176,16 +1198,17 @@ util::expected_t synthetic_source_t::fill(trainer_t& trainer, util::data_epoch_t
     util::u32_t const first = trainer.mesh->topology.first_gpu_index();
     util::u32_t const segments = config.batch.max_segments_per_gpu;
     for (std::size_t member = 0; member != trainer.replicas.size(); ++member) {
-        util::switch_to_gpu_t gpu_scope {trainer.streams[member]};
-        if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+        [[maybe_unused]] util::status_t const gpu_scope = (trainer.streams->stream(member)).bind();
+        if (gpu_scope.failed()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
         base_replica_t& replica = trainer.replicas[member];
         util::u32_t const gpu_index = first + static_cast<util::u32_t>(member);
-        if (util::expected_t drawn = replica.draw(config, gpu_index, data_epoch, trainer.streams[member]); !drawn)
+        if (util::expected_t drawn = replica.draw(config, gpu_index, data_epoch, trainer.streams->stream(member));
+            !drawn)
             return drawn;
         if (!config.contrasts()) continue;
         if (util::expected_t related = replica.relations.upload_self_edges(
                 segments, {}, {}, static_cast<std::size_t>(gpu_index) * segments,
-                config.contrastive.ambient_repulsion_weight, trainer.streams[member]);
+                config.contrastive.ambient_repulsion_weight, trainer.streams->stream(member));
             !related)
             return related;
         trainer.contrastive.rebind_relations(member, replica.relations.view());
@@ -1282,8 +1305,9 @@ util::expected_t synthetic_source_t::fill(trainer_t& trainer, util::data_epoch_t
 }
 
 util::expected_t items_source_t::make(items_source_t& placed, trainer_t& trainer) noexcept {
-    util::switch_to_gpu_t lead_scope {trainer.streams[0]}; // pinned host pages allocate inside a context
-    if (!lead_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+    [[maybe_unused]] util::status_t const lead_scope =
+        (trainer.streams->stream(0)).bind(); // pinned pages need a context
+    if (lead_scope.failed()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
     trainer_config_t const& config = trainer.config;
     multimodal_batch_shape_t const& shape = config.batch;
     std::size_t const gpus = trainer.replicas.size(), segments = shape.max_segments_per_gpu;
@@ -1299,8 +1323,8 @@ util::expected_t items_source_t::make(items_source_t& placed, trainer_t& trainer
         return util::expected_t::fail(util::status_code_t::unsupported_k,
                                       "decoded video frames are RGB, not {} channels", shape.video.channels);
     for (std::size_t member = 0; member != gpus; ++member) {
-        util::switch_to_gpu_t gpu_scope {trainer.streams[member]};
-        if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+        [[maybe_unused]] util::status_t const gpu_scope = (trainer.streams->stream(member)).bind();
+        if (gpu_scope.failed()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
         auto [gpu_batch, make_gpu_batch_status] = multimodal_batch_on_gpu_t::make(
             util::gpu_arena_alloc_t {trainer.arenas[member]}, shape);
         if (!make_gpu_batch_status) return util::expected_t::fail(std::move(make_gpu_batch_status));
@@ -1312,10 +1336,14 @@ util::expected_t items_source_t::make(items_source_t& placed, trainer_t& trainer
     }
     auto [mixer, make_mixer_status] = multimodal_batch_mixer_t::make(trainer.domain, trainer.mesh->colocated,
                                                                      trainer.arenas, shape, config.seed,
-                                                                     trainer.streams, trainer.mesh->timeout_seconds);
+                                                                     *trainer.streams, trainer.mesh->timeout_seconds);
     if (!make_mixer_status) return util::expected_t::fail(std::move(make_mixer_status));
     placed.mixer_ = std::move(mixer);
 
+    // The member loop and the mixer left another member's device current; the pinned pages below
+    // allocate with the lead's
+    if (util::status_t const lead_again = trainer.streams->stream(0).bind(); lead_again.failed())
+        return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
     std::size_t const total_segments = gpus * segments;
     std::size_t const edges = config.contrastive.max_edges_per_gpu
                                   ? config.contrastive.max_edges_per_gpu
@@ -1352,7 +1380,7 @@ util::expected_t items_source_t::fill(trainer_t& trainer, util::data_epoch_t dat
     std::span<multimodal_batch_on_gpu_t const> const loaded = loaded_.view();
     for (std::size_t member = 0; member != trainer.replicas.size(); ++member)
         if (util::expected_t mixed = mixer_(member, data_epoch, loaded, trainer.replicas[member].batch,
-                                            trainer.streams[member]);
+                                            trainer.streams->stream(member));
             !mixed)
             return mixed;
     if (!trainer.config.contrasts()) return {};
@@ -1497,9 +1525,9 @@ util::expected_t items_source_t::pack_(trainer_t& trainer, step_report_t& report
             }
         }
         staged.segment_offsets[segments] = cursors[device];
-        util::gpu_stream_t& stream = trainer.streams[device];
-        util::switch_to_gpu_t gpu_scope {stream};
-        if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+        util::executor_stream_t& stream = trainer.streams->stream(device);
+        [[maybe_unused]] util::status_t const gpu_scope = (stream).bind();
+        if (gpu_scope.failed()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
         util::expected_t copied = util::copy_host_to_device(staged.segment_offsets.view(),
                                                             loaded.segment_offsets.span(), stream);
         if (copied)
@@ -1609,11 +1637,11 @@ util::expected_t items_source_t::relate_(trainer_t& trainer) noexcept {
     util::u32_t const groups = fu::max_of(config.contrastive.temperature_groups, 1u);
 
     for (std::size_t member = 0; member != gpus; ++member) {
-        util::switch_to_gpu_t gpu_scope {trainer.streams[member]};
-        if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+        [[maybe_unused]] util::status_t const gpu_scope = (trainer.streams->stream(member)).bind();
+        if (gpu_scope.failed()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
         util::u32r2_view_t const world_sources = mixer_.world_sources(member);
-        if (util::expected_t copied = util::copy_device_to_host(world_sources[member, nk::slice],
-                                                                sources_[member, nk::slice], trainer.streams[member]);
+        if (util::expected_t copied = util::copy_device_to_host(
+                world_sources[member, nk::slice], sources_[member, nk::slice], trainer.streams->stream(member));
             !copied)
             return copied;
     }
@@ -1650,9 +1678,9 @@ util::expected_t items_source_t::relate_(trainer_t& trainer) noexcept {
         }
 
         base_replica_t& replica = trainer.replicas[member];
-        util::gpu_stream_t& stream = trainer.streams[member];
-        util::switch_to_gpu_t gpu_scope {stream};
-        if (!gpu_scope.ok()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
+        util::executor_stream_t& stream = trainer.streams->stream(member);
+        [[maybe_unused]] util::status_t const gpu_scope = (stream).bind();
+        if (gpu_scope.failed()) return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed");
         bool const ignores = !items.ignore.ids.empty();
         util::expected_t staged = util::copy_host_to_device(std::span<util::u32_t const> {lengths_},
                                                             replica.to_vertex_lengths.span(), stream);
@@ -1666,7 +1694,7 @@ util::expected_t items_source_t::relate_(trainer_t& trainer) noexcept {
                                               util::u64r1_view_t {}, util::u64r1_view_t {}, total_segments,
                                               member * segments, config.contrastive.ambient_repulsion_weight, stream);
         if (staged) // the host columns are reused for the next device, so their copies land first
-            if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
+            if (CUresult result = cuStreamSynchronize(util::native_stream(stream)); result != CUDA_SUCCESS)
                 staged = util::cuda_failure(result, "relation staging drain failed (member={})", member);
         if (!staged) return staged;
         trainer.contrastive.rebind_relations(member, replica.relations.view());
@@ -1680,11 +1708,11 @@ util::expected<util::bf16r2_view_t> items_source_t::pooled(trainer_t& trainer) n
     std::size_t const gpus = trainer.replicas.size();
     if (!pooled_) return result_t::fail(util::status_code_t::unsupported_k, "Only a contrastive objective pools items");
     for (std::size_t member = 0; member != gpus; ++member) {
-        util::switch_to_gpu_t gpu_scope {trainer.streams[member]};
-        if (!gpu_scope.ok()) return result_t::fail(util::status_code_t::device_k, "Context entry failed");
+        [[maybe_unused]] util::status_t const gpu_scope = (trainer.streams->stream(member)).bind();
+        if (gpu_scope.failed()) return result_t::fail(util::status_code_t::device_k, "Context entry failed");
         if (util::expected_t copied = util::copy_device_to_host(trainer.replicas[member].vertices.view().flatten<1>(),
                                                                 pooled_[member, nk::slice].flatten<1>(),
-                                                                trainer.streams[member]);
+                                                                trainer.streams->stream(member));
             !copied)
             return result_t::fail(std::move(copied));
     }

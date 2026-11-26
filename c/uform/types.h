@@ -882,9 +882,9 @@ typedef struct uform_executor_drain_t {
 UFORM_EXPORT void uform_executor_drain(uform_executor_drain_t* arguments);
 
 /** Waits until no call holds the executor, releases what it owns, its streams included, and frees
- *  it; @c NULL is safe, and it cannot fail, so it takes no outcome. Free every arena it made
- *  before calling it, and never call it from a callback of a call on the same executor: it would
- *  wait on that call forever, which Debug builds assert. */
+ *  it; @c NULL is safe, and it cannot fail, so it takes no outcome. Free every arena, trainer and
+ *  mesh made with it before calling it, and never call it from a callback of a call on the same
+ *  executor: it would wait on that call forever, which Debug builds assert. */
 UFORM_EXPORT void uform_executor_free(uform_executor_t executor);
 
 /**

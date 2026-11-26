@@ -114,7 +114,7 @@ static __global__ void pair_segments_kernel_(util::u32r2_view_t role_offsets, ut
 
 /** Land the device offsets @p offsets on the host into @p landed . */
 [[nodiscard]] static util::expected_t land_offsets_(util::u64r1_view_t offsets, st::basic_vector<util::u64_t>& landed,
-                                                    util::gpu_stream_t& stream) noexcept {
+                                                    util::executor_stream_t& stream) noexcept {
     if (st::failed(landed.resize(st::assume_uninitialized, offsets.extent(0))))
         return util::expected_t::fail(util::status_code_t::out_of_memory_k, "offset landing failed ({} entries)",
                                       offsets.extent(0));
@@ -123,7 +123,7 @@ static __global__ void pair_segments_kernel_(util::u32r2_view_t role_offsets, ut
 
 /** Land the device bytes @p payload on the host into @p landed . */
 [[nodiscard]] static util::expected_t land_bytes_(util::b8r1_view_t payload, st::basic_vector<char>& landed,
-                                                  util::gpu_stream_t& stream) noexcept {
+                                                  util::executor_stream_t& stream) noexcept {
     if (st::failed(landed.resize(st::assume_uninitialized, payload.extent(0))))
         return util::expected_t::fail(util::status_code_t::out_of_memory_k, "byte landing failed ({} bytes)",
                                       payload.extent(0));
@@ -132,7 +132,7 @@ static __global__ void pair_segments_kernel_(util::u32r2_view_t role_offsets, ut
 
 /** Land the device values of a @c list<int32> column, @p payload , on the host into @p landed . */
 [[nodiscard]] static util::expected_t land_rows_(util::b8r1_view_t payload, st::basic_vector<util::i32_t>& landed,
-                                                 util::gpu_stream_t& stream) noexcept {
+                                                 util::executor_stream_t& stream) noexcept {
     std::size_t const values = payload.extent(0) / sizeof(util::i32_t);
     if (st::failed(landed.resize(st::assume_uninitialized, values)))
         return util::expected_t::fail(util::status_code_t::out_of_memory_k, "row landing failed ({} rows)", values);
@@ -229,7 +229,7 @@ util::expected<paired_loader_parquet_t> paired_loader_parquet_t::make(
 }
 
 template <typename decode_type_>
-util::expected_t paired_loader_parquet_t::fill_(util::gpu_stream_t& gpu_stream, util::u32_t gpu_rank,
+util::expected_t paired_loader_parquet_t::fill_(util::executor_stream_t& gpu_stream, util::u32_t gpu_rank,
                                                 util::u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches,
                                                 decode_type_&& decode) noexcept {
     if (batches.empty()) return {};
@@ -288,8 +288,8 @@ util::expected_t paired_loader_parquet_t::fill_(util::gpu_stream_t& gpu_stream, 
     column_view_t const anchors = reservoir.column(0), positives = reservoir.column(1);
     column_view_t const listed_negatives = negatives ? reservoir.column(2) : column_view_t {};
 
-    util::switch_to_gpu_t gpu_scope {gpu_stream};
-    if (!gpu_scope.ok())
+    [[maybe_unused]] util::status_t const gpu_scope = (gpu_stream).bind();
+    if (gpu_scope.failed())
         return util::expected_t::fail(util::status_code_t::device_k, "Context entry failed for the loader stream");
     // Text negatives are strings grouped per row; media negatives are rows grouped by list offsets.
     st::basic_vector<util::u64_t> anchor_offsets, anchor_groups, positive_offsets, positive_groups, negative_offsets,
@@ -317,7 +317,7 @@ util::expected_t paired_loader_parquet_t::fill_(util::gpu_stream_t& gpu_stream, 
         if (landed) landed = land_bytes_(sample_keys.payload, key_bytes, gpu_stream);
     }
     if (!landed) return landed;
-    if (CUresult result = cuStreamSynchronize(gpu_stream.get()); result != CUDA_SUCCESS)
+    if (CUresult result = cuStreamSynchronize(util::native_stream(gpu_stream)); result != CUDA_SUCCESS)
         return util::cuda_failure(result, "reservoir offsets readback failed");
 
     // Every pair on the host: a keyed bijection over the pool picks the rows, and a key per draw
@@ -402,9 +402,10 @@ util::expected_t paired_loader_parquet_t::fill_(util::gpu_stream_t& gpu_stream, 
                                       "{} pooled rows across {} files hold {} complete pairs, fewer than the {} needed",
                                       pooled_rows, picked_paths.size(), found, total_pairs);
     st::basic_vector<util::u64_t, util::gpu_alloc<util::u64_t>> drawn_on_gpu {
-        util::gpu_alloc<util::u64_t> {gpu_stream.get()}},
-        keys_on_gpu {util::gpu_alloc<util::u64_t> {gpu_stream.get()}};
-    st::basic_vector<util::b8_t, util::gpu_alloc<util::b8_t>> prefixes {util::gpu_alloc<util::b8_t> {gpu_stream.get()}};
+        util::gpu_alloc<util::u64_t> {util::native_stream(gpu_stream)}},
+        keys_on_gpu {util::gpu_alloc<util::u64_t> {util::native_stream(gpu_stream)}};
+    st::basic_vector<util::b8_t, util::gpu_alloc<util::b8_t>> prefixes {
+        util::gpu_alloc<util::b8_t> {util::native_stream(gpu_stream)}};
     std::size_t const anchor_prefix_bytes = anchor_prefix_.size(), positive_prefix_bytes = positive_prefix_.size();
     if (st::failed(drawn_on_gpu.resize(st::assume_uninitialized, drawn.size())) ||
         st::failed(keys_on_gpu.resize(st::assume_uninitialized, keys.size())) ||
@@ -437,13 +438,13 @@ util::expected_t paired_loader_parquet_t::fill_(util::gpu_stream_t& gpu_stream, 
     // One scratch table row per role: offsets, lengths, modalities and, for images and videos, the
     // positive and negative media shapes; every batch reuses them in stream order.
     st::basic_vector<util::u32_t, util::gpu_alloc<util::u32_t>> offsets {
-        util::gpu_alloc<util::u32_t> {gpu_stream.get()}};
+        util::gpu_alloc<util::u32_t> {util::native_stream(gpu_stream)}};
     st::basic_vector<util::u32_t, util::gpu_alloc<util::u32_t>> lengths {
-        util::gpu_alloc<util::u32_t> {gpu_stream.get()}};
+        util::gpu_alloc<util::u32_t> {util::native_stream(gpu_stream)}};
     st::basic_vector<modality_t, util::gpu_alloc<modality_t>> modalities {
-        util::gpu_alloc<modality_t> {gpu_stream.get()}};
+        util::gpu_alloc<modality_t> {util::native_stream(gpu_stream)}};
     st::basic_vector<util::u16_t, util::gpu_alloc<util::u16_t>> media_shapes {
-        util::gpu_alloc<util::u16_t> {gpu_stream.get()}};
+        util::gpu_alloc<util::u16_t> {util::native_stream(gpu_stream)}};
     if (st::failed(offsets.resize(st::assume_uninitialized, roles * (pairs + 1))) ||
         st::failed(lengths.resize(st::assume_uninitialized, roles * pairs)) ||
         st::failed(modalities.resize(st::assume_uninitialized, roles * pairs)) ||
@@ -563,7 +564,7 @@ util::expected_t paired_loader_parquet_t::fill_(util::gpu_stream_t& gpu_stream, 
     return {};
 }
 
-util::expected_t paired_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, nvjpeg_session_t& decoder,
+util::expected_t paired_loader_parquet_t::fill(util::executor_stream_t& gpu_stream, nvjpeg_session_t& decoder,
                                                util::u32_t gpu_rank, util::u32_t training_step,
                                                std::span<multimodal_batch_on_gpu_t> batches) noexcept {
     if (modality_ != modality_t::image_k)
@@ -579,7 +580,7 @@ util::expected_t paired_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, n
                  });
 }
 
-util::expected_t paired_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, nvdec_session_t& decoder,
+util::expected_t paired_loader_parquet_t::fill(util::executor_stream_t& gpu_stream, nvdec_session_t& decoder,
                                                util::u32_t gpu_rank, util::u32_t training_step,
                                                std::span<multimodal_batch_on_gpu_t> batches) noexcept {
     if (modality_ != modality_t::video_k)
@@ -597,7 +598,7 @@ util::expected_t paired_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, n
                  });
 }
 
-util::expected_t paired_loader_parquet_t::fill(util::gpu_stream_t& gpu_stream, util::u32_t gpu_rank,
+util::expected_t paired_loader_parquet_t::fill(util::executor_stream_t& gpu_stream, util::u32_t gpu_rank,
                                                util::u32_t training_step,
                                                std::span<multimodal_batch_on_gpu_t> batches) noexcept {
     if (modality_ != modality_t::audio_k && modality_ != modality_t::text_k)

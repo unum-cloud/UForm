@@ -539,7 +539,7 @@ util::expected<util::infiniband_completion_mapping_t> util::infiniband_completio
 
 util::expected<util::infiniband_reach_t> util::infiniband_reach_t::make_(
     util::mesh_topology_t const& topology, util::u32_t member_index, util::infiniband_nic_t& nic,
-    util::gpu_arena_t& arena, util::gpu_stream_t& stream, heap_layout_t layout, sz::string_view_t key_prefix,
+    util::gpu_arena_t& arena, util::executor_stream_t& stream, heap_layout_t layout, sz::string_view_t key_prefix,
     util::f64_t timeout_seconds) noexcept {
     using result_t = util::expected<util::infiniband_reach_t>;
     util::mesh_shape_t const& shape = topology.shape;
@@ -567,12 +567,13 @@ util::expected<util::infiniband_reach_t> util::infiniband_reach_t::make_(
                               arena.used());
     // The heap zero and the round seed share the member's stream and land before any partner can
     // write: on the legacy stream the zero could follow the seed, so the sides disagreed on parity.
-    if (cuMemsetD8Async(util::device_address(member.heap_.data()), 0, heap_bytes, stream.get()) != CUDA_SUCCESS)
+    if (cuMemsetD8Async(util::device_address(member.heap_.data()), 0, heap_bytes, util::native_stream(stream)) !=
+        CUDA_SUCCESS)
         return result_t::fail(util::status_code_t::device_k, "Member heap reset failed");
     auto [counter, make_counter_status] = util::barrier_round_t::make(
         util::u32r1_span_t {member.round_scalar_.data(), 1}, layout.rounds, stream);
     if (!make_counter_status) return result_t::fail(std::move(make_counter_status));
-    if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
+    if (cuStreamSynchronize(util::native_stream(stream)) != CUDA_SUCCESS)
         return result_t::fail(util::status_code_t::device_k, "Member heap reset did not land");
     member.round_ = std::move(counter);
     if (st::failed(member.endpoints_.resize(layout.rounds)) || st::failed(member.queues_.resize(layout.rounds)) ||
@@ -664,7 +665,7 @@ util::expected<util::infiniband_reach_t> util::infiniband_reach_t::make_(
     return result_t {std::move(member)};
 }
 
-util::expected_t util::infiniband_reach_t::allreduce_sum(util::gpu_stream_t& stream) noexcept {
+util::expected_t util::infiniband_reach_t::allreduce_sum(util::executor_stream_t& stream) noexcept {
     if (layout_.rounds == 0) return {};
     std::span<util::f32_t> const shard {nk::as_writable_values<util::f32_t>(heap_.span()).data(),
                                         layout_.payload_bytes / sizeof(util::f32_t)};
@@ -689,7 +690,7 @@ util::expected_t util::infiniband_reach_t::allreduce_sum(util::gpu_stream_t& str
     return {};
 }
 
-util::expected_t util::infiniband_reach_t::allgather(util::gpu_stream_t& stream) noexcept {
+util::expected_t util::infiniband_reach_t::allgather(util::executor_stream_t& stream) noexcept {
     if (layout_.rounds == 0) return {};
     util::infiniband_allgather_plan_t plan;
     plan.block_bytes = layout_.payload_bytes >> layout_.rounds;
@@ -711,7 +712,7 @@ util::expected_t util::infiniband_reach_t::allgather(util::gpu_stream_t& stream)
     return {};
 }
 
-util::expected_t util::infiniband_reach_t::alltoall(util::gpu_stream_t& stream) noexcept {
+util::expected_t util::infiniband_reach_t::alltoall(util::executor_stream_t& stream) noexcept {
     if (layout_.rounds == 0) return {};
     util::infiniband_alltoall_plan_t plan;
     plan.block_bytes = layout_.landing_bytes;
@@ -750,7 +751,7 @@ util::expected<util::colocated_domain_t> util::colocated_domain_t::make(util::me
 }
 
 util::expected<util::infiniband_reach_t> util::colocated_domain_t::reach_(
-    util::u32_t member_index, util::gpu_arena_t& arena, util::gpu_stream_t& stream,
+    util::u32_t member_index, util::gpu_arena_t& arena, util::executor_stream_t& stream,
     util::infiniband_reach_t::heap_layout_t layout, util::f64_t timeout_seconds) noexcept {
     // The single-domain identity: no partners exist, every collective is a no-op — but the
     // rendezvous id still advances, so every rank's key sequence stays aligned whatever

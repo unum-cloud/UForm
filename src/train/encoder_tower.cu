@@ -234,22 +234,22 @@ static util::expected_t head_forward_(util::bf16r2_view_t normalized, util::b8r1
                                       util::b8r1_tensor_arena_t const& packed_fc2, util::bf16r2_span_t hidden_state,
                                       util::bf16r2_span_t activated, util::f32r2_span_t products,
                                       util::bf16r2_span_t vertices, util::gpu_numerics_t const& numerics,
-                                      util::gpu_stream_t& stream) noexcept {
+                                      util::executor_stream_t& stream) noexcept {
     std::size_t const cells = normalized.extent(0) * normalized.extent(1);
     dim3 const cell_grid {static_cast<util::u32_t>(util::divide_round_up(cells, util::kernel_block_size_default_k)), 1u,
                           1u};
     util::expected_t staged = util::multiply_bf16(normalized, packed_fc1.view(), products, numerics, stream);
     if (staged)
-        staged = util::numkong_result(
-            numerics.cast(products.data(), nk_f32_k, hidden_state.data(), nk_bf16_k, cells, stream.numkong()),
-            "head fc1 narrowing");
+        staged = util::numkong_result(numerics.cast(products.data(), nk_f32_k, hidden_state.data(), nk_bf16_k, cells,
+                                                    util::numkong_stream(stream)),
+                                      "head fc1 narrowing");
     if (staged)
         staged = util::launch_kernel(&tower_silu_kernel_, cell_grid, dim3 {util::kernel_block_size_default_k, 1u, 1u},
                                      stream, hidden_state.flatten<1>(), activated.flatten<1>());
     if (staged) staged = util::multiply_bf16(activated, packed_fc2.view(), products, numerics, stream);
     if (staged)
         staged = util::numkong_result(
-            numerics.cast(products.data(), nk_f32_k, vertices.data(), nk_bf16_k, cells, stream.numkong()),
+            numerics.cast(products.data(), nk_f32_k, vertices.data(), nk_bf16_k, cells, util::numkong_stream(stream)),
             "head fc2 narrowing");
     return staged;
 }
@@ -298,7 +298,7 @@ static util::expected_t stage_pixel_patches(nk::tensor_view<util::pixel_t, 3> ra
                                             util::f32r1_view_t mean, util::f32r1_view_t inverse_std,
                                             util::u32r1_view_t offsets, util::u32r1_view_t lengths,
                                             modality_view_t modality, dim3 segment_grid, util::bf16r2_span_t patches,
-                                            util::gpu_stream_t& stream) noexcept {
+                                            util::executor_stream_t& stream) noexcept {
     std::size_t const rows = patches.extent(0);
     util::u32_t const spatial = static_cast<util::u32_t>(raw.extent(1));
     util::u32_t const channels = static_cast<util::u32_t>(raw.extent(2));
@@ -325,7 +325,7 @@ static util::expected_t project_media_entries(
     util::b8r1_tensor_arena_t& packed_image, util::f32r1_tensor_arena_t& video_mean,
     util::f32r1_tensor_arena_t& video_inverse_std, util::b8r1_tensor_arena_t& packed_video,
     util::b8r1_tensor_arena_t& packed_audio, util::f32r2_span_t entry_state, util::f32r1_span_t products,
-    util::gpu_numerics_t const& numerics, util::gpu_stream_t& stream) noexcept {
+    util::gpu_numerics_t const& numerics, util::executor_stream_t& stream) noexcept {
     std::size_t const columns = batch.tokens.extent(1);
     std::size_t const live_tokens = static_cast<std::size_t>(batch.tokens.extent(0)) * columns;
     std::size_t const hidden = entry_state.extent(1);
@@ -341,7 +341,7 @@ static util::expected_t project_media_entries(
         util::expected_t staged = util::multiply_bf16(patches, packed.view(), projected, numerics, stream);
         if (staged)
             staged = util::numkong_result(numerics.sum_f32(entry_state.data(), projected.data(), live_tokens * hidden,
-                                                           entry_state.data(), stream.numkong()),
+                                                           entry_state.data(), util::numkong_stream(stream)),
                                           "entry projection");
         return staged;
     };
@@ -398,7 +398,7 @@ static util::expected_t project_media_weight_grads(
     util::bf16r2_tensor_arena_t& image_projection_grad, util::f32r1_tensor_arena_t& video_mean,
     util::f32r1_tensor_arena_t& video_inverse_std, util::bf16r2_tensor_arena_t& video_projection_grad,
     util::bf16r2_tensor_arena_t& audio_projection_grad, transformer_scratch_t& scratch,
-    util::gpu_numerics_t const& numerics, util::gpu_stream_t& stream) noexcept {
+    util::gpu_numerics_t const& numerics, util::executor_stream_t& stream) noexcept {
     std::size_t const columns = batch.tokens.extent(1);
     std::size_t const live_tokens = static_cast<std::size_t>(batch.tokens.extent(0)) * columns;
     dim3 const block_shape {util::kernel_block_size_default_k, 1u, 1u};
@@ -707,23 +707,23 @@ util::expected<tower_pool_t> tower_pool_t::make(util::gpu_arena_t& arena, transf
 
 util::expected_t tower_pool_t::forward(util::bf16r1_view_t query, util::bf16r2_view_t states,
                                        util::u32r1_view_t segment_offsets, util::u32r1_view_t segment_lengths,
-                                       util::bf16r2_span_t pooled, util::gpu_stream_t& stream) noexcept {
+                                       util::bf16r2_span_t pooled, util::executor_stream_t& stream) noexcept {
     std::size_t const segments = pooled_.extent(0), hidden = pooled_.extent(1);
     std::size_t const heads = hidden / transformer_head_dim_k;
     nk_bf16_t const* const states_data = nk::as_values<nk_bf16_t>(nk::as_bytes(states)).data();
     nk_status_t status = numerics_.attention_pack_bf16(
         heads, transformer_head_dim_k, segment_offsets.data(), segment_lengths.data(), segments, states_data,
         hidden * sizeof(util::bf16_t), states_data, hidden * sizeof(util::bf16_t), packed_.data(), 0, segments * heads,
-        stream.numkong());
+        util::numkong_stream(stream));
     if (status == nk_success_k)
         status = numerics_.attend_bf16(heads, heads, transformer_head_dim_k, query_offsets_.data(), segments,
                                        transformer_attention_scale(), NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX,
                                        nk::as_values<nk_bf16_t>(nk::as_bytes(query)).data(), 0, packed_.data(),
                                        pooled_.data(), hidden * sizeof(util::f32_t), log_sum_exp_.data(), 0,
-                                       NUMKONG_SIZE_MAX, NUMKONG_NULL, 0, stream.numkong());
+                                       NUMKONG_SIZE_MAX, NUMKONG_NULL, 0, util::numkong_stream(stream));
     if (status == nk_success_k)
         status = numerics_.cast(pooled_.data(), nk_f32_k, pooled.data(), nk_bf16_k, segments * hidden,
-                                stream.numkong());
+                                util::numkong_stream(stream));
     if (status != nk_success_k)
         return util::expected_t::fail(util::status_code_t::device_k, "attention pool failed: {}",
                                       nk_status_name(status));
@@ -732,7 +732,7 @@ util::expected_t tower_pool_t::forward(util::bf16r1_view_t query, util::bf16r2_v
 
 util::expected_t tower_pool_t::backward(util::bf16r1_view_t query, util::bf16r2_view_t pooled_grad,
                                         util::f32r2_span_t key_grad, util::f32r2_span_t value_grad,
-                                        util::bf16r1_span_t query_grad, util::gpu_stream_t& stream) noexcept {
+                                        util::bf16r1_span_t query_grad, util::executor_stream_t& stream) noexcept {
     std::size_t const segments = pooled_.extent(0), hidden = pooled_.extent(1);
     std::size_t const heads = hidden / transformer_head_dim_k;
     std::size_t const tokens = key_grad.extent(0);
@@ -746,17 +746,17 @@ util::expected_t tower_pool_t::backward(util::bf16r1_view_t query, util::bf16r2_
         !zeroed)
         return zeroed;
     nk_status_t status = numerics_.cast(pooled_grad.data(), nk_bf16_k, pooled_grad_.data(), nk_f32_k, segments * hidden,
-                                        stream.numkong());
+                                        util::numkong_stream(stream));
     if (status == nk_success_k)
         status = numerics_.attend_gradients_bf16(
             heads, heads, transformer_head_dim_k, query_offsets_.data(), segments, transformer_attention_scale(),
             NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, nk::as_values<nk_bf16_t>(nk::as_bytes(query)).data(), 0, packed_.data(),
             pooled_.data(), pooled_grad_.data(), hidden * sizeof(util::f32_t), log_sum_exp_.data(),
             query_partials_.data(), hidden * sizeof(util::f32_t), key_grad.data(), value_grad.data(),
-            key_grad.stride_bytes(0), 0, NUMKONG_SIZE_MAX, NUMKONG_NULL, 0, stream.numkong());
+            key_grad.stride_bytes(0), 0, NUMKONG_SIZE_MAX, NUMKONG_NULL, 0, util::numkong_stream(stream));
     if (status == nk_success_k)
         status = numerics_.sum_f32(key_grad.data(), value_grad.data(), tokens * hidden, key_grad.data(),
-                                   stream.numkong());
+                                   util::numkong_stream(stream));
     if (status != nk_success_k)
         return util::expected_t::fail(util::status_code_t::device_k, "attention pool backward failed: {}",
                                       nk_status_name(status));
@@ -931,7 +931,7 @@ util::expected<tower_token_head_t> tower_token_head_t::make(util::gpu_arena_t& a
 }
 
 util::expected_t tower_token_head_t::forward(util::bf16r2_view_t states, multimodal_batch_view_t const& batch,
-                                             util::gpu_stream_t& stream) noexcept {
+                                             util::executor_stream_t& stream) noexcept {
     std::size_t const tokens = gathered_.extent(0);
     dim3 const block_shape {util::kernel_block_size_default_k, 1u, 1u};
     dim3 const row_grid {static_cast<util::u32_t>(tokens), 1u, 1u};
@@ -954,7 +954,7 @@ util::expected_t tower_token_head_t::forward(util::bf16r2_view_t states, multimo
 
 util::expected_t tower_token_head_t::backward(util::bf16r2_view_t vectors_grad, multimodal_batch_view_t const& batch,
                                               util::f32r2_span_t states_grad, transformer_scratch_t& scratch,
-                                              util::gpu_stream_t& stream) noexcept {
+                                              util::executor_stream_t& stream) noexcept {
     std::size_t const tokens = gathered_.extent(0), hidden = gathered_.extent(1);
     if (vectors_grad.extent(0) != tokens || vectors_grad.extent(1) != vectors_.extent(1))
         return util::expected_t::fail(util::status_code_t::unsupported_k,
@@ -979,9 +979,9 @@ util::expected_t tower_token_head_t::backward(util::bf16r2_view_t vectors_grad, 
     // The normalized stash is dead once the projection's weight gradient read it, so it holds the
     // narrowed data gradient into the norm's backward.
     if (staged)
-        staged = util::numkong_result(
-            numerics_.cast(products.data(), nk_f32_k, normalized_.data(), nk_bf16_k, tokens * hidden, stream.numkong()),
-            "token head gradient narrowing");
+        staged = util::numkong_result(numerics_.cast(products.data(), nk_f32_k, normalized_.data(), nk_bf16_k,
+                                                     tokens * hidden, util::numkong_stream(stream)),
+                                      "token head gradient narrowing");
     if (staged)
         staged = util::launch_kernel(&rmsnorm_backward_kernel, dim3 {static_cast<util::u32_t>(token_bands), 1u, 1u},
                                      block_shape, stream, gathered_.view(), norm_scale_.view(), inverse_rms_.view(),
@@ -1010,14 +1010,15 @@ util::expected_t tower_token_head_t::fill(st::basic_vector<util::differentiable_
     return {};
 }
 
-util::expected_t tower_token_head_t::pack_weights(util::bf16r1_span_t transposed, util::gpu_stream_t& stream) noexcept {
+util::expected_t tower_token_head_t::pack_weights(util::bf16r1_span_t transposed,
+                                                  util::executor_stream_t& stream) noexcept {
     return util::pack_weight_bf16(projection_.view(), transposed, packed_projection_.span(),
                                   packed_projection_transposed_.span(), numerics_, stream);
 }
 
 util::expected<tower_token_head_t> tower_token_head_t::snapshot(util::gpu_arena_t& arena,
                                                                 transformer_block_config_t const& block,
-                                                                util::gpu_stream_t& stream) const noexcept {
+                                                                util::executor_stream_t& stream) const noexcept {
     using result_t = util::expected<tower_token_head_t>;
     auto [copy, status] = make(arena, block, static_cast<util::u32_t>(projection_.extent(0)), numerics_);
     if (!status) return result_t::fail(std::move(status));
@@ -1032,7 +1033,7 @@ util::expected<tower_token_head_t> tower_token_head_t::snapshot(util::gpu_arena_
 }
 
 util::expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const& batch, util::bf16r2_span_t vertices,
-                                               util::gpu_stream_t& stream) noexcept {
+                                               util::executor_stream_t& stream) noexcept {
     util::u32_t const hidden = config_.block.hidden;
     std::size_t const columns = batch.tokens.extent(1);
     std::size_t const live_tokens = static_cast<std::size_t>(batch.tokens.extent(0)) * columns;
@@ -1088,7 +1089,7 @@ util::expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const& 
                                  entry_output_.span());
     if (staged)
         staged = util::numkong_result(numerics_.cast(entry_output_.data(), nk_bf16_k, activations_b_.data(), nk_f32_k,
-                                                     live_tokens * hidden, stream.numkong()),
+                                                     live_tokens * hidden, util::numkong_stream(stream)),
                                       "entry widening");
     if (staged)
         staged = project_media_entries(batch, patch_scratch_, image_pixel_mean_, image_pixel_inverse_std_,
@@ -1112,12 +1113,13 @@ util::expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const& 
     // Final norm narrows the stack output into the per-token states, under the scale
     // widened for rmscast.
     nk_status_t status = numerics_.cast(final_norm_scale_.data(), nk_bf16_k, widened_final_norm_scale_.data(), nk_f32_k,
-                                        hidden, stream.numkong());
+                                        hidden, util::numkong_stream(stream));
     if (status == nk_success_k)
         status = numerics_.rmscast_bf16(
             stack_output_.data(), widened_final_norm_scale_.data(),
             nk::as_writable_values<nk_bf16_t>(nk::as_writable_bytes(normalized_.span())).data(), live_tokens, 1, hidden,
-            hidden * sizeof(util::f32_t), hidden * sizeof(util::bf16_t), config_.block.rms_eps, stream.numkong());
+            hidden * sizeof(util::f32_t), hidden * sizeof(util::bf16_t), config_.block.rms_eps,
+            util::numkong_stream(stream));
     if (status != nk_success_k)
         return util::expected_t::fail(util::status_code_t::device_k, "final norm failed: {}", nk_status_name(status));
     if (config_.token_width != 0)
@@ -1150,7 +1152,7 @@ util::expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const& 
 util::expected_t encoder_tower_bf16_t::patchify_media_targets(multimodal_batch_on_gpu_t const& batch,
                                                               util::bf16r2_span_t image_patches,
                                                               util::bf16r2_span_t video_patches,
-                                                              util::gpu_stream_t& stream) noexcept {
+                                                              util::executor_stream_t& stream) noexcept {
     // The masked-autoencoder reconstruction target: the same per-channel-normalized patch vectors
     // the entry stages before its projection, but written into the caller's clean-batch spans with
     // no projection and no forward — one shared stage per present pixel modality, non-modality and
@@ -1187,7 +1189,7 @@ util::expected_t encoder_tower_bf16_t::patchify_media_targets(multimodal_batch_o
 }
 
 util::expected_t encoder_tower_bf16_t::backward(util::bf16r2_view_t vertices_grad, util::bf16r2_view_t hidden_grad,
-                                                multimodal_batch_on_gpu_t const& batch, util::gpu_stream_t& stream,
+                                                multimodal_batch_on_gpu_t const& batch, util::executor_stream_t& stream,
                                                 util::bf16r2_view_t token_vectors_grad) noexcept {
     util::u32_t const hidden = config_.block.hidden;
     std::size_t const columns = batch.tokens.extent(1);
@@ -1248,7 +1250,7 @@ util::expected_t encoder_tower_bf16_t::backward(util::bf16r2_view_t vertices_gra
                                                               numerics_, stream);
             if (multiplied)
                 multiplied = util::numkong_result(numerics_.cast(head_products.data(), nk_f32_k, segment_grad_a_.data(),
-                                                                 nk_bf16_k, head_cells, stream.numkong()),
+                                                                 nk_bf16_k, head_cells, util::numkong_stream(stream)),
                                                   "head gradient narrowing");
             return multiplied;
         };
@@ -1285,10 +1287,10 @@ util::expected_t encoder_tower_bf16_t::backward(util::bf16r2_view_t vertices_gra
         util::bf16r2_view_t const masked_grad = hidden_grad[nk::range(0, live_tokens), nk::slice];
         util::f32_t* const widened = pooled_present ? token_grad_b_.data() : token_grad_a_.data();
         nk_status_t status = numerics_.cast(masked_grad.data(), nk_bf16_k, widened, nk_f32_k, live_tokens * hidden,
-                                            stream.numkong());
+                                            util::numkong_stream(stream));
         if (status == nk_success_k && pooled_present)
             status = numerics_.sum_f32(token_grad_a_.data(), token_grad_b_.data(), live_tokens * hidden,
-                                       token_grad_a_.data(), stream.numkong());
+                                       token_grad_a_.data(), util::numkong_stream(stream));
         if (status != nk_success_k)
             return util::expected_t::fail(util::status_code_t::device_k, "masked force join failed: {}",
                                           nk_status_name(status));
@@ -1332,7 +1334,7 @@ util::expected_t encoder_tower_bf16_t::backward(util::bf16r2_view_t vertices_gra
     // The entry backward reads BFloat16, so the stack's gradient narrows into the
     // free normalized-grad buffer.
     if (nk_status_t const status = numerics_.cast(flowing.data(), nk_f32_k, normalized_grad_.data(), nk_bf16_k,
-                                                  live_tokens * hidden, stream.numkong());
+                                                  live_tokens * hidden, util::numkong_stream(stream));
         status != nk_success_k)
         return util::expected_t::fail(util::status_code_t::device_k, "entry gradient narrowing failed: {}",
                                       nk_status_name(status));
@@ -1352,7 +1354,7 @@ util::expected_t encoder_tower_bf16_t::backward(util::bf16r2_view_t vertices_gra
     util::u32r1_span_t const values_in = sort_values_[nk::range(0, live_tokens), nk::slice];
     util::u32r1_span_t const values_out = sort_values_[nk::range(max_tokens, max_tokens + live_tokens), nk::slice];
     if (CUresult result = cuMemsetD8Async(util::device_address(keys_in.data()), 0xFF,
-                                          live_tokens * sizeof(util::token_id_t), stream.get());
+                                          live_tokens * sizeof(util::token_id_t), util::native_stream(stream));
         result != CUDA_SUCCESS)
         return util::cuda_failure(result, "sentinel key reset failed");
     staged = util::launch_kernel(&tower_text_keys_kernel_, segment_grid, block_shape, stream, live_token_ids_,
@@ -1364,7 +1366,7 @@ util::expected_t encoder_tower_bf16_t::backward(util::bf16r2_view_t vertices_gra
     std::size_t sort_bytes = sort_workspace_.extent(0);
     if (cudaError_t sorted = cub::DeviceRadixSort::SortPairs(
             sort_workspace_.data(), sort_bytes, keys_in.data(), keys_out.data(), values_in.data(), values_out.data(),
-            static_cast<int>(live_tokens), 0, sizeof(util::token_id_t) * 8, stream.get());
+            static_cast<int>(live_tokens), 0, sizeof(util::token_id_t) * 8, util::native_stream(stream));
         sorted != cudaSuccess)
         return util::expected_t::fail(util::status_code_t::device_k, "embedding sort failed (code={})",
                                       static_cast<int>(sorted));
@@ -1383,7 +1385,7 @@ util::expected_t encoder_tower_bf16_t::backward(util::bf16r2_view_t vertices_gra
                                       video_projection_grad_, audio_projection_grad_, *scratch_, numerics_, stream);
 }
 
-util::expected_t encoder_tower_bf16_t::pack_weights(util::gpu_stream_t& stream) noexcept {
+util::expected_t encoder_tower_bf16_t::pack_weights(util::executor_stream_t& stream) noexcept {
     for (transformer_block_bf16_t& layer : blocks_)
         if (util::expected_t packed = layer.pack_weights(stream); !packed) return packed;
     util::bf16r1_span_t const transposed = scratch_->transposed_weight.span();
@@ -1477,7 +1479,7 @@ util::expected_t encoder_tower_bf16_t::fill(st::basic_vector<util::differentiabl
  *  @p name tags the failure diagnostic with the weight's role. */
 [[nodiscard]] static util::expected<util::bf16r2_tensor_arena_t> snapshot_weight_(util::bf16r2_view_t source,
                                                                                   util::gpu_arena_t& arena,
-                                                                                  util::gpu_stream_t& stream,
+                                                                                  util::executor_stream_t& stream,
                                                                                   sz::string_view_t name) noexcept {
     using result_t = util::expected<util::bf16r2_tensor_arena_t>;
     util::gpu_arena_alloc<util::bf16_t> bf16_alloc {arena};
@@ -1495,7 +1497,7 @@ util::expected_t encoder_tower_bf16_t::fill(st::basic_vector<util::differentiabl
 /** The rank-1 overload of @ref snapshot_weight_ for the norm scales and the pool query. */
 [[nodiscard]] static util::expected<util::bf16r1_tensor_arena_t> snapshot_weight_(util::bf16r1_view_t source,
                                                                                   util::gpu_arena_t& arena,
-                                                                                  util::gpu_stream_t& stream,
+                                                                                  util::executor_stream_t& stream,
                                                                                   sz::string_view_t name) noexcept {
     using result_t = util::expected<util::bf16r1_tensor_arena_t>;
     util::gpu_arena_alloc<util::bf16_t> bf16_alloc {arena};
@@ -1508,7 +1510,7 @@ util::expected_t encoder_tower_bf16_t::fill(st::basic_vector<util::differentiabl
 }
 
 util::expected<encoder_tower_e4m3_t> encoder_tower_bf16_t::quantize_weights(util::gpu_arena_t& arena,
-                                                                            util::gpu_stream_t& stream) noexcept {
+                                                                            util::executor_stream_t& stream) noexcept {
     using result_t = util::expected<encoder_tower_e4m3_t>;
     encoder_tower_e4m3_t twin;
     twin.config_ = config_;
@@ -1624,13 +1626,13 @@ util::expected<encoder_tower_e4m3_t> encoder_tower_bf16_t::quantize_weights(util
     }
 
     // The snapshots above are stream-ordered; drain them so the twin owns settled weights.
-    if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
+    if (CUresult result = cuStreamSynchronize(util::native_stream(stream)); result != CUDA_SUCCESS)
         return util::cuda_failure<encoder_tower_e4m3_t>(result, "twin snapshot drain failed");
     return result_t {std::move(twin)};
 }
 
 util::expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const& batch, util::bf16r2_span_t vertices,
-                                               util::gpu_stream_t& stream) noexcept {
+                                               util::executor_stream_t& stream) noexcept {
     util::u32_t const hidden = config_.block.hidden;
     std::size_t const columns = batch.tokens.extent(1);
     std::size_t const live_tokens = static_cast<std::size_t>(batch.tokens.extent(0)) * columns;
@@ -1677,18 +1679,18 @@ util::expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const& 
     if (entry_state_.data() != nullptr) {
         std::size_t const cells = live_tokens * hidden;
         util::f32r2_span_t const entry_state {entry_state_.data(), live_tokens, hidden};
-        staged = util::numkong_result(
-            numerics_.cast(entry_output_.data(), nk_bf16_k, entry_state.data(), nk_f32_k, cells, stream.numkong()),
-            "entry widening");
+        staged = util::numkong_result(numerics_.cast(entry_output_.data(), nk_bf16_k, entry_state.data(), nk_f32_k,
+                                                     cells, util::numkong_stream(stream)),
+                                      "entry widening");
         if (staged)
             staged = project_media_entries(batch, patch_scratch_, image_pixel_mean_, image_pixel_inverse_std_,
                                            packed_image_projection_, video_pixel_mean_, video_pixel_inverse_std_,
                                            packed_video_projection_, packed_audio_projection_, entry_state,
                                            products_.span(), numerics_, stream);
         if (staged)
-            staged = util::numkong_result(
-                numerics_.cast(entry_state.data(), nk_f32_k, entry_output_.data(), nk_bf16_k, cells, stream.numkong()),
-                "entry narrowing");
+            staged = util::numkong_result(numerics_.cast(entry_state.data(), nk_f32_k, entry_output_.data(), nk_bf16_k,
+                                                         cells, util::numkong_stream(stream)),
+                                          "entry narrowing");
         if (!staged) return staged;
     }
 

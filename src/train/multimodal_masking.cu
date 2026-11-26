@@ -380,7 +380,7 @@ util::expected<masked_tokens_t> masked_tokens_t::make(util::gpu_arena_t& arena, 
     return result_t {std::move(head)};
 }
 
-util::expected_t masked_tokens_t::pack_weights(util::gpu_stream_t& stream) noexcept {
+util::expected_t masked_tokens_t::pack_weights(util::executor_stream_t& stream) noexcept {
     return util::pack_weight_bf16(decoder_weight_.view(), transposed_input_.span(), packed_decoder_.span(),
                                   packed_decoder_transposed_.span(), numerics_, stream);
 }
@@ -389,7 +389,7 @@ util::expected_t masked_tokens_t::corrupt(util::tokens_view_t clean, util::token
                                           util::u32r1_span_t loss_weights, util::u32r1_view_t segment_offsets,
                                           util::u32r1_view_t segment_lengths, modality_view_t segment_modality,
                                           nk::tensor_view<util::token_id_t, 2> segment_choices, masking_recipe_t recipe,
-                                          util::data_epoch_t data_epoch, util::gpu_stream_t& stream) noexcept {
+                                          util::data_epoch_t data_epoch, util::executor_stream_t& stream) noexcept {
     std::size_t const tokens = clean.extent(0);
     if (distorted.extent(0) != tokens || loss_weights.extent(0) != tokens)
         return util::expected_t::fail(util::status_code_t::unsupported_k,
@@ -417,7 +417,8 @@ util::expected_t masked_tokens_t::corrupt(util::tokens_view_t clean, util::token
 
 util::expected_t masked_tokens_t::operator()(util::bf16r2_view_t normalized, util::tokens_view_t clean_targets,
                                              util::u32r1_view_t loss_weights, util::f32r1_span_t loss_summands,
-                                             util::bf16r2_span_t normalized_grad, util::gpu_stream_t& stream) noexcept {
+                                             util::bf16r2_span_t normalized_grad,
+                                             util::executor_stream_t& stream) noexcept {
     util::u32_t const hidden = config_.hidden;
     std::size_t const tokens = config_.max_tokens;
     if (normalized.extent(0) != tokens || normalized_grad.extent(0) != tokens || clean_targets.extent(0) != tokens ||
@@ -449,7 +450,7 @@ util::expected_t masked_tokens_t::operator()(util::bf16r2_view_t normalized, uti
                                      stream);
     if (staged)
         staged = util::numkong_result(numerics_.cast(normalized_products.data(), nk_f32_k, normalized_grad.data(),
-                                                     nk_bf16_k, tokens * hidden, stream.numkong()),
+                                                     nk_bf16_k, tokens * hidden, util::numkong_stream(stream)),
                                       "masked token gradient narrowing");
     if (staged)
         staged = util::weight_gradient_bf16(logit_grad, normalized, decoder_weight_grad_.span(),
@@ -460,7 +461,8 @@ util::expected_t masked_tokens_t::operator()(util::bf16r2_view_t normalized, uti
 
 util::expected_t masked_tokens_t::choose(util::bf16r2_view_t normalized, multimodal_batch_view_t const& batch,
                                          choices_config_t config, util::f32r1_span_t loss_summands,
-                                         util::bf16r2_span_t normalized_grad, util::gpu_stream_t& stream) noexcept {
+                                         util::bf16r2_span_t normalized_grad,
+                                         util::executor_stream_t& stream) noexcept {
     std::size_t const hidden = config_.hidden, vocabulary = config_.vocabulary, segments = gathered_.extent(0);
     if (segments == 0 || batch.segment_choices.extent(0) != segments ||
         batch.segment_choice_targets.extent(0) != segments ||
@@ -503,7 +505,7 @@ util::expected_t masked_tokens_t::choose(util::bf16r2_view_t normalized, multimo
                                      util::f32r2_view_t {gathered_grad}, batch, normalized_grad);
     if (staged)
         staged = util::numkong_result(numerics_.cast(decoder_weight_grad_.data(), nk_bf16_k, widened_weight_grad.data(),
-                                                     nk_f32_k, vocabulary * hidden, stream.numkong()),
+                                                     nk_f32_k, vocabulary * hidden, util::numkong_stream(stream)),
                                       "decoder gradient widening");
     if (staged)
         staged = util::weight_gradient_bf16(logit_grad, gathered_.view(), decoder_weight_grad_.span(),
@@ -512,11 +514,11 @@ util::expected_t masked_tokens_t::choose(util::bf16r2_view_t normalized, multimo
     if (staged)
         staged = util::numkong_result(
             numerics_.sum_f32(widened_weight_grad.data(), weight_products.data(), vocabulary * hidden,
-                              widened_weight_grad.data(), stream.numkong()),
+                              widened_weight_grad.data(), util::numkong_stream(stream)),
             "decoder gradient addition");
     if (staged)
         staged = util::numkong_result(numerics_.cast(widened_weight_grad.data(), nk_f32_k, decoder_weight_grad_.data(),
-                                                     nk_bf16_k, vocabulary * hidden, stream.numkong()),
+                                                     nk_bf16_k, vocabulary * hidden, util::numkong_stream(stream)),
                                       "decoder gradient narrowing");
     return staged;
 }
@@ -570,7 +572,7 @@ static __global__ void media_mask_sample_kernel_(util::u32r1_span_t mask, util::
                                                          masking_recipe_t recipe, util::data_epoch_t data_epoch,
                                                          util::f32_t mask_ratio, util::u32_t spatial_cells,
                                                          masking_draw_purpose_t purpose,
-                                                         util::gpu_stream_t& stream) noexcept {
+                                                         util::executor_stream_t& stream) noexcept {
     if (util::expected_t zeroed = util::zero_async(mask, stream); !zeroed) return zeroed;
     dim3 const segment_grid {static_cast<util::u32_t>(segment_lengths.extent(0)), 1u, 1u};
     dim3 const block_shape {util::kernel_block_size_default_k, 1u, 1u};
@@ -691,21 +693,22 @@ util::expected<masked_patches_t> masked_patches_t::make(util::gpu_arena_t& arena
     return result_t {std::move(head)};
 }
 
-util::expected_t masked_patches_t::pack_weights(util::gpu_stream_t& stream) noexcept {
+util::expected_t masked_patches_t::pack_weights(util::executor_stream_t& stream) noexcept {
     return util::pack_weight_bf16(recon_weight_.view(), transposed_input_.span(), packed_recon_.span(),
                                   packed_recon_transposed_.span(), numerics_, stream);
 }
 
 util::expected_t masked_patches_t::sample_mask(masking_recipe_t recipe, util::data_epoch_t data_epoch,
                                                util::u32r1_view_t segment_offsets, util::u32r1_view_t segment_lengths,
-                                               modality_view_t segment_modality, util::gpu_stream_t& stream) noexcept {
+                                               modality_view_t segment_modality,
+                                               util::executor_stream_t& stream) noexcept {
     return sample_media_mask_(mask_.span(), segment_offsets, segment_lengths, segment_modality, config_.modality,
                               recipe, data_epoch, config_.mask_ratio, config_.max_patches / config_.temporal_groups,
                               masking_draw_purpose_t::patch_mask_k, stream);
 }
 
 util::expected_t masked_patches_t::corrupt_raw(nk::tensor_span<util::pixel_t, 2> raw_patches,
-                                               util::gpu_stream_t& stream) noexcept {
+                                               util::executor_stream_t& stream) noexcept {
     util::u32_t const patches = config_.max_patches;
     if (raw_patches.extent(0) != patches)
         return util::expected_t::fail(util::status_code_t::unsupported_k,
@@ -717,7 +720,7 @@ util::expected_t masked_patches_t::corrupt_raw(nk::tensor_span<util::pixel_t, 2>
 
 util::expected_t masked_patches_t::operator()(util::bf16r2_view_t normalized, util::bf16r2_view_t clean_patches,
                                               util::f32r1_span_t loss_summands, util::bf16r2_span_t normalized_grad,
-                                              util::gpu_stream_t& stream) noexcept {
+                                              util::executor_stream_t& stream) noexcept {
     util::u32_t const hidden = config_.hidden, patch_pixels = config_.patch_pixels;
     std::size_t const patches = config_.max_patches;
     if (normalized.extent(0) != patches || normalized_grad.extent(0) != patches || clean_patches.extent(0) != patches)
@@ -741,7 +744,7 @@ util::expected_t masked_patches_t::operator()(util::bf16r2_view_t normalized, ut
     if (staged) staged = util::multiply_bf16(normalized, packed_recon_.view(), predicted_products, numerics_, stream);
     if (staged)
         staged = util::numkong_result(numerics_.cast(predicted_products.data(), nk_f32_k, predicted_.data(), nk_bf16_k,
-                                                     rows * outputs, stream.numkong()),
+                                                     rows * outputs, util::numkong_stream(stream)),
                                       "prediction narrowing");
     if (staged)
         staged = util::launch_kernel(&patch_mae_loss_kernel_, row_grid, block_shape, stream, predicted_view,
@@ -755,15 +758,15 @@ util::expected_t masked_patches_t::operator()(util::bf16r2_view_t normalized, ut
                                      numerics_, stream);
     if (staged)
         staged = util::numkong_result(numerics_.cast(normalized_grad.data(), nk_bf16_k, widened_grad_.data(), nk_f32_k,
-                                                     rows * hidden, stream.numkong()),
+                                                     rows * hidden, util::numkong_stream(stream)),
                                       "normalized gradient widening");
     if (staged)
         staged = util::numkong_result(numerics_.sum_f32(widened_grad_.data(), normalized_products.data(), rows * hidden,
-                                                        widened_grad_.data(), stream.numkong()),
+                                                        widened_grad_.data(), util::numkong_stream(stream)),
                                       "normalized gradient addition");
     if (staged)
         staged = util::numkong_result(numerics_.cast(widened_grad_.data(), nk_f32_k, normalized_grad.data(), nk_bf16_k,
-                                                     rows * hidden, stream.numkong()),
+                                                     rows * hidden, util::numkong_stream(stream)),
                                       "normalized gradient narrowing");
     if (staged)
         staged = util::weight_gradient_bf16(predicted_grad_.view(), normalized, recon_weight_grad_.span(),
@@ -898,20 +901,21 @@ util::expected<masked_frames_t> masked_frames_t::make(util::gpu_arena_t& arena, 
     return result_t {std::move(head)};
 }
 
-util::expected_t masked_frames_t::pack_weights(util::gpu_stream_t& stream) noexcept {
+util::expected_t masked_frames_t::pack_weights(util::executor_stream_t& stream) noexcept {
     return util::pack_weight_bf16(recon_weight_.view(), transposed_input_.span(), packed_recon_.span(),
                                   packed_recon_transposed_.span(), numerics_, stream);
 }
 
 util::expected_t masked_frames_t::sample_mask(masking_recipe_t recipe, util::data_epoch_t data_epoch,
                                               util::u32r1_view_t segment_offsets, util::u32r1_view_t segment_lengths,
-                                              modality_view_t segment_modality, util::gpu_stream_t& stream) noexcept {
+                                              modality_view_t segment_modality,
+                                              util::executor_stream_t& stream) noexcept {
     return sample_media_mask_(mask_.span(), segment_offsets, segment_lengths, segment_modality, modality_t::audio_k,
                               recipe, data_epoch, config_.mask_ratio, config_.max_frames,
                               masking_draw_purpose_t::frame_mask_k, stream);
 }
 
-util::expected_t masked_frames_t::corrupt_raw(util::f32r2_span_t raw_frames, util::gpu_stream_t& stream) noexcept {
+util::expected_t masked_frames_t::corrupt_raw(util::f32r2_span_t raw_frames, util::executor_stream_t& stream) noexcept {
     util::u32_t const frames = config_.max_frames;
     if (raw_frames.extent(0) != frames)
         return util::expected_t::fail(util::status_code_t::unsupported_k,
@@ -923,7 +927,7 @@ util::expected_t masked_frames_t::corrupt_raw(util::f32r2_span_t raw_frames, uti
 
 util::expected_t masked_frames_t::operator()(util::bf16r2_view_t normalized, util::f32r2_view_t clean_frames,
                                              util::f32r1_span_t loss_summands, util::bf16r2_span_t normalized_grad,
-                                             util::gpu_stream_t& stream) noexcept {
+                                             util::executor_stream_t& stream) noexcept {
     util::u32_t const hidden = config_.hidden, chunk_samples = config_.chunk_samples;
     std::size_t const frames = config_.max_frames;
     if (normalized.extent(0) != frames || normalized_grad.extent(0) != frames || clean_frames.extent(0) != frames)
@@ -947,7 +951,7 @@ util::expected_t masked_frames_t::operator()(util::bf16r2_view_t normalized, uti
     if (staged) staged = util::multiply_bf16(normalized, packed_recon_.view(), predicted_products, numerics_, stream);
     if (staged)
         staged = util::numkong_result(numerics_.cast(predicted_products.data(), nk_f32_k, predicted_.data(), nk_bf16_k,
-                                                     rows * outputs, stream.numkong()),
+                                                     rows * outputs, util::numkong_stream(stream)),
                                       "prediction narrowing");
     if (staged)
         staged = util::launch_kernel(&frame_mae_loss_kernel_, row_grid, block_shape, stream, predicted_view,
@@ -961,15 +965,15 @@ util::expected_t masked_frames_t::operator()(util::bf16r2_view_t normalized, uti
                                      numerics_, stream);
     if (staged)
         staged = util::numkong_result(numerics_.cast(normalized_grad.data(), nk_bf16_k, widened_grad_.data(), nk_f32_k,
-                                                     rows * hidden, stream.numkong()),
+                                                     rows * hidden, util::numkong_stream(stream)),
                                       "normalized gradient widening");
     if (staged)
         staged = util::numkong_result(numerics_.sum_f32(widened_grad_.data(), normalized_products.data(), rows * hidden,
-                                                        widened_grad_.data(), stream.numkong()),
+                                                        widened_grad_.data(), util::numkong_stream(stream)),
                                       "normalized gradient addition");
     if (staged)
         staged = util::numkong_result(numerics_.cast(widened_grad_.data(), nk_f32_k, normalized_grad.data(), nk_bf16_k,
-                                                     rows * hidden, stream.numkong()),
+                                                     rows * hidden, util::numkong_stream(stream)),
                                       "normalized gradient narrowing");
     if (staged)
         staged = util::weight_gradient_bf16(predicted_grad_.view(), normalized, recon_weight_grad_.span(),

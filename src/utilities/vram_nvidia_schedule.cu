@@ -26,7 +26,7 @@ static __global__ void barrier_round_increment_kernel_(util::u32r1_span_t round,
     }
 }
 
-util::expected_t util::barrier_round_t::advance(util::gpu_stream_t& stream) noexcept {
+util::expected_t util::barrier_round_t::advance(util::executor_stream_t& stream) noexcept {
     return util::launch_kernel(&barrier_round_increment_kernel_, dim3 {1, 1, 1}, dim3 {1, 1, 1}, stream, device_round_,
                                increment_);
 }
@@ -129,29 +129,30 @@ util::expected<util::b8r1_tensor_arena_t> util::allocate_pack_bf16(std::size_t c
 }
 
 util::expected_t util::pack_bf16(util::bf16r2_view_t b, util::b8r1_span_t packed, util::gpu_numerics_t const& numerics,
-                                 util::gpu_stream_t& stream) noexcept {
+                                 util::executor_stream_t& stream) noexcept {
     std::size_t const columns = b.extent(0);
     return util::numkong_result(
         numerics.pack_bf16(nk::as_values<nk_bf16_t>(nk::as_bytes(b)).data(), columns, b.extent(1), b.stride_bytes(0),
-                           packed.data(), 0, columns, stream.numkong()),
+                           packed.data(), 0, columns, util::numkong_stream(stream)),
         "packing");
 }
 
 util::expected_t util::multiply_bf16(util::bf16r2_view_t a, util::b8r1_view_t packed_b, util::f32r2_span_t c,
-                                     util::gpu_numerics_t const& numerics, util::gpu_stream_t& stream) noexcept {
+                                     util::gpu_numerics_t const& numerics, util::executor_stream_t& stream) noexcept {
     if (c.extent(0) != a.extent(0))
         return util::expected_t::fail(util::status_code_t::unsupported_k, "[{}x{}]·Bᵀ cannot fill [{}x{}]", a.extent(0),
                                       a.extent(1), c.extent(0), c.extent(1));
     return util::numkong_result(
         numerics.multiply_bf16(nk::as_values<nk_bf16_t>(nk::as_bytes(a)).data(), packed_b.data(), c.data(), a.extent(0),
                                c.extent(1), a.extent(1), a.stride_bytes(0), c.stride_bytes(0), NUMKONG_NULL, 0,
-                               stream.numkong()),
+                               util::numkong_stream(stream)),
         "product");
 }
 
 util::expected_t util::pack_weight_bf16(util::bf16r2_view_t weight, util::bf16r1_span_t transposed,
                                         util::b8r1_span_t packed, util::b8r1_span_t packed_transposed,
-                                        util::gpu_numerics_t const& numerics, util::gpu_stream_t& stream) noexcept {
+                                        util::gpu_numerics_t const& numerics,
+                                        util::executor_stream_t& stream) noexcept {
     std::size_t const outputs = weight.extent(0), inputs = weight.extent(1);
     util::bf16r2_span_t const padded {transposed.data(), inputs, util::round_up_to_multiple(outputs, std::size_t {8})};
     util::bf16r2_span_t const weight_transposed = padded[nk::all, nk::range(0, outputs), nk::slice];
@@ -177,7 +178,8 @@ util::expected_t util::weight_gradient_bf16(util::bf16r2_view_t output_grad, uti
                                             util::bf16r2_span_t weight_grad, util::bf16r1_span_t transposed_grad,
                                             util::bf16r1_span_t transposed_input, util::b8r1_span_t packed_input,
                                             util::f32r1_span_t product, util::b8r1_span_t workspace,
-                                            util::gpu_numerics_t const& numerics, util::gpu_stream_t& stream) noexcept {
+                                            util::gpu_numerics_t const& numerics,
+                                            util::executor_stream_t& stream) noexcept {
     std::size_t const tokens = output_grad.extent(0), outputs = output_grad.extent(1), inputs = input.extent(1);
     std::size_t const padded_tokens = util::round_up_to_multiple(tokens, std::size_t {8});
     util::bf16r2_span_t const output_grad_padded {transposed_grad.data(), outputs, padded_tokens};
@@ -192,11 +194,11 @@ util::expected_t util::weight_gradient_bf16(util::bf16r2_view_t output_grad, uti
             numerics.multiply_bf16(nk::as_values<nk_bf16_t>(nk::as_bytes(output_grad_transposed)).data(),
                                    packed_input.data(), product.data(), outputs, inputs, tokens,
                                    output_grad_transposed.stride_bytes(0), inputs * sizeof(util::f32_t),
-                                   workspace.data(), workspace.extent(0), stream.numkong()),
+                                   workspace.data(), workspace.extent(0), util::numkong_stream(stream)),
             "weight gradient product");
     if (staged)
-        staged = util::numkong_result(
-            numerics.cast(product.data(), nk_f32_k, weight_grad.data(), nk_bf16_k, outputs * inputs, stream.numkong()),
-            "weight gradient narrowing");
+        staged = util::numkong_result(numerics.cast(product.data(), nk_f32_k, weight_grad.data(), nk_bf16_k,
+                                                    outputs * inputs, util::numkong_stream(stream)),
+                                      "weight gradient narrowing");
     return staged;
 }

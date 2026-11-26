@@ -339,7 +339,7 @@ util::expected_t util::gpu_symmetric_arena_t::adopt_peer(std::size_t member, CUm
 util::expected<util::multimem_domain_t> util::multimem_domain_t::make(util::mesh_topology_t& topology,
                                                                       std::span<util::i32_t const> local_devices,
                                                                       std::size_t payload_scalars,
-                                                                      std::span<util::gpu_stream_t> local_streams,
+                                                                      util::cuda_executor_t& local_streams,
                                                                       util::f64_t timeout_seconds) noexcept {
     using result_t = util::expected<util::multimem_domain_t>;
     std::size_t const local_count = local_devices.size();
@@ -369,8 +369,8 @@ util::expected<util::multimem_domain_t> util::multimem_domain_t::make(util::mesh
     // Host-side staging (creates, binds, memsets) needs a current context; the lead local stream
     // owns one — every VMM call names its device explicitly, so one context serves all. No stream
     // is retained: the domain outlives its bring-up streams by design.
-    util::switch_to_gpu_t gpu_scope {local_streams[0]};
-    if (!gpu_scope.ok())
+    [[maybe_unused]] util::status_t const gpu_scope = (local_streams.stream(0)).bind();
+    if (gpu_scope.failed())
         return result_t::fail(util::status_code_t::device_k, "context entry failed (device={})", local_devices[0]);
 
     util::multimem_domain_t domain;
@@ -529,7 +529,7 @@ util::expected<util::multimem_domain_t> util::multimem_domain_t::make(util::mesh
     return result_t {std::move(domain)};
 }
 
-util::expected_t util::multimem_domain_t::barrier(std::size_t member_index, util::gpu_stream_t& stream) noexcept {
+util::expected_t util::multimem_domain_t::barrier(std::size_t member_index, util::executor_stream_t& stream) noexcept {
     dim3 const one {1u, 1u, 1u};
     dim3 const warp {util::warp_size_k, 1u, 1u};
     switch (tier()) {
@@ -543,7 +543,8 @@ util::expected_t util::multimem_domain_t::barrier(std::size_t member_index, util
 }
 
 util::expected_t util::multimem_domain_t::reduce_scatter(std::size_t member_index, util::f32r1_span_t destination,
-                                                         std::size_t shard_begin, util::gpu_stream_t& stream) noexcept {
+                                                         std::size_t shard_begin,
+                                                         util::executor_stream_t& stream) noexcept {
     std::size_t const shard_scalars = destination.extent(0);
     if (shard_begin + shard_scalars > payload_scalars_)
         return util::expected_t::fail(util::status_code_t::unsupported_k,

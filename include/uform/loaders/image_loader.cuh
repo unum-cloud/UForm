@@ -48,7 +48,7 @@
 #include "uform/utilities/ram_device.hpp"           // `fu::pool_t` — the CPU-decode pool the composition root owns
 #include "uform/utilities/vram_nvidia_memory.hpp"   // `pinned_alloc` — the non-JPEG fallback's host tapes
 #include "uform/encoder/multimodal_batch.cuh"       // `multimodal_batch_on_gpu_t` — the decode target
-#include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
+#include "uform/utilities/vram_nvidia_schedule.cuh" // `executor_stream_t`, `launch_kernel`
 #include "uform/utilities/types.hpp"                // `expected`, `status_t`, `data_epoch_t`, `epoch_permutation`
 #include "uform/loaders/dataset_shards.hpp"         // `parquet_file_t`, `expand_glob`, `column_view_t`
 #include "uform/loaders/direct_storage.hpp"         // `gpu_direct_storage_session_t`
@@ -117,7 +117,8 @@ struct nvjpeg_session_t {
      *      the method fills nvJPEG's parallel arrays straight from them at the vendor boundary.
      *  @param[in,out] stream The stream the decode enqueues on.
      */
-    [[nodiscard]] expected_t decode_jpeg_batch(std::span<jpeg_entry_t const> entries, gpu_stream_t& stream) noexcept;
+    [[nodiscard]] expected_t decode_jpeg_batch(std::span<jpeg_entry_t const> entries,
+                                               executor_stream_t& stream) noexcept;
 
   private:
 
@@ -172,7 +173,7 @@ struct nvjpeg_session_t {
                                        pixel_patches_span_t pixels, image_shape_span_t shapes,
                                        u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
                                        modality_span_t segment_modality, u32r1_span_t dropped,
-                                       gpu_stream_t& stream) noexcept;
+                                       executor_stream_t& stream) noexcept;
 
 /** The Parquet image loader's baked knobs — a different config is a different loader. */
 struct image_loader_parquet_config_t {
@@ -229,7 +230,7 @@ struct image_loader_parquet_t {
      *  @param[out] batches Output batches whose @c images grid, @c image_shapes ,
      *      @c segment_offsets/lengths , and @c segment_modality get populated.
      */
-    [[nodiscard]] expected_t fill(gpu_stream_t& gpu_stream, nvjpeg_session_t& decoder,
+    [[nodiscard]] expected_t fill(executor_stream_t& gpu_stream, nvjpeg_session_t& decoder,
                                   image_loader_parquet_config_t config, u32_t gpu_rank, u32_t training_step,
                                   std::span<multimodal_batch_on_gpu_t> batches) noexcept;
 

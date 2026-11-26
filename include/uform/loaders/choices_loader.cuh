@@ -33,7 +33,7 @@
 
 #include "uform/utilities/vram_nvidia_memory.hpp"   // `gpu_alloc` — the per-fill scratch allocator
 #include "uform/encoder/multimodal_batch.cuh"       // `multimodal_batch_on_gpu_t`, `byte_pad_k`, `byte_mask_k`
-#include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
+#include "uform/utilities/vram_nvidia_schedule.cuh" // `executor_stream_t`, `launch_kernel`
 #include "uform/utilities/types.hpp"                // `expected`, `status_t`, `token_id_t`, `epoch_permutation`
 #include "uform/loaders/dataset_shards.hpp"         // `parquet_file_t`, `row_group_draw_t`, `expand_glob`
 #include "uform/loaders/direct_storage.hpp"         // `gpu_direct_storage_session_t`
@@ -90,7 +90,7 @@ struct choices_loader_parquet_t {
      *  - @c status_code_t::unsupported_k The batches have no choice columns, or the pool holds
      *    no well-formed row.
      */
-    [[nodiscard]] expected_t fill(gpu_stream_t& gpu_stream, u32_t gpu_rank, u32_t training_step,
+    [[nodiscard]] expected_t fill(executor_stream_t& gpu_stream, u32_t gpu_rank, u32_t training_step,
                                   std::span<multimodal_batch_on_gpu_t> batches) noexcept;
 
     /** The device bytes a fill's reservoir can take outside the arena. */

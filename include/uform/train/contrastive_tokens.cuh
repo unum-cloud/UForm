@@ -52,7 +52,7 @@
 #include "uform/utilities/infiniband_collectives.cuh" // `colocated_domain_t`, the cross-domain gathers and reduces
 #include "uform/utilities/multimem_collectives.cuh"   // `multimem_domain_t` — the main-owned level-1 surface
 #include "uform/encoder/multimodal_batch.hpp"         // `multimodal_batch_view_t`
-#include "uform/utilities/vram_nvidia_schedule.cuh"   // `gpu_stream_t`, `launch_kernel`, the NumKong products
+#include "uform/utilities/vram_nvidia_schedule.cuh"   // `executor_stream_t`, `launch_kernel`, the NumKong products
 #include "uform/utilities/types.hpp"                  // `expected_t`, `status_t`, `late_interaction_side_t`
 
 namespace unum::uform::train {
@@ -144,14 +144,14 @@ struct contrastive_tokens_t {
     [[nodiscard]] expected_t operator()(bf16r2_view_t token_vectors, u32r1_view_t token_offsets,
                                         multimodal_batch_view_t const& batch, contrastive_relations_view_t relations,
                                         contrastive_recipe_t recipe, f32r1_span_t loss_out,
-                                        bf16r2_span_t token_vectors_grad, gpu_stream_t& stream,
+                                        bf16r2_span_t token_vectors_grad, executor_stream_t& stream,
                                         f32r1_span_t log_inverse_temperature_grad = {},
                                         f32r1_span_t bias_grad = {}) noexcept;
 
     /** Lay out this GPU's query tile and documents from the token head's rows, and
      *  pack the documents. */
     [[nodiscard]] expected_t stage(bf16r2_view_t token_vectors, u32r1_view_t token_offsets,
-                                   multimodal_batch_view_t const& batch, gpu_stream_t& stream) noexcept;
+                                   multimodal_batch_view_t const& batch, executor_stream_t& stream) noexcept;
 
     /** This GPU's own query tile, as every GPU scores it. */
     [[nodiscard]] gpu_query_subgraph_t query_subgraph() const noexcept {
@@ -162,13 +162,14 @@ struct contrastive_tokens_t {
      *  documents into @p raw_scores @b [segments_per_gpu,segments_per_gpu] , query segments
      *  by document segments. */
     [[nodiscard]] expected_t score(std::size_t subgraph_index, gpu_query_subgraph_t const& subgraph,
-                                   f32r2_span_t raw_scores, gpu_stream_t& stream) noexcept;
+                                   f32r2_span_t raw_scores, executor_stream_t& stream) noexcept;
 
     /** Differentiate @ref score for @p subgraph under @p score_grad , the gradient of its raw
      *  scores: the query-tile force into @p query_grad , overwritten, and the document force added
      *  onto this GPU's own. */
     [[nodiscard]] expected_t force(std::size_t subgraph_index, gpu_query_subgraph_t const& subgraph,
-                                   f32r2_view_t score_grad, f32r2_span_t query_grad, gpu_stream_t& stream) noexcept;
+                                   f32r2_view_t score_grad, f32r2_span_t query_grad,
+                                   executor_stream_t& stream) noexcept;
 
     /** Turn the @b [1,subgraphs,segments,segments] raw score rows of this GPU's queries into the
      *  score gradient in place, through the pair loss over @p relations whose PAD columns are
@@ -176,13 +177,13 @@ struct contrastive_tokens_t {
      *  document spans and query count. */
     [[nodiscard]] expected_t relax(f32r4_span_t scores, contrastive_relations_view_t relations,
                                    contrastive_recipe_t recipe, u32r1_view_t world_document_lengths,
-                                   f32r1_view_t live_queries, f32r1_span_t loss_out, gpu_stream_t& stream,
+                                   f32r1_view_t live_queries, f32r1_span_t loss_out, executor_stream_t& stream,
                                    f32r1_span_t log_inverse_temperature_grad, f32r1_span_t bias_grad) noexcept;
 
     /** Fold this GPU's summed query-tile force and document force into @p token_vectors_grad . */
     [[nodiscard]] expected_t finish(f32r2_view_t query_grad, u32r1_view_t token_offsets,
                                     multimodal_batch_view_t const& batch, bf16r2_span_t token_vectors_grad,
-                                    gpu_stream_t& stream) noexcept;
+                                    executor_stream_t& stream) noexcept;
 
     /** @b [segments_per_gpu] this GPU's document token spans by segment, zero for the rest. */
     [[nodiscard]] u32r1_view_t document_lengths() const noexcept { return document_lengths_.view(); }
@@ -336,12 +337,11 @@ struct distributed_contrastive_tokens_t {
      */
     [[nodiscard]] static expected<distributed_contrastive_tokens_t> make(
         multimem_domain_t& domain, colocated_domain_t& colocated, std::span<gpu_arena_t> arenas,
-        std::span<gpu_stream_t> streams, contrastive_tokens_config_t config, gpu_numerics_t const& numerics,
+        cuda_executor_t& streams, contrastive_tokens_config_t config, gpu_numerics_t const& numerics,
         f64_t timeout_seconds = peer_timeout_seconds_k) noexcept;
 
     /** One step over every local GPU, enqueued phase by phase across @p inputs and @p streams . */
-    [[nodiscard]] expected_t operator()(std::span<gpu_tokens_inputs_t const> inputs,
-                                        std::span<gpu_stream_t> streams) noexcept;
+    [[nodiscard]] expected_t operator()(std::span<gpu_tokens_inputs_t const> inputs, cuda_executor_t& streams) noexcept;
 
     /** Rank @p rank 's @b [2·temperature_groups] world-summed temperature gradients,
      *  log-β then bias. */
@@ -395,12 +395,16 @@ struct distributed_contrastive_tokens_t {
     [[nodiscard]] f32r3_view_t world_scores_(std::size_t world_gpu, std::size_t block) noexcept;
 
     /** The step's phases for GPU @p rank , each enqueued before the barrier that closes it. */
-    [[nodiscard]] expected_t stage_(std::size_t rank, gpu_tokens_inputs_t const& inputs, gpu_stream_t& stream) noexcept;
-    [[nodiscard]] expected_t score_(std::size_t rank, gpu_tokens_inputs_t const& inputs, gpu_stream_t& stream) noexcept;
-    [[nodiscard]] expected_t relax_(std::size_t rank, gpu_tokens_inputs_t const& inputs, gpu_stream_t& stream) noexcept;
-    [[nodiscard]] expected_t force_(std::size_t rank, gpu_tokens_inputs_t const& inputs, gpu_stream_t& stream) noexcept;
+    [[nodiscard]] expected_t stage_(std::size_t rank, gpu_tokens_inputs_t const& inputs,
+                                    executor_stream_t& stream) noexcept;
+    [[nodiscard]] expected_t score_(std::size_t rank, gpu_tokens_inputs_t const& inputs,
+                                    executor_stream_t& stream) noexcept;
+    [[nodiscard]] expected_t relax_(std::size_t rank, gpu_tokens_inputs_t const& inputs,
+                                    executor_stream_t& stream) noexcept;
+    [[nodiscard]] expected_t force_(std::size_t rank, gpu_tokens_inputs_t const& inputs,
+                                    executor_stream_t& stream) noexcept;
     [[nodiscard]] expected_t reduce_(std::size_t rank, gpu_tokens_inputs_t const& inputs,
-                                     gpu_stream_t& stream) noexcept;
+                                     executor_stream_t& stream) noexcept;
 
     /** The baked geometry. */
     contrastive_tokens_config_t config_ {};

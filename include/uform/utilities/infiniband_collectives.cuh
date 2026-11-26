@@ -1159,7 +1159,7 @@ struct infiniband_reach_t {
      *  stage the links. The @p stream seeds the member's round scalar (ordered after its zero). */
     [[nodiscard]] static expected<infiniband_reach_t> make_(mesh_topology_t const& topology, u32_t member_index,
                                                             infiniband_nic_t& nic, gpu_arena_t& arena,
-                                                            gpu_stream_t& stream, heap_layout_t layout,
+                                                            executor_stream_t& stream, heap_layout_t layout,
                                                             sz::string_view_t key_prefix,
                                                             f64_t timeout_seconds) noexcept;
 
@@ -1180,7 +1180,7 @@ struct infiniband_reach_t {
     /** The one enqueued host write of a step: stage the round into the pinned cell and
      *  enqueue its upload — on @p stream , before this step's collective. A no-op on the
      *  zero-round single-domain identity. */
-    [[nodiscard]] expected_t advance(gpu_stream_t& stream) noexcept {
+    [[nodiscard]] expected_t advance(executor_stream_t& stream) noexcept {
         if (layout_.rounds == 0) return {};
         return round_.advance(stream);
     }
@@ -1201,7 +1201,7 @@ struct infiniband_reach_t {
      *  post-and-drain, wait, accumulate. Call @ref advance first, once per step. Zero rounds — the
      *  single-domain identity — enqueues nothing.
      */
-    [[nodiscard]] expected_t allreduce_sum(gpu_stream_t& stream) noexcept;
+    [[nodiscard]] expected_t allreduce_sum(executor_stream_t& stream) noexcept;
 
     /**
      *  @brief Device-initiated inter-domain all-gather of the domain-major blocks inside this
@@ -1211,7 +1211,7 @@ struct infiniband_reach_t {
      *  This domain's own block must already sit at its domain-major cell; after @c log2(D) rounds
      *  every block is filled. Call @ref advance first, once per step.
      */
-    [[nodiscard]] expected_t allgather(gpu_stream_t& stream) noexcept;
+    [[nodiscard]] expected_t allgather(executor_stream_t& stream) noexcept;
 
     /** This domain's outgoing block for @p destination_domain inside the send region — where the
      *  caller stages what @ref alltoall ships to that domain. @c destination_domain equal to this
@@ -1243,7 +1243,7 @@ struct infiniband_reach_t {
      *  @ref advance first, once per step. Two domains today — one pairwise exchange; beyond two
      *  needs the multi-hop schedule.
      */
-    [[nodiscard]] expected_t alltoall(gpu_stream_t& stream) noexcept;
+    [[nodiscard]] expected_t alltoall(executor_stream_t& stream) noexcept;
 
   private:
 
@@ -1341,7 +1341,7 @@ struct colocated_domain_t {
      *  @param[in] timeout_seconds Deadline on the coordinate and armed-peer rendezvous, and on
      *      every device-side flag wait and completion drain of the wired rounds.
      */
-    [[nodiscard]] expected<infiniband_reach_t> reach_(u32_t member_index, gpu_arena_t& arena, gpu_stream_t& stream,
+    [[nodiscard]] expected<infiniband_reach_t> reach_(u32_t member_index, gpu_arena_t& arena, executor_stream_t& stream,
                                                       infiniband_reach_t::heap_layout_t layout,
                                                       f64_t timeout_seconds) noexcept;
 
@@ -1366,7 +1366,8 @@ struct infiniband_all_reduce {
      *  endpoint per recursive-doubling round — a single-domain world gets the zero-round identity. */
     [[nodiscard]] static expected<infiniband_all_reduce> make(colocated_domain_t& domain, u32_t member_index,
                                                               gpu_arena_t& arena, std::size_t scalars,
-                                                              gpu_stream_t& stream, f64_t timeout_seconds) noexcept {
+                                                              executor_stream_t& stream,
+                                                              f64_t timeout_seconds) noexcept {
         using result_t = expected<infiniband_all_reduce>;
         infiniband_reach_t::heap_layout_t layout;
         layout.payload_bytes = scalars * sizeof(value_type_);
@@ -1386,7 +1387,7 @@ struct infiniband_all_reduce {
 
     /** Advance the round and enqueue the in-place cross-domain sum — one op
      *  per step, capture-safe. */
-    [[nodiscard]] expected_t operator()(gpu_stream_t& stream) noexcept {
+    [[nodiscard]] expected_t operator()(executor_stream_t& stream) noexcept {
         if (expected_t advanced = reach_.advance(stream); !advanced) return advanced;
         return reach_.allreduce_sum(stream);
     }
@@ -1411,7 +1412,8 @@ struct infiniband_all_gather {
      *  landing (blocks gather in place) — a single-domain world gets the zero-round identity. */
     [[nodiscard]] static expected<infiniband_all_gather> make(colocated_domain_t& domain, u32_t member_index,
                                                               gpu_arena_t& arena, std::size_t block_scalars,
-                                                              gpu_stream_t& stream, f64_t timeout_seconds) noexcept {
+                                                              executor_stream_t& stream,
+                                                              f64_t timeout_seconds) noexcept {
         using result_t = expected<infiniband_all_gather>;
         infiniband_reach_t::heap_layout_t layout;
         layout.payload_bytes = static_cast<std::size_t>(domain.multimem_domain_count()) * block_scalars *
@@ -1436,7 +1438,7 @@ struct infiniband_all_gather {
 
     /** Advance the round and enqueue the domain-major all-gather — one op
      *  per step, capture-safe. */
-    [[nodiscard]] expected_t operator()(gpu_stream_t& stream) noexcept {
+    [[nodiscard]] expected_t operator()(executor_stream_t& stream) noexcept {
         if (expected_t advanced = reach_.advance(stream); !advanced) return advanced;
         return reach_.allgather(stream);
     }
@@ -1459,7 +1461,8 @@ struct infiniband_all_to_all {
      *  needs the D-1 links (or a multi-hop schedule) the round wiring does not lay down. */
     [[nodiscard]] static expected<infiniband_all_to_all> make(colocated_domain_t& domain, u32_t member_index,
                                                               gpu_arena_t& arena, std::size_t block_scalars,
-                                                              gpu_stream_t& stream, f64_t timeout_seconds) noexcept {
+                                                              executor_stream_t& stream,
+                                                              f64_t timeout_seconds) noexcept {
         using result_t = expected<infiniband_all_to_all>;
         u32_t const domains = domain.multimem_domain_count();
         if (domains > 2u)
@@ -1496,7 +1499,7 @@ struct infiniband_all_to_all {
     }
 
     /** Advance the round and enqueue the all-to-all exchange — one op per step, capture-safe. */
-    [[nodiscard]] expected_t operator()(gpu_stream_t& stream) noexcept {
+    [[nodiscard]] expected_t operator()(executor_stream_t& stream) noexcept {
         if (expected_t advanced = reach_.advance(stream); !advanced) return advanced;
         expected_t exchanged = reach_.alltoall(stream);
         if (exchanged) ++exchanges_;
@@ -1518,10 +1521,10 @@ struct infiniband_all_to_all {
 struct infiniband_reach_t {
     [[nodiscard]] b8r1_span_t payload() noexcept { return {}; }
     [[nodiscard]] b8r1_span_t own_block() noexcept { return {}; }
-    [[nodiscard]] expected_t advance(gpu_stream_t&) noexcept { return {}; }
-    [[nodiscard]] expected_t allreduce_sum(gpu_stream_t&) noexcept { return {}; }
-    [[nodiscard]] expected_t allgather(gpu_stream_t&) noexcept { return {}; }
-    [[nodiscard]] expected_t alltoall(gpu_stream_t&) noexcept { return {}; }
+    [[nodiscard]] expected_t advance(executor_stream_t&) noexcept { return {}; }
+    [[nodiscard]] expected_t allreduce_sum(executor_stream_t&) noexcept { return {}; }
+    [[nodiscard]] expected_t allgather(executor_stream_t&) noexcept { return {}; }
+    [[nodiscard]] expected_t alltoall(executor_stream_t&) noexcept { return {}; }
     [[nodiscard]] b8r1_span_t send_block(u32_t) noexcept { return {}; }
     [[nodiscard]] b8r1_span_t recv_block(u32_t, u32_t) noexcept { return {}; }
     [[nodiscard]] bool identity() const noexcept { return true; }
@@ -1555,11 +1558,11 @@ template <typename value_type_>
 struct infiniband_all_reduce {
     using value_type = value_type_;
     [[nodiscard]] static expected<infiniband_all_reduce> make(colocated_domain_t&, u32_t, gpu_arena_t&, std::size_t,
-                                                              gpu_stream_t&, f64_t) noexcept {
+                                                              executor_stream_t&, f64_t) noexcept {
         return expected<infiniband_all_reduce> {infiniband_all_reduce {}};
     }
     [[nodiscard]] nk::tensor_span<value_type_, 1> payload() noexcept { return {}; }
-    [[nodiscard]] expected_t operator()(gpu_stream_t&) noexcept { return {}; }
+    [[nodiscard]] expected_t operator()(executor_stream_t&) noexcept { return {}; }
     [[nodiscard]] bool identity() const noexcept { return true; }
     [[nodiscard]] u32_t multimem_domain_count() const noexcept { return 1; }
 };
@@ -1567,24 +1570,24 @@ template <typename value_type_>
 struct infiniband_all_gather {
     using value_type = value_type_;
     [[nodiscard]] static expected<infiniband_all_gather> make(colocated_domain_t&, u32_t, gpu_arena_t&, std::size_t,
-                                                              gpu_stream_t&, f64_t) noexcept {
+                                                              executor_stream_t&, f64_t) noexcept {
         return expected<infiniband_all_gather> {infiniband_all_gather {}};
     }
     [[nodiscard]] nk::tensor_span<value_type_, 1> payload() noexcept { return {}; }
     [[nodiscard]] nk::tensor_span<value_type_, 1> own_block() noexcept { return {}; }
-    [[nodiscard]] expected_t operator()(gpu_stream_t&) noexcept { return {}; }
+    [[nodiscard]] expected_t operator()(executor_stream_t&) noexcept { return {}; }
 };
 template <typename value_type_>
 struct infiniband_all_to_all {
     using value_type = value_type_;
     [[nodiscard]] static expected<infiniband_all_to_all> make(colocated_domain_t&, u32_t, gpu_arena_t&, std::size_t,
-                                                              gpu_stream_t&, f64_t) noexcept {
+                                                              executor_stream_t&, f64_t) noexcept {
         return expected<infiniband_all_to_all> {infiniband_all_to_all {}};
     }
     [[nodiscard]] nk::tensor_span<value_type_, 1> send_block(u32_t) noexcept { return {}; }
     [[nodiscard]] u32_t latest_parity() const noexcept { return 0; }
     [[nodiscard]] nk::tensor_span<value_type_, 1> recv_block(u32_t, u32_t) noexcept { return {}; }
-    [[nodiscard]] expected_t operator()(gpu_stream_t&) noexcept { return {}; }
+    [[nodiscard]] expected_t operator()(executor_stream_t&) noexcept { return {}; }
 };
 
 #endif // UFORM_WITH_INFINIBAND

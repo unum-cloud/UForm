@@ -156,7 +156,8 @@ struct tower_pool_t {
      *  @param[in,out] stream The stream every launch enqueues on.
      */
     [[nodiscard]] expected_t forward(bf16r1_view_t query, bf16r2_view_t states, u32r1_view_t segment_offsets,
-                                     u32r1_view_t segment_lengths, bf16r2_span_t pooled, gpu_stream_t& stream) noexcept;
+                                     u32r1_view_t segment_lengths, bf16r2_span_t pooled,
+                                     executor_stream_t& stream) noexcept;
 
     /**
      *  @brief Differentiate the last @ref forward — pure enqueue: NumKong recomputes the weights from the
@@ -170,7 +171,8 @@ struct tower_pool_t {
      *  @param[in,out] stream The stream every launch enqueues on.
      */
     [[nodiscard]] expected_t backward(bf16r1_view_t query, bf16r2_view_t pooled_grad, f32r2_span_t key_grad,
-                                      f32r2_span_t value_grad, bf16r1_span_t query_grad, gpu_stream_t& stream) noexcept;
+                                      f32r2_span_t value_grad, bf16r1_span_t query_grad,
+                                      executor_stream_t& stream) noexcept;
 
   private:
 
@@ -218,7 +220,7 @@ struct tower_token_head_t {
      *  @param[in,out] stream The stream every launch enqueues on.
      */
     [[nodiscard]] expected_t forward(bf16r2_view_t states, multimodal_batch_view_t const& batch,
-                                     gpu_stream_t& stream) noexcept;
+                                     executor_stream_t& stream) noexcept;
 
     /**
      *  @brief Differentiate the last @ref forward , adding the force on the final-norm states into
@@ -234,18 +236,18 @@ struct tower_token_head_t {
      */
     [[nodiscard]] expected_t backward(bf16r2_view_t vectors_grad, multimodal_batch_view_t const& batch,
                                       f32r2_span_t states_grad, transformer_scratch_t& scratch,
-                                      gpu_stream_t& stream) noexcept;
+                                      executor_stream_t& stream) noexcept;
 
     /** Append @c token_head.norm and @c token_head.projection to @p weights . */
     [[nodiscard]] expected_t fill(st::basic_vector<differentiable_weights_t>& weights) noexcept;
 
     /** Pack the projection for its forward and data-gradient products, once per optimizer step. */
-    [[nodiscard]] expected_t pack_weights(bf16r1_span_t transposed, gpu_stream_t& stream) noexcept;
+    [[nodiscard]] expected_t pack_weights(bf16r1_span_t transposed, executor_stream_t& stream) noexcept;
 
     /** A copy of this head off @p arena for @p block 's capacities, its projection packed once for
      *  the forward of a twin whose weights never change. */
     [[nodiscard]] expected<tower_token_head_t> snapshot(gpu_arena_t& arena, transformer_block_config_t const& block,
-                                                        gpu_stream_t& stream) const noexcept;
+                                                        executor_stream_t& stream) const noexcept;
 
     /** @b [tokens,width] the unit token vectors of the last @ref forward . */
     [[nodiscard]] bf16r2_view_t token_vectors() const noexcept { return vectors_.view(); }
@@ -310,7 +312,7 @@ struct encoder_tower_bf16_t {
      *  @c normalized exposed). @b [segments,hidden] @p vertices ⇒ contrastive path (attention pool
      *  → head). */
     [[nodiscard]] expected_t forward(multimodal_batch_on_gpu_t const& batch, bf16r2_span_t vertices,
-                                     gpu_stream_t& stream) noexcept;
+                                     executor_stream_t& stream) noexcept;
 
     /** Tower backward from the loss's force to every weight-gradient buffer (and the embedding
      *  table's, deterministically). Populated @p vertices_grad drives the contrastive path; populated
@@ -319,7 +321,7 @@ struct encoder_tower_bf16_t {
      *  another forward in between. A populated @p token_vectors_grad , the gradient of
      *  @ref token_vectors , joins the same Float32 states' gradient through the token head. */
     [[nodiscard]] expected_t backward(bf16r2_view_t vertices_grad, bf16r2_view_t hidden_grad,
-                                      multimodal_batch_on_gpu_t const& batch, gpu_stream_t& stream,
+                                      multimodal_batch_on_gpu_t const& batch, executor_stream_t& stream,
                                       bf16r2_view_t token_vectors_grad = {}) noexcept;
 
     /** Stage each present media modality's raw pixels into the @b clean per-channel-normalized patch
@@ -330,7 +332,7 @@ struct encoder_tower_bf16_t {
      *  configured, its @p batch tensor is present, and its output span is non-empty; audio is not staged here —
      *  its reconstruction target is the raw @c batch.audio_samples frames the caller reshapes directly. */
     [[nodiscard]] expected_t patchify_media_targets(multimodal_batch_on_gpu_t const& batch, bf16r2_span_t image_patches,
-                                                    bf16r2_span_t video_patches, gpu_stream_t& stream) noexcept;
+                                                    bf16r2_span_t video_patches, executor_stream_t& stream) noexcept;
 
     /** Fill @p weights with every optimizer-facing weight in the canonical reduction order:
      *  entry → media projections → per-layer block weights → final norm → pool query → head.
@@ -346,12 +348,12 @@ struct encoder_tower_bf16_t {
     /** Pack every block's, head's and media projection's weights for NumKong's products — pure enqueue,
      *  capture-safe. Call once per optimizer step, after the weights change and before the first @ref forward ;
      *  every forward and backward of the step reuses the packs. */
-    [[nodiscard]] expected_t pack_weights(gpu_stream_t& stream) noexcept;
+    [[nodiscard]] expected_t pack_weights(executor_stream_t& stream) noexcept;
 
     /** Quantize this tower's block stack into the E4M3 inference twin (entries / pool / head stay
      *  BFloat16) — the twin's only constructor. */
     [[nodiscard]] expected<struct encoder_tower_e4m3_t> quantize_weights(gpu_arena_t& arena,
-                                                                         gpu_stream_t& stream) noexcept;
+                                                                         executor_stream_t& stream) noexcept;
 
     /** The per-token final-norm states — the masked head's input on the masked path. */
     [[nodiscard]] bf16r2_view_t normalized() const noexcept { return normalized_.view(); }
@@ -485,7 +487,7 @@ struct encoder_tower_e4m3_t {
     /** One quantized tower forward over @p batch — same dual-mode contract as the training twin,
      *  forward only, deriving its own per-token rotary @b (t,h,w) coordinates into @ref coords_ . */
     [[nodiscard]] expected_t forward(multimodal_batch_on_gpu_t const& batch, bf16r2_span_t vertices,
-                                     gpu_stream_t& stream) noexcept;
+                                     executor_stream_t& stream) noexcept;
 
     /** The per-token final-norm states — the masked head's input on the masked path. */
     [[nodiscard]] bf16r2_view_t normalized() const noexcept { return normalized_.view(); }
