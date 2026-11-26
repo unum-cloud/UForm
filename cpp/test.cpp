@@ -106,7 +106,9 @@ static void test_executors_and_arenas(fixture_t& fixture) {
     auto [arena, arena_status] = uf::arena_t::make({.executor = fixture.executor.handle()});
     expect_true(!arena_status.failed() && arena.handle());
     auto [description, describe_status] = arena.describe();
-    expect_true(!describe_status.failed() && description.residency == uform_residency_ram_k);
+    expect_true(!describe_status.failed() && description.residency == uform_residency_ram_k &&
+                description.device == -1 && description.vendor == uform_gpu_vendor_unknown_k &&
+                description.vendor_ordinal == -1 && description.host_access == uform_host_access_readable_k);
 
     // A moved arena leaves an empty owner behind, which frees nothing.
     uf::arena_t moved = std::move(arena);

@@ -338,7 +338,8 @@ static case_result_t device_variant_parity(encoder_verbs<residency_> const* verb
     else if (device.vendor == util::gpu_vendor_t::apple_k) {
         policy.handle = gpu_drivers().metal_contexts.context(static_cast<int>(device.vendor_ordinal));
         policy.allocate = [](nk_size_t bytes, void* context, nk_stream_t) noexcept -> void* {
-            return util::metal_allocate_pages(*static_cast<util::metal_context_t*>(context), bytes).data();
+            auto [address, status] = util::metal_allocate_block(*static_cast<util::metal_context_t*>(context), bytes);
+            return status.succeeded() ? reinterpret_cast<void*>(address) : nullptr;
         };
         policy.free = [](void* pages, nk_size_t, void* context, nk_stream_t) noexcept {
             util::metal_free_block(*static_cast<util::metal_context_t*>(context),

@@ -720,7 +720,7 @@ func (on TrainerDeferredOn) Save(path string, config *TrainerSaveConfig) (*Defer
 func (receiver trainerReceiver) step(call *callWithResult[Rows], completion C.uform_completion_t, modalities []Modality,
 	contents Tape, config *TrainerStepConfig) error {
 	options := configOf(config)
-	trainer, executor, outputsArena, err := receiver.lowerInto(options.Arena)
+	trainer, executor, outputsArena, err := receiver.lowerReadableInto(options.Arena)
 	if err != nil {
 		return err
 	}

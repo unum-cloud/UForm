@@ -112,6 +112,19 @@ test("executors: RAM spawns, while VRAM without a device refuses", () => {
   assert.throws(() => new Executor(Symbol(), {}), (error) => error.code === Status.InvalidArgument);
 });
 
+test("arenas describe where their outputs live and whether the host reads them", () => {
+  using arena = new Arena();
+  assert.deepStrictEqual(arena.describe(), {
+    residency: "ram",
+    device: null,
+    vendor: "unknown",
+    vendorOrdinal: null,
+    hostAccess: "readable",
+  });
+  arena.free();
+  throwsStatus(() => arena.describe(), Status.Uninitialized);
+});
+
 test("models load from paths and buffers and describe themselves", () => {
   const model = Model.loadRam(checkpointPath);
   const description = model.describe();

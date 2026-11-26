@@ -777,15 +777,21 @@ napi_value uform_js_executor_define(napi_env env) {
 
 #pragma region Arena
 
-/** Forgets every view handed out so far, detaching the live ones when @p should_detach asks. */
-static void uform_js_arena_forget(napi_env env, uform_js_arena_t* arena, bool should_detach) {
+/** Forgets every view handed out so far, leaving the live ones attached. */
+static void uform_js_arena_forget(napi_env env, uform_js_arena_t* arena) {
+    for (size_t view_index = 0; view_index != arena->views_count; ++view_index)
+        napi_delete_reference(env, arena->views[view_index]);
+    arena->views_count = 0;
+}
+
+/** Detaches every live view handed out so far, then forgets them all. */
+static void uform_js_arena_detach(napi_env env, uform_js_arena_t* arena) {
     for (size_t view_index = 0; view_index != arena->views_count; ++view_index) {
         napi_value buffer = NULL;
-        if (should_detach && napi_get_reference_value(env, arena->views[view_index], &buffer) == napi_ok && buffer)
+        if (napi_get_reference_value(env, arena->views[view_index], &buffer) == napi_ok && buffer)
             napi_detach_arraybuffer(env, buffer);
-        napi_delete_reference(env, arena->views[view_index]);
     }
-    arena->views_count = 0;
+    uform_js_arena_forget(env, arena);
 }
 
 /** Lets go of the executor a GPU arena held, once the arena's memory is freed. */
@@ -800,21 +806,23 @@ static void uform_js_arena_finalize(napi_env env, void* data, void* hint) {
     uform_js_arena_t* const arena = (uform_js_arena_t*)data;
     (void)hint;
     if (!arena) return;
-    uform_js_arena_forget(env, arena, false);
+    uform_js_arena_forget(env, arena);
     free(arena->views);
     uform_arena_free(arena->handle);
     uform_js_arena_unbind(env, arena);
     free(arena);
 }
 
-/** Where the outputs of @p arena live, as the library reports it; @c uform_residency_unknown_k
- *  with an exception pending when it refuses. */
-static uform_residency_t uform_js_arena_described(napi_env env, uform_js_arena_t const* arena) {
+/** Where the outputs of @p arena live, as the library reports it; residency
+ *  @c uform_residency_unknown_k with an exception pending when it refuses. */
+static uform_arena_description_t uform_js_arena_described(napi_env env, uform_js_arena_t const* arena) {
+    uform_arena_description_t const refused = {uform_residency_unknown_k, -1, uform_gpu_vendor_unknown_k, -1,
+                                               uform_host_access_refused_k};
     uform_outcome_t outcome = {uform_status_success_k, NULL};
-    uform_arena_description_t description = {uform_residency_unknown_k, -1};
+    uform_arena_description_t description = refused;
     uform_arena_describe_t describe = {.arena = arena->handle, .outcome = &outcome, .description = &description};
     uform_arena_describe(&describe);
-    return uform_js_succeeded(env, &outcome) ? description.residency : uform_residency_unknown_k;
+    return uform_js_succeeded(env, &outcome) ? description : refused;
 }
 
 /** @c Arena(executor) - empty memory where @p executor computes; host pages for the calling
@@ -838,7 +846,7 @@ static napi_value uform_js_arena_construct(napi_env env, napi_callback_info info
         free(arena);
         return NULL;
     }
-    uform_residency_t const residency = uform_js_arena_described(env, arena);
+    uform_residency_t const residency = uform_js_arena_described(env, arena).residency;
     if (residency == uform_residency_unknown_k) {
         uform_arena_free(arena->handle);
         free(arena);
@@ -865,13 +873,18 @@ static napi_value uform_js_arena_construct(napi_env env, napi_callback_info info
 }
 
 /** @c free() - releases the memory now, once every deferred call writing it is final, detaching
- *  every view still held into it; a second call is a no-op. */
+ *  every view still held into it; a second call is a no-op. While an export of the outputs is open
+ *  it throws @c uform_status_contended_k and frees nothing, so a later @c free retries. */
 static napi_value uform_js_arena_release(napi_env env, napi_callback_info info) {
     uform_js_arena_t* const arena = (uform_js_arena_t*)uform_js_self(env, info, 0, NULL, NULL);
     if (!arena) return NULL;
     if (!arena->handle) return uform_js_undefined(env);
-    uform_arena_free(arena->handle);
-    uform_js_arena_forget(env, arena, true);
+    uform_status_t const status = uform_arena_free(arena->handle);
+    if (status != uform_status_success_k) {
+        uform_js_throw(env, status, "an export of the arena's outputs is still open");
+        return NULL;
+    }
+    uform_js_arena_detach(env, arena);
     uform_js_arena_unbind(env, arena);
     arena->handle = NULL;
     arena->holder = NULL;
@@ -910,11 +923,11 @@ napi_value uform_js_arena_view(napi_env env, napi_value arena_value, napi_typeda
         uform_js_throw(env, uform_status_internal_k, "The Arena is not attached");
         return NULL;
     }
-    uform_residency_t const residency = uform_js_arena_described(env, arena);
-    if (residency == uform_residency_unknown_k) return NULL;
-    if (residency == uform_residency_vram_k) {
-        napi_get_null(env, &array);
-        return array;
+    uform_arena_description_t const description = uform_js_arena_described(env, arena);
+    if (description.residency == uform_residency_unknown_k) return NULL;
+    if (description.host_access != uform_host_access_readable_k) {
+        uform_js_throw(env, uform_status_device_k, "the outputs are memory the host may not read");
+        return NULL;
     }
     if (arena->views_count == arena->views_capacity) {
         size_t const capacity = arena->views_capacity ? arena->views_capacity * 2 : 4;
@@ -975,18 +988,34 @@ napi_value uform_js_offsets_view(napi_env env, napi_value arena, size_t const* o
                                (count + 1) * sizeof(size_t), count + 1);
 }
 
-/** @c residency → "ram" or "vram", where the executor that made it computes. */
-static napi_value uform_js_arena_residency(napi_env env, napi_callback_info info) {
+/** A device number, or @c null for the -1 of host pages. */
+static napi_value uform_js_ordinal(napi_env env, int32_t ordinal) {
+    napi_value value = NULL;
+    if (ordinal < 0) napi_get_null(env, &value);
+    else value = uform_js_number(env, (size_t)ordinal);
+    return value;
+}
+
+/** @c describe() → where the outputs live, as the executor that made the arena decided, and
+ *  whether host code may read them. */
+static napi_value uform_js_arena_describe(napi_env env, napi_callback_info info) {
     uform_js_arena_t const* const arena = (uform_js_arena_t const*)uform_js_self(env, info, 0, NULL, NULL);
     if (!arena) return NULL;
-    uform_residency_t const residency = uform_js_arena_described(env, arena);
-    if (residency == uform_residency_unknown_k) return NULL;
-    return uform_js_static_string(env, residency == uform_residency_vram_k ? "vram" : "ram");
+    uform_arena_description_t const description = uform_js_arena_described(env, arena);
+    if (description.residency == uform_residency_unknown_k) return NULL;
+    static char const* const names[] = {"residency", "device", "vendor", "vendorOrdinal", "hostAccess"};
+    napi_value const values[] = {
+        uform_js_static_string(env, description.residency == uform_residency_vram_k ? "vram" : "ram"),
+        uform_js_ordinal(env, description.device),
+        uform_js_static_string(env, uform_gpu_vendor_name(description.vendor)),
+        uform_js_ordinal(env, description.vendor_ordinal),
+        uform_js_static_string(env, uform_host_access_name(description.host_access))};
+    return uform_js_object(env, sizeof(names) / sizeof(names[0]), names, values);
 }
 
 napi_value uform_js_arena_define(napi_env env) {
     static napi_property_descriptor const properties[] = {
-        {"residency", NULL, NULL, uform_js_arena_residency, NULL, NULL, napi_default, NULL},
+        {"describe", NULL, uform_js_arena_describe, NULL, NULL, NULL, napi_default_method, NULL},
         {"free", NULL, uform_js_arena_release, NULL, NULL, NULL, napi_default_method, NULL},
     };
     napi_value arena_class = NULL;
@@ -1135,7 +1164,7 @@ napi_value uform_js_call_answer(napi_env env, uform_js_call_t* call, uform_js_ca
                                 napi_value const* slots, napi_value deferred) {
     uform_js_arena_t* const arena = call->arena;
     if (arena && uform_outcome_status(&call->outcome) != uform_status_contended_k) {
-        uform_js_arena_forget(env, arena, true);
+        uform_js_arena_detach(env, arena);
         arena->holder = call;
     }
     if (call != local) return deferred;

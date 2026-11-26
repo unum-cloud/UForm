@@ -64,6 +64,16 @@ inline void free_on_memory_domain(fu_memory_domain_id_t domain, bytes_span_t mem
     fu_free_on_domain_id(domain, memory.data(), memory.size());
 }
 
+/** How page-locked host pages were made, which names the verb that frees them. */
+enum class pinned_origin_t : u32_t {
+
+    /** Allocated and page-locked by the GPU runtime. */
+    runtime_k,
+
+    /** Placed on a memory domain, then registered with the GPU runtime. */
+    memory_domain_k,
+};
+
 /** The label the threads of every UForm pool have in the OS. */
 inline constexpr char const pool_name_k[] = "uform";
 

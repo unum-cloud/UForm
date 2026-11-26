@@ -451,9 +451,12 @@ struct hip_scratch_t {
     /** Device memory the call's layers compute in, grown in the stream's order. */
     chunked_arena_t activations;
 
-    /** Pinned host pages both the host and the device address, where a call packs what the device
-     *  reads. */
+    /** Pinned host pages on the memory domain nearest the device, which both the host and the
+     *  device address, where a call packs what the device reads. */
     chunked_arena_t transfers;
+
+    /** How the @ref transfers chunk was made, which its free follows. */
+    pinned_origin_t transfers_origin = pinned_origin_t::runtime_k;
 
     /** The ceiling on @ref activations , zero for none, which every @ref reserve checks. */
     std::size_t limit = 0;
@@ -495,12 +498,10 @@ struct hip_scratch_t {
         }
         if (transfers.room() < transfer_bytes) {
             free_transfers_(stream);
-            void* pages = nullptr;
-            if (stream.handle.api().host_malloc(&pages, transfer_bytes, hip_host_portable_k) != hip_success_k)
-                return {status_code_t::out_of_memory_k, "The host refused pinned pages"};
-            if (status_t const appended = transfers.append({static_cast<b8_t*>(pages), transfer_bytes});
-                appended.failed())
-                return stream.handle.api().host_free(pages), appended;
+            bytes_span_t const pages = allocate_pinned_(stream, transfer_bytes);
+            if (pages.empty()) return {status_code_t::out_of_memory_k, "The host refused pinned pages"};
+            if (status_t const appended = transfers.append(pages); appended.failed())
+                return free_pinned_(stream, pages), appended;
         }
         return {};
     }
@@ -524,8 +525,37 @@ struct hip_scratch_t {
     /** Frees the pinned transfers, which the last call's wait left unread. */
     template <typename stream_type_>
     void free_transfers_(stream_type_& stream) noexcept {
-        for (bytes_span_t const chunk : transfers.chunks()) stream.handle.api().host_free(chunk.data());
+        for (bytes_span_t const chunk : transfers.chunks()) free_pinned_(stream, chunk);
         transfers.forget();
+    }
+
+    /** Page-locks @p bytes on the memory domain nearest @p stream 's device, as the runtime found
+     *  it at load, or wherever the runtime picks when it found none or that domain refused them,
+     *  noting which in @ref transfers_origin ; empty when every way was refused. */
+    template <typename stream_type_>
+    bytes_span_t allocate_pinned_(stream_type_& stream, std::size_t bytes) noexcept {
+        auto const& api = stream.handle.api();
+        fu_memory_domain_id_t const domain = api.memory_domains[stream.ordinal];
+        if (domain != no_memory_domain_k) {
+            bytes_span_t const pages = allocate_on_memory_domain(domain, bytes);
+            if (!pages.empty() && api.host_register(pages.data(), bytes, hip_host_portable_k) == hip_success_k)
+                return transfers_origin = pinned_origin_t::memory_domain_k, pages;
+            if (!pages.empty()) free_on_memory_domain(domain, pages);
+        }
+        void* pages = nullptr;
+        if (api.host_malloc(&pages, bytes, hip_host_portable_k) != hip_success_k) return {};
+        transfers_origin = pinned_origin_t::runtime_k;
+        return {static_cast<b8_t*>(pages), bytes};
+    }
+
+    /** Frees @p pages , which @ref allocate_pinned_ took for @p stream 's device, through the verb
+     *  @ref transfers_origin names. */
+    template <typename stream_type_>
+    void free_pinned_(stream_type_& stream, bytes_span_t pages) noexcept {
+        auto const& api = stream.handle.api();
+        if (transfers_origin == pinned_origin_t::runtime_k) return void(api.host_free(pages.data()));
+        api.host_unregister(pages.data());
+        free_on_memory_domain(api.memory_domains[stream.ordinal], pages);
     }
 };
 
@@ -628,6 +658,23 @@ struct hip_executor_t {
             if (status_t const bound = bind(); bound.failed()) return bound;
             if (status_t const recorded = event.record(handle); recorded.failed()) return recorded;
             return event.wait();
+        }
+
+        /**
+         *  @brief Queues on this stream a wait for everything @p other queued so far, marking it
+         *      with its device bound, so work here follows work there without the host waiting;
+         *      the two may sit on different devices.
+         *
+         *  @par Statuses:
+         *  - @c device_k A device could not be bound, or the driver refused the mark or the wait.
+         */
+        status_t follow(stream_t& other) noexcept {
+            if (status_t const bound = other.bind(); bound.failed()) return bound;
+            if (status_t const recorded = other.event.record(other.handle); recorded.failed()) return recorded;
+            if (status_t const bound = bind(); bound.failed()) return bound;
+            if (handle.api().stream_wait_event(handle, other.event, 0) != hip_success_k)
+                return {status_code_t::device_k, "The stream refused to wait on the mark"};
+            return {};
         }
 
         /**

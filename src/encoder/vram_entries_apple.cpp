@@ -10,12 +10,12 @@
  *  which each device builds into one library at its first launch, under Metal 3.1. The Apple9 and
  *  Apple10 tiles and passes come from two more libraries, the Apple10 one under Metal 4.0.
  *
- *  Every kernel takes one argument record, its operands' GPU addresses first. A device view holds
- *  a GPU address, as a CUDA one holds a device pointer; a view of pinned pages holds their host
- *  address, which a launch turns into the GPU address of the same bytes. Both resolve through the
- *  buffers the device's context records, and a launch makes each buffer it touches resident. A
- *  copy or fill between device buffers runs as a kernel; one touching host memory waits for the
- *  stream's work and runs on the host, as memory is unified and no kernel is then needed.
+ *  Every kernel takes one argument record, its operands' GPU addresses first. Every view holds the
+ *  @c contents pointer of a shared buffer, which the host reads in place, and a launch turns it
+ *  into the GPU address of the same bytes through the buffers the device's context records, making
+ *  each buffer it touches resident. A copy or fill between registered buffers runs as a kernel; one
+ *  touching other host memory waits for the stream's work and runs on the host, as memory is
+ *  unified and no kernel is then needed.
  */
 #include <cstddef> // `std::size_t`
 #include <cstring> // `std::memcpy`, `std::memset`, `std::strncpy`
@@ -363,11 +363,10 @@ using stream_t = vram_apple_entries_kit_t::stream_t;
  *      address of a shared buffer, and makes it resident for @p launch when open.
  *
  *  Writes the GPU address of the same byte to @p address and the bytes the buffer holds from there
- *  to @p bytes , and answers whether the pointer is the host address, through @p host , or the
- *  host address the GPU address sits at.
+ *  to @p bytes , answering whether any buffer holds it.
  */
 [[nodiscard]] static bool resolve_(metal_context_t& context, metal_launch_t const* launch, void const* pointer,
-                                   u64_t& address, std::size_t& bytes, b8_t** host = nullptr) noexcept {
+                                   u64_t& address, std::size_t& bytes) noexcept {
     u64_t const wanted = reinterpret_cast<u64_t>(pointer);
     st::unique_lock<fu::fair_mutex_t> guard {context.lock};
     for (metal_buffer_t const& buffer : context.buffers.records()) {
@@ -380,7 +379,6 @@ using stream_t = vram_apple_entries_kit_t::stream_t;
         else continue;
         std::size_t const offset = static_cast<std::size_t>(wanted - first);
         address = device_first + offset, bytes = buffer.bytes - offset;
-        if (host) *host = buffer.host + offset;
         // The command buffer retains the buffer before the lock lets a free release it
         if (launch && *launch)
             metal_send<void>(*launch->api, launch->encoder, "useResource:usage:", buffer.handle,
@@ -390,27 +388,12 @@ using stream_t = vram_apple_entries_kit_t::stream_t;
     return false;
 }
 
-/** The host address of @p pointer : a GPU address any listed device's buffers hold becomes the
- *  host address of the same byte, and any other pointer is host memory already. */
-template <typename byte_type_>
-[[nodiscard]] static byte_type_* host_of_(byte_type_* pointer) noexcept {
-    util::metal_contexts_t& contexts = uf::gpu_drivers().metal_contexts;
-    for (std::size_t index = 0; index != contexts.count; ++index) {
-        u64_t address = 0;
-        std::size_t bytes = 0;
-        b8_t* host = nullptr;
-        if (resolve_(contexts.contexts[index], nullptr, pointer, address, bytes, &host))
-            return reinterpret_cast<byte_type_*>(host);
-    }
-    return pointer;
-}
-
-/** Whether @p pointer lies in device memory of @p context , as a GPU address of one of its
- *  buffers, rather than in host memory or pinned pages. */
+/** Whether @p pointer lies in a buffer @p context registered, which a kernel reaches, rather than
+ *  in other host memory. */
 [[nodiscard]] static bool on_device_(metal_context_t& context, void const* pointer) noexcept {
     u64_t address = 0;
     std::size_t bytes = 0;
-    return resolve_(context, nullptr, pointer, address, bytes) && address == reinterpret_cast<u64_t>(pointer);
+    return resolve_(context, nullptr, pointer, address, bytes);
 }
 
 /** One call's command buffer on @p stream , and the context of its device. */
@@ -1320,7 +1303,7 @@ nk_allocator_t ue::vram_apple_entries_kit_t::policy(vram_apple_entries_kit_t::st
     nk_allocator_t policy {};
     policy.handle = context_of_(stream);
     if (!policy.handle) return {};
-    // Device memory by GPU address, as CUDA hands out device pointers
+    // Shared buffers by their contents pointer, which launches resolve to GPU addresses
     policy.allocate = [](nk_size_t bytes, void* handle, nk_stream_t) noexcept -> void* {
         auto [address, status] = util::metal_allocate_block(*static_cast<metal_context_t*>(handle), bytes);
         return status.succeeded() ? reinterpret_cast<void*>(address) : nullptr;
@@ -1346,7 +1329,7 @@ nk_status_t ue::vram_apple_entries_kit_t::copy(bytes_span_t target, bytes_view_t
     if (source.empty()) return nk_success_k;
     metal_context_t* const context = context_of_(stream);
     if (!context) return nk_missing_gpu_k;
-    // Between device buffers a kernel copies in stream order; a host side waits for the stream
+    // Between registered buffers a kernel copies in stream order; other host memory waits for it
     if (on_device_(*context, target.data()) && on_device_(*context, source.data())) {
         bytes_arguments_t arguments;
         arguments.bytes = source.size();
@@ -1354,7 +1337,7 @@ nk_status_t ue::vram_apple_entries_kit_t::copy(bytes_span_t target, bytes_view_t
                        {target.data(), source.data()}, arguments);
     }
     if (nk_status_t const drained = drain_(*context, stream); drained != nk_success_k) return drained;
-    std::memcpy(host_of_(target.data()), host_of_(source.data()), source.size());
+    std::memcpy(target.data(), source.data(), source.size());
     return nk_success_k;
 }
 
@@ -1371,7 +1354,7 @@ nk_status_t ue::vram_apple_entries_kit_t::zero(bytes_span_t target,
                        {target.data(), nullptr}, arguments);
     }
     if (nk_status_t const drained = drain_(*context, stream); drained != nk_success_k) return drained;
-    std::memset(host_of_(target.data()), 0, target.size());
+    std::memset(target.data(), 0, target.size());
     return nk_success_k;
 }
 

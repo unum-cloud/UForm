@@ -17,6 +17,7 @@ from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from uform import (
     Arena,
+    ArenaDescription,
     Continuation,
     CPUClass,
     EncodeConfig,
@@ -26,6 +27,7 @@ from uform import (
     GPUClass,
     GPUDevice,
     GPUVendor,
+    HostAccess,
     LateInteractionSide,
     Library,
     Mesh,
@@ -171,6 +173,8 @@ def test_names_round_trip_through_the_library_and_refuse_strangers() raises:
     assert_equal(library.pair_loss_form_name(PairLossForm.SIGMOID), "sigmoid")
     assert_equal(library.late_interaction_side_name(LateInteractionSide.QUERY_AND_DOCUMENT), "query-and-document")
     assert_equal(library.gpu_vendor_name(GPUVendor.NVIDIA), "nvidia")
+    assert_equal(library.host_access_name(HostAccess.REFUSED), "refused")
+    assert_equal(library.host_access_name(HostAccess.READABLE), "readable")
     assert_equal(library.status_name(Status.UNINITIALIZED), "uninitialized")
     var refused = Status.SUCCESS
     try:
@@ -207,6 +211,24 @@ def test_executors_and_arenas_open_and_drain() raises:
     var inline_arena = Arena(library)
     var pooled_arena = Arena(executor)
     assert_true(inline_arena.describe().residency == Residency.RAM and pooled_arena.describe().device == -1)
+    var description = pooled_arena.describe()
+    assert_true(description.vendor == GPUVendor.UNKNOWN and description.vendor_ordinal == -1)
+    assert_true(description.host_access == HostAccess.READABLE)
+    description.host("a host arena")
+
+
+def test_host_reads_follow_host_access() raises:
+    """The stub makes only host arenas, so device descriptions are built by hand: host reads key on
+    `host_access` alone, never on the residency."""
+    var shared = ArenaDescription(Residency.VRAM, Int32(0), GPUVendor.APPLE, Int32(0), HostAccess.READABLE)
+    shared.host("Apple's shared memory")
+    var device = ArenaDescription(Residency.VRAM, Int32(0), GPUVendor.NVIDIA, Int32(0), HostAccess.REFUSED)
+    var refused = Status.SUCCESS
+    try:
+        device.host("device memory")
+    except error:
+        refused = error.status
+    assert_true(refused == Status.DEVICE, "device memory must never read as a host span")
 
 
 def test_a_missing_checkpoint_is_refused_with_its_status() raises:
@@ -785,6 +807,7 @@ def main() raises:
     suite.test[test_names_round_trip_through_the_library_and_refuse_strangers]()
     suite.test[test_gpu_devices_count_what_the_process_drives]()
     suite.test[test_executors_and_arenas_open_and_drain]()
+    suite.test[test_host_reads_follow_host_access]()
     suite.test[test_a_missing_checkpoint_is_refused_with_its_status]()
     suite.test[test_undecodable_bytes_are_refused]()
     suite.test[test_a_device_executor_needs_a_device]()

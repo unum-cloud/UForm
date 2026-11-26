@@ -82,6 +82,8 @@ struct Status(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     """Supplied bytes could not be decoded: a checkpoint, an image, a clip or a recording."""
     comptime INTERNAL = Self(10)
     """The library reported neither success nor a failure, which names a defect rather than a state."""
+    comptime OVERFLOW = Self(11)
+    """A count would pass the largest value its type holds."""
     comptime UNINITIALIZED = Self(12)
     """The handle the call operates on is missing, refused before any other check."""
     comptime CONFIG_MISMATCH = Self(13)
@@ -325,7 +327,19 @@ struct Residency(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     comptime RAM = Self(1)
     """Host pages, which the host reads directly."""
     comptime VRAM = Self(2)
-    """One GPU's memory, which only device code reads."""
+    """One GPU's memory, which the host reads only where `HostAccess` lets it."""
+
+
+@fieldwise_init
+struct HostAccess(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
+    """Whether host code may read an arena's outputs, `uform_host_access_t`."""
+
+    var code: c_int
+    """The raw `uform_host_access_t` value the ABI exchanges."""
+    comptime REFUSED = Self(0)
+    """Device memory the host must not read."""
+    comptime READABLE = Self(1)
+    """Host, pinned and managed memory, and Apple's shared memory, which the host reads directly."""
 
 
 @fieldwise_init
@@ -519,7 +533,10 @@ comptime Verb[Arguments: AnyType] = def(Pointer[Arguments, MutAnyOrigin]) thin a
 """Every struct verb: one argument structure named after it, its outputs written through its pointers."""
 
 comptime Release = def(Address) thin abi("C") -> None
-"""The positional `_free` family of executors, arenas, models, meshes and trainers; `NULL` is safe."""
+"""The positional `_free` family of executors, models, meshes and trainers; `NULL` is safe."""
+
+comptime ArenaFree = def(Address) thin abi("C") -> c_int
+"""`uform_arena_free`: `CONTENDED`, with nothing freed, while an export of the arena is open."""
 
 comptime OutcomeStatus = def(Pointer[Outcome, MutAnyOrigin]) thin abi("C") -> c_int
 """`uform_outcome_wait` and `uform_outcome_status`: an outcome's status, the first once it is final."""
@@ -1221,6 +1238,21 @@ struct ArenaDescription(ImplicitlyCopyable):
     """`RAM` for host pages, `VRAM` for one device's memory."""
     var device: Int32
     """The device ordinal, as `Executor.for_vram` takes it, or -1 for host pages."""
+    var vendor: GPUVendor
+    """The vendor whose memory it is, as `Library.gpu_devices` reports it; `UNKNOWN` for host pages."""
+    var vendor_ordinal: Int32
+    """The vendor's own device number, which Arrow and DLPack name, or -1 for host pages."""
+    var host_access: HostAccess
+    """Whether host reads of the outputs are allowed."""
+
+    def host(self, detail: StaticString) raises Error:
+        """Refuses memory the host may not read.
+
+        Raises:
+            `Error` with `DEVICE` when `host_access` is `REFUSED`.
+        """
+        if self.host_access != HostAccess.READABLE:
+            raise Error(Status.DEVICE, detail)
 
 
 @fieldwise_init
@@ -1260,9 +1292,10 @@ struct Arena[origin: ImmOrigin]:
     the holder's results readable.
 
     A result refuses every read with `INVALID_ARGUMENT` once a later call rewinds its arena, and a
-    result over a device arena refuses every host read with `DEVICE`. A device arena serves only
+    result over memory whose `host_access` is `REFUSED` refuses every host read with `DEVICE`. A device arena serves only
     calls on the executor that made it. An arena never outlives that executor: its origin points
-    at it, so Mojo frees the arena first.
+    at it, so Mojo frees the arena first. Its release cannot report a refused free, so the arena
+    must outlive every export opened on it.
 
     Parameters:
         origin: The executor that made it, untracked for `Arena(library)`, which no executor made.
@@ -1298,7 +1331,7 @@ struct Arena[origin: ImmOrigin]:
 
         The loader reference is surrendered only after the call, for the reason `Executor` records.
         """
-        self._library.symbols().arena_free(self._address)
+        _ = self._library.symbols().arena_free(self._address)
         _ = self._library^
 
     def _pointer(ref self) -> Pointer[Arena[ImmUntrackedOrigin], origin_of(self)]:
@@ -1309,7 +1342,9 @@ struct Arena[origin: ImmOrigin]:
     def describe(self) raises Error -> ArenaDescription:
         """Where its outputs live, as the executor that made it decided. Calls `uform_arena_describe`."""
         var description = stack_allocation[1, ArenaDescription]()
-        description[unsafe_offset=0] = ArenaDescription(Residency.RAM, Int32(-1))
+        description[unsafe_offset=0] = ArenaDescription(
+            Residency.RAM, Int32(-1), GPUVendor.UNKNOWN, Int32(-1), HostAccess.REFUSED
+        )
         var outcome = stack_allocation[1, Outcome]()
         outcome[unsafe_offset=0] = Outcome()
         _cross(
@@ -1334,9 +1369,8 @@ def _served[origin: MutOrigin](arena: Pointer[Arena[ImmUntrackedOrigin], origin]
 
 
 def _readable[origin: MutOrigin](arena: Pointer[Arena[ImmUntrackedOrigin], origin], generation: Int, detail: StaticString) raises Error:
-    """Refuses a host read of a result over device memory, or over an arena a later call rewound."""
-    if arena[].describe().residency == Residency.VRAM:
-        raise Error(Status.DEVICE, detail)
+    """Refuses a host read of a result over memory the host may not read, or over an arena a later call rewound."""
+    arena[].describe().host(detail)
     if arena[]._generation != generation:
         raise Error(Status.INVALID_ARGUMENT, detail)
 

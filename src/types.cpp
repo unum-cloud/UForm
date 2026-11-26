@@ -29,8 +29,8 @@ using namespace unum::uform;
 static bool hold_arena(uform_arena_t arena, uform_outcome_t const* call) noexcept {
     if (!arena) return true;
     uform_outcome_t const* holder = nullptr;
-    return fu::standard_atomic_ref<uform_outcome_t const*> {arena->holder}.compare_exchange_strong(
-               holder, call, std::memory_order_acquire) ||
+    // Sequentially consistent, as an export opening re-reads the holder after its own count
+    return fu::standard_atomic_ref<uform_outcome_t const*> {arena->holder}.compare_exchange_strong(holder, call) ||
            holder == call;
 }
 
@@ -99,6 +99,10 @@ uform_arena_t uf::claim_arena(uform_arena_t arena, uform_executor_t executor, st
         return propagate_error(uform_status_device_k, outcome, "Host pages serve no call computing on a GPU"), nullptr;
     if (!hold_arena(arena, outcome.published()))
         return propagate_error(uform_status_contended_k, outcome, "The arena serves another call"), nullptr;
+    // An export opened between the entry's check and the hold above sees the hold and backs out,
+    // or this load sees its count
+    if (fu::standard_atomic_ref<util::u32_t> {arena->exports}.load())
+        return propagate_error(uform_status_contended_k, outcome, "An export of the arena's outputs is open"), nullptr;
     for (void const* input : inputs)
         if (input && arena->chunks.contains(input))
             return propagate_error(uform_status_invalid_argument_k, outcome,
@@ -453,13 +457,36 @@ UFORM_EXPORT void uform_arena_init(uform_arena_init_t* arguments) {
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
 
-UFORM_EXPORT void uform_arena_free(uform_arena_t arena) {
-    if (!arena) return;
+UFORM_EXPORT uform_status_t uform_arena_free(uform_arena_t arena) {
+    if (!arena) return uform_status_success_k;
     host_verbs().wait_named_calls(&arena->named_calls);
+    if (fu::standard_atomic_ref<util::u32_t> {arena->exports}.load()) return uform_status_contended_k;
     if (!arena->executor) util::release_host_pages(arena->chunks);
     else std::visit([&](auto& gpus) noexcept { release_device_chunks(gpus, arena->chunks); }, arena->executor->device);
     arena->chunks.forget();
     delete arena;
+    return uform_status_success_k;
+}
+
+UFORM_EXPORT uform_status_t uform_arena_export_open(uform_arena_t arena) {
+    if (!arena) return uform_status_invalid_argument_k;
+    fu::standard_atomic_ref<util::u32_t> exports {arena->exports};
+    util::u32_t open = exports.load();
+    do
+        if (open == (std::numeric_limits<util::u32_t>::max)()) return uform_status_overflow_k;
+    while (!exports.compare_exchange_weak(open, open + 1));
+    // A call holding the arena may rewind it at any moment, so the count backs out
+    if (fu::standard_atomic_ref<uform_outcome_t const*> {arena->holder}.load())
+        return exports.fetch_sub(1), uform_status_contended_k;
+    return uform_status_success_k;
+}
+
+UFORM_EXPORT void uform_arena_export_close(uform_arena_t arena) {
+    if (!arena) return;
+    fu::standard_atomic_ref<util::u32_t> exports {arena->exports};
+    util::u32_t open = exports.load(std::memory_order_relaxed);
+    while (open &&
+           !exports.compare_exchange_weak(open, open - 1, std::memory_order_release, std::memory_order_relaxed));
 }
 
 UFORM_EXPORT void uform_arena_describe(uform_arena_describe_t* arguments) {
@@ -468,13 +495,20 @@ UFORM_EXPORT void uform_arena_describe(uform_arena_describe_t* arguments) {
         return propagate_error(uform_status_uninitialized_k, outcome, "The arena must not be null"), void();
     if (!arguments->description)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The description must not be null"), void();
-    *arguments->description = {uform_residency_ram_k, -1};
+    *arguments->description = {uform_residency_ram_k, -1, uform_gpu_vendor_unknown_k, -1, uform_host_access_readable_k};
     if (arguments->arena->executor)
         std::visit(
             [&]<typename executor_type_>(executor_type_ const& gpus) noexcept {
-                if constexpr (!std::is_same_v<executor_type_, std::monostate>)
+                if constexpr (!std::is_same_v<executor_type_, std::monostate>) {
+                    // Apple's GPU and CPU share one memory, so its device outputs stay readable
+                    constexpr uform_host_access_t host_access = executor_type_::vendor_k == util::gpu_vendor_t::apple_k
+                                                                    ? uform_host_access_readable_k
+                                                                    : uform_host_access_refused_k;
                     *arguments->description = {uform_residency_vram_k,
-                                               listed_ordinal_of<executor_type_>(gpus.stream(0))};
+                                               listed_ordinal_of<executor_type_>(gpus.stream(0)),
+                                               static_cast<uform_gpu_vendor_t>(executor_type_::vendor_k),
+                                               static_cast<int32_t>(gpus.stream(0).ordinal), host_access};
+                }
             },
             arguments->arena->executor->device);
     propagate_error(uform_status_success_k, outcome, nullptr);
@@ -496,6 +530,7 @@ UFORM_EXPORT char const* uform_status_name(uform_status_t status) {
     case uform_status_device_k: return "device";
     case uform_status_malformed_k: return "malformed";
     case uform_status_internal_k: return "internal";
+    case uform_status_overflow_k: return "overflow";
     case uform_status_uninitialized_k: return "uninitialized";
     case uform_status_config_mismatch_k: return "config-mismatch";
     case uform_status_contended_k: return "contended";
@@ -511,7 +546,7 @@ UFORM_EXPORT uform_status_t uform_status_from_name(uform_bytes_view_t name, ufor
         name,
         {uform_status_success_k, uform_status_deferred_k, uform_status_out_of_memory_k, uform_status_shape_mismatch_k,
          uform_status_unsupported_layout_k, uform_status_unknown_kind_k, uform_status_io_k, uform_status_device_k,
-         uform_status_malformed_k, uform_status_internal_k, uform_status_uninitialized_k,
+         uform_status_malformed_k, uform_status_internal_k, uform_status_overflow_k, uform_status_uninitialized_k,
          uform_status_config_mismatch_k, uform_status_contended_k, uform_status_cancelled_k, uform_status_unsupported_k,
          uform_status_invalid_argument_k},
         uform_status_name, status);
@@ -541,9 +576,9 @@ UFORM_EXPORT char const* uform_scalar_name(uform_scalar_t scalar) {
 UFORM_EXPORT uform_status_t uform_scalar_from_name(uform_bytes_view_t name, uform_scalar_t* scalar) {
     return read_name<uform_scalar_t>(
         name,
-        {uform_scalar_f64_k, uform_scalar_f32_k, uform_scalar_bf16_k, uform_scalar_f16_k, uform_scalar_e5m2_k,
-         uform_scalar_e4m3_k, uform_scalar_e3m2_k, uform_scalar_e2m3_k, uform_scalar_i8_k, uform_scalar_i4x2_k,
-         uform_scalar_i32_k, uform_scalar_u8_k, uform_scalar_u4x2_k, uform_scalar_u1x8_k},
+        {uform_scalar_unknown_k, uform_scalar_f64_k, uform_scalar_f32_k, uform_scalar_bf16_k, uform_scalar_f16_k,
+         uform_scalar_e5m2_k, uform_scalar_e4m3_k, uform_scalar_e3m2_k, uform_scalar_e2m3_k, uform_scalar_i8_k,
+         uform_scalar_i4x2_k, uform_scalar_i32_k, uform_scalar_u8_k, uform_scalar_u4x2_k, uform_scalar_u1x8_k},
         uform_scalar_name, scalar);
 }
 
@@ -611,6 +646,8 @@ UFORM_EXPORT char const* uform_gpu_class_name(uform_gpu_class_t gpu_class) {
 }
 
 UFORM_EXPORT uform_status_t uform_gpu_class_from_name(uform_bytes_view_t name, uform_gpu_class_t* gpu_class) {
+    if (gpu_class && named(name, uform_gpu_class_name(uform_gpu_class_unknown_k)))
+        return *gpu_class = uform_gpu_class_unknown_k, uform_status_success_k;
     return read_name<uform_gpu_class_t>(name, gpu_classes_k, uform_gpu_class_name, gpu_class);
 }
 
@@ -628,6 +665,23 @@ UFORM_EXPORT uform_status_t uform_gpu_vendor_from_name(uform_bytes_view_t name, 
     return read_name<uform_gpu_vendor_t>(
         name, {uform_gpu_vendor_unknown_k, uform_gpu_vendor_nvidia_k, uform_gpu_vendor_amd_k, uform_gpu_vendor_apple_k},
         uform_gpu_vendor_name, vendor);
+}
+
+UFORM_EXPORT char const* uform_host_access_name(uform_host_access_t host_access) {
+    switch (host_access) {
+    case uform_host_access_refused_k: return "refused";
+    case uform_host_access_readable_k: return "readable";
+    }
+    return "unrecognized";
+}
+
+UFORM_EXPORT char const* uform_residency_name(uform_residency_t residency) {
+    switch (residency) {
+    case uform_residency_unknown_k: return "unknown";
+    case uform_residency_ram_k: return "ram";
+    case uform_residency_vram_k: return "vram";
+    }
+    return "unrecognized";
 }
 
 UFORM_EXPORT char const* uform_modality_name(uform_modality_t modality) {

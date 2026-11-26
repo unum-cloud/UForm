@@ -83,6 +83,7 @@ from uform.types import (
     GPUClass,
     GPUDevice,
     GPUVendor,
+    HostAccess,
     Mood,
     Progress,
     RamOptions,

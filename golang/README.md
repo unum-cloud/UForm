@@ -170,7 +170,8 @@ Every output whose length only the call knows, the embeddings, the states and th
 `uform.NewArena(executor)` places it where that executor computes, decided once, and `uform.NewArena(nil)` makes host pages for the calling goroutine.
 Each call rewinds its arena, so the previous call's views and every slice they handed out end there, and a steady loop allocates once.
 To keep a result past the next call, pass that call another arena; an arena serves one call at a time, so each deferred call needs its own.
-An arena from a VRAM executor holds device memory, which `Describe` reports as `ResidencyVram` and no Go code may read.
+An arena from a VRAM executor holds device memory, which `Describe` reports as `ResidencyVram`; where its `HostAccess` is `HostAccessRefused` no Go code may read it, so a verb given that arena fails with `StatusDevice` before it runs, while managed memory and Apple's shared memory read like host pages.
+The Go binding has no pointer accessor or device export that could hand device outputs on unread, so CUDA and HIP device arenas are not usable from Go.
 An arena never outlives the executor that made it, so `defer executor.Close()` comes before `defer arena.Close()`, and an arena from `uform.NewArena(nil)` lives until it is closed.
 
 ```go

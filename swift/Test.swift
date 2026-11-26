@@ -146,6 +146,8 @@ struct VocabularyTests {
             #expect(GPUVendor(name: vendor.description) == vendor)
         }
         #expect(GPUVendor(name: "intel") == nil)
+        #expect(HostAccess.refused.description == "refused")
+        #expect(HostAccess.readable.description == "readable")
         #expect(CPUClass.intelHaswell.description == "intel-haswell")
         #expect(CPUClass(name: "wasm64-extended") == .wasm64Extended)
         #expect(CPUClass(name: "pentium") == nil)
@@ -175,8 +177,10 @@ struct ExecutorTests {
     @Test func factoriesMirrorTheirConstructors() throws {
         let executor = try Executor.forRam(memoryDomains: [], threads: 2)
         try executor.drain(mood: .spinning)
-        _ = try Arena(on: executor)
-        _ = try Arena()
+        let host = try Arena(on: executor).placement
+        #expect(host.residency == .ram && host.device == nil && host.vendorOrdinal == nil)
+        #expect(host.vendor == .unknown && host.hostAccess == .readable)
+        #expect(try Arena().placement == host)
         #expect(failureStatus(of: try Executor.forVram(devices: [0])) == .device)
         // The streams cross behind a pointer that has no count, so the binding counts them.
         #expect(failureStatus(of: try Executor.forVram(devices: [0, 1], streams: [nil])) == .shapeMismatch)

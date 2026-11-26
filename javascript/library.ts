@@ -15,7 +15,7 @@ import build from "node-gyp-build";
 import * as path from "path";
 import { existsSync } from "fs";
 import { getFileName, getRoot } from "bindings";
-import type { GpuVendor, LateInteractionSide, MultimemTier } from "./types.js";
+import type { ArenaDescription, GpuVendor, LateInteractionSide, MultimemTier } from "./types.js";
 
 /** The C `uform_completion_t` a verb is submitted with: `0` blocks, `1` defers. */
 export type Completion = 0 | 1;
@@ -37,7 +37,7 @@ export interface CompiledExecutor {
 /** Memory every output whose length scales with a call lands in, made where
  *  its executor computes. */
 export interface CompiledArena {
-  readonly residency: string;
+  describe(): ArenaDescription;
   free(): void;
 }
 

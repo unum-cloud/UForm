@@ -45,6 +45,10 @@ struct uform_arena_handle_t {
     /** The outcome of the call holding the arena, null while free; read and written under
      *  the running calls' lock. */
     uform_outcome_t const* holder = nullptr;
+
+    /** Open exports of the outputs, which refuse every call naming the arena and its free; read
+     *  and written under the running calls' lock. */
+    std::uint32_t exports = 0;
 };
 
 /** What @c uform_model_t owns: the geometry a checkpoint would hold, and the bytes it
@@ -188,8 +192,8 @@ void run_holding(call_t call, uform_outcome_t* outcome);
 /** Returns once no running call names @p handle. */
 void wait_for_calls_using(void const* handle);
 
-/** Holds @p arena for the call whose outcome is @p call, answering whether that call holds it now.
- *  A null arena holds nothing, left for the verb to refuse. */
+/** Holds @p arena for the call whose outcome is @p call, answering whether that call holds it now;
+ *  no call holds it while an export is open, and a null arena holds nothing, left for the verb. */
 bool hold_arena(uform_arena_t arena, uform_outcome_t const* call);
 
 /** Arguments naming a model, an arena, a mesh or a trainer, each a handle the call may hold. */
@@ -241,7 +245,8 @@ bool through_executor(arguments_* arguments) {
 inline uform_arena_handle_t* claim_arena(uform_arena_t arena, uform_outcome_t const* call,
                                          std::initializer_list<void const*> inputs, uform_outcome_t* outcome) {
     if (reject_if(!arena, uform_status_invalid_argument_k, "The arena must not be null", outcome)) return nullptr;
-    if (reject_if(!hold_arena(arena, call), uform_status_contended_k, "The arena serves another call", outcome))
+    if (reject_if(!hold_arena(arena, call), uform_status_contended_k, "The arena serves another call or an open export",
+                  outcome))
         return nullptr;
     std::byte const* const begin = arena->memory.get();
     for (void const* input : inputs) {

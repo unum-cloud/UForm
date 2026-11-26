@@ -29,10 +29,12 @@ export {
   gpuDevices,
 } from "./types.js";
 export type {
+  ArenaDescription,
   ExecutorForRamConfig,
   ExecutorForVramConfig,
   GpuDevice,
   GpuVendor,
+  HostAccess,
   MultimemTier,
   UFormError,
 } from "./types.js";

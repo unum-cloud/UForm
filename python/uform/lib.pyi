@@ -63,6 +63,7 @@ class Status(IntEnum):
     DEVICE = 8
     MALFORMED = 9
     INTERNAL = 10
+    OVERFLOW = 11
     UNINITIALIZED = 12
     CONFIG_MISMATCH = 13
     CONTENDED = 14
@@ -253,6 +254,9 @@ class MalformedError(Error, ValueError):
 class InternalError(Error):
     """The library reported neither success nor a failure - a defect."""
 
+class CapacityOverflowError(Error, OverflowError):
+    """A count would pass the largest value its type holds."""
+
 class UninitializedError(Error):
     """The handle the call operates on is missing, refused before any other check."""
 
@@ -329,7 +333,7 @@ class ArenaBuffer:
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
     def __buffer__(self, flags: int, /) -> memoryview:
-        """Host memory only; device memory raises `DeviceError`. Valid until the next call rewinds the arena."""
+        """Memory the host may read only; other memory raises `BufferError`. Valid until the next call rewinds the arena."""
         ...
 
     def __len__(self) -> int:

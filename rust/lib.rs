@@ -51,6 +51,6 @@ pub use train::{
 };
 pub use types::{
     Arena, ArenaDescription, Blocking, CPUClass, Deferred, Deferring, Element, Error, Executor, GPUClass, GPUDevice,
-    GPUVendor, Mood, On, Progress, Residency, Result, Rows, RowsTape, Scalar, Status, Tape, capabilities_available,
-    capabilities_compiled, gpu_devices, version,
+    GPUVendor, HostAccess, Mood, On, Progress, Residency, Result, Rows, RowsTape, Scalar, Status, Tape,
+    capabilities_available, capabilities_compiled, gpu_devices, version,
 };

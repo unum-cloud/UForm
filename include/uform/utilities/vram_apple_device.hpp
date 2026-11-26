@@ -484,7 +484,8 @@ inline status_t metal_register_(metal_context_t& context, metal_buffer_t&& buffe
 
 /**
  *  @brief Allocates @p bytes of shared storage on @p context 's device and registers it, answering
- *      its GPU address, which launches bind, through @p into .
+ *      its @c contents pointer, which the host reads and writes in place and a launch resolves to
+ *      the buffer's GPU address through the registry.
  *
  *  @par Statuses:
  *  - @c out_of_memory_k The device refused the buffer, or the registry is full.
@@ -492,21 +493,10 @@ inline status_t metal_register_(metal_context_t& context, metal_buffer_t&& buffe
 inline expected<std::uintptr_t> metal_allocate_block(metal_context_t& context, std::size_t bytes) noexcept {
     metal_buffer_t buffer = metal_allocate(context, bytes);
     if (!buffer) return {{}, {status_code_t::out_of_memory_k, "The device refused a buffer"}};
-    std::uintptr_t const address = metal_send<u64_t>(*context.api, buffer.handle, "gpuAddress");
+    std::uintptr_t const address = reinterpret_cast<std::uintptr_t>(buffer.host);
     if (status_t const registered = metal_register_(context, std::move(buffer)); registered.failed())
         return {{}, registered};
     return {std::uintptr_t {address}, status_code_t::success_k};
-}
-
-/** Allocates @p bytes of shared storage on @p context 's device and registers it, answering the
- *  host bytes it spans, where the host packs what the device reads; empty when the device refused
- *  the buffer or the registry is full. */
-inline bytes_span_t metal_allocate_pages(metal_context_t& context, std::size_t bytes) noexcept {
-    metal_buffer_t buffer = metal_allocate(context, bytes);
-    if (!buffer) return {};
-    b8_t* const host = buffer.host;
-    if (metal_register_(context, std::move(buffer)).failed()) return {};
-    return {host, bytes};
 }
 
 /** Releases the registered buffer @p address starts, its GPU or its host address; committed work
@@ -526,16 +516,16 @@ inline void metal_free_block(metal_context_t& context, std::uintptr_t address) n
 }
 
 /**
- *  @brief UForm's memory on one Apple stream: the activations a call computes in, by GPU address,
- *      and the transfers it packs what the device reads into, by host address, both in shared
- *      buffers of the stream's device.
+ *  @brief UForm's memory on one Apple stream: the activations a call computes in and the transfers
+ *      it packs what the device reads into, both shared buffers of the stream's device handed out
+ *      by their @c contents pointers.
  *
  *  Both only hand out what @ref reserve grew them by before a call allocates, and @ref release
  *  frees them after the stream drained.
  */
 struct metal_scratch_t {
 
-    /** Shared buffers the call's layers compute in, handed out by GPU address. */
+    /** Shared buffers the call's layers compute in, handed out by their @c contents pointers. */
     chunked_arena_t activations;
 
     /** Shared buffers the host packs what the device reads into, handed out by host address. */
@@ -583,10 +573,11 @@ struct metal_scratch_t {
         }
         if (transfers.room() < transfer_bytes) {
             free_buffers_(*context, transfers);
-            bytes_span_t const pages = metal_allocate_pages(*context, transfer_bytes);
-            if (pages.empty()) return {status_code_t::out_of_memory_k, "The device refused pinned pages"};
-            if (status_t const appended = transfers.append(pages); appended.failed())
-                return metal_free_block(*context, reinterpret_cast<std::uintptr_t>(pages.data())), appended;
+            auto [address, allocate_status] = metal_allocate_block(*context, transfer_bytes);
+            if (allocate_status.failed()) return allocate_status;
+            if (status_t const appended = transfers.append({reinterpret_cast<b8_t*>(address), transfer_bytes});
+                appended.failed())
+                return metal_free_block(*context, address), appended;
         }
         return {};
     }
@@ -780,6 +771,16 @@ struct metal_executor_t {
             if (state != completed_k) return {status_code_t::device_k, "The device failed the committed work"};
             return {};
         }
+
+        /**
+         *  @brief Orders this stream after everything @p other committed so far. Metal has no
+         *      event entry here, so it waits on @p other from the host, and the follow is done
+         *      once it returns.
+         *
+         *  @par Statuses:
+         *  - @c device_k @p other names no device, or the device failed its work.
+         */
+        status_t follow(stream_t& other) noexcept { return other.wait(); }
 
         /**
          *  @brief Allocates @p bytes of shared storage on this stream's device through its buffer

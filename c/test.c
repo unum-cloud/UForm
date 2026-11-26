@@ -315,6 +315,7 @@ static void test_library_probes(void) {
         uform_status_cancelled_k,
         uform_status_unsupported_k,
         uform_status_invalid_argument_k,
+        uform_status_overflow_k,
     };
     for (size_t position = 0; position != sizeof(statuses) / sizeof(statuses[0]); ++position) {
         uform_status_t read = uform_status_internal_k;
@@ -386,6 +387,26 @@ static void test_library_probes(void) {
     expect_(uform_pair_loss_form_from_name(view_of("steep"), &untouched_form) == uform_status_invalid_argument_k &&
             untouched_form == uform_pair_loss_form_ranked_k);
     expect_(strcmp(uform_gpu_vendor_name((uform_gpu_vendor_t)7), "unrecognized") == 0);
+    expect_(strcmp(uform_host_access_name(uform_host_access_refused_k), "refused") == 0);
+    expect_(strcmp(uform_host_access_name(uform_host_access_readable_k), "readable") == 0);
+    expect_(strcmp(uform_host_access_name((uform_host_access_t)2), "unrecognized") == 0);
+    expect_(strcmp(uform_residency_name(uform_residency_ram_k), "ram") == 0 &&
+            strcmp(uform_residency_name(uform_residency_vram_k), "vram") == 0);
+    expect_(strcmp(uform_residency_name(uform_residency_unknown_k), "unknown") == 0);
+    expect_(strcmp(uform_residency_name((uform_residency_t)3), "unrecognized") == 0);
+    // Every enum declaring an unknown value spells it "unknown" and reads that spelling back.
+    uform_scalar_t unknown_scalar = uform_scalar_f32_k;
+    uform_cpu_class_t unknown_cpu_class = uform_cpu_class_serial_k;
+    uform_gpu_class_t unknown_gpu_class = uform_gpu_class_nvidia_ampere_k;
+    uform_gpu_vendor_t unknown_vendor = uform_gpu_vendor_nvidia_k;
+    expect_(uform_scalar_from_name(view_of("unknown"), &unknown_scalar) == uform_status_success_k &&
+            unknown_scalar == uform_scalar_unknown_k);
+    expect_(uform_cpu_class_from_name(view_of("unknown"), &unknown_cpu_class) == uform_status_success_k &&
+            unknown_cpu_class == uform_cpu_class_unknown_k);
+    expect_(uform_gpu_class_from_name(view_of("unknown"), &unknown_gpu_class) == uform_status_success_k &&
+            unknown_gpu_class == uform_gpu_class_unknown_k);
+    expect_(uform_gpu_vendor_from_name(view_of("unknown"), &unknown_vendor) == uform_status_success_k &&
+            unknown_vendor == uform_gpu_vendor_unknown_k);
 
     // Classes fit a byte, so walking every byte meets each class and every gap between blocks;
     // the CPU walk starts at "unknown", which a pin spells too.
@@ -1216,17 +1237,37 @@ static void test_arenas(void) {
     expect_(outcome.status == uform_status_invalid_argument_k);
     expect_(embeddings.data == NULL);
 
-    uform_arena_description_t placement = {uform_residency_unknown_k, 0};
+    uform_arena_description_t placement = {uform_residency_unknown_k, 0, uform_gpu_vendor_apple_k, 0,
+                                           uform_host_access_refused_k};
     uform_arena_describe(
         &(uform_arena_describe_t) {.arena = outputs.arena, .outcome = &outcome, .description = &placement});
     expect_(outcome.status == uform_status_success_k && placement.residency == uform_residency_ram_k &&
-            placement.device == -1);
+            placement.device == -1 && placement.vendor == uform_gpu_vendor_unknown_k &&
+            placement.vendor_ordinal == -1 && placement.host_access == uform_host_access_readable_k);
     uform_arena_describe(&(uform_arena_describe_t) {.arena = NULL, .outcome = &outcome, .description = &placement});
     expect_(outcome.status == uform_status_uninitialized_k);
     uform_arena_describe(&(uform_arena_describe_t) {.arena = outputs.arena, .outcome = &outcome, .description = NULL});
     expect_(outcome.status == uform_status_invalid_argument_k);
 
-    uform_arena_free(outputs.arena);
+    // An open export refuses every call naming the arena and its free, until the last one closes.
+    expect_(uform_arena_export_open(NULL) == uform_status_invalid_argument_k);
+    expect_(uform_arena_export_open(outputs.arena) == uform_status_success_k);
+    expect_(uform_arena_export_open(outputs.arena) == uform_status_success_k);
+    encode_texts(model, executor, uform_completion_blocking_k, &texts, &outputs, silent);
+    expect_(outputs.outcome.status == uform_status_contended_k);
+    expect_(uform_arena_free(outputs.arena) == uform_status_contended_k);
+    uform_arena_describe(
+        &(uform_arena_describe_t) {.arena = outputs.arena, .outcome = &outcome, .description = &placement});
+    expect_(outcome.status == uform_status_success_k);
+    uform_arena_export_close(outputs.arena);
+    expect_(uform_arena_free(outputs.arena) == uform_status_contended_k);
+    uform_arena_export_close(outputs.arena);
+    uform_arena_export_close(outputs.arena); // a close past the last open leaves the count at zero
+    uform_arena_export_close(NULL);
+    encode_texts(model, executor, uform_completion_blocking_k, &texts, &outputs, silent);
+    expect_at(!outputs.outcome.message, __FILE__, __LINE__, outputs.outcome.message);
+
+    expect_(uform_arena_free(outputs.arena) == uform_status_success_k);
     uform_model_free(model);
     uform_executor_free(executor);
 }

@@ -88,6 +88,8 @@ const (
 	StatusMalformed Status = C.uform_status_malformed_k
 	// StatusInternal means the library reported neither success nor a failure.
 	StatusInternal Status = C.uform_status_internal_k
+	// StatusOverflow means a count would pass the largest value its type holds.
+	StatusOverflow Status = C.uform_status_overflow_k
 	// StatusUninitialized means the handle the call operates on is closed or was never opened.
 	StatusUninitialized Status = C.uform_status_uninitialized_k
 	// StatusConfigMismatch means the request contradicts a frozen configuration.
@@ -298,8 +300,8 @@ func scalarOf[Value Element]() Scalar {
 
 // region: Rows
 
-// Rows is a run of rows a call wrote packed into its arena, one per item, readable until the
-// arena serves another call. Rows over a GPU arena hold device memory, which no Go code may read.
+// Rows is a run of rows a call wrote packed into its arena, one per item, readable until the arena
+// serves another call. A call into an arena the host may not read is refused before it runs.
 //
 // Mirrors uform_rows_view_t, beside the count the call was given.
 type Rows struct {
@@ -545,9 +547,24 @@ const (
 	ResidencyUnknown Residency = C.uform_residency_unknown_k
 	// ResidencyRam is host pages, which Go code reads directly.
 	ResidencyRam Residency = C.uform_residency_ram_k
-	// ResidencyVram is one GPU's memory, which only device code reads.
+	// ResidencyVram is one GPU's memory, which Go code reads only where HostAccess lets it.
 	ResidencyVram Residency = C.uform_residency_vram_k
 )
+
+// HostAccess is whether Go code may read an arena's outputs.
+type HostAccess int32
+
+const (
+	// HostAccessRefused is device memory the host must not read.
+	HostAccessRefused HostAccess = C.uform_host_access_refused_k
+	// HostAccessReadable is host, pinned and managed memory, and Apple's shared memory.
+	HostAccessReadable HostAccess = C.uform_host_access_readable_k
+)
+
+// String renders the access as the library spells it, "refused" or "readable".
+func (access HostAccess) String() string {
+	return C.GoString(C.uform_host_access_name(C.uform_host_access_t(access)))
+}
 
 // Mood is what an executor's threads do between a drain and its next call.
 type Mood int32
@@ -834,8 +851,8 @@ func (executor *Executor) Drain(mood Mood) error {
 // slice they handed out end there, as they do once it is closed; to keep one call's views past
 // the next, give that call another arena. An arena serves one call at a time, and a second
 // overlapping it fails with StatusContended. Deferred verbs hold it as blocking ones do, since
-// Close waits for every deferred call naming it. Views over a GPU arena hold device memory,
-// which Describe reports and no Go code may read.
+// Close waits for every deferred call naming it. A verb given an arena whose Describe refuses host
+// access fails with StatusDevice before it runs, since no Go code may read its views.
 type Arena struct {
 	handle C.uform_arena_t
 }
@@ -865,11 +882,29 @@ func NewArena(executor *Executor) (*Arena, error) {
 //
 // Mirrors uform_arena_description_t field for field, so the library writes it in place.
 type ArenaDescription struct {
-	// Residency is ResidencyRam for host pages and ResidencyVram for one device's memory, which no Go
-	// code may read.
+	// Residency is ResidencyRam for host pages and ResidencyVram for one device's memory.
 	Residency Residency
-	// Device is the ordinal of the GPU holding the outputs, and -1 for host pages.
+	// Device is the ordinal of the GPU holding the outputs, as GPUDevices lists it, and -1 for host
+	// pages.
 	Device int32
+	// Vendor is the vendor whose memory it is, as GPUDevices reports it.
+	Vendor GPUVendor
+	// VendorOrdinal is the vendor's own device number, which Arrow and DLPack name, and -1 for host
+	// pages.
+	VendorOrdinal int32
+	// HostAccess is whether Go code may read the outputs.
+	HostAccess HostAccess
+}
+
+// The library writes the description in place.
+var _ = [1]byte{}[unsafe.Sizeof(ArenaDescription{})-C.sizeof_uform_arena_description_t]
+
+// host refuses memory Go code may not read with StatusDevice.
+func (description ArenaDescription) host() error {
+	if description.HostAccess != HostAccessReadable {
+		return fail(StatusDevice, "the outputs are memory the host may not read")
+	}
+	return nil
 }
 
 // Describe reports where the arena's outputs live, as the executor that made it decided.
@@ -1121,18 +1156,35 @@ func (arena *Arena) lower() (C.uform_arena_t, error) {
 }
 
 // Close releases the memory, waiting for every deferred call naming the arena, and ends every view
-// over it; it comes before the Close of the executor that made the arena. It is idempotent, and a
-// closed arena must not be used again.
+// over it; it comes before the Close of the executor that made the arena. While an Arrow export of
+// its outputs is unreleased it fails with [StatusContended] and frees nothing, so a later Close
+// retries. It is idempotent, and a closed arena must not be used again.
 func (arena *Arena) Close() error {
 	if arena == nil || arena.handle == nil {
 		return nil
 	}
-	C.uform_arena_free(arena.handle)
+	if status := C.uform_arena_free(arena.handle); status != C.uform_status_success_k {
+		return fail(Status(status), "an export of the arena's outputs is still open")
+	}
 	arena.handle = nil
 	return nil
 }
 
 // endregion: Receivers
+
+// lowerReadableInto is lowerInto for a verb whose results wrap the arena's outputs as Go slices, so
+// it refuses an arena whose memory the host may not read before the call rather than after it.
+func (receiver receiver[Handle]) lowerReadableInto(arena *Arena) (Handle, C.uform_executor_t, C.uform_arena_t, error) {
+	handle, executor, outputs, err := receiver.lowerInto(arena)
+	if err != nil || arena == nil {
+		return handle, executor, outputs, err
+	}
+	description, err := arena.Describe()
+	if err == nil {
+		err = description.host()
+	}
+	return handle, executor, outputs, err
+}
 
 // region: Introspection
 

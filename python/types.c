@@ -43,6 +43,8 @@ static struct {
      "Supplied bytes could not be decoded: a checkpoint, an image, a clip, or a recording."},
     {uform_status_internal_k, "uform.InternalError", NULL,
      "The library reported neither success nor a failure - a defect."},
+    {uform_status_overflow_k, "uform.CapacityOverflowError", &PyExc_OverflowError,
+     "A count would pass the largest value its type holds."},
     {uform_status_uninitialized_k, "uform.UninitializedError", NULL,
      "The handle the call operates on is missing, refused before any other check."},
     {uform_status_config_mismatch_k, "uform.ConfigMismatchError", &PyExc_ValueError,
@@ -1432,10 +1434,10 @@ static char const doc_Arena[] =                                                 
     "and none makes host pages for calls on the calling thread. Results are zero-copy views\n" //
     "over it, valid until the next call handed it rewinds it, as a C view is. It serves one\n" //
     "call at a time, and a call finding another one holding it raises `ContendedError`. A\n"   //
-    "deferred call holds it until it is final. Results over device memory export\n"            //
-    "`__dlpack__`, and host reads of them raise `DeviceError`. A GPU arena serves only\n"      //
-    "calls on the executor that made it. An arena never outlives that executor: drop it\n"     //
-    "before the executor closes. One made with no executor lives until it is dropped.\n"       //
+    "deferred call holds it until it is final. Results over memory the host may not read\n"    //
+    "export `__dlpack__`, and host reads of them raise `BufferError`. A GPU arena serves\n"    //
+    "only calls on the executor that made it. An arena never outlives that executor: drop\n"   //
+    "it before the executor closes. One made with no executor lives until it is dropped.\n"    //
     "Calls `uform_arena_init`.\n"                                                              //
     "\n"                                                                                       //
     "Args:\n"                                                                                  //
@@ -1466,7 +1468,7 @@ static PyObject* Arena_tp_new(PyTypeObject* type, PyObject* args, PyObject* keyw
     if (uform_py_raise_on_outcome(&outcome) != 0) return NULL;
     Arena* const arena = (Arena*)type->tp_alloc(type, 0);
     if (!arena) {
-        uform_arena_free(handle);
+        uform_arena_free(handle); // a new arena has no export open, so it frees
         return NULL;
     }
     arena->handle = handle;
@@ -1485,7 +1487,7 @@ static PyObject* Arena_tp_new(PyTypeObject* type, PyObject* args, PyObject* keyw
 
 static void Arena_dealloc(Arena* self) {
     Py_BEGIN_ALLOW_THREADS;
-    uform_arena_free(self->handle);
+    uform_arena_free(self->handle); // every export holds this object, so none is open
     Py_END_ALLOW_THREADS;
     if (self->executor) executor_release((Executor*)self->executor);
     Py_XDECREF(self->executor);
@@ -1548,21 +1550,22 @@ static int arena_buffer_describe(ArenaBuffer const* buffer, uform_arena_descript
     return uform_py_raise_on_outcome(&outcome);
 }
 
-/**
- *  @brief Refuses a host read of @p buffer when its output lives on a device.
- *  @return 0 on success, -1 with a @c DeviceError set when the output is on a device.
- */
-static int arena_buffer_on_host(ArenaBuffer const* buffer) {
+/** Whether host code may read the pages of the arena behind @p buffer: 1 or 0, or -1 with an
+ *  exception set. */
+static int uform_py_host_readable(ArenaBuffer const* buffer) {
     uform_arena_description_t description = {0};
     if (arena_buffer_describe(buffer, &description) != 0) return -1;
-    if (description.residency == uform_residency_vram_k)
-        return uform_py_raise(uform_status_device_k, "the output lives in device memory; read `__dlpack__`");
-    return 0;
+    return description.host_access == uform_host_access_readable_k;
 }
 
 static int ArenaBuffer_getbuffer(ArenaBuffer* self, Py_buffer* view, int flags) {
     view->obj = NULL;
-    if (arena_buffer_on_host(self) != 0) return -1;
+    int const readable = uform_py_host_readable(self);
+    if (readable < 0) return -1;
+    if (!readable) {
+        PyErr_SetString(PyExc_BufferError, "the host may not read the output's memory; read `__dlpack__`");
+        return -1;
+    }
     Py_ssize_t bytes = self->item_bytes;
     for (int axis = 0; axis != self->rank; ++axis) bytes *= self->shape[axis];
     view->obj = Py_NewRef((PyObject*)self);
@@ -1621,36 +1624,35 @@ static PyObject* ArenaBuffer_get_cuda_array_interface(ArenaBuffer* self, void* c
     return array_interface;
 }
 
-/** The DLPack device the outputs of @p buffer live on, from the engine's description of its arena;
- *  0, or -1 with an exception set. */
+/** The DLPack device of the memory @p description names, derived as its type documents: VRAM
+ *  the host may not read is device memory, VRAM it may read is CUDA managed or Metal shared
+ *  memory, RAM placed for a device is page-locked for it, and other RAM is host memory. */
+static DLDevice uform_py_dlpack_device(uform_arena_description_t const* description) {
+    int32_t const ordinal = description->vendor_ordinal;
+    int const readable = description->host_access == uform_host_access_readable_k;
+    if (description->residency == uform_residency_vram_k && description->vendor == uform_gpu_vendor_apple_k)
+        return (DLDevice) {kDLMetal, ordinal};
+    if (description->residency == uform_residency_vram_k && description->vendor == uform_gpu_vendor_amd_k)
+        return (DLDevice) {kDLROCM, ordinal};
+    if (description->residency == uform_residency_vram_k)
+        return (DLDevice) {readable ? kDLCUDAManaged : kDLCUDA, ordinal};
+    if (description->device >= 0 && description->vendor == uform_gpu_vendor_nvidia_k)
+        return (DLDevice) {kDLCUDAHost, ordinal};
+    if (description->device >= 0 && description->vendor == uform_gpu_vendor_amd_k)
+        return (DLDevice) {kDLROCMHost, ordinal};
+    return (DLDevice) {kDLCPU, 0};
+}
+
+/** The DLPack device the outputs of @p buffer live on; 0, or -1 with an exception set. */
 static int arena_buffer_device(ArenaBuffer const* buffer, DLDevice* device) {
     uform_arena_description_t description = {0};
     if (arena_buffer_describe(buffer, &description) != 0) return -1;
-    *device = (DLDevice) {kDLCPU, 0};
-    if (description.residency != uform_residency_vram_k) return 0;
-    size_t const capacity = (size_t)description.device + 1;
-    size_t count = 0;
-    uform_gpu_device_t* const listed = (uform_gpu_device_t*)PyMem_Calloc(capacity, sizeof(uform_gpu_device_t));
-    if (!listed) return PyErr_NoMemory(), -1;
-    uform_outcome_t outcome = {0};
-    uform_gpu_devices(&(uform_gpu_devices_t) {.outcome = &outcome,
-                                              .devices = listed,
-                                              .devices_capacity = capacity,
-                                              .devices_count = &count});
-    int failed = uform_py_raise_on_outcome(&outcome);
-    if (!failed && count < capacity) failed = uform_py_raise(uform_status_device_k, "the arena's GPU is not listed");
-    uform_gpu_device_t const* const gpu = &listed[description.device];
-    if (!failed)
-        *device = (DLDevice) {gpu->vendor == uform_gpu_vendor_amd_k     ? kDLROCM
-                              : gpu->vendor == uform_gpu_vendor_apple_k ? kDLMetal
-                                                                        : kDLCUDA,
-                              (int32_t)gpu->vendor_ordinal};
-    PyMem_Free(listed);
-    return failed ? -1 : 0;
+    *device = uform_py_dlpack_device(&description);
+    return 0;
 }
 
 /** What a DLPack capsule over an @c ArenaBuffer owns: the managed tensor, its extents and strides,
- *  and the export it holds on the buffer's arena until the consumer lets go. */
+ *  and the buffer, whose arena counts the export until the consumer lets go. */
 typedef struct dlpack_export_t {
     union {
         DLManagedTensor legacy;
@@ -1664,6 +1666,7 @@ typedef struct dlpack_export_t {
 /** Releases an export from whichever thread its consumer drops it on, taking the GIL itself. */
 static void dlpack_export_release(dlpack_export_t* exported) {
     PyGILState_STATE const state = PyGILState_Ensure();
+    uform_arena_export_close(((Arena*)exported->buffer->arena)->handle);
     Py_DECREF(exported->buffer);
     PyMem_Free(exported);
     PyGILState_Release(state);
@@ -1728,6 +1731,11 @@ static PyObject* ArenaBuffer_dlpack(ArenaBuffer* self, PyObject* const* args, Py
 
     dlpack_export_t* const exported = (dlpack_export_t*)PyMem_Calloc(1, sizeof(dlpack_export_t));
     if (!exported) return PyErr_NoMemory();
+    uform_status_t const opened = uform_arena_export_open(((Arena*)self->arena)->handle);
+    if (opened != uform_status_success_k) {
+        PyMem_Free(exported);
+        return uform_py_raise(opened, "the output's arena could not count another export"), NULL;
+    }
     exported->buffer = (ArenaBuffer*)Py_NewRef((PyObject*)self);
     for (int axis = 0; axis != self->rank; ++axis) {
         exported->shape[axis] = self->shape[axis];

@@ -139,7 +139,7 @@ Every output whose length only the call knows, embeddings, states, token vectors
 `Arena(executor)` places it where that executor computes, decided once, and `Arena(library)` makes host pages for the calling thread.
 Each call rewinds its arena, so the previous call's views die and a steady loop allocates once; reading a stale one raises `Status.INVALID_ARGUMENT`.
 To keep a result past the next call, pass that call another arena, and give every deferred call its own.
-An arena from a VRAM executor holds device memory, which host accessors refuse with `Status.DEVICE`, and serves only that executor's calls.
+An arena from a VRAM executor holds device memory and serves only that executor's calls; where `describe().host_access` is `HostAccess.REFUSED`, host accessors refuse with `Status.DEVICE`, while managed memory and Apple's shared memory read like host pages.
 Every arena refers to the executor that made it, so Mojo frees the arena before that executor.
 
 The engine classifies every input pointer through the driver, so `TapeView.of` takes a host span or a host or device pointer, such as `buffer.unsafe_ptr()` of a MAX `DeviceBuffer`, with its offsets in host memory.

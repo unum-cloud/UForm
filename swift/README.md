@@ -108,7 +108,7 @@ There is one verb per operation: no allocating twin, no caller buffers, and no d
 Each call rewinds its arena, so the previous call's views die and a steady loop allocates once it reaches its high-water mark.
 Reading a stale view traps, as an out-of-bounds index does; to keep a result past the next call, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own, and a call naming an arena another call holds finishes `contended`.
-An arena from a VRAM executor holds device memory, which host accessors refuse with a trap.
+An arena from a VRAM executor holds device memory, which `placement` describes; where its `hostAccess` is `.refused`, host accessors refuse with a trap, while managed memory and Apple's shared memory read like host pages.
 An arena never outlives the executor that made it: one in device memory holds that executor, so ARC releases the arena first, and one from `Arena()` has no executor and lives until its last reference goes.
 
 ```swift

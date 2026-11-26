@@ -310,7 +310,7 @@ func (on ModelDeferredOn) AudioEncodeSamples(samples Tape, sampleRate uint32, ou
 func (receiver modelReceiver) textEncode(call *callWithResult[Encoded], completion C.uform_completion_t, texts Tape,
 	outputs EncodeOutputs, outputsScalar Scalar, arena *Arena, config *TextEncodeConfig) error {
 	options := configOf(config)
-	model, executor, outputsArena, err := receiver.lowerInto(arena)
+	model, executor, outputsArena, err := receiver.lowerReadableInto(arena)
 	if err != nil {
 		return err
 	}
@@ -338,7 +338,7 @@ func (receiver modelReceiver) textEncode(call *callWithResult[Encoded], completi
 func (receiver modelReceiver) textChoose(call *callWithResult[TapeView], completion C.uform_completion_t, texts, choices Tape,
 	arena *Arena, config *TextChooseConfig) error {
 	options := configOf(config)
-	model, executor, outputsArena, err := receiver.lowerInto(arena)
+	model, executor, outputsArena, err := receiver.lowerReadableInto(arena)
 	if err != nil {
 		return err
 	}
@@ -370,7 +370,7 @@ func (receiver modelReceiver) textChoose(call *callWithResult[TapeView], complet
 func (receiver modelReceiver) imageEncode(call *callWithResult[Encoded], completion C.uform_completion_t, images Tape,
 	outputs EncodeOutputs, outputsScalar Scalar, arena *Arena, config *ImageEncodeConfig) error {
 	options := configOf(config)
-	model, executor, outputsArena, err := receiver.lowerInto(arena)
+	model, executor, outputsArena, err := receiver.lowerReadableInto(arena)
 	if err != nil {
 		return err
 	}
@@ -398,7 +398,7 @@ func (receiver modelReceiver) imageEncode(call *callWithResult[Encoded], complet
 func (receiver modelReceiver) imageEncodePixels(call *callWithResult[Encoded], completion C.uform_completion_t, pixels Tape,
 	heights, widths []uint32, outputs EncodeOutputs, outputsScalar Scalar, arena *Arena, config *ImageEncodeConfig) error {
 	options := configOf(config)
-	model, executor, outputsArena, err := receiver.lowerInto(arena)
+	model, executor, outputsArena, err := receiver.lowerReadableInto(arena)
 	if err != nil {
 		return err
 	}
@@ -432,7 +432,7 @@ func (receiver modelReceiver) imageEncodePixels(call *callWithResult[Encoded], c
 func (receiver modelReceiver) videoEncode(call *callWithResult[Encoded], completion C.uform_completion_t, videos Tape,
 	outputs EncodeOutputs, outputsScalar Scalar, arena *Arena, config *VideoEncodeConfig) error {
 	options := configOf(config)
-	model, executor, outputsArena, err := receiver.lowerInto(arena)
+	model, executor, outputsArena, err := receiver.lowerReadableInto(arena)
 	if err != nil {
 		return err
 	}
@@ -460,7 +460,7 @@ func (receiver modelReceiver) videoEncode(call *callWithResult[Encoded], complet
 func (receiver modelReceiver) audioEncode(call *callWithResult[Encoded], completion C.uform_completion_t, recordings Tape,
 	outputs EncodeOutputs, outputsScalar Scalar, arena *Arena, config *AudioEncodeConfig) error {
 	options := configOf(config)
-	model, executor, outputsArena, err := receiver.lowerInto(arena)
+	model, executor, outputsArena, err := receiver.lowerReadableInto(arena)
 	if err != nil {
 		return err
 	}
@@ -488,7 +488,7 @@ func (receiver modelReceiver) audioEncode(call *callWithResult[Encoded], complet
 func (receiver modelReceiver) audioEncodeSamples(call *callWithResult[Encoded], completion C.uform_completion_t, samples Tape,
 	sampleRate uint32, outputs EncodeOutputs, outputsScalar Scalar, arena *Arena, config *AudioEncodeConfig) error {
 	options := configOf(config)
-	model, executor, outputsArena, err := receiver.lowerInto(arena)
+	model, executor, outputsArena, err := receiver.lowerReadableInto(arena)
 	if err != nil {
 		return err
 	}

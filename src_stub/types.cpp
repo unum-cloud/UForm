@@ -10,6 +10,7 @@
  *  library never includes.
  */
 #include <algorithm> // `std::find`, `std::any_of`
+#include <limits>    // `std::numeric_limits` - the cap of an export count
 #include <mutex>     // `std::mutex`, `std::lock_guard`, `std::unique_lock`
 #include <variant>   // `std::visit`
 #include <vector>    // `std::vector`
@@ -42,7 +43,7 @@ void uf::release_arena(uform_arena_t arena, uform_outcome_t const* call) {
 bool uf::hold_arena(uform_arena_t arena, uform_outcome_t const* call) {
     if (!arena) return true;
     std::lock_guard<std::mutex> lock(calls.guard);
-    if (arena->holder && arena->holder != call) return false;
+    if (arena->exports || (arena->holder && arena->holder != call)) return false;
     arena->holder = call;
     return true;
 }
@@ -163,9 +164,30 @@ void uform_arena_init(uform_arena_init_t* arguments) {
     *arguments->arena = arena;
 }
 
-void uform_arena_free(uform_arena_t arena) {
+uform_status_t uform_arena_free(uform_arena_t arena) {
+    if (!arena) return uform_status_success_k;
     wait_for_calls_using(arena);
+    {
+        std::lock_guard<std::mutex> lock(calls.guard);
+        if (arena->exports) return uform_status_contended_k;
+    }
     delete arena;
+    return uform_status_success_k;
+}
+
+uform_status_t uform_arena_export_open(uform_arena_t arena) {
+    if (!arena) return uform_status_invalid_argument_k;
+    std::lock_guard<std::mutex> lock(calls.guard);
+    if (arena->holder) return uform_status_contended_k;
+    if (arena->exports == (std::numeric_limits<std::uint32_t>::max)()) return uform_status_overflow_k;
+    ++arena->exports;
+    return uform_status_success_k;
+}
+
+void uform_arena_export_close(uform_arena_t arena) {
+    if (!arena) return;
+    std::lock_guard<std::mutex> lock(calls.guard);
+    if (arena->exports) --arena->exports;
 }
 
 void uform_arena_describe(uform_arena_describe_t* arguments) {
@@ -174,7 +196,7 @@ void uform_arena_describe(uform_arena_describe_t* arguments) {
     if (reject_if(!arguments->description, uform_status_invalid_argument_k, "The description must not be null",
                   outcome))
         return;
-    *arguments->description = {uform_residency_ram_k, -1};
+    *arguments->description = {uform_residency_ram_k, -1, uform_gpu_vendor_unknown_k, -1, uform_host_access_readable_k};
 }
 
 char const* uform_status_name(uform_status_t status) {
@@ -189,6 +211,7 @@ char const* uform_status_name(uform_status_t status) {
     case uform_status_device_k: return "device";
     case uform_status_malformed_k: return "malformed";
     case uform_status_internal_k: return "internal";
+    case uform_status_overflow_k: return "overflow";
     case uform_status_uninitialized_k: return "uninitialized";
     case uform_status_config_mismatch_k: return "config-mismatch";
     case uform_status_contended_k: return "contended";
@@ -204,7 +227,7 @@ uform_status_t uform_status_from_name(uform_bytes_view_t name, uform_status_t* s
         name,
         {uform_status_success_k, uform_status_deferred_k, uform_status_out_of_memory_k, uform_status_shape_mismatch_k,
          uform_status_unsupported_layout_k, uform_status_unknown_kind_k, uform_status_io_k, uform_status_device_k,
-         uform_status_malformed_k, uform_status_internal_k, uform_status_uninitialized_k,
+         uform_status_malformed_k, uform_status_internal_k, uform_status_overflow_k, uform_status_uninitialized_k,
          uform_status_config_mismatch_k, uform_status_contended_k, uform_status_cancelled_k, uform_status_unsupported_k,
          uform_status_invalid_argument_k},
         uform_status_name, status);
@@ -234,9 +257,9 @@ char const* uform_scalar_name(uform_scalar_t scalar) {
 uform_status_t uform_scalar_from_name(uform_bytes_view_t name, uform_scalar_t* scalar) {
     return read_name<uform_scalar_t>(
         name,
-        {uform_scalar_f64_k, uform_scalar_f32_k, uform_scalar_bf16_k, uform_scalar_f16_k, uform_scalar_e5m2_k,
-         uform_scalar_e4m3_k, uform_scalar_e3m2_k, uform_scalar_e2m3_k, uform_scalar_i8_k, uform_scalar_i4x2_k,
-         uform_scalar_i32_k, uform_scalar_u8_k, uform_scalar_u4x2_k, uform_scalar_u1x8_k},
+        {uform_scalar_unknown_k, uform_scalar_f64_k, uform_scalar_f32_k, uform_scalar_bf16_k, uform_scalar_f16_k,
+         uform_scalar_e5m2_k, uform_scalar_e4m3_k, uform_scalar_e3m2_k, uform_scalar_e2m3_k, uform_scalar_i8_k,
+         uform_scalar_i4x2_k, uform_scalar_i32_k, uform_scalar_u8_k, uform_scalar_u4x2_k, uform_scalar_u1x8_k},
         uform_scalar_name, scalar);
 }
 
@@ -312,10 +335,11 @@ char const* uform_gpu_class_name(uform_gpu_class_t gpu_class) {
 uform_status_t uform_gpu_class_from_name(uform_bytes_view_t name, uform_gpu_class_t* gpu_class) {
     return read_name<uform_gpu_class_t>(
         name,
-        {uform_gpu_class_nvidia_ampere_k, uform_gpu_class_nvidia_ada_k, uform_gpu_class_nvidia_hopper_k,
-         uform_gpu_class_nvidia_blackwell_k, uform_gpu_class_nvidia_blackwellrtx_k, uform_gpu_class_nvidia_rubin_k,
-         uform_gpu_class_amd_cdna3_k, uform_gpu_class_amd_cdna4_k, uform_gpu_class_amd_cdna5_k,
-         uform_gpu_class_apple_metal7_k, uform_gpu_class_apple_metal9_k, uform_gpu_class_apple_metal10_k},
+        {uform_gpu_class_unknown_k, uform_gpu_class_nvidia_ampere_k, uform_gpu_class_nvidia_ada_k,
+         uform_gpu_class_nvidia_hopper_k, uform_gpu_class_nvidia_blackwell_k, uform_gpu_class_nvidia_blackwellrtx_k,
+         uform_gpu_class_nvidia_rubin_k, uform_gpu_class_amd_cdna3_k, uform_gpu_class_amd_cdna4_k,
+         uform_gpu_class_amd_cdna5_k, uform_gpu_class_apple_metal7_k, uform_gpu_class_apple_metal9_k,
+         uform_gpu_class_apple_metal10_k},
         uform_gpu_class_name, gpu_class);
 }
 
@@ -333,6 +357,23 @@ uform_status_t uform_gpu_vendor_from_name(uform_bytes_view_t name, uform_gpu_ven
     return read_name<uform_gpu_vendor_t>(
         name, {uform_gpu_vendor_unknown_k, uform_gpu_vendor_nvidia_k, uform_gpu_vendor_amd_k, uform_gpu_vendor_apple_k},
         uform_gpu_vendor_name, vendor);
+}
+
+char const* uform_host_access_name(uform_host_access_t host_access) {
+    switch (host_access) {
+    case uform_host_access_refused_k: return "refused";
+    case uform_host_access_readable_k: return "readable";
+    }
+    return "unrecognized";
+}
+
+char const* uform_residency_name(uform_residency_t residency) {
+    switch (residency) {
+    case uform_residency_unknown_k: return "unknown";
+    case uform_residency_ram_k: return "ram";
+    case uform_residency_vram_k: return "vram";
+    }
+    return "unrecognized";
 }
 
 void uform_gpu_devices(uform_gpu_devices_t* arguments) {

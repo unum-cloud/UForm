@@ -405,13 +405,18 @@ struct vram_site {
         return {};
     }
 
-    /** Waits for every shard's stream and the lead's, then binds the lead's device, where later
-     *  outputs grow. */
+    /** Joins every other shard's stream onto the lead's, waits on the lead once, then binds the
+     *  lead's device, where later outputs grow. */
     failure_t finish() noexcept {
         failure_t failure {};
-        for (shard_t const& shard : shards)
-            if (util::status_t const drained = shard.stream->wait(); drained.failed() && !failure.message)
-                failure = failure_of(drained, "A device failed the work queued on it");
+        for (shard_t const& shard : shards) {
+            if (shard.stream == &lead) continue;
+            util::status_t const joined = lead.follow(*shard.stream);
+            if (joined.succeeded()) continue;
+            // A shard that never joined drains alone before the next call reuses its memory
+            static_cast<void>(shard.stream->wait());
+            if (!failure.message) failure = failure_of(joined, "A device failed to join the lead stream");
+        }
         if (util::status_t const drained = lead.wait(); drained.failed() && !failure.message)
             failure = failure_of(drained, "A device failed the work queued on it");
         if (lead.bind().failed() && !failure.message) failure = unbound_k;

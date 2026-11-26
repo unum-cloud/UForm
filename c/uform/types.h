@@ -286,6 +286,9 @@ typedef enum uform_status_t {
      *  names a defect. */
     uform_status_internal_k = 10,
 
+    /** A count would pass the largest value its type holds. */
+    uform_status_overflow_k = 11,
+
     /** The handle the call operates on is @c NULL, refused before any other check. */
     uform_status_uninitialized_k = 12,
 
@@ -939,13 +942,30 @@ typedef struct uform_arena_init_t {
 UFORM_EXPORT void uform_arena_init(uform_arena_init_t* arguments);
 
 /**
- *  @brief Frees the arena and every output in it; @c NULL is safe, and it cannot fail, so
- *      takes no outcome.
- *  @param[in,out] arena The arena to be freed; invalid afterwards.
+ *  @brief Frees the arena and every output in it, unless an export of them is open.
+ *  @param[in,out] arena The arena to be freed; invalid afterwards, unless the free was refused.
+ *  @return @c uform_status_success_k once freed, @c NULL included, or @c uform_status_contended_k
+ *      with nothing freed while @c uform_arena_export_open counts an open export.
  *
  *  Waits until every deferred call naming the handle is final.
  */
-UFORM_EXPORT void uform_arena_free(uform_arena_t arena);
+UFORM_EXPORT uform_status_t uform_arena_free(uform_arena_t arena);
+
+/**
+ *  @brief Counts one more export of the arena's outputs, a view a consumer reads in place, so no
+ *      call rewinds them and no free releases them until @c uform_arena_export_close .
+ *  @return @c uform_status_success_k once counted; @c uform_status_invalid_argument_k for a
+ *      @c NULL arena; @c uform_status_contended_k while a call holds the arena; and
+ *      @c uform_status_overflow_k past @c UINT32_MAX open exports.
+ *
+ *  While any export is open, every call naming the arena answers @c uform_status_contended_k
+ *  before it claims its executor; @c uform_arena_describe answers as usual.
+ */
+UFORM_EXPORT uform_status_t uform_arena_export_open(uform_arena_t arena);
+
+/** Closes one export @c uform_arena_export_open counted, from the consumer's release on any thread;
+ *  a @c NULL arena or one with no open export is left as it is. */
+UFORM_EXPORT void uform_arena_export_close(uform_arena_t arena);
 
 /** Where an arena's outputs live, as the executor that made it decided. */
 typedef enum uform_residency_t {
@@ -960,7 +980,25 @@ typedef enum uform_residency_t {
     uform_residency_vram_k = 2,
 } uform_residency_t;
 
-/** Where an arena's outputs live. */
+/** Whether host code may read an arena's outputs in place. */
+typedef enum uform_host_access_t {
+
+    /** Host code must not read the pages: only device code does. */
+    uform_host_access_refused_k = 0,
+
+    /** Host code reads the pages: host, page-locked, managed and Apple's shared memory. */
+    uform_host_access_readable_k = 1,
+} uform_host_access_t;
+
+/**
+ *  @brief Where an arena's outputs live and who may read them.
+ *
+ *  An export names the memory it hands out from these fields alone: @c uform_residency_vram_k
+ *  refused to the host is device memory; @c uform_residency_vram_k readable by the host is managed
+ *  memory on CUDA and shared memory on Metal; @c uform_residency_ram_k with a @c device of zero or
+ *  more is page-locked for that device, as CUDA and ROCm host memory; and @c uform_residency_ram_k
+ *  with a @c device of -1 is plain host memory.
+ */
 typedef struct uform_arena_description_t {
 
     /** RAM for host pages, VRAM for one device's memory. */
@@ -968,6 +1006,15 @@ typedef struct uform_arena_description_t {
 
     /** The UForm ordinal of the device, as @c uform_gpu_devices lists it, or -1 for host pages. */
     int32_t device;
+
+    /** The vendor whose runtime drives that device, as @c uform_gpu_devices reports it. */
+    uform_gpu_vendor_t vendor;
+
+    /** The device's ordinal in its vendor's runtime, or -1 for host pages. */
+    int32_t vendor_ordinal;
+
+    /** Whether host code may read the outputs in place. */
+    uform_host_access_t host_access;
 } uform_arena_description_t;
 
 /** The arguments of @c uform_arena_describe. */
@@ -1042,6 +1089,12 @@ UFORM_EXPORT char const* uform_gpu_vendor_name(uform_gpu_vendor_t vendor);
 /** Reads a GPU vendor back from its spelling into @p vendor, or fails with
  *  @c uform_status_invalid_argument_k. */
 UFORM_EXPORT uform_status_t uform_gpu_vendor_from_name(uform_bytes_view_t name, uform_gpu_vendor_t* vendor);
+
+/** The canonical spelling of a host access, as @c uform_host_access_refused_k spells "refused". */
+UFORM_EXPORT char const* uform_host_access_name(uform_host_access_t host_access);
+
+/** The canonical spelling of a residency, as @c uform_residency_ram_k spells "ram". */
+UFORM_EXPORT char const* uform_residency_name(uform_residency_t residency);
 
 /**
  *  @brief Reports the version of the library this process linked, which may differ from the

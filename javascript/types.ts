@@ -27,6 +27,7 @@ export enum Status {
   Device = "device",
   Malformed = "malformed",
   Internal = "internal",
+  Overflow = "overflow",
   Uninitialized = "uninitialized",
   ConfigMismatch = "config-mismatch",
   Contended = "contended",
@@ -153,6 +154,24 @@ export enum LateInteractionSide {
 
 /** The runtime that drives a GPU, one name per `uform_gpu_vendor_t`. */
 export type GpuVendor = "unknown" | "nvidia" | "amd" | "apple";
+
+/** Whether host code may read an arena's outputs, one name per `uform_host_access_t`: host,
+ *  pinned and managed memory and Apple's shared memory are `"readable"`. */
+export type HostAccess = "refused" | "readable";
+
+/** Where an arena's outputs live. Mirrors `uform_arena_description_t`. */
+export interface ArenaDescription {
+  /** `"ram"` for host pages, `"vram"` for one device's memory. */
+  residency: "ram" | "vram";
+  /** The device's position in {@link gpuDevices}, or `null` for host pages. */
+  device: number | null;
+  /** The vendor whose memory it is, `"unknown"` for host pages. */
+  vendor: GpuVendor;
+  /** The vendor's own device number, which Arrow and DLPack name, or `null` for host pages. */
+  vendorOrdinal: number | null;
+  /** Whether views read the outputs; under `"refused"` they throw {@link Status.Device}. */
+  hostAccess: HostAccess;
+}
 
 /** One GPU this process can drive. Mirrors `uform_gpu_device_t`. */
 export interface GpuDevice {
@@ -334,14 +353,15 @@ export class Arena implements Disposable {
     this.compiled = new (backend().Arena)(executor?.compiled);
   }
 
-  /** `"ram"` or `"vram"`, where the executor that made it computes; a VRAM arena's views
-   *  refuse host reads. */
-  get residency(): string {
-    return this.compiled.residency;
+  /** Where the outputs live, as the executor that made it decided; when its `hostAccess` is
+   *  `"refused"`, a call's views throw {@link Status.Device}. Calls `uform_arena_describe`. */
+  describe(): ArenaDescription {
+    return this.compiled.describe();
   }
 
   /** Releases the memory now, once every deferred call writing it is final, detaching every view
-   *  into it. Calls `uform_arena_free`. */
+   *  into it; while an export of its outputs is open it throws {@link Status.Contended} and frees
+   *  nothing. Calls `uform_arena_free`. */
   free(): void {
     this.compiled.free();
   }

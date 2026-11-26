@@ -166,6 +166,15 @@ def test_outputs_cross_as_dlpack(model: uform.Model, arena: uform.Arena):
     del capsule
 
 
+def test_an_arena_with_an_export_open_refuses_calls(model: uform.Model, arena: uform.Arena):
+    """A DLPack capsule over an output keeps its arena from rewinding until the consumer lets go."""
+    capsule = model.text_encode(TEXTS, arena).embeddings.__dlpack__()
+    with pytest.raises(uform.ContendedError):
+        model.text_encode(TEXTS, arena)
+    del capsule
+    model.text_encode(TEXTS, arena)
+
+
 def test_a_tape_pair_past_its_data_is_refused(model: uform.Model, arena: uform.Arena):
     """Offsets ending past the data would read out of bounds, so the binding refuses them."""
     with pytest.raises(uform.ShapeMismatchError):

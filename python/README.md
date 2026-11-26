@@ -84,7 +84,7 @@ Every output whose length only the call knows, the embeddings, the states and th
 Each call rewinds its arena, so the previous call's views die and a steady loop allocates once.
 To keep a result past the next call, pass that call another arena; an arena serves one call at a time, so each deferred call needs its own.
 A NumPy array or `memoryview` over an output views its arena until the next call naming that arena rewinds it, as a C view does, and a call naming an arena another call still holds raises `ContendedError`.
-An arena from a VRAM executor holds device memory: its views export `__cuda_array_interface__` for CuPy, PyTorch or Numba, and host reads raise `DeviceError`.
+An arena from a VRAM executor holds device memory: its views export `__cuda_array_interface__` for CuPy, PyTorch or Numba, and the buffer protocol raises `BufferError` wherever the host may not read the pages.
 An arena never outlives the executor that made it, so drop every arena before the executor's `with` block ends, and an arena from `uform.Arena()` lives until it is dropped.
 
 ```python
@@ -216,6 +216,7 @@ except uform.Error as error:
 - `DEVICE` → `DeviceError`
 - `MALFORMED` → `MalformedError`, a `ValueError`
 - `INTERNAL` → `InternalError`
+- `OVERFLOW` → `CapacityOverflowError`, an `OverflowError`
 - `UNINITIALIZED` → `UninitializedError`
 - `CONFIG_MISMATCH` → `ConfigMismatchError`, a `ValueError`
 - `CONTENDED` → `ContendedError`

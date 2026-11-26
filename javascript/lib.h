@@ -387,8 +387,8 @@ bool uform_js_arena_from_value(napi_env env, napi_value value, uform_js_call_t* 
  *
  *  The backing @c ArrayBuffer references @p arena, so the memory outlives every view of it, and the
  *  arena remembers the buffer, empty ones included, so its next call or its @c free detaches the
- *  view rather than leaving it dangling. A VRAM arena holds device memory, which is never viewed as
- *  host memory, so its views read as @c null.
+ *  view rather than leaving it dangling. Memory whose arena description refuses host access is
+ *  never viewed as host memory: the view throws @c uform_status_device_k instead.
  *
  *  @return The view, or @c NULL with an exception pending.
  */

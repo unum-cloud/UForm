@@ -41,6 +41,7 @@ enum class status_code_t : int {
     device_k = uform_status_device_k,
     malformed_k = uform_status_malformed_k,
     internal_k = uform_status_internal_k,
+    overflow_k = uform_status_overflow_k,
     uninitialized_k = uform_status_uninitialized_k,
     config_mismatch_k = uform_status_config_mismatch_k,
     contended_k = uform_status_contended_k,
@@ -551,13 +552,22 @@ class executor_t {
     }
 };
 
+/** Frees @p arena as its owner dies, which an open export of its outputs refuses, leaving it to the
+ *  export's holder, who closes every export before the owner dies. */
+inline void free_arena(uform_arena_t arena) noexcept {
+    [[maybe_unused]] uform_status_t const freed = uform_arena_free(arena);
+}
+
 /** Owns one arena; every call writing outputs into it rewinds it first, ending the previous
  *  call's views. It must not outlive the executor that made it, so declare that executor first;
- *  one made with no executor lives until it is destroyed. */
+ *  one made with no executor lives until it is destroyed. It must outlive every export opened on
+ *  its outputs: a free those refuse leaves the arena allocated with no owner left to free it. */
 class arena_t {
-    owner<uform_arena_t, uform_arena_free> owner_;
+    owner<uform_arena_t, free_arena> owner_;
 
   public:
+    /** The C handle, for @c uform_arena_export_open among others; close every export opened
+     *  through it before this owner dies. */
     uform_arena_t handle() const noexcept { return owner_.handle(); }
     uform_arena_t* handle_field() noexcept { return owner_.handle_field(); }
 

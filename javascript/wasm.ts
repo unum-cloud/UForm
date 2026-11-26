@@ -37,6 +37,7 @@ import type {
   ProgressCallback,
 } from "./library.js";
 import { Status, backend, bind, fail } from "./types.js";
+import type { ArenaDescription } from "./types.js";
 
 /** The Emscripten module surface this backend calls: the heap, the runtime helpers, and the
  *  exported C verbs. */
@@ -300,7 +301,6 @@ function wasmBackend(module: WasmModule): Compiled {
   }
 
   class WasmArena implements CompiledArena {
-    readonly residency = "ram";
     handle = 0;
     readonly #views: ArrayBuffer[] = [];
 
@@ -320,6 +320,11 @@ function wasmBackend(module: WasmModule): Compiled {
       } finally {
         frame.free();
       }
+    }
+
+    /** Host pages on the module's heap, whose outputs reach JavaScript as copies. */
+    describe(): ArenaDescription {
+      return { residency: "ram", device: null, vendor: "unknown", vendorOrdinal: null, hostAccess: "readable" };
     }
 
     /** Detaches every copy handed out since the last rewind, as a call rewinding the
@@ -772,9 +777,11 @@ export {
 } from "./types.js";
 export type {
   ExecutorForRamConfig,
+  ArenaDescription,
   ExecutorForVramConfig,
   GpuDevice,
   GpuVendor,
+  HostAccess,
   MultimemTier,
   UFormError,
 } from "./types.js";

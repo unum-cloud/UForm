@@ -1210,6 +1210,11 @@ bool submitted(arguments_type_* arguments) noexcept {
     if (arguments ==
         fu::standard_atomic_ref<void const*>(executor->holding_call.arguments).load(std::memory_order_relaxed))
         return false;
+    if constexpr (an_arena_naming_call<arguments_type_>)
+        if (arguments->arena && fu::standard_atomic_ref<util::u32_t> {arguments->arena->exports}.load())
+            return propagate_error(uform_status_contended_k, arguments->outcome,
+                                   "An export of the arena's outputs is open"),
+                   true;
     if (!take_call_claim(*executor))
         return propagate_error(uform_status_contended_k, arguments->outcome, "Another call holds the executor"), true;
     auto& call = executor->holding_call;
@@ -1383,6 +1388,10 @@ struct uform_arena_handle_t {
 
     /** Executor calls naming the arena that have not ended, which its free waits out. */
     util::u32_t named_calls = 0;
+
+    /** Open exports of the outputs, which refuse every call naming the arena and its free; set
+     *  through the standard reference, as a consumer closes one from any thread. */
+    util::u32_t exports = 0;
 };
 
 /** What @c uform_model_t owns: the geometry its checkpoint held, the precision its blocks run in,

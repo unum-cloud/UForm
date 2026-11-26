@@ -65,6 +65,9 @@ func TestNamesRoundTrip(t *testing.T) {
 	if err != nil || modality != uform.ModalityImage {
 		t.Fatalf("read back %v, %v", modality, err)
 	}
+	if uform.HostAccessRefused.String() != "refused" || uform.HostAccessReadable.String() != "readable" {
+		t.Fatalf("host access spells %s, %s", uform.HostAccessRefused, uform.HostAccessReadable)
+	}
 	if _, err := uform.MoodFromName("sleepy"); !errors.Is(err, uform.StatusInvalidArgument) {
 		t.Fatalf("an unknown spelling answered %v", err)
 	}
@@ -86,7 +89,8 @@ func TestExecutorsAndArenas(t *testing.T) {
 		t.Fatal(err)
 	}
 	description, err := arena.Describe()
-	if err != nil || description.Residency != uform.ResidencyRam || description.Device != -1 {
+	host := uform.ArenaDescription{Residency: uform.ResidencyRam, Device: -1, VendorOrdinal: -1, HostAccess: uform.HostAccessReadable}
+	if err != nil || description != host {
 		t.Fatalf("a host arena reads %+v, %v", description, err)
 	}
 	devices := make([]uform.GPUDevice, 4)

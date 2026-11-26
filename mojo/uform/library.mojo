@@ -49,6 +49,7 @@ from uform.train import (
 )
 from uform.types import (
     ArenaDescribe,
+    ArenaFree,
     ArenaInit,
     BytesView,
     CPUClass,
@@ -63,6 +64,7 @@ from uform.types import (
     GPUDevices,
     GPUDevicesArguments,
     GPUVendor,
+    HostAccess,
     Mood,
     NameOf,
     Outcome,
@@ -166,6 +168,8 @@ struct Symbols:
     """`uform_gpu_vendor_name`."""
     var gpu_vendor_from_name: FromName
     """`uform_gpu_vendor_from_name`."""
+    var host_access_name: NameOf
+    """`uform_host_access_name`."""
     var gpu_devices: GPUDevices
     """`uform_gpu_devices`."""
 
@@ -181,7 +185,7 @@ struct Symbols:
     """`uform_arena_init`."""
     var arena_describe: ArenaDescribe
     """`uform_arena_describe`."""
-    var arena_free: Release
+    var arena_free: ArenaFree
     """`uform_arena_free`."""
 
     var model_load_ram: ModelLoadRam
@@ -279,6 +283,7 @@ struct Symbols:
         self.gpu_class_from_name = _resolve[FromName](handle, "uform_gpu_class_from_name")
         self.gpu_vendor_name = _resolve[NameOf](handle, "uform_gpu_vendor_name")
         self.gpu_vendor_from_name = _resolve[FromName](handle, "uform_gpu_vendor_from_name")
+        self.host_access_name = _resolve[NameOf](handle, "uform_host_access_name")
         self.gpu_devices = _resolve[GPUDevices](handle, "uform_gpu_devices")
 
         self.executor_for_ram = _resolve[ExecutorForRam](handle, "uform_executor_for_ram")
@@ -287,7 +292,7 @@ struct Symbols:
         self.executor_free = _resolve[Release](handle, "uform_executor_free")
         self.arena_init = _resolve[ArenaInit](handle, "uform_arena_init")
         self.arena_describe = _resolve[ArenaDescribe](handle, "uform_arena_describe")
-        self.arena_free = _resolve[Release](handle, "uform_arena_free")
+        self.arena_free = _resolve[ArenaFree](handle, "uform_arena_free")
 
         self.model_load_ram = _resolve[ModelLoadRam](handle, "uform_model_load_ram")
         self.model_load_ram_buffer = _resolve[ModelLoadRamBuffer](handle, "uform_model_load_ram_buffer")
@@ -472,6 +477,10 @@ struct Library(ImplicitlyCopyable):
     def gpu_vendor_from_name(self, name: StringSlice) raises Error -> GPUVendor:
         """Reads a spelling back, raising `INVALID_ARGUMENT` when unrecognized. Calls `uform_gpu_vendor_from_name`."""
         return GPUVendor(self._from_name(self.symbols().gpu_vendor_from_name, name, "uform_gpu_vendor_from_name"))
+
+    def host_access_name(self, host_access: HostAccess) -> String:
+        """The engine's spelling of a host access, as `READABLE` spells "readable". Calls `uform_host_access_name`."""
+        return text_at(self.symbols().host_access_name(host_access.code))
 
     def modality_name(self, modality: Modality) -> String:
         """The engine's spelling of a modality, as `TEXT` spells "text". Calls `uform_modality_name`."""

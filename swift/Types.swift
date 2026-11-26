@@ -38,6 +38,8 @@ public struct Status: Hashable, Sendable, CustomStringConvertible {
     public static let malformed = Status(raw: uform_status_malformed_k)
     /// The library reported neither success nor a failure.
     public static let `internal` = Status(raw: uform_status_internal_k)
+    /// A count would pass the largest value its type holds.
+    public static let overflow = Status(raw: uform_status_overflow_k)
     /// The handle the call operates on is missing, refused before any other check.
     public static let uninitialized = Status(raw: uform_status_uninitialized_k)
     /// The request contradicts a frozen configuration.
@@ -716,6 +718,58 @@ public final class Executor: @unchecked Sendable {
 
 // MARK: - Arenas
 
+/// Where an arena's outputs live, carrying the C enumerator.
+public struct Residency: Hashable, Sendable {
+    /// The C enumerator.
+    let raw: uform_residency_t
+
+    /// Host pages, which the host reads directly.
+    public static let ram = Residency(raw: uform_residency_ram_k)
+    /// One GPU's memory, which the host reads only where `HostAccess` lets it.
+    public static let vram = Residency(raw: uform_residency_vram_k)
+
+    init(raw: uform_residency_t) { self.raw = raw }
+}
+
+/// Whether host code may read an arena's outputs, carrying the C enumerator: host, pinned and
+/// managed memory and Apple's shared memory are readable.
+public struct HostAccess: Hashable, Sendable, CustomStringConvertible {
+    /// The C enumerator.
+    let raw: uform_host_access_t
+
+    /// Device memory the host must not read.
+    public static let refused = HostAccess(raw: uform_host_access_refused_k)
+    /// Memory the host reads directly.
+    public static let readable = HostAccess(raw: uform_host_access_readable_k)
+
+    /// The access as the library spells it. Calls `uform_host_access_name`.
+    public var description: String { String(cString: uform_host_access_name(raw)) }
+
+    init(raw: uform_host_access_t) { self.raw = raw }
+}
+
+/// Where an arena's outputs live. Mirrors `uform_arena_description_t`.
+public struct ArenaDescription: Hashable, Sendable {
+    /// `ram` for host pages, `vram` for one device's memory.
+    public var residency: Residency
+    /// The device's position in `gpuDevices()`, or nil for host pages.
+    public var device: Int?
+    /// The vendor whose memory it is, `unknown` for host pages.
+    public var vendor: GPUVendor
+    /// The vendor's own device number, which Arrow and DLPack name, or nil for host pages.
+    public var vendorOrdinal: Int?
+    /// Whether the views over the outputs read them.
+    public var hostAccess: HostAccess
+
+    init(_ raw: uform_arena_description_t) {
+        residency = Residency(raw: raw.residency)
+        device = raw.device < 0 ? nil : Int(raw.device)
+        vendor = GPUVendor(raw: raw.vendor)
+        vendorOrdinal = raw.vendor_ordinal < 0 ? nil : Int(raw.vendor_ordinal)
+        hostAccess = HostAccess(raw: raw.host_access)
+    }
+}
+
 /// Memory the library writes every output whose length scales with a call into, reused across calls
 /// so a steady loop allocates once.
 ///
@@ -724,12 +778,17 @@ public final class Executor: @unchecked Sendable {
 /// out-of-bounds index does. To keep a result past the next call, give that call another arena. An
 /// arena serves one call at a time, deferred ones included, and a call naming it while another
 /// holds it is refused with `contended`. An arena never outlives the executor that made it: one in
-/// device memory holds that executor, so ARC releases the arena first.
+/// device memory holds that executor, so ARC releases the arena first. Where `placement` refuses
+/// host access, any read of a view traps, as an out-of-bounds index does. `deinit` cannot report a
+/// refused free, so the arena must outlive every export opened on it.
 public final class Arena {
     /// The native handle, released by `deinit`.
     let raw: uform_arena_t
     /// The device executor that made it, held so the arena is freed first; nil for host pages.
     let device: Executor?
+    /// Where the outputs live, as the executor that made it decided once. Read from
+    /// `uform_arena_describe`.
+    public let placement: ArenaDescription
     /// Advanced by every call given the arena, so a view remembers which call wrote it.
     var generation: UInt64 = 0
 
@@ -745,7 +804,8 @@ public final class Arena {
         let description = asked.slots(uform_arena_description_t())
         var describe = uform_arena_describe_t(arena: raw, outcome: asked.outcome, description: description)
         uform_arena_describe(&describe)
-        device = description.pointee.residency == uform_residency_vram_k ? executor : nil
+        placement = ArenaDescription(description.pointee)
+        device = placement.residency == .vram ? executor : nil
         try asked.read { () throws(UFormError) in }
     }
 
@@ -758,10 +818,10 @@ struct ArenaWrite {
     let arena: Arena
     let generation: UInt64
 
-    /// Refuses a read the arena no longer backs, or one reaching device memory.
+    /// Refuses a read of an arena a later call rewound, or of memory the host may not read.
     func check() {
         precondition(arena.generation == generation, "the arena was rewound since this view was written")
-        precondition(arena.device == nil, "the view is device memory, which no host read reaches")
+        precondition(arena.placement.hostAccess == .readable, "the outputs are memory the host may not read")
     }
 
     /// Refuses as `check()` does, then a `position` past `count`, as a collection does.

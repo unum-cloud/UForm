@@ -245,7 +245,7 @@ Each header lists a verb's refusals under `@par Statuses` in this order and in t
 
 Statuses 0 to 19 keep the same numbers and meanings in every Unum library: success 0, deferred 1, out_of_memory 2, shape_mismatch 3, unsupported_layout 4, unknown_kind 5, read_only 6, io 7, device 8, malformed 9, internal 10, overflow 11, uninitialized 12, config_mismatch 13, contended 14, cancelled 15, unsupported 16, invalid_argument 17, not_found 18, already_exists 19.
 A library leaves out the ones it cannot answer but never renumbers the rest, and numbers its own statuses from 20.
-Every enum the C interface names, statuses included, has a `uform_*_name` answering "unrecognized" for a value it does not know and a `uform_*_from_name(view, &out)` answering `invalid_argument` for a name it does not know, leaving `out` as it was.
+Every enum the C interface names, statuses included, has a `uform_*_name`, answering "unrecognized" for a value it does not know; one a caller can pass in also has `uform_*_from_name(view, &out)`, answering `invalid_argument` for a name it does not know and leaving `out` as it was.
 CPU and GPU class values are ABI: each class keeps the number USearch gives the same hardware, written explicitly, with unused numbers reserved rather than reused.
 `uform_version_name` answers the full version, pre-release suffix included, in the engine and in the stub alike.
 

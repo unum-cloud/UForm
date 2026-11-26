@@ -208,12 +208,16 @@ pub struct uform_arena_init_t {
 }
 
 pub type uform_residency_t = c_int;
+pub type uform_host_access_t = c_int;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct uform_arena_description_t {
     pub residency: uform_residency_t,
     pub device: i32,
+    pub vendor: uform_gpu_vendor_t,
+    pub vendor_ordinal: i32,
+    pub host_access: uform_host_access_t,
 }
 
 #[repr(C)]
@@ -233,7 +237,7 @@ unsafe extern "C" {
     pub fn uform_executor_free(executor: uform_executor_t);
 
     pub fn uform_arena_init(arguments: *mut uform_arena_init_t);
-    pub fn uform_arena_free(arena: uform_arena_t);
+    pub fn uform_arena_free(arena: uform_arena_t) -> uform_status_t;
     pub fn uform_arena_describe(arguments: *mut uform_arena_describe_t);
 
     pub fn uform_status_name(status: uform_status_t) -> *const c_char;
@@ -248,6 +252,7 @@ unsafe extern "C" {
     pub fn uform_gpu_class_from_name(name: uform_bytes_view_t, gpu_class: *mut uform_gpu_class_t) -> uform_status_t;
     pub fn uform_gpu_vendor_name(vendor: uform_gpu_vendor_t) -> *const c_char;
     pub fn uform_gpu_vendor_from_name(name: uform_bytes_view_t, vendor: *mut uform_gpu_vendor_t) -> uform_status_t;
+    pub fn uform_host_access_name(host_access: uform_host_access_t) -> *const c_char;
 
     pub fn uform_gpu_devices(arguments: *mut uform_gpu_devices_t);
 
@@ -394,6 +399,8 @@ pub enum Status {
     Malformed = 9,
     /// The library reported neither success nor a failure.
     Internal = 10,
+    /// A count would pass the largest value its type holds.
+    Overflow = 11,
     /// The handle the call operates on is missing, refused before any other check.
     Uninitialized = 12,
     /// The request contradicts a frozen configuration, like resuming a checkpoint
@@ -422,6 +429,7 @@ impl Status {
             7 => Status::Io,
             8 => Status::Device,
             9 => Status::Malformed,
+            11 => Status::Overflow,
             12 => Status::Uninitialized,
             13 => Status::ConfigMismatch,
             14 => Status::Contended,
@@ -806,6 +814,8 @@ impl FromStr for GPUClass {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[non_exhaustive]
 pub enum GPUVendor {
+    /// No vendor: the memory of host pages.
+    Unknown = 0,
     /// NVIDIA, through the CUDA driver.
     Nvidia = 1,
     /// AMD, through the HIP runtime.
@@ -817,6 +827,7 @@ pub enum GPUVendor {
 impl GPUVendor {
     fn from_raw(value: uform_gpu_vendor_t) -> Option<Self> {
         match value {
+            0 => Some(GPUVendor::Unknown),
             1 => Some(GPUVendor::Nvidia),
             2 => Some(GPUVendor::Amd),
             3 => Some(GPUVendor::Apple),
@@ -835,7 +846,7 @@ impl fmt::Display for GPUVendor {
 impl FromStr for GPUVendor {
     type Err = Error;
 
-    /// Calls `uform_gpu_vendor_from_name`, refusing "unknown", which names no vendor.
+    /// Calls `uform_gpu_vendor_from_name`.
     fn from_str(text: &str) -> Result<Self> {
         read_spelling(text, uform_gpu_vendor_from_name, GPUVendor::from_raw)
     }
@@ -987,14 +998,14 @@ impl<'arena> Rows<'arena> {
 
     /// Every row's bytes end to end, refused with [`Status::Device`] over device memory.
     pub fn as_bytes(&self) -> Result<&'arena [u8]> {
-        self.arena.host()?;
+        self.arena.describe()?.host()?;
         exported_slice(self.view.0.data.cast::<u8>(), self.count * self.view.0.stride)
     }
 
     /// Every row's values end to end, refused with [`Status::InvalidArgument`] when the rows hold
     /// another scalar type, and with [`Status::Device`] over device memory.
     pub fn values<Value: Element>(&self) -> Result<&'arena [Value]> {
-        self.arena.host()?;
+        self.arena.describe()?.host()?;
         let view = self.view.0;
         if self.scalar() != Some(Value::SCALAR) {
             return Err(fail(Status::InvalidArgument, "the rows hold another scalar type"));
@@ -1032,7 +1043,7 @@ impl<'arena> RowsTape<'arena> {
     /// The call's count plus one non-decreasing offsets, in rows, refused with [`Status::Device`]
     /// over device memory.
     pub fn offsets(&self) -> Result<&'arena [usize]> {
-        self.arena.host()?;
+        self.arena.describe()?.host()?;
         exported_slice(self.view.0.offsets, self.count + 1)
     }
 
@@ -1085,7 +1096,7 @@ impl<'arena> Tape<'arena> {
     /// The call's count plus one non-decreasing offsets, in values, refused with [`Status::Device`]
     /// over device memory.
     pub fn offsets(&self) -> Result<&'arena [usize]> {
-        self.arena.host()?;
+        self.arena.describe()?.host()?;
         exported_slice(self.view.0.offsets, self.count + 1)
     }
 
@@ -1277,6 +1288,36 @@ impl Residency {
     }
 }
 
+/// Whether host code may read an arena's outputs: host and pinned pages, managed memory and Apple's
+/// shared memory are readable, other device memory is not.
+///
+/// Mirrors `uform_host_access_t`.
+#[repr(i32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum HostAccess {
+    /// Host code must not read the pages.
+    Refused = 0,
+    /// Host code reads the pages directly.
+    Readable = 1,
+}
+
+impl HostAccess {
+    fn from_raw(value: uform_host_access_t) -> Option<Self> {
+        match value {
+            0 => Some(HostAccess::Refused),
+            1 => Some(HostAccess::Readable),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for HostAccess {
+    /// Calls `uform_host_access_name`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(spelling(uform_host_access_name, *self as c_int))
+    }
+}
+
 /// The host threads or device streams an [`On`] runs its calls on, with the activation scratch and
 /// the staging buffers each of them uses.
 ///
@@ -1427,12 +1468,14 @@ impl Drop for Executor {
 /// nothing is allocated until a call writes into it. Every call rewinds and refills it,
 /// invalidating the previous call's outputs, so a steady loop allocates once. Every verb, blocking
 /// or deferred, takes it as `&mut Arena` and answers outputs that refer to it in turn. An arena
-/// from a VRAM executor holds device memory, so the host accessors of its outputs refuse with
-/// [`Status::Device`]. It grows, fills and frees on the first stream of the executor that made it,
-/// so it serves only calls on that executor, and `'executor` keeps it from outliving that executor.
+/// from a VRAM executor holds device memory, so where [`ArenaDescription::host_access`] refuses the
+/// host, the host accessors of its outputs refuse with [`Status::Device`]. It grows, fills and
+/// frees on the first stream of the executor that made it, so it serves only calls on that
+/// executor, and `'executor` keeps it from outliving that executor.
 ///
 /// Mirrors `uform_arena_t`; dropping it calls `uform_arena_free`, which waits for the calls
-/// still writing into it.
+/// still writing into it. A drop cannot report a refused free, so the arena must outlive every
+/// export opened on it.
 #[derive(Debug)]
 pub struct Arena<'executor> {
     pub(crate) handle: uform_arena_t,
@@ -1490,15 +1533,11 @@ impl<'executor> Arena<'executor> {
             residency: Residency::from_raw(description.residency)
                 .ok_or_else(|| fail(Status::UnknownKind, "the arena names no known residency"))?,
             device: u32::try_from(description.device).ok(),
+            vendor: GPUVendor::from_raw(description.vendor).unwrap_or(GPUVendor::Unknown),
+            vendor_ordinal: u32::try_from(description.vendor_ordinal).ok(),
+            host_access: HostAccess::from_raw(description.host_access)
+                .ok_or_else(|| fail(Status::UnknownKind, "the arena names no known host access"))?,
         })
-    }
-
-    /// Refuses device memory, which no host accessor may read.
-    pub(crate) fn host(&self) -> Result<()> {
-        match self.describe()?.residency {
-            Residency::Vram => Err(fail(Status::Device, "the outputs are device memory")),
-            _ => Ok(()),
-        }
     }
 }
 
@@ -1510,11 +1549,28 @@ pub struct ArenaDescription {
     pub residency: Residency,
     /// The device ordinal, as [`Executor::for_vram`] takes it; `None` for host pages.
     pub device: Option<u32>,
+    /// The vendor whose memory it is, as [`gpu_devices`] reports it; `Unknown` for host pages.
+    pub vendor: GPUVendor,
+    /// The vendor's own device number, which Arrow and DLPack name; `None` for host pages.
+    pub vendor_ordinal: Option<u32>,
+    /// Whether the host accessors of the outputs may read them.
+    pub host_access: HostAccess,
+}
+
+impl ArenaDescription {
+    /// Refuses memory the host may not read with [`Status::Device`].
+    pub(crate) fn host(&self) -> Result<()> {
+        match self.host_access {
+            HostAccess::Readable => Ok(()),
+            HostAccess::Refused => Err(fail(Status::Device, "the outputs are memory the host may not read")),
+        }
+    }
 }
 
 impl Drop for Arena<'_> {
     fn drop(&mut self) {
-        unsafe { uform_arena_free(self.handle) }
+        // Only an open export refuses the free, and this crate opens none.
+        unsafe { uform_arena_free(self.handle) };
     }
 }
 
@@ -1822,6 +1878,7 @@ mod tests {
             Status::Device,
             Status::Malformed,
             Status::Internal,
+            Status::Overflow,
             Status::Uninitialized,
             Status::ConfigMismatch,
             Status::Contended,
@@ -1835,9 +1892,9 @@ mod tests {
             assert_eq!(status.to_string().parse(), Ok(status));
         }
         // A final outcome is never deferred, and a status this build has no name for is not
-        // success either, so both read as the contract violation they are; USearch's 6 and 11
-        // stay unused.
-        for status in [Status::Deferred as i32, 6, 11, 4242] {
+        // success either, so both read as the contract violation they are; USearch's 6 stays
+        // unused.
+        for status in [Status::Deferred as i32, 6, 4242] {
             let raw = uform_outcome_t { status, message: ptr::null() };
             assert_eq!(check(raw).unwrap_err().status, Status::Internal);
         }
@@ -1878,13 +1935,25 @@ mod tests {
         }
     }
 
-    /// An arena lives where the executor that made it computes, and the host reads only host pages.
+    /// An arena lives where the executor that made it computes, and the host reads only memory its
+    /// description lets it.
     #[test]
     fn arenas_live_where_their_executor_computes() {
         let local = Arena::new().unwrap();
-        let host = ArenaDescription { residency: Residency::Ram, device: None };
+        let host = ArenaDescription {
+            residency: Residency::Ram,
+            device: None,
+            vendor: GPUVendor::Unknown,
+            vendor_ordinal: None,
+            host_access: HostAccess::Readable,
+        };
         assert_eq!(local.describe().unwrap(), host);
-        assert!(local.host().is_ok());
+        assert!(local.describe().unwrap().host().is_ok());
+
+        let device = ArenaDescription { residency: Residency::Vram, device: Some(0), ..host };
+        let refused = ArenaDescription { host_access: HostAccess::Refused, ..device };
+        assert_eq!(refused.host().unwrap_err().status, Status::Device, "device memory is never a host slice");
+        assert!(device.host().is_ok(), "managed and Apple's shared memory read on the host");
 
         let executor = testing::executor();
         let placed = Arena::new_in(&executor).unwrap();
@@ -1893,9 +1962,9 @@ mod tests {
         let Ok(gpu) = (unsafe { Executor::for_vram(&[0], None, &[], None, &[], 0) }) else {
             return testing::skipped("no GPU device");
         };
-        let device = Arena::new_in(&gpu).unwrap();
-        assert_eq!(device.describe().unwrap(), ArenaDescription { residency: Residency::Vram, device: Some(0) });
-        assert_eq!(device.host().unwrap_err().status, Status::Device);
+        let described = Arena::new_in(&gpu).unwrap().describe().unwrap();
+        assert_eq!((described.residency, described.device), (Residency::Vram, Some(0)));
+        assert!(described.vendor != GPUVendor::Unknown && described.vendor_ordinal.is_some(), "{described:?}");
     }
 
     /// Streams that do not pair with the devices are refused.
@@ -1915,11 +1984,13 @@ mod tests {
         assert!("intel".parse::<GPUClass>().is_err());
         assert_eq!(CPUClass::from_raw(0), None);
         assert_eq!(GPUClass::from_raw(13), None);
-        for vendor in [GPUVendor::Nvidia, GPUVendor::Amd, GPUVendor::Apple] {
+        for vendor in [GPUVendor::Unknown, GPUVendor::Nvidia, GPUVendor::Amd, GPUVendor::Apple] {
             assert_eq!(vendor.to_string().parse(), Ok(vendor));
         }
         assert_eq!(GPUVendor::Nvidia.to_string(), "nvidia");
-        assert!("unknown".parse::<GPUVendor>().is_err());
+        assert_eq!(HostAccess::Refused.to_string(), "refused");
+        assert_eq!(HostAccess::Readable.to_string(), "readable");
+        assert_eq!("unknown".parse::<GPUVendor>(), Ok(GPUVendor::Unknown));
         assert!("intel".parse::<GPUVendor>().is_err());
     }
 
@@ -1930,7 +2001,8 @@ mod tests {
         let count = gpu_devices(&mut devices).unwrap();
         assert_eq!(gpu_devices(&mut []).unwrap(), count);
         for device in &devices[..count.min(devices.len())] {
-            assert!(device.vendor().is_some() && !device.name().is_empty(), "{device:?}");
+            assert!(device.vendor().is_some_and(|vendor| vendor != GPUVendor::Unknown), "{device:?}");
+            assert!(!device.name().is_empty(), "{device:?}");
         }
     }
 
