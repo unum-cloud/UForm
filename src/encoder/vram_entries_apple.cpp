@@ -20,6 +20,8 @@
 #include <cstddef> // `std::size_t`
 #include <cstring> // `std::memcpy`, `std::memset`, `std::strncpy`
 
+#include <forkunion/locks.hpp> // `fu::spin_mutex_t` - a context's lock
+
 #include "uform/encoder/vram_kits.hpp" // `vram_apple_entries_kit_t`, the Metal kits, `entries_block_threads_k`
 
 #include "lib.hpp" // `gpu_drivers`

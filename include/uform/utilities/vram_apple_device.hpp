@@ -22,6 +22,7 @@
 #include <span>    // `std::span` - the device list an executor opens over
 #include <utility> // `std::exchange`, `std::move`, `std::swap`
 
+#include <forkunion/locks.hpp>               // `fu::spin_mutex_t` - a context's lock
 #include <smashtable/basic_growing_pool.hpp> // `st::basic_growing_pool` - every buffer a device holds
 
 #include "uform/utilities/array.hpp"          // `per_gpu_array`, `max_gpus_per_host_k`

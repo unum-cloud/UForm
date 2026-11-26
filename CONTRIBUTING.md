@@ -161,6 +161,7 @@ The library under `include/uform/` and `src/` holds none of these standard types
 The suites, tools and benchmarks may also hold a `std::string`, a `std::vector` or a standard map, and reach files through `std::filesystem`.
 No library type derives from another: shared behavior is a member the type holds.
 A member that locks or writes is not `const`, and no `const_cast` turns a read-only view writable.
+A try-only claim is an atomic bit or `fu::spin_mutex_t`, anything that waits is `fu::fair_mutex_t` from `<forkunion/locks.hpp>`, and UForm holds no reader-writer gate yet; `.githooks/pre-commit` refuses any other new lock, so ask first.
 Memory a call computes through belongs to its executor, its outputs land in the arena it names, and both keep their high-water mark, so a steady loop allocates once.
 Tensors index by rank, `tensor[row, column]`, and slice through the same subscript, `tensor[nk::range(0, rows), nk::slice]`, never through the call form or a flat `row * columns + column`.
 

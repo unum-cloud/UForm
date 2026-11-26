@@ -33,8 +33,9 @@
 
 #include <forkunion/atomics.hpp>      // `fu::standard_atomic_ref` & kin - the classes' atomic references
 #include <forkunion/capabilities.hpp> // `fu::x86_pause_t`, `fu::arm64_wfet_t` & waiter kin
+#include <forkunion/locks.hpp>        // `fu::spin_mutex_t` - the executors' holds
 #include <forkunion/topology.hpp>     // `fu::current_thread_id` - the thread running an executor's call
-#include <forkunion/types.hpp>        // `fu::spin_mutex_t`, `fu::wait_capped_k`
+#include <forkunion/types.hpp>        // `fu::wait_capped_k`
 #include <numkong/capabilities.h>     // `nk_capability_t`, `nk_stream_t`
 #include <numkong/memory.h>           // `nk_allocator_t`, `nk_allocator_init_heap`
 #include <numkong/memory.hpp>         // `nk::stream_t` - the stream an executor owns
@@ -893,9 +894,9 @@ struct slice_t {
 };
 
 /**
- *  @brief One call's reports: the C handler, serialized for the executor's threads, which the
- *      contract promises it never sees concurrently, thinned to the caller's steps, and the slices
- *      a batch verb hands its engine whole.
+ *  @brief One call's reports: the C handler, thinned to the caller's steps, and the slices a batch
+ *      verb hands its engine whole. Only the calling thread ticks, between slices its pool joined,
+ *      so the handler never runs concurrently and needs no lock.
  *
  *  Without a handler a batch is one slice and nothing is reported; with one it splits into
  *  @c progress.steps nearly equal slices, ten when zero. A verb counting its own units, a load's
@@ -945,7 +946,6 @@ class progress_ticks_t {
      *  slice end @c ⌈i · population/steps⌉ closes exactly step @c i . */
     continuation_t operator()(std::size_t completed, std::size_t population) noexcept {
         if (!progress_.callback) return continuation_t::continue_k;
-        st::unique_lock<fu::spin_mutex_t> lock(mutex_);
         std::size_t const steps = steps_(population);
         std::size_t const step = completed >= population ? steps : completed * steps / population;
         if (step <= closed_) return continuation_t::continue_k;
@@ -966,9 +966,8 @@ class progress_ticks_t {
     uform_progress_t progress_;
     std::size_t total_;
 
-    /** The last step a forwarded tick closed, guarded by @ref mutex_ like the handler itself. */
+    /** The last step a forwarded tick closed. */
     std::size_t closed_ = 0;
-    fu::spin_mutex_t mutex_;
 };
 
 #pragma endregion Progress
