@@ -46,7 +46,7 @@ if [ "${1:-}" = --siblings ] || [ "${1:-}" = --sync ]; then
             printf '%s\n' "${region_names:-Shared VRAM}" |
                 awk -v path="$source_path" '{ print path "|#pragma region " $0 "|#pragma endregion " $0 }'
         done
-        printf '%s\n' "c/@name@/dlpack.h||" "c/@name@/arrow_abi.h||"
+        printf '%s\n' "c/@name@/arrow_abi.h||" "python/dlpack.h||"
     }
     # Succeeds when the file holds the opener line, or exists at all when the opener is empty, as a vendored file.
     carries_region() { # carries_region <opener> <file>
@@ -2313,6 +2313,11 @@ stage_renamed_fixture scripts/probe.sh scripts/moved.sh 's/^echo settled$/# ----
 run_precommit
 expect_rejection "banner ruler in a renamed file" "adds a banner ruler"
 
+assert_verbatim_accepts "vendored standard header kept as its upstream wrote it" python/dlpack.h <<'FIXTURE'
+// ----------------------------------------------------------------------
+#define DLPACK_DLL  /* exported */
+FIXTURE
+
 assert_rejects "banner ruler" "adds a banner ruler" scripts/probe.sh <<'FIXTURE'
 # ----
 echo probe
@@ -4443,8 +4448,8 @@ inline int probe(unum::uform::utilities::status_t status) { return 0; }
 FIXTURE
 
 assert_accepts "project namespace through an alias" tools/probe.hpp <<'FIXTURE'
-namespace us = unum::uform;
-inline int probe(us::utilities::status_t status) { return 0; }
+namespace util = unum::uform::utilities;
+inline int probe(util::status_t status) { return 0; }
 FIXTURE
 
 assert_rejects "namespace reopened" "reopens namespace" test/probe.hpp <<'FIXTURE'
@@ -5339,6 +5344,27 @@ inline int probe(int &count) noexcept {
     // One owner, not a std::mutex, keeps this count consistent.
     return ++count;
 }
+FIXTURE
+
+assert_accepts "live-arena count on the Python executor" python/probe.c <<'FIXTURE'
+typedef struct probe_executor_t {
+    probe_handle_t handle;
+    atomic_size_t arenas;
+} probe_executor_t;
+FIXTURE
+
+assert_rejects "live-arena count outside the Python binding" "counts references in a binding" javascript/probe.c <<'FIXTURE'
+typedef struct probe_executor_t {
+    probe_handle_t handle;
+    atomic_size_t arenas;
+} probe_executor_t;
+FIXTURE
+
+assert_rejects "live-arena count as a plain integer" "counts references in a binding" python/probe.c <<'FIXTURE'
+typedef struct probe_executor_t {
+    probe_handle_t handle;
+    Py_ssize_t arenas;
+} probe_executor_t;
 FIXTURE
 
 # endregion UForm Fixtures
