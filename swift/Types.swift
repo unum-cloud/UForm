@@ -303,13 +303,6 @@ public struct GPUVendor: Hashable, Sendable, CustomStringConvertible {
     /// The vendor as the library spells it. Calls `uform_gpu_vendor_name`.
     public var description: String { String(cString: uform_gpu_vendor_name(raw)) }
 
-    /// Reads a spelling back, and nil for one no vendor holds. Calls
-    /// `uform_gpu_vendor_from_name`.
-    public init?(name: String) {
-        guard let raw = parsed(name, uform_gpu_vendor_from_name) else { return nil }
-        self.raw = raw
-    }
-
     init(raw: uform_gpu_vendor_t) { self.raw = raw }
 }
 

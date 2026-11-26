@@ -142,10 +142,6 @@ struct VocabularyTests {
             #expect(LateInteractionSide(name: side.description) == side)
         }
         #expect(LateInteractionSide.queryAndDocument.description == "query-and-document")
-        for vendor in [GPUVendor.unknown, .nvidia, .amd, .apple] {
-            #expect(GPUVendor(name: vendor.description) == vendor)
-        }
-        #expect(GPUVendor(name: "intel") == nil)
         #expect(HostAccess.refused.description == "refused")
         #expect(HostAccess.readable.description == "readable")
         #expect(CPUClass.intelHaswell.description == "intel-haswell")

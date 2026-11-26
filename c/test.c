@@ -369,7 +369,6 @@ static void test_library_probes(void) {
     for (int value = 0; value != 4; ++value) {
         uform_pair_loss_form_t form = uform_pair_loss_form_sigmoid_k;
         uform_late_interaction_side_t side = uform_late_interaction_side_query_and_document_k;
-        uform_gpu_vendor_t vendor = uform_gpu_vendor_apple_k;
         expect_(uform_pair_loss_form_from_name(view_of(uform_pair_loss_form_name((uform_pair_loss_form_t)value)),
                                                &form) == uform_status_success_k &&
                 form == (uform_pair_loss_form_t)value);
@@ -377,15 +376,16 @@ static void test_library_probes(void) {
                     view_of(uform_late_interaction_side_name((uform_late_interaction_side_t)value)), &side) ==
                     uform_status_success_k &&
                 side == (uform_late_interaction_side_t)value);
-        expect_(uform_gpu_vendor_from_name(view_of(uform_gpu_vendor_name((uform_gpu_vendor_t)value)), &vendor) ==
-                    uform_status_success_k &&
-                vendor == (uform_gpu_vendor_t)value);
     }
     expect_(strcmp(uform_late_interaction_side_name(uform_late_interaction_side_query_and_document_k),
                    "query-and-document") == 0);
     uform_pair_loss_form_t untouched_form = uform_pair_loss_form_ranked_k;
     expect_(uform_pair_loss_form_from_name(view_of("steep"), &untouched_form) == uform_status_invalid_argument_k &&
             untouched_form == uform_pair_loss_form_ranked_k);
+    expect_(strcmp(uform_gpu_vendor_name(uform_gpu_vendor_unknown_k), "unknown") == 0 &&
+            strcmp(uform_gpu_vendor_name(uform_gpu_vendor_nvidia_k), "nvidia") == 0 &&
+            strcmp(uform_gpu_vendor_name(uform_gpu_vendor_amd_k), "amd") == 0 &&
+            strcmp(uform_gpu_vendor_name(uform_gpu_vendor_apple_k), "apple") == 0);
     expect_(strcmp(uform_gpu_vendor_name((uform_gpu_vendor_t)7), "unrecognized") == 0);
     expect_(strcmp(uform_host_access_name(uform_host_access_refused_k), "refused") == 0);
     expect_(strcmp(uform_host_access_name(uform_host_access_readable_k), "readable") == 0);
@@ -398,15 +398,12 @@ static void test_library_probes(void) {
     uform_scalar_t unknown_scalar = uform_scalar_f32_k;
     uform_cpu_class_t unknown_cpu_class = uform_cpu_class_serial_k;
     uform_gpu_class_t unknown_gpu_class = uform_gpu_class_nvidia_ampere_k;
-    uform_gpu_vendor_t unknown_vendor = uform_gpu_vendor_nvidia_k;
     expect_(uform_scalar_from_name(view_of("unknown"), &unknown_scalar) == uform_status_success_k &&
             unknown_scalar == uform_scalar_unknown_k);
     expect_(uform_cpu_class_from_name(view_of("unknown"), &unknown_cpu_class) == uform_status_success_k &&
             unknown_cpu_class == uform_cpu_class_unknown_k);
     expect_(uform_gpu_class_from_name(view_of("unknown"), &unknown_gpu_class) == uform_status_success_k &&
             unknown_gpu_class == uform_gpu_class_unknown_k);
-    expect_(uform_gpu_vendor_from_name(view_of("unknown"), &unknown_vendor) == uform_status_success_k &&
-            unknown_vendor == uform_gpu_vendor_unknown_k);
 
     // Classes fit a byte, so walking every byte meets each class and every gap between blocks;
     // the CPU walk starts at "unknown", which a pin spells too.

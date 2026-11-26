@@ -48,8 +48,6 @@ import (
 #cgo nocallback uform_cpu_class_from_name
 #cgo noescape uform_gpu_class_from_name
 #cgo nocallback uform_gpu_class_from_name
-#cgo noescape uform_gpu_vendor_from_name
-#cgo nocallback uform_gpu_vendor_from_name
 
 #include "shim.h"
 */
@@ -709,13 +707,6 @@ const (
 // String renders the vendor as the library spells it.
 func (vendor GPUVendor) String() string {
 	return C.GoString(C.uform_gpu_vendor_name(C.uform_gpu_vendor_t(vendor)))
-}
-
-// GPUVendorFromName reads a GPU vendor back from the spelling [GPUVendor.String] renders.
-func GPUVendorFromName(name string) (GPUVendor, error) {
-	var vendor C.uform_gpu_vendor_t
-	err := named(C.uform_gpu_vendor_from_name(view(name), &vendor))
-	return GPUVendor(vendor), err
 }
 
 // GPUDevice is one GPU as UForm numbers it: its position in what GPUDevices fills is the ordinal

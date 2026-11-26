@@ -1088,10 +1088,6 @@ UFORM_EXPORT uform_status_t uform_gpu_class_from_name(uform_bytes_view_t name, u
 /** The canonical spelling of a GPU vendor, as @c uform_gpu_vendor_nvidia_k spells "nvidia". */
 UFORM_EXPORT char const* uform_gpu_vendor_name(uform_gpu_vendor_t vendor);
 
-/** Reads a GPU vendor back from its spelling into @p vendor, or fails with
- *  @c uform_status_invalid_argument_k. */
-UFORM_EXPORT uform_status_t uform_gpu_vendor_from_name(uform_bytes_view_t name, uform_gpu_vendor_t* vendor);
-
 /** The canonical spelling of a host access, as @c uform_host_access_refused_k spells "refused". */
 UFORM_EXPORT char const* uform_host_access_name(uform_host_access_t host_access);
 

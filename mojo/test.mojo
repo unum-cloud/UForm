@@ -168,8 +168,6 @@ def test_names_round_trip_through_the_library_and_refuse_strangers() raises:
         assert_true(library.pair_loss_form_from_name(library.pair_loss_form_name(form)) == form)
         var side = LateInteractionSide(c_int(code))
         assert_true(library.late_interaction_side_from_name(library.late_interaction_side_name(side)) == side)
-        var vendor = GPUVendor(c_int(code))
-        assert_true(library.gpu_vendor_from_name(library.gpu_vendor_name(vendor)) == vendor)
     assert_equal(library.pair_loss_form_name(PairLossForm.SIGMOID), "sigmoid")
     assert_equal(library.late_interaction_side_name(LateInteractionSide.QUERY_AND_DOCUMENT), "query-and-document")
     assert_equal(library.gpu_vendor_name(GPUVendor.NVIDIA), "nvidia")

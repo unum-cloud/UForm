@@ -251,7 +251,6 @@ unsafe extern "C" {
     pub fn uform_gpu_class_name(gpu_class: uform_gpu_class_t) -> *const c_char;
     pub fn uform_gpu_class_from_name(name: uform_bytes_view_t, gpu_class: *mut uform_gpu_class_t) -> uform_status_t;
     pub fn uform_gpu_vendor_name(vendor: uform_gpu_vendor_t) -> *const c_char;
-    pub fn uform_gpu_vendor_from_name(name: uform_bytes_view_t, vendor: *mut uform_gpu_vendor_t) -> uform_status_t;
     pub fn uform_host_access_name(host_access: uform_host_access_t) -> *const c_char;
 
     pub fn uform_gpu_devices(arguments: *mut uform_gpu_devices_t);
@@ -840,15 +839,6 @@ impl fmt::Display for GPUVendor {
     /// Calls `uform_gpu_vendor_name`.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(spelling(uform_gpu_vendor_name, *self as c_int))
-    }
-}
-
-impl FromStr for GPUVendor {
-    type Err = Error;
-
-    /// Calls `uform_gpu_vendor_from_name`.
-    fn from_str(text: &str) -> Result<Self> {
-        read_spelling(text, uform_gpu_vendor_from_name, GPUVendor::from_raw)
     }
 }
 
@@ -1985,14 +1975,9 @@ mod tests {
         assert!("intel".parse::<GPUClass>().is_err());
         assert_eq!(CPUClass::from_raw(0), None);
         assert_eq!(GPUClass::from_raw(13), None);
-        for vendor in [GPUVendor::Unknown, GPUVendor::Nvidia, GPUVendor::Amd, GPUVendor::Apple] {
-            assert_eq!(vendor.to_string().parse(), Ok(vendor));
-        }
         assert_eq!(GPUVendor::Nvidia.to_string(), "nvidia");
         assert_eq!(HostAccess::Refused.to_string(), "refused");
         assert_eq!(HostAccess::Readable.to_string(), "readable");
-        assert_eq!("unknown".parse::<GPUVendor>(), Ok(GPUVendor::Unknown));
-        assert!("intel".parse::<GPUVendor>().is_err());
     }
 
     /// A machine without GPUs, or a build without their vendors, lists none and still succeeds.

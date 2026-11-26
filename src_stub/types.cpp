@@ -372,12 +372,6 @@ char const* uform_gpu_vendor_name(uform_gpu_vendor_t vendor) {
     }
 }
 
-uform_status_t uform_gpu_vendor_from_name(uform_bytes_view_t name, uform_gpu_vendor_t* vendor) {
-    return read_name<uform_gpu_vendor_t>(
-        name, {uform_gpu_vendor_unknown_k, uform_gpu_vendor_nvidia_k, uform_gpu_vendor_amd_k, uform_gpu_vendor_apple_k},
-        uform_gpu_vendor_name, vendor);
-}
-
 char const* uform_host_access_name(uform_host_access_t host_access) {
     switch (host_access) {
     case uform_host_access_refused_k: return "refused";
