@@ -12,16 +12,80 @@ Date: October 18, 2026
 """
 
 import asyncio
+import ctypes
 import io
 import wave
 from array import array
+from typing import NoReturn
 
 import pytest
-from base import png
+from base import numpy_available, png, pyarrow_available
 
 import uform
 
+if numpy_available:
+    import numpy
+if pyarrow_available:
+    import pyarrow
+
 TEXTS = ["first document", "the second", ""]
+
+
+class DLDevice(ctypes.Structure):
+    """DLPack's `DLDevice`, to hand-build a capsule no installed library would export here."""
+
+    _fields_ = [("device_type", ctypes.c_int32), ("device_id", ctypes.c_int32)]
+
+
+class DLDataType(ctypes.Structure):
+    """DLPack's `DLDataType`."""
+
+    _fields_ = [("code", ctypes.c_uint8), ("bits", ctypes.c_uint8), ("lanes", ctypes.c_uint16)]
+
+
+class DLTensor(ctypes.Structure):
+    """DLPack's `DLTensor`."""
+
+    _fields_ = [
+        ("data", ctypes.c_void_p),
+        ("device", DLDevice),
+        ("ndim", ctypes.c_int32),
+        ("dtype", DLDataType),
+        ("shape", ctypes.POINTER(ctypes.c_int64)),
+        ("strides", ctypes.POINTER(ctypes.c_int64)),
+        ("byte_offset", ctypes.c_uint64),
+    ]
+
+
+class DLManagedTensorVersioned(ctypes.Structure):
+    """DLPack's `DLManagedTensorVersioned`, with no deleter, as the test owns it."""
+
+    _fields_ = [
+        ("version", ctypes.c_uint32 * 2),
+        ("manager_ctx", ctypes.c_void_p),
+        ("deleter", ctypes.c_void_p),
+        ("flags", ctypes.c_uint64),
+        ("dl_tensor", DLTensor),
+    ]
+
+
+class DLPackExporter:
+    """An object exporting `tensor` through a versioned DLPack capsule, as a GPU library would."""
+
+    def __init__(self, tensor: DLManagedTensorVersioned):
+        """Keeps `tensor` alive as long as the exporter."""
+        self.tensor = tensor
+
+    def __dlpack__(self, **_: object) -> object:
+        """A capsule naming the tensor in place, whatever the consumer asks for."""
+        capsule_new = ctypes.pythonapi.PyCapsule_New
+        capsule_new.restype = ctypes.py_object
+        capsule_new.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
+        return capsule_new(ctypes.addressof(self.tensor), b"dltensor_versioned", None)
+
+
+DEVICE_BYTES = (ctypes.c_uint8 * 8)()
+"""Host bytes a hand-built capsule claims live on a GPU; the binding must refuse them before reading."""
 
 
 def wav(samples: int = 1600) -> bytes:
@@ -172,6 +236,15 @@ def test_an_arena_with_an_export_open_refuses_calls(model: uform.Model, arena: u
     with pytest.raises(uform.ContendedError):
         model.text_encode(TEXTS, arena)
     del capsule
+    model.text_encode(TEXTS, arena)
+
+
+def test_a_live_buffer_view_refuses_reuse_of_its_arena(model: uform.Model, arena: uform.Arena):
+    """A memoryview counts as an export, so reusing its arena raises ContendedError until the view is released."""
+    view = memoryview(model.text_encode(TEXTS, arena).embeddings)
+    with pytest.raises(uform.ContendedError):
+        model.text_encode(TEXTS, arena)
+    view.release()
     model.text_encode(TEXTS, arena)
 
 
@@ -329,3 +402,198 @@ def test_a_receiver_offers_its_targets_verbs(model: uform.Model, executor: uform
     assert isinstance(model.deferred(executor).text_encode, type(model.text_encode))
     with pytest.raises(AttributeError):
         on.step([uform.Modality.TEXT], ["a"])
+
+
+@pytest.mark.skipif(not pyarrow_available, reason="PyArrow is not installed")
+@pytest.mark.parametrize("arrow_type", ["string", "large_string", "binary", "large_binary"])
+def test_arrow_strings_encode_as_their_sequence(model: uform.Model, arena: uform.Arena, arrow_type: str):
+    """An Arrow array of strings or binaries encodes exactly as the Python sequence it holds."""
+    batch = pyarrow.array([text.encode() for text in TEXTS], getattr(pyarrow, arrow_type)())
+    packed = bytes(memoryview(model.text_encode(batch, arena).embeddings))
+    gathered = bytes(memoryview(model.text_encode(TEXTS, uform.Arena()).embeddings))
+    assert packed == gathered
+
+
+@pytest.mark.skipif(not pyarrow_available, reason="PyArrow is not installed")
+def test_a_sliced_arrow_array_reads_its_own_entries(model: uform.Model, arena: uform.Arena):
+    """An Arrow slice starts at its own offset, so it encodes as the entries it shows."""
+    batch = pyarrow.array(["skipped", *TEXTS], pyarrow.large_string()).slice(1)
+    packed = bytes(memoryview(model.text_encode(batch, arena).embeddings))
+    assert packed == bytes(memoryview(model.text_encode(TEXTS, uform.Arena()).embeddings))
+
+
+@pytest.mark.skipif(not pyarrow_available, reason="PyArrow is not installed")
+def test_an_arrow_stream_of_chunks_encodes_as_one_batch(model: uform.Model, arena: uform.Arena):
+    """A chunked Arrow stream gathers its chunks into one batch, in order."""
+    chunked = pyarrow.chunked_array([TEXTS[:1], TEXTS[1:]], pyarrow.string())
+    packed = bytes(memoryview(model.text_encode(chunked, arena).embeddings))
+    assert packed == bytes(memoryview(model.text_encode(TEXTS, uform.Arena()).embeddings))
+
+
+@pytest.mark.skipif(not pyarrow_available, reason="PyArrow is not installed")
+def test_arrow_nulls_are_refused(model: uform.Model, arena: uform.Arena):
+    """A null entry has no text to encode, so the binding refuses the batch."""
+    with pytest.raises(uform.InvalidArgumentError):
+        model.text_encode(pyarrow.array(["text", None]), arena)
+
+
+@pytest.mark.skipif(not pyarrow_available, reason="PyArrow is not installed")
+def test_arrow_lists_of_float32_encode_as_samples(model: uform.Model, arena: uform.Arena):
+    """An Arrow list of float32 samples encodes as the buffers it lays out."""
+    recordings = [[0.25 * (sample % 4) for sample in range(1600)], [0.5] * 800]
+    batch = pyarrow.array(recordings, pyarrow.list_(pyarrow.float32()))
+    packed = bytes(memoryview(model.audio_encode_samples(batch, 16000, arena).embeddings))
+    gathered = [array("f", recording) for recording in recordings]
+    assert packed == bytes(memoryview(model.audio_encode_samples(gathered, 16000, uform.Arena()).embeddings))
+
+
+@pytest.mark.skipif(not pyarrow_available, reason="PyArrow is not installed")
+@pytest.mark.parametrize("arrow_type", ["string", "large_string"])
+def test_arrow_strings_are_read_in_place(model: uform.Model, arena: uform.Arena, arrow_type: str):
+    """An Arrow array over an arena's own output is refused by the call rewinding it, so its bytes were never copied."""
+    embeddings = model.text_encode(TEXTS, arena).embeddings
+    with memoryview(embeddings) as view:
+        anchor = ctypes.c_char.from_buffer(view.cast("B"))
+        address, size = ctypes.addressof(anchor), view.nbytes
+        del anchor
+    data = pyarrow.foreign_buffer(address, size)  # holds no export, so only the input check can refuse
+    width = 4 if arrow_type == "string" else 8
+    offsets = pyarrow.py_buffer((0).to_bytes(width, "little") + (4).to_bytes(width, "little"))
+    batch = pyarrow.Array.from_buffers(getattr(pyarrow, arrow_type)(), 1, [None, offsets, data])
+    with pytest.raises(uform.InvalidArgumentError):
+        model.text_encode(batch, arena)
+
+
+class ArrowOnly:
+    """Exports a PyArrow array through `__arrow_c_array__` alone, as a producer without DLPack does."""
+
+    def __init__(self, array: object) -> None:
+        """Keeps `array` alive as long as the wrapper."""
+        self.array = array
+
+    def __arrow_c_array__(self, requested_schema: object | None = None) -> tuple[object, object]:
+        """The schema and array capsules of the wrapped array."""
+        return self.array.__arrow_c_array__(requested_schema)
+
+
+@pytest.mark.skipif(not pyarrow_available, reason="PyArrow is not installed")
+def test_a_tape_pair_takes_arrow_offsets(model: uform.Model, arena: uform.Arena):
+    """A pair's offsets cross through Arrow when the producer exports nothing else, as through the buffer protocol."""
+    data = "".join(TEXTS).encode()
+    offsets = ArrowOnly(pyarrow.array([0, 14, 24, 24], pyarrow.uint64()))
+    packed = bytes(memoryview(model.text_encode((data, offsets), arena).embeddings))
+    assert packed == bytes(memoryview(model.text_encode((data, array("Q", [0, 14, 24, 24])), uform.Arena()).embeddings))
+
+
+@pytest.mark.skipif(not numpy_available, reason="NumPy is not installed")
+def test_outputs_round_trip_through_numpy_dlpack(model: uform.Model, arena: uform.Arena):
+    """NumPy reads an output in place through DLPack, as the buffer protocol shows it."""
+    encoded = model.text_encode(TEXTS, arena, outputs=uform.Outputs.EMBEDDINGS | uform.Outputs.STATES)
+    embeddings = numpy.from_dlpack(encoded.embeddings)
+    assert embeddings.shape == (len(TEXTS), model.describe().dimensions)
+    assert embeddings.tobytes() == bytes(memoryview(encoded.embeddings))
+    assert numpy.from_dlpack(encoded.states.offsets).tolist() == memoryview(encoded.states.offsets).tolist()
+    assert not hasattr(encoded.embeddings, "__cuda_array_interface__")
+
+
+@pytest.mark.skipif(not numpy_available, reason="NumPy is not installed")
+def test_numpy_inputs_cross_dlpack_even_read_only(model: uform.Model, arena: uform.Arena):
+    """A NumPy pair crosses through its versioned DLPack capsule, a read-only one included."""
+    data = numpy.frombuffer("".join(TEXTS).encode(), dtype=numpy.uint8)
+    offsets = numpy.array([0, 14, 24, 24], dtype=numpy.uint64)
+    assert not data.flags.writeable
+    packed = bytes(memoryview(model.text_encode((data, offsets), arena).embeddings))
+    assert packed == bytes(memoryview(model.text_encode(TEXTS, uform.Arena()).embeddings))
+
+
+def test_dlpack_stream_argument_is_checked(model: uform.Model, arena: uform.Arena):
+    """Host outputs take no stream but None or -1, and a stream that is no integer is a type error."""
+    embeddings = model.text_encode(TEXTS, arena).embeddings
+    assert embeddings.__dlpack__(stream=None) is not None
+    assert embeddings.__dlpack__(stream=-1) is not None
+    with pytest.raises(ValueError) as refused:  # noqa: PT011 - the standard names only the built-in
+        embeddings.__dlpack__(stream=1)
+    assert refused.type is ValueError
+    with pytest.raises(TypeError):
+        embeddings.__dlpack__(stream="default")
+    with pytest.raises(TypeError):
+        embeddings.__dlpack__(stream=True)
+    with pytest.raises(BufferError):
+        embeddings.__dlpack__(dl_device=(2, 0))
+
+
+def test_device_memory_is_refused_on_host_arenas(model: uform.Model, arena: uform.Arena):
+    """A DLPack tensor in CUDA memory cannot feed a call on host pages, which would read it on the host."""
+    tensor = DLManagedTensorVersioned()
+    shape = ctypes.c_int64(len(DEVICE_BYTES))
+    tensor.version[0] = 1
+    tensor.dl_tensor.data = ctypes.addressof(DEVICE_BYTES)
+    tensor.dl_tensor.device = DLDevice(2, 0)  # kDLCUDA
+    tensor.dl_tensor.ndim = 1
+    tensor.dl_tensor.dtype = DLDataType(1, 8, 1)  # uint8
+    tensor.dl_tensor.shape = ctypes.pointer(shape)
+    exporter = DLPackExporter(tensor)
+    with pytest.raises(uform.DeviceError):
+        model.text_encode((exporter, array("Q", [0, len(DEVICE_BYTES)])), arena)
+
+
+class RefusingExporter(bytearray):
+    """Bytes whose DLPack export refuses with `BufferError`, as NumPy before 2.1 does for read-only arrays."""
+
+    def __dlpack__(self, **_: object) -> NoReturn:
+        """Refuses every export."""
+        raise BufferError("read-only")
+
+
+def test_a_refused_dlpack_export_falls_back_to_the_buffer_protocol(model: uform.Model, arena: uform.Arena):
+    """A producer refusing its DLPack export with `BufferError` is read through the buffer protocol instead."""
+    data = RefusingExporter("".join(TEXTS).encode())
+    packed = bytes(memoryview(model.text_encode((data, array("Q", [0, 14, 24, 24])), arena).embeddings))
+    assert packed == bytes(memoryview(model.text_encode(TEXTS, uform.Arena()).embeddings))
+
+
+def test_metal_tensors_are_refused(model: uform.Model, arena: uform.Arena):
+    """No Metal exchange is supported yet, so a DLPack tensor on a Metal device is refused as unsupported."""
+    shape = ctypes.c_int64(len(DEVICE_BYTES))
+    tensor = DLManagedTensorVersioned()
+    tensor.version[0] = 1
+    tensor.dl_tensor.data = ctypes.addressof(DEVICE_BYTES)
+    tensor.dl_tensor.device = DLDevice(8, 0)  # kDLMetal
+    tensor.dl_tensor.ndim = 1
+    tensor.dl_tensor.dtype = DLDataType(1, 8, 1)  # uint8
+    tensor.dl_tensor.shape = ctypes.pointer(shape)
+    with pytest.raises(uform.UnsupportedError):
+        model.text_encode((DLPackExporter(tensor), array("Q", [0, len(DEVICE_BYTES)])), arena)
+
+
+@pytest.mark.skipif(not pyarrow_available, reason="PyArrow is not installed")
+def test_outputs_round_trip_through_arrow(model: uform.Model, arena: uform.Arena):
+    """Rows export as fixed-size lists, ragged rows as large lists of them, and offsets as uint64, all in place."""
+    dimensions = model.describe().dimensions
+    encoded = model.text_encode(TEXTS, arena, outputs=uform.Outputs.EMBEDDINGS | uform.Outputs.STATES)
+    embeddings = pyarrow.array(encoded.embeddings)
+    assert (embeddings.type.list_size, embeddings.type.value_type) == (dimensions, pyarrow.float32())
+    assert embeddings.values.buffers()[1].to_pybytes() == bytes(memoryview(encoded.embeddings))
+    states = pyarrow.chunked_array(encoded.states)
+    assert pyarrow.types.is_large_list(states.type)
+    assert states.type.value_type.list_size == memoryview(encoded.states).shape[1]
+    assert [len(item) for item in states.chunk(0)] == [
+        end - start
+        for start, end in zip(memoryview(encoded.states.offsets)[:-1], memoryview(encoded.states.offsets)[1:])
+    ]
+    assert pyarrow.array(encoded.states.offsets).type == pyarrow.uint64()
+    schema, device_array = encoded.embeddings.__arrow_c_device_array__()
+    imported = pyarrow.Array._import_from_c_device_capsule(schema, device_array)
+    assert imported.equals(embeddings)
+    with pytest.raises(uform.ContendedError):
+        model.text_encode(TEXTS, arena)
+    del embeddings, states, imported
+    model.text_encode(TEXTS, arena)
+
+
+@pytest.mark.skipif(not pyarrow_available, reason="PyArrow is not installed")
+def test_bf16_rows_have_no_arrow_type(model: uform.Model, arena: uform.Arena):
+    """Rows of bf16 cross DLPack and buffers as their bytes, but Arrow names no such type, so it is refused."""
+    embeddings = model.text_encode(TEXTS, arena, outputs_scalar=uform.Scalar.BF16).embeddings
+    with pytest.raises(BufferError):
+        pyarrow.array(embeddings)

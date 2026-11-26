@@ -892,6 +892,105 @@ UFORM_EXPORT void uform_executor_drain(uform_executor_drain_t* arguments);
  *  which Debug builds assert. */
 UFORM_EXPORT uform_status_t uform_executor_free(uform_executor_t executor);
 
+/** The arguments of @c uform_executor_stream. */
+typedef struct uform_executor_stream_t {
+
+    /** The GPU executor whose stream to name. */
+    uform_executor_t executor;
+
+    /** The stream's position in the executor, in the order its devices were named. */
+    size_t position;
+
+    /** Output for the outcome, final once its status leaves @c uform_status_deferred_k. */
+    uform_outcome_t* outcome;
+
+    /** Output for the native handle: a @c CUstream, @c hipStream_t or @c id<MTLCommandQueue>, or
+     *  @c NULL for the null legacy stream. */
+    void** stream;
+} uform_executor_stream_t;
+
+/**
+ *  @brief Names the native stream at @c position, so a foreign producer or consumer orders its
+ *      work against the calls the executor runs there.
+ *
+ *  @par Statuses:
+ *  - @c uform_status_unsupported_k A RAM executor, which drives no stream.
+ *  - @c uform_status_invalid_argument_k A @c NULL executor or output, or a position past
+ *    every stream the executor drives.
+ */
+UFORM_EXPORT void uform_executor_stream(uform_executor_stream_t* arguments);
+
+/** The arguments of @c uform_executor_follow. */
+typedef struct uform_executor_follow_t {
+
+    /** The GPU executor whose stream waits. */
+    uform_executor_t executor;
+
+    /** The waiting stream's position in the executor. */
+    size_t position;
+
+    /** A pointer to a foreign @c CUevent or @c hipEvent_t, exactly as an Arrow device array's
+     *  @c sync_event holds it, or @c NULL when @c stream is set. */
+    void* event;
+
+    /** A foreign @c CUstream or @c hipStream_t whose queued work to wait for, as the CUDA Array
+     *  Interface names it, or @c NULL when @c event is set. */
+    void* stream;
+
+    /** Output for the outcome, final once its status leaves @c uform_status_deferred_k. */
+    uform_outcome_t* outcome;
+} uform_executor_follow_t;
+
+/**
+ *  @brief Queues on the stream at @c position a wait for a foreign producer, so the next call
+ *      reads its memory only once it is written; the host never waits.
+ *
+ *  Takes the executor's claim for its duration, as a call does. A foreign event may come from any
+ *  device; a foreign stream must sit on the waiting stream's device, since the wait marks it with
+ *  that stream's own event.
+ *
+ *  @par Statuses:
+ *  - @c uform_status_contended_k A call holds the executor.
+ *  - @c uform_status_config_mismatch_k A foreign stream on another device.
+ *  - @c uform_status_unsupported_k A RAM or Metal executor.
+ *  - @c uform_status_invalid_argument_k Neither or both of @c event and @c stream, a @c NULL
+ *    executor, or a position past the executor's streams.
+ *  - @c uform_status_device_k The driver refused the wait.
+ */
+UFORM_EXPORT void uform_executor_follow(uform_executor_follow_t* arguments);
+
+/** The arguments of @c uform_executor_accepts. */
+typedef struct uform_executor_accepts_t {
+
+    /** The GPU executor whose stream to compare against. */
+    uform_executor_t executor;
+
+    /** The compared stream's position in the executor. */
+    size_t position;
+
+    /** The foreign @c CUstream or @c hipStream_t a consumer names. */
+    void* stream;
+
+    /** Output for the outcome, final once its status leaves @c uform_status_deferred_k. */
+    uform_outcome_t* outcome;
+} uform_executor_accepts_t;
+
+/**
+ *  @brief Checks that a foreign stream sits on the same device as the stream at @c position, as a
+ *      DLPack export checks the @c stream its consumer passes.
+ *
+ *  The null, legacy and per-thread handles, 0, 1 and 2, name the default streams of the current
+ *  device, which a consumer means as this one's, so they are accepted.
+ *
+ *  @par Statuses:
+ *  - @c uform_status_config_mismatch_k The foreign stream sits on another device.
+ *  - @c uform_status_unsupported_k A RAM or Metal executor.
+ *  - @c uform_status_invalid_argument_k A @c NULL executor, or a position past the executor's
+ *    streams.
+ *  - @c uform_status_device_k The driver could not name the foreign stream's device.
+ */
+UFORM_EXPORT void uform_executor_accepts(uform_executor_accepts_t* arguments);
+
 /**
  *  @brief Memory the library allocates for the outputs only a call can size, reused across
  *      calls. @ref types_memory
@@ -1037,8 +1136,7 @@ typedef struct uform_arena_describe_t {
  *      reads them as host memory or hands them to device code without remembering that executor.
  *
  *  @par Statuses:
- *  - @c uform_status_uninitialized_k A @c NULL arena.
- *  - @c uform_status_invalid_argument_k A @c NULL description.
+ *  - @c uform_status_invalid_argument_k A @c NULL arena or description.
  */
 UFORM_EXPORT void uform_arena_describe(uform_arena_describe_t* arguments);
 

@@ -855,8 +855,8 @@ static int choices_from_objects(PyObject* choices_object, PyObject* targets_obje
     if (with_choices != (targets_object && targets_object != Py_None))
         return uform_py_raise(uform_status_invalid_argument_k, "pass both 'choices' and 'choice_targets', or neither");
     if (!with_choices) return 0;
-    if (uform_py_tape_from_object(choices_object, "choices", uform_py_element_text_k, choices) != 0 ||
-        uform_py_tape_from_object(targets_object, "choice_targets", uform_py_element_samples_k, targets) != 0)
+    if (uform_py_tape_from_object(choices_object, "choices", uform_py_element_text_k, NULL, choices) != 0 ||
+        uform_py_tape_from_object(targets_object, "choice_targets", uform_py_element_samples_k, NULL, targets) != 0)
         return -1;
     if (choices->count != count || targets->count != count)
         return uform_py_raise(uform_status_shape_mismatch_k,
@@ -972,7 +972,8 @@ static char const doc_Trainer_step[] =                                          
     "Args:\n"                                                                                     //
     "  modalities (Sequence[Modality]): The modality of each item.\n"                             //
     "  contents (Sequence[str | bytes] | tuple[buffer, buffer]): UTF-8 text or an encoded file\n" //
-    "    per item, gathered into one tape, or a (data, offsets) pair read in place.\n"            //
+    "    per item, gathered into one tape, or a (data, offsets) pair or an Arrow array read in\n" //
+    "    place.\n"                                                                                //
     "  bags (buffer | Sequence[int], optional): The bag of each item; items sharing one land\n"   //
     "    on one device. None keeps every item its own bag.\n"                                     //
     "  temperature_groups (buffer | Sequence[int], optional): The temperature group of each\n"    //
@@ -1035,7 +1036,7 @@ static PyObject* Trainer_step(PyObject* self, PyObject* const* args, Py_ssize_t 
     if (!call) return NULL;
     uform_relations_view_t relations = {{0}};
     int const has_relations = relations_object && relations_object != Py_None;
-    if (uform_py_tape_from_object(contents_object, "contents", uform_py_element_text_k, &call->contents) != 0)
+    if (uform_py_tape_from_object(contents_object, "contents", uform_py_element_text_k, NULL, &call->contents) != 0)
         return uform_py_call_discard(&receiver, &step_verb, call);
     size_t const count = call->contents.count;
     if (modalities_from_object(modalities_object, count, &call->modalities) != 0 ||

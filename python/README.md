@@ -83,8 +83,9 @@ Every output whose length only the call knows, the embeddings, the states and th
 `uform.Arena(executor)` places it where that executor computes, decided once, and `uform.Arena()` makes host pages for the calling thread.
 Each call rewinds its arena, so the previous call's views die and a steady loop allocates once.
 To keep a result past the next call, pass that call another arena; an arena serves one call at a time, so each deferred call needs its own.
-A NumPy array or `memoryview` over an output views its arena until the next call naming that arena rewinds it, as a C view does, and a call naming an arena another call still holds raises `ContendedError`.
-An arena from a VRAM executor holds device memory: its views export `__cuda_array_interface__` for CuPy, PyTorch or Numba, and the buffer protocol raises `BufferError` wherever the host may not read the pages.
+A live `memoryview`, NumPy view, DLPack capsule, Arrow array or CUDA Array Interface consumer of a result keeps its arena from rewinding: a call naming it raises `ContendedError`, as does a call naming an arena another call holds.
+An arena from a VRAM executor holds device memory: the buffer protocol raises `BufferError` wherever the host may not read the pages, and CUDA device and managed memory also export `__cuda_array_interface__` for CuPy or Numba.
+An Apple GPU arena's outputs cross as host memory, through `kDLCPU`, plain Arrow arrays and the buffer protocol, and Metal tensors or Arrow arrays offered as inputs raise `UnsupportedError`, as no Metal exchange is supported yet.
 An arena never outlives the executor that made it, so drop every arena before the executor's `with` block ends, and an arena from `uform.Arena()` lives until it is dropped.
 
 ```python
@@ -113,6 +114,20 @@ data = b"first documentthe second"
 offsets = np.array([0, 14, 24], dtype=np.uint64)
 encoded = model.text_encode((data, offsets), arena)
 ```
+
+Each member of the pair crosses through DLPack first, a versioned capsule before a legacy one, then a primitive Arrow array, a device export before a host one, then the CUDA Array Interface on a CUDA arena, then the buffer protocol; device memory crosses only onto the GPU the arena lives on.
+On a GPU arena, a DLPack producer on that vendor's device is handed the arena's first stream to order its writes before, and the stream a CUDA Array Interface names is waited on from that first stream, so the host never blocks.
+An Apache Arrow array or stream of strings, binaries or lists of `float32` is read the same way, as Arrow lays them out with offsets too: 64-bit offsets in place, 32-bit ones widened while the bytes stay in place, and a stream of several chunks gathered with one copy.
+Arrow nulls are refused, and its offsets must be memory the host may read, as they drive host-side dispatch, so for an array carrying a `sync_event` the arena's first stream follows it and the host waits for that stream before reading:
+
+```python
+texts = pyarrow.array(["first document", "the second"], pyarrow.large_string())
+encoded = model.text_encode(texts, arena)
+```
+
+Every output exports itself in place: `__dlpack__` for NumPy, PyTorch or CuPy, `__arrow_c_array__` and `__arrow_c_device_array__` for PyArrow, rows as fixed-size lists of their columns, and a `RowsTape` also as `__arrow_c_stream__`, a large list of each item's rows.
+While any such export is alive, a call naming its arena raises `ContendedError`, so a consumer never reads rows a later call rewrote.
+A `stream` handed to `__dlpack__` must sit on the output's device, and once the consumer drops the capsule, the arena's next call waits for the work queued on that stream before it rewinds.
 
 `outputs` names the surfaces a call keeps, and decides which C output pointers the binding passes:
 

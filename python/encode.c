@@ -319,7 +319,8 @@ static encode_call_t* encode_open(PyObject* self, encode_verb_t const* descripto
 
     encode_call_t* const call = uform_py_call_open(receiver, &descriptor->verb, stack);
     if (!call) return NULL;
-    if (uform_py_tape_from_object(parsed->inputs, descriptor->input_name, descriptor->element, &call->inputs) != 0 ||
+    if (uform_py_tape_from_object(parsed->inputs, descriptor->input_name, descriptor->element, parsed->arena,
+                                  &call->inputs) != 0 ||
         uform_py_callable_from_object(parsed->progress, "progress", &call->progress) != 0 ||
         uform_py_call_hold_arena(&call->call, parsed->arena) != 0) {
         uform_py_call_discard(receiver, &descriptor->verb, call);
@@ -397,9 +398,10 @@ static char const doc_Model_text_encode[] =                                     
     "Calls `uform_text_encode`.\n"                                                                      //
     "\n"                                                                                                //
     "Args:\n"                                                                                           //
-    "  texts (Sequence[str | bytes] | tuple[buffer, buffer]): The texts, gathered into one tape,\n"     //
-    "    or a (data, offsets) pair of a byte buffer and count + 1 size_t offsets, read in place.\n"     //
-    "    The pair must stay alive and unchanged until the call is final.\n"                             //
+    "  texts (Sequence[str | bytes] | tuple[buffer, buffer] | Arrow): The texts, gathered into one\n"   //
+    "    tape, or a (data, offsets) pair of a byte buffer and count + 1 size_t offsets, or an Arrow\n"  //
+    "    array or stream of strings, read in place. Either must stay alive and unchanged until the\n"   //
+    "    call is final.\n"                                                                              //
     "  arena (Arena): Where the outputs land, rewound by the call.\n"                                   //
     "  outputs (Outputs, optional): Any union of `Outputs.EMBEDDINGS`, `Outputs.STATES` and\n"          //
     "    `Outputs.TOKEN_VECTORS`; a model without a token head raises `UnsupportedError` for\n"         //
@@ -588,7 +590,7 @@ static char const doc_Model_audio_encode[] =                                    
     "\n"                                                                                       //
     "Args:\n"                                                                                  //
     "  files (Sequence[bytes-like] | tuple[buffer, buffer]): The encoded recordings, or a\n"   //
-    "    (data, offsets) pair read in place.\n"                                                //
+    "    (data, offsets) pair or Arrow binaries, read in place.\n"                             //
     "  arena (Arena): Where the outputs land, rewound by the call.\n"                          //
     "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"             //
     "  stats (AudioEncodeStats, optional): Overwritten with this call's report.";
@@ -630,7 +632,7 @@ static char const doc_Model_audio_encode_samples[] =                            
     "\n"                                                                                             //
     "Args:\n"                                                                                        //
     "  samples (Sequence[buffer] | tuple[buffer, buffer]): 1-D float32 buffers, gathered into one\n" //
-    "    tape, or a (data, offsets) pair read in place, its offsets counted in samples.\n"           //
+    "    tape, or a (data, offsets) pair counted in samples or Arrow float32 lists, in place.\n"     //
     "  sample_rate (int): Samples per second shared by every recording.\n"                           //
     "  arena (Arena): Where the outputs land, rewound by the call.\n"                                //
     "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"                   //
@@ -775,8 +777,9 @@ static PyObject* Model_text_choose(PyObject* self, PyObject* const* args, Py_ssi
     choose_call_t stack;
     choose_call_t* const call = uform_py_call_open(&receiver, &text_choose_verb, &stack);
     if (!call) return NULL;
-    if (uform_py_tape_from_object(texts_object, "texts", uform_py_element_text_k, &call->texts) != 0 ||
-        uform_py_tape_from_object(choices_object, "choices", uform_py_element_text_k, &call->choices) != 0)
+    if (uform_py_tape_from_object(texts_object, "texts", uform_py_element_text_k, arena_object, &call->texts) != 0 ||
+        uform_py_tape_from_object(choices_object, "choices", uform_py_element_text_k, arena_object, &call->choices) !=
+            0)
         return uform_py_call_discard(&receiver, &text_choose_verb, call);
     size_t const count = call->texts.count;
     if (call->choices.count != count) {

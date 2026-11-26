@@ -120,7 +120,10 @@ matrix past it unnoticed.
 """
 
 numpy_available = importlib.util.find_spec("numpy") is not None
-"""Whether NumPy is installed, which the README Quickstarts use and the suites themselves never import."""
+"""Whether NumPy is installed, which the README Quickstarts use and the interop suites exchange outputs with."""
+
+pyarrow_available = importlib.util.find_spec("pyarrow") is not None
+"""Whether PyArrow is installed, whose arrays and streams cross in and out without a copy."""
 
 requires_cpu_only_build = pytest.mark.skipif(
     "serial" not in uform.capabilities_compiled(), reason="needs a build without GPU backends"

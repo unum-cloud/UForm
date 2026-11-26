@@ -160,6 +160,31 @@ uform_status_t uform_executor_free(uform_executor_t executor) {
     return uform_status_success_k;
 }
 
+/* Every stand-in executor computes on the host, so each stream verb refuses it as a RAM one. */
+void uform_executor_stream(uform_executor_stream_t* arguments) {
+    deferred_outcome_t outcome(arguments->outcome);
+    if (reject_if(!arguments->executor || !arguments->stream, uform_status_invalid_argument_k,
+                  "The executor and output must not be null", outcome))
+        return;
+    *arguments->stream = nullptr;
+    propagate_error(uform_status_unsupported_k, outcome, "A RAM executor drives no stream");
+}
+
+void uform_executor_follow(uform_executor_follow_t* arguments) {
+    deferred_outcome_t outcome(arguments->outcome);
+    if (reject_if(!arguments->executor || !arguments->event == !arguments->stream, uform_status_invalid_argument_k,
+                  "A non-null executor and exactly one of an event and a stream", outcome))
+        return;
+    propagate_error(uform_status_unsupported_k, outcome, "A RAM executor drives no stream");
+}
+
+void uform_executor_accepts(uform_executor_accepts_t* arguments) {
+    deferred_outcome_t outcome(arguments->outcome);
+    if (reject_if(!arguments->executor, uform_status_invalid_argument_k, "The executor must not be null", outcome))
+        return;
+    propagate_error(uform_status_unsupported_k, outcome, "A RAM executor drives no stream");
+}
+
 void uform_arena_init(uform_arena_init_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     if (reject_if(!arguments->arena, uform_status_invalid_argument_k, "The arena output must not be null", outcome))
@@ -211,7 +236,7 @@ void uform_arena_export_close(uform_arena_t arena) {
 
 void uform_arena_describe(uform_arena_describe_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
-    if (reject_if(!arguments->arena, uform_status_uninitialized_k, "The arena must not be null", outcome)) return;
+    if (reject_if(!arguments->arena, uform_status_invalid_argument_k, "The arena must not be null", outcome)) return;
     if (reject_if(!arguments->description, uform_status_invalid_argument_k, "The description must not be null",
                   outcome))
         return;

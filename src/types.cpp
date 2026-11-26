@@ -451,6 +451,133 @@ UFORM_EXPORT uform_status_t uform_executor_free(uform_executor_t executor) {
     return uform_status_success_k;
 }
 
+/** The native handle of @p stream : the CUDA or HIP stream it queues on, or the Metal queue it
+ *  commits to. */
+static void* native_stream_(util::cuda_executor_t::stream_t const& stream) noexcept {
+    return static_cast<util::cuda_stream_handle_t>(stream.handle);
+}
+static void* native_stream_(util::hip_executor_t::stream_t const& stream) noexcept {
+    return static_cast<util::hip_stream_handle_t>(stream.handle);
+}
+static void* native_stream_(util::metal_executor_t::stream_t const& stream) noexcept { return stream.handle.queue(); }
+
+/** Whether the foreign @p foreign stream sits on @p stream 's device: @c config_mismatch_k when it
+ *  sits on another, @c device_k when the driver cannot name it; Metal names no foreign stream. */
+static uform_status_t foreign_stream_on_device(util::cuda_executor_t::stream_t& stream, void* foreign) noexcept {
+    // Handles 0, 1 and 2 name the current device's default streams, meant as this one's
+    if (reinterpret_cast<std::uintptr_t>(foreign) <= 2) return uform_status_success_k;
+    auto const& api = stream.handle.api();
+    util::cuda_context_handle_t context = nullptr;
+    if (api.stream_get_context(static_cast<util::cuda_stream_handle_t>(foreign), &context) != util::cuda_success_k)
+        return uform_status_device_k;
+    return context == api.primary_contexts[stream.ordinal] ? uform_status_success_k : uform_status_config_mismatch_k;
+}
+static uform_status_t foreign_stream_on_device(util::hip_executor_t::stream_t& stream, void* foreign) noexcept {
+    // Handles 0, 1 and 2 name the current device's default streams, meant as this one's
+    if (reinterpret_cast<std::uintptr_t>(foreign) <= 2) return uform_status_success_k;
+    int device = -1;
+    if (stream.handle.api().stream_get_device(static_cast<util::hip_stream_handle_t>(foreign), &device) !=
+        util::hip_success_k)
+        return uform_status_device_k;
+    return device == static_cast<int>(stream.ordinal) ? uform_status_success_k : uform_status_config_mismatch_k;
+}
+static uform_status_t foreign_stream_on_device(util::metal_executor_t::stream_t&, void*) noexcept {
+    return uform_status_unsupported_k;
+}
+
+/** Queues on @p stream a wait for the foreign event @p event points at, or, when null, for all
+ *  queued so far on the @p foreign stream, which must sit on @p stream 's device, as its own event
+ *  marks it; a null event behind @p event leaves nothing to wait for, and Metal has none. */
+static uform_status_t follow_foreign_(util::cuda_executor_t::stream_t& stream, void* event, void* foreign) noexcept {
+    if (stream.bind().failed()) return uform_status_device_k;
+    if (uform_status_t const placed = foreign_stream_on_device(stream, foreign); placed != uform_status_success_k)
+        return placed;
+    auto const& api = stream.handle.api();
+    util::cuda_event_handle_t const awaited = event ? *static_cast<util::cuda_event_handle_t const*>(event)
+                                                    : stream.event;
+    if (!awaited) return uform_status_success_k; // Arrow's producer had nothing left to wait for
+    if (!event && api.event_record(awaited, static_cast<util::cuda_stream_handle_t>(foreign)) != util::cuda_success_k)
+        return uform_status_device_k;
+    return api.stream_wait_event(stream.handle, awaited, 0) == util::cuda_success_k ? uform_status_success_k
+                                                                                    : uform_status_device_k;
+}
+static uform_status_t follow_foreign_(util::hip_executor_t::stream_t& stream, void* event, void* foreign) noexcept {
+    if (stream.bind().failed()) return uform_status_device_k;
+    if (uform_status_t const placed = foreign_stream_on_device(stream, foreign); placed != uform_status_success_k)
+        return placed;
+    auto const& api = stream.handle.api();
+    util::hip_event_handle_t const awaited = event ? *static_cast<util::hip_event_handle_t const*>(event)
+                                                   : stream.event;
+    if (!awaited) return uform_status_success_k; // Arrow's producer had nothing left to wait for
+    if (!event && api.event_record(awaited, static_cast<util::hip_stream_handle_t>(foreign)) != util::hip_success_k)
+        return uform_status_device_k;
+    return api.stream_wait_event(stream.handle, awaited, 0) == util::hip_success_k ? uform_status_success_k
+                                                                                   : uform_status_device_k;
+}
+static uform_status_t follow_foreign_(util::metal_executor_t::stream_t&, void*, void*) noexcept {
+    return uform_status_unsupported_k;
+}
+
+UFORM_EXPORT void uform_executor_stream(uform_executor_stream_t* arguments) {
+    call_outcome_t outcome(arguments->outcome);
+    if (!arguments->executor || !arguments->stream)
+        return propagate_error(uform_status_invalid_argument_k, outcome, "The executor and output must not be null"),
+               void();
+    *arguments->stream = nullptr;
+    std::visit(
+        [&]<typename executor_type_>(executor_type_& gpus) noexcept {
+            if constexpr (std::is_same_v<executor_type_, std::monostate>)
+                propagate_error(uform_status_unsupported_k, outcome, "A RAM executor drives no stream");
+            else if (arguments->position >= gpus.size())
+                propagate_error(uform_status_invalid_argument_k, outcome, "The position is past the streams");
+            else
+                *arguments->stream = native_stream_(gpus.stream(arguments->position)),
+                propagate_error(uform_status_success_k, outcome, nullptr);
+        },
+        arguments->executor->device);
+}
+
+UFORM_EXPORT void uform_executor_follow(uform_executor_follow_t* arguments) {
+    call_outcome_t outcome(arguments->outcome);
+    if (!arguments->executor || !arguments->event == !arguments->stream)
+        return propagate_error(uform_status_invalid_argument_k, outcome,
+                               "A non-null executor and exactly one of an event and a stream"),
+               void();
+    uform_executor_handle_t& executor = *arguments->executor;
+    // The wait queues on a stream a call may drive, so it holds the executor as a call does
+    if (!take_call_claim(executor))
+        return propagate_error(uform_status_contended_k, outcome, "Another call holds the executor"), void();
+    uform_status_t const followed = std::visit(
+        [&]<typename executor_type_>(executor_type_& gpus) noexcept {
+            if constexpr (std::is_same_v<executor_type_, std::monostate>) return uform_status_unsupported_k;
+            else {
+                if (arguments->position >= gpus.size()) return uform_status_invalid_argument_k;
+                // Queueing on the executor's stream drives it, as a call does
+                auto [claim, claim_status] = gpus.claim();
+                if (claim_status.failed()) return uform_status_contended_k;
+                return follow_foreign_(gpus.stream(arguments->position), arguments->event, arguments->stream);
+            }
+        },
+        executor.device);
+    fu::standard_atomic_ref<call_claim_t> {executor.holding_call.claim}.store(call_claim_t::free_k,
+                                                                              std::memory_order_release);
+    propagate_error(followed, outcome, followed == uform_status_success_k ? nullptr : "The stream could not follow");
+}
+
+UFORM_EXPORT void uform_executor_accepts(uform_executor_accepts_t* arguments) {
+    call_outcome_t outcome(arguments->outcome);
+    if (!arguments->executor)
+        return propagate_error(uform_status_invalid_argument_k, outcome, "The executor must not be null"), void();
+    uform_status_t const accepted = std::visit(
+        [&]<typename executor_type_>(executor_type_& gpus) noexcept {
+            if constexpr (std::is_same_v<executor_type_, std::monostate>) return uform_status_unsupported_k;
+            else if (arguments->position >= gpus.size()) return uform_status_invalid_argument_k;
+            else return foreign_stream_on_device(gpus.stream(arguments->position), arguments->stream);
+        },
+        arguments->executor->device);
+    propagate_error(accepted, outcome, accepted == uform_status_success_k ? nullptr : "The stream is not accepted");
+}
+
 UFORM_EXPORT void uform_arena_init(uform_arena_init_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
     *arguments->arena = nullptr;
@@ -506,7 +633,7 @@ UFORM_EXPORT void uform_arena_export_close(uform_arena_t arena) {
 UFORM_EXPORT void uform_arena_describe(uform_arena_describe_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
     if (!arguments->arena)
-        return propagate_error(uform_status_uninitialized_k, outcome, "The arena must not be null"), void();
+        return propagate_error(uform_status_invalid_argument_k, outcome, "The arena must not be null"), void();
     if (!arguments->description)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The description must not be null"), void();
     *arguments->description = {uform_residency_ram_k, -1, uform_gpu_vendor_unknown_k, -1, uform_host_access_readable_k};

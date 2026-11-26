@@ -61,6 +61,9 @@
 #include <stdint.h>    // `uint32_t`, `uint64_t`, `PTRDIFF_MAX`
 #include <string.h>    // `memcpy`, `memset`
 
+#include <dlpack.h> // the DLPack ABI, vendored beside this header byte-identical in every engine
+
+#include "uform/arrow_abi.h" // the Arrow C data, device and stream interfaces, vendored likewise
 #include "uform/uform.h"
 
 #ifdef __cplusplus
@@ -147,10 +150,12 @@ typedef struct Executor {
     /** The library's executor, freed once nothing holds it. */
     uform_executor_t owned;
 
-    /** One while it is open, plus one per GPU arena it made that is still alive, since each frees
-     *  on its first stream. */
+    /** One while it is open, plus one per arena it made that is still alive, since a GPU arena
+     *  frees on its first stream and every arena may follow a consumer on it. */
     atomic_size_t holds;
 } Executor;
+
+struct dlpack_export_t;
 
 /** The memory every output whose length scales with a call lands in, rewound by the next call
  *  handed it. */
@@ -158,9 +163,13 @@ typedef struct Arena {
     PyObject ob_base;
     uform_arena_t handle;
 
-    /** The @c Executor a GPU arena serves alone, held until the arena is freed; NULL
-     *  for host pages. */
+    /** The @c Executor the arena serves, held until the arena is freed, which counts it among its
+     *  holds; NULL for an arena of the calling thread. */
     PyObject* executor;
+
+    /** Dropped DLPack exports whose consumer stream the arena's stream could not follow yet, still
+     *  open, which the next call naming the arena or its dealloc follows and closes first. */
+    _Atomic(struct dlpack_export_t*) unfollowed;
 } Arena;
 
 /** A loaded encoder, serving every modality it was trained on. */
@@ -542,10 +551,20 @@ typedef struct uform_py_tape_t {
 /**
  *  @brief Reads a batch of @p element entries: a sequence of separate objects, gathered with one
  *      copy, or, for every element but pixels, a @c (data, offsets) tuple whose offsets buffer
- *      holds @c size_t words, read in place.
+ *      holds @c size_t words, or an Apache Arrow array or stream of strings, binaries or lists of
+ *      @c float32, read in place.
+ *  @param[in] arena The @c Arena the call writes into, whose GPU the pair's data may live on; NULL
+ *      takes host memory alone.
  *  @return 0 on success, -1 with an exception set otherwise; release @p tape either way.
+ *
+ *  A pair's data crosses through DLPack, versioned first, then the CUDA Array Interface on a CUDA
+ *  arena, then the buffer protocol. Arrow arrays cross through their device export first, from
+ *  memory the host may read, as their offsets drive host-side dispatch: in place with 64-bit
+ *  offsets, with only the offsets widened with 32-bit ones, and gathered once from a stream of
+ *  several chunks, as a sequence of separate objects is.
  */
-int uform_py_tape_from_object(PyObject* object, char const* field, uform_py_element_t element, uform_py_tape_t* tape);
+int uform_py_tape_from_object(PyObject* object, char const* field, uform_py_element_t element, PyObject* arena,
+                              uform_py_tape_t* tape);
 
 /** Releases whatever @c uform_py_tape_from_object acquired; a zeroed tape is a no-op. */
 void uform_py_tape_release(uform_py_tape_t* tape);

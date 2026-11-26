@@ -517,6 +517,64 @@ static void test_executors(void) {
     expect_(uform_executor_free(executor) == uform_status_success_k);
 }
 
+/** A RAM executor names no stream, follows none and accepts none, and every malformed request is
+ *  refused first; a GPU executor names its streams, accepts its own, and follows one, where a
+ *  device is listed. */
+static void test_executor_streams(void) {
+    uform_executor_t const executor = create_executor();
+    uform_outcome_t outcome = {0};
+    void* named = &outcome;
+    uform_executor_stream(&(uform_executor_stream_t) {.executor = executor, .outcome = &outcome, .stream = &named});
+    expect_(outcome.status == uform_status_unsupported_k && named == NULL);
+    uform_executor_stream(&(uform_executor_stream_t) {.executor = executor, .outcome = &outcome, .stream = NULL});
+    expect_(outcome.status == uform_status_invalid_argument_k);
+    uform_executor_follow(&(uform_executor_follow_t) {.executor = executor, .outcome = &outcome});
+    expect_(outcome.status == uform_status_invalid_argument_k);
+    uform_executor_follow(
+        &(uform_executor_follow_t) {.executor = executor, .event = &named, .stream = &named, .outcome = &outcome});
+    expect_(outcome.status == uform_status_invalid_argument_k);
+    uform_executor_follow(&(uform_executor_follow_t) {.executor = executor, .stream = &named, .outcome = &outcome});
+    expect_(outcome.status == uform_status_unsupported_k);
+    uform_executor_accepts(&(uform_executor_accepts_t) {.executor = executor, .stream = &named, .outcome = &outcome});
+    expect_(outcome.status == uform_status_unsupported_k);
+    uform_executor_accepts(&(uform_executor_accepts_t) {.executor = NULL, .outcome = &outcome});
+    expect_(outcome.status == uform_status_invalid_argument_k);
+    uform_executor_free(executor);
+
+    uform_executor_t gpu = NULL;
+    uform_executor_for_vram(&(uform_executor_for_vram_t) {.executor = &gpu, .outcome = &outcome});
+    if (outcome.status != uform_status_success_k) {
+        printf("- skipped the GPU cases: no GPU this build drives\n");
+        return;
+    }
+    uform_gpu_device_t device = {0};
+    size_t devices_count = 0;
+    uform_gpu_devices(&(uform_gpu_devices_t) {.outcome = &outcome,
+                                              .devices = &device,
+                                              .devices_capacity = 1,
+                                              .devices_count = &devices_count});
+    uform_executor_stream(
+        &(uform_executor_stream_t) {.executor = gpu, .position = 99, .outcome = &outcome, .stream = &named});
+    expect_(outcome.status == uform_status_invalid_argument_k);
+    uform_executor_stream(&(uform_executor_stream_t) {.executor = gpu, .outcome = &outcome, .stream = &named});
+    expect_(outcome.status == uform_status_success_k);
+    if (device.vendor != uform_gpu_vendor_apple_k) {
+        // Its own stream sits on its own device, and following it orders nothing new but succeeds
+        uform_executor_accepts(&(uform_executor_accepts_t) {.executor = gpu, .stream = named, .outcome = &outcome});
+        expect_(outcome.status == uform_status_success_k);
+        uform_executor_follow(&(uform_executor_follow_t) {.executor = gpu, .stream = named, .outcome = &outcome});
+        expect_(outcome.status == uform_status_success_k);
+        // The per-thread handle names the current device's default stream, taken as this one's
+        uform_executor_accepts(&(uform_executor_accepts_t) {.executor = gpu, .stream = (void*)2, .outcome = &outcome});
+        expect_(outcome.status == uform_status_success_k);
+        // An event passes as Arrow's `sync_event` holds it; a null one leaves nothing to follow
+        void* no_event = NULL;
+        uform_executor_follow(&(uform_executor_follow_t) {.executor = gpu, .event = &no_event, .outcome = &outcome});
+        expect_(outcome.status == uform_status_success_k);
+    }
+    uform_executor_free(gpu);
+}
+
 /** A checkpoint loads from a path and from a buffer, in either quantization, and its description
  *  echoes the quantization asked for; another quantization and a missing file are refused,
  *  leaving no model. */
@@ -1254,7 +1312,7 @@ static void test_arenas(void) {
             placement.device == -1 && placement.vendor == uform_gpu_vendor_unknown_k &&
             placement.vendor_ordinal == -1 && placement.host_access == uform_host_access_readable_k);
     uform_arena_describe(&(uform_arena_describe_t) {.arena = NULL, .outcome = &outcome, .description = &placement});
-    expect_(outcome.status == uform_status_uninitialized_k);
+    expect_(outcome.status == uform_status_invalid_argument_k);
     uform_arena_describe(&(uform_arena_describe_t) {.arena = outputs.arena, .outcome = &outcome, .description = NULL});
     expect_(outcome.status == uform_status_invalid_argument_k);
 
@@ -1604,6 +1662,7 @@ int main(int argc, char* argv[]) {
 
     start_test_case("test_library_probes"), test_library_probes(), finish_test_case(NULL);
     start_test_case("test_executors"), test_executors(), finish_test_case(NULL);
+    start_test_case("test_executor_streams"), test_executor_streams(), finish_test_case(NULL);
     start_test_case("test_model_load"), test_model_load(), finish_test_case(NULL);
     start_test_case("test_text_shapes"), test_text_shapes(), finish_test_case(NULL);
     start_test_case("test_heads"), test_heads(), finish_test_case(NULL);

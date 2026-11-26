@@ -12,7 +12,7 @@ import os
 from collections.abc import Buffer, Callable, Generator, Sequence
 from enum import IntEnum, IntFlag
 from types import GenericAlias, TracebackType
-from typing import Any, Final, NoReturn, Self, final, type_check_only
+from typing import Any, Final, NoReturn, Protocol, Self, final, type_check_only
 
 from _typeshed import structseq
 
@@ -45,7 +45,16 @@ def gpu_devices() -> tuple[GPUDevice, ...]:
 # need a `cast` here.
 type _PathLike = str | bytes | os.PathLike[str] | os.PathLike[bytes]
 type _Progress = Callable[[int, int], bool | None]
-type _Tape = tuple[Buffer, Buffer]
+
+@type_check_only
+class _ArrowArray(Protocol):
+    def __arrow_c_array__(self, requested_schema: object = None, /) -> tuple[object, object]: ...
+
+@type_check_only
+class _ArrowStream(Protocol):
+    def __arrow_c_stream__(self, requested_schema: object = None, /) -> object: ...
+
+type _Tape = tuple[Buffer, Buffer] | _ArrowArray | _ArrowStream
 type _Texts = Sequence[str | Buffer] | _Tape
 type _Files = Sequence[Buffer] | _Tape
 type _Words = Buffer | Sequence[int]
@@ -357,7 +366,15 @@ class ArenaBuffer:
 
     @property
     def __cuda_array_interface__(self) -> dict[str, Any]:
-        """Version 3 of the CUDA Array Interface, present only over device memory. Python-only."""
+        """Version 3 of the CUDA Array Interface, present only over CUDA device and managed memory. Python-only."""
+        ...
+
+    def __arrow_c_array__(self, requested_schema: object = None, /) -> tuple[object, object]:
+        """An Arrow array over the output in place; memory the host may not read raises `DeviceError`."""
+        ...
+
+    def __arrow_c_device_array__(self, requested_schema: object = None, /, **kwargs: object) -> tuple[object, object]:
+        """An Arrow device array over the output in place, on the device its arena lives on."""
         ...
 
 @final
@@ -367,6 +384,10 @@ class RowsTape(ArenaBuffer):
     @property
     def offsets(self) -> ArenaBuffer:
         """(count + 1,) Apache Arrow offsets into the rows."""
+        ...
+
+    def __arrow_c_stream__(self, requested_schema: object = None, /) -> object:
+        """An Arrow stream of one batch, the tape as a large list of its items' rows."""
         ...
 
 @final

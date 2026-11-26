@@ -982,7 +982,7 @@ static char const doc_Executor[] =                                              
     "`model.on(executor)` blocks on it, `model.deferred(executor)` submits to it. It runs\n"   //
     "one call at a time, and a call finding another one holding it raises a\n"                 //
     "`ContendedError` once waited for. In a `with` block, it waits for its calls and closes\n" //
-    "on exit, or leaves both to the last GPU arena it made that is alive.\n"                   //
+    "on exit, or leaves both to the last arena it made that is alive.\n"                       //
     "\n"                                                                                       //
     "Example:\n"                                                                               //
     "  >>> with uform.Executor.for_ram() as executor:\n"                                       //
@@ -1241,63 +1241,6 @@ PyTypeObject ExecutorType = {
 
 #pragma region DLPack
 
-/** The parts of the DLPack 1.x ABI this binding exchanges, spelled as @c dlpack.h spells them. */
-typedef enum DLDeviceType {
-    kDLCPU = 1,
-    kDLCUDA = 2,
-    kDLCUDAHost = 3,
-    kDLMetal = 8,
-    kDLROCM = 10,
-    kDLROCMHost = 11,
-    kDLCUDAManaged = 13,
-} DLDeviceType;
-
-typedef enum DLDataTypeCode {
-    kDLInt = 0,
-    kDLUInt = 1,
-    kDLFloat = 2,
-} DLDataTypeCode;
-
-typedef struct DLPackVersion {
-    uint32_t major;
-    uint32_t minor;
-} DLPackVersion;
-
-typedef struct DLDevice {
-    DLDeviceType device_type;
-    int32_t device_id;
-} DLDevice;
-
-typedef struct DLDataType {
-    uint8_t code;
-    uint8_t bits;
-    uint16_t lanes;
-} DLDataType;
-
-typedef struct DLTensor {
-    void* data;
-    DLDevice device;
-    int32_t ndim;
-    DLDataType dtype;
-    int64_t* shape;
-    int64_t* strides;
-    uint64_t byte_offset;
-} DLTensor;
-
-typedef struct DLManagedTensor {
-    DLTensor dl_tensor;
-    void* manager_ctx;
-    void (*deleter)(struct DLManagedTensor* self);
-} DLManagedTensor;
-
-typedef struct DLManagedTensorVersioned {
-    DLPackVersion version;
-    void* manager_ctx;
-    void (*deleter)(struct DLManagedTensorVersioned* self);
-    uint64_t flags;
-    DLTensor dl_tensor;
-} DLManagedTensorVersioned;
-
 /** The buffer formats a DLPack tensor crosses as, and the element type each stands for. */
 static struct {
     char const* format;
@@ -1307,6 +1250,114 @@ static struct {
     {"i", {kDLInt, 32, 1}},   {"Q", {kDLUInt, 64, 1}},  {"e", {kDLFloat, 16, 1}},
     {"f", {kDLFloat, 32, 1}}, {"d", {kDLFloat, 64, 1}}, {"N", {kDLUInt, sizeof(size_t) * 8, 1}},
 };
+
+/** The DLPack device of the memory @p description names, derived as its type documents: VRAM the
+ *  host may not read is device memory, VRAM it may read is CUDA managed memory, RAM placed for a
+ *  device is page-locked for it, and other RAM is host memory. Apple's shared memory crosses as
+ *  host memory, since no Metal exchange is supported yet. */
+static DLDevice uform_py_dlpack_device(uform_arena_description_t const* description) {
+    int32_t const ordinal = description->vendor_ordinal;
+    int const readable = description->host_access == uform_host_access_readable_k;
+    if (description->residency == uform_residency_vram_k && description->vendor == uform_gpu_vendor_apple_k)
+        return (DLDevice) {kDLCPU, 0};
+    if (description->residency == uform_residency_vram_k && description->vendor == uform_gpu_vendor_amd_k)
+        return (DLDevice) {kDLROCM, ordinal};
+    if (description->residency == uform_residency_vram_k)
+        return (DLDevice) {readable ? kDLCUDAManaged : kDLCUDA, ordinal};
+    if (description->device >= 0 && description->vendor == uform_gpu_vendor_nvidia_k)
+        return (DLDevice) {kDLCUDAHost, ordinal};
+    if (description->device >= 0 && description->vendor == uform_gpu_vendor_amd_k)
+        return (DLDevice) {kDLROCMHost, ordinal};
+    return (DLDevice) {kDLCPU, 0};
+}
+
+/**
+ *  @brief Finds the device whose memory a call on @p arena may read: the GPU a VRAM arena lives on.
+ *  @return 1 with @p device set, 0 for no arena or host pages, or -1 with an exception set.
+ */
+static int arena_device(PyObject* arena, DLDevice* device) {
+    if (!arena || !PyObject_TypeCheck(arena, &ArenaType)) return 0; // a stranger is refused once the call holds it
+    uform_arena_description_t description = {0};
+    uform_outcome_t outcome = {0};
+    uform_arena_describe(
+        &(uform_arena_describe_t) {.arena = ((Arena*)arena)->handle, .outcome = &outcome, .description = &description});
+    if (uform_py_raise_on_outcome(&outcome) != 0) return -1;
+    if (description.residency != uform_residency_vram_k) return 0;
+    *device = uform_py_dlpack_device(&description);
+    return 1;
+}
+
+/** The executor @p arena serves as verbs read it, NULL for an arena of the calling thread or once
+ *  the executor's @c with block closed it. */
+static uform_executor_t arena_executor(PyObject* arena) {
+    PyObject* const executor = ((Arena*)arena)->executor;
+    return executor ? atomic_load(&((Executor*)executor)->handle) : NULL;
+}
+
+/** Orders the first stream of @p arena 's executor after a foreign @p event or @p stream. */
+static uform_status_t arena_follow(Arena* arena, void* event, void* stream) {
+    if (!event && !stream) return uform_status_success_k;
+    uform_outcome_t outcome = {0};
+    uform_executor_follow(&(uform_executor_follow_t) {.executor = arena_executor((PyObject*)arena),
+                                                      .position = 0,
+                                                      .event = event,
+                                                      .stream = stream,
+                                                      .outcome = &outcome});
+    return outcome.status;
+}
+
+/** Makes the host wait for a foreign @p event before reading what its producer wrote: the GPU
+ *  @p arena's first stream follows it and a drain waits for that stream; 0, or -1 with an error. */
+static int arena_wait(PyObject* arena, void* event) {
+    DLDevice device;
+    int const on_device = arena_device(arena, &device);
+    if (on_device <= 0)
+        return on_device ? -1
+                         : uform_py_raise(uform_status_device_k, "only a call on a GPU arena waits for a producer");
+    uform_status_t const followed = arena_follow((Arena*)arena, event, NULL);
+    if (followed != uform_status_success_k)
+        return uform_py_raise(followed, "the arena's stream could not follow the Arrow array's producer");
+    uform_executor_t const executor = arena_executor(arena);
+    uform_outcome_t outcome = {0};
+    Py_BEGIN_ALLOW_THREADS;
+    uform_executor_drain(
+        &(uform_executor_drain_t) {.executor = executor, .outcome = &outcome, .mood = uform_mood_parked_k});
+    Py_END_ALLOW_THREADS;
+    return uform_py_raise_on_outcome(&outcome);
+}
+
+/**
+ *  @brief The @c stream a DLPack consumer on @p arena passes @p object 's @c __dlpack__, as the
+ *      standard spells it: the arena's first stream when the producer's memory is on that GPU's
+ *      vendor, CUDA's legacy stream as 1, and @c None otherwise.
+ *  @return A new reference, or NULL with an exception set.
+ */
+static PyObject* dlpack_stream_argument(PyObject* object, PyObject* arena) {
+    DLDevice device;
+    int const on_device = arena_device(arena, &device);
+    if (on_device <= 0) return on_device ? NULL : Py_NewRef(Py_None);
+    int const cuda = device.device_type == kDLCUDA || device.device_type == kDLCUDAManaged;
+    if (!cuda && device.device_type != kDLROCM) return Py_NewRef(Py_None); // Apple arenas cross as host memory
+    PyObject* const placement = PyObject_HasAttrString(object, "__dlpack_device__")
+                                    ? PyObject_CallMethod(object, "__dlpack_device__", NULL)
+                                    : Py_NewRef(Py_None);
+    if (!placement) return NULL;
+    long const producer = PyTuple_Check(placement) && PyTuple_GET_SIZE(placement) == 2
+                              ? PyLong_AsLong(PyTuple_GET_ITEM(placement, 0))
+                              : -1;
+    Py_DECREF(placement);
+    if (producer == -1 && PyErr_Occurred()) return NULL;
+    int const same_vendor = cuda ? producer == kDLCUDA || producer == kDLCUDAManaged : producer == kDLROCM;
+    if (!same_vendor) return Py_NewRef(Py_None);
+    void* stream = NULL;
+    uform_outcome_t outcome = {0};
+    uform_executor_stream(&(uform_executor_stream_t) {.executor = arena_executor(arena),
+                                                      .position = 0,
+                                                      .outcome = &outcome,
+                                                      .stream = &stream});
+    if (uform_py_raise_on_outcome(&outcome) != 0) return NULL;
+    return stream ? PyLong_FromVoidPtr(stream) : PyLong_FromLong(cuda ? 1 : 0);
+}
 
 /** Hands the tensor a consumed capsule holds back to its producer, and frees the extents
  *  its view pointed at. */
@@ -1323,42 +1374,72 @@ static void dlpack_capsule_release(PyObject* capsule) {
 }
 
 /**
+ *  @brief Asks @p exporter for a DLPack capsule, versioned first, and a legacy one from a producer
+ *      that predates @c max_version, passing @p stream for it to order its writes before.
+ *  @return A new capsule, or NULL with the producer's exception set.
+ */
+static PyObject* dlpack_capsule_request(PyObject* exporter, PyObject* stream) {
+    PyObject* const keywords = PyDict_New();
+    PyObject* const version = keywords ? PyTuple_New(2) : NULL;
+    if (version) {
+        PyTuple_SET_ITEM(version, 0, PyLong_FromLong(DLPACK_MAJOR_VERSION));
+        PyTuple_SET_ITEM(version, 1, PyLong_FromLong(DLPACK_MINOR_VERSION));
+    }
+    int const packed = version && PyTuple_GET_ITEM(version, 0) && PyTuple_GET_ITEM(version, 1) &&
+                       uform_py_dict_steal_item(keywords, "stream", Py_NewRef(stream)) == 0 &&
+                       uform_py_dict_steal_item(keywords, "max_version", Py_NewRef(version)) == 0;
+    Py_XDECREF(version);
+    PyObject* const arguments = packed ? PyTuple_New(0) : NULL;
+    PyObject* capsule = arguments ? PyObject_Call(exporter, arguments, keywords) : NULL;
+    if (!capsule && arguments && PyErr_ExceptionMatches(PyExc_TypeError)) {
+        PyErr_Clear();
+        if (PyDict_DelItemString(keywords, "max_version") == 0) capsule = PyObject_Call(exporter, arguments, keywords);
+    }
+    Py_XDECREF(arguments);
+    Py_XDECREF(keywords);
+    return capsule;
+}
+
+/**
  *  @brief Consumes the DLPack export of @p object into @p view, whose @c obj becomes the capsule,
  *      so releasing the view hands the tensor back to its producer.
  *  @return 1 when it does, 0 when @p object exports no DLPack, or -1 with an exception set.
  *
- *  Only C-contiguous tensors cross. Host-readable memory always does, and CUDA and ROCm memory only
- *  where @p device_allowed, since the binding reads the other inputs itself.
+ *  Only C-contiguous tensors of DLPack 1.x cross. Memory the host may read always does, and device
+ *  memory only on the GPU the VRAM @p arena lives on, since the binding reads the other inputs
+ *  itself; a NULL @p arena takes host memory alone. The view is read-only whatever the read-only
+ *  flag says, as no input is written.
  */
-static int dlpack_acquire(PyObject* object, int device_allowed, Py_buffer* view) {
+static int dlpack_acquire(PyObject* object, PyObject* arena, Py_buffer* view) {
     PyObject* const exporter = PyObject_GetAttrString(object, "__dlpack__");
     if (!exporter) {
         PyErr_Clear();
         return 0;
     }
-    PyObject* const arguments = PyTuple_New(0);
-    PyObject* const keywords = PyDict_New();
-    PyObject* const version = PyTuple_New(2);
-    if (version) {
-        PyTuple_SET_ITEM(version, 0, PyLong_FromLong(1));
-        PyTuple_SET_ITEM(version, 1, PyLong_FromLong(0));
-    }
-    int const packed = arguments && keywords && version && PyTuple_GET_ITEM(version, 0) &&
-                       PyTuple_GET_ITEM(version, 1) && PyDict_SetItemString(keywords, "stream", Py_None) == 0 &&
-                       PyDict_SetItemString(keywords, "max_version", version) == 0;
-    PyObject* const capsule = packed ? PyObject_Call(exporter, arguments, keywords) : NULL;
-    Py_XDECREF(version);
-    Py_XDECREF(keywords);
-    Py_XDECREF(arguments);
+    PyObject* const stream = dlpack_stream_argument(object, arena);
+    PyObject* const capsule = stream ? dlpack_capsule_request(exporter, stream) : NULL;
+    Py_XDECREF(stream);
     Py_DECREF(exporter);
-    if (!capsule) { // a producer refusing this export may still support the buffer protocol
+    // A producer may refuse this export and still offer the buffer protocol, as NumPy before 2.1
+    // does for read-only arrays
+    if (!capsule && PyErr_ExceptionMatches(PyExc_BufferError)) {
         PyErr_Clear();
         return 0;
     }
+    if (!capsule) return -1;
     int const versioned = PyCapsule_IsValid(capsule, "dltensor_versioned");
     void* const managed = PyCapsule_GetPointer(capsule, versioned ? "dltensor_versioned" : "dltensor");
     if (!managed) {
         Py_DECREF(capsule);
+        return -1;
+    }
+    if (versioned && ((DLManagedTensorVersioned*)managed)->version.major != DLPACK_MAJOR_VERSION) {
+        // Another major version may lay its tensor out differently, so only its deleter is safe
+        DLManagedTensorVersioned* const foreign = (DLManagedTensorVersioned*)managed;
+        uint32_t const major = foreign->version.major;
+        if (PyCapsule_SetName(capsule, "used_dltensor_versioned") == 0 && foreign->deleter) foreign->deleter(foreign);
+        Py_DECREF(capsule);
+        PyErr_Format(PyExc_BufferError, "DLPack %u.x is not 1.x", (unsigned)major);
         return -1;
     }
     DLTensor const* const tensor = versioned ? &((DLManagedTensorVersioned*)managed)->dl_tensor
@@ -1366,6 +1447,12 @@ static int dlpack_acquire(PyObject* object, int device_allowed, Py_buffer* view)
     DLDeviceType const device = tensor->device.device_type;
     int const host_readable = device == kDLCPU || device == kDLCUDAHost || device == kDLROCMHost ||
                               device == kDLCUDAManaged;
+    DLDevice accepted = {kDLCPU, 0};
+    int const on_device = host_readable ? 0 : arena_device(arena, &accepted);
+    if (on_device < 0) {
+        Py_DECREF(capsule);
+        return -1;
+    }
     char const* format = NULL;
     for (size_t row = 0; row != sizeof(dlpack_formats) / sizeof(*dlpack_formats) && !format; ++row)
         if (dlpack_formats[row].dtype.code == tensor->dtype.code &&
@@ -1379,9 +1466,13 @@ static int dlpack_acquire(PyObject* object, int device_allowed, Py_buffer* view)
         items *= (Py_ssize_t)tensor->shape[axis];
     }
     int failed = 0;
-    if (!host_readable && !(device_allowed && (device == kDLCUDA || device == kDLROCM)))
-        failed = uform_py_raise(uform_status_device_k, "this input cannot take memory of DLPack device type %d",
-                                (int)device);
+    int const same_vendor = device == accepted.device_type ||
+                            (device == kDLCUDA && accepted.device_type == kDLCUDAManaged); // managed reads either
+    if (device == kDLMetal)
+        failed = uform_py_raise(uform_status_unsupported_k, "Metal tensors don't cross DLPack yet; pass host memory");
+    else if (!host_readable && !(on_device && same_vendor && tensor->device.device_id == accepted.device_id))
+        failed = uform_py_raise(uform_status_device_k, "this input cannot take memory of DLPack device (%d, %d)",
+                                (int)device, (int)tensor->device.device_id);
     else if (!format)
         failed = uform_py_raise(uform_status_unsupported_layout_k, "the DLPack tensor holds items no format names");
     else if (!contiguous)
@@ -1412,11 +1503,80 @@ static int dlpack_acquire(PyObject* object, int device_allowed, Py_buffer* view)
     return 1;
 }
 
-/** Acquires @p object into @p view through DLPack first, then the buffer protocol under @p flags;
- *  0, or -1 with an exception set. */
-static int buffer_acquire(PyObject* object, int device_allowed, int flags, Py_buffer* view) {
-    int const consumed = dlpack_acquire(object, device_allowed, view);
-    return consumed ? (consumed > 0 ? 0 : -1) : PyObject_GetBuffer(object, view, flags);
+/**
+ *  @brief Reads the CUDA Array Interface of @p object into @p view, for a call on a CUDA @p arena:
+ *      version 3, C-contiguous and unmasked, the arena's first stream waiting on the one it names.
+ *  @return 1 when it does, 0 when @p object or @p arena takes no part in it, or -1 with an error.
+ */
+static int cuda_array_interface_acquire(PyObject* object, PyObject* arena, Py_buffer* view) {
+    DLDevice accepted = {kDLCPU, 0};
+    int const on_device = arena_device(arena, &accepted);
+    if (on_device <= 0 || (accepted.device_type != kDLCUDA && accepted.device_type != kDLCUDAManaged)) return on_device;
+    if (!PyObject_HasAttrString(object, "__cuda_array_interface__")) return 0;
+    PyObject* const exported = PyObject_GetAttrString(object, "__cuda_array_interface__");
+    if (!exported) return -1;
+    PyObject* const data = PyDict_Check(exported) ? PyDict_GetItemString(exported, "data") : NULL;
+    PyObject* const shape = PyDict_Check(exported) ? PyDict_GetItemString(exported, "shape") : NULL;
+    PyObject* const typestr = PyDict_Check(exported) ? PyDict_GetItemString(exported, "typestr") : NULL;
+    PyObject* const strides = PyDict_Check(exported) ? PyDict_GetItemString(exported, "strides") : NULL;
+    PyObject* const mask = PyDict_Check(exported) ? PyDict_GetItemString(exported, "mask") : NULL;
+    PyObject* const stream = PyDict_Check(exported) ? PyDict_GetItemString(exported, "stream") : NULL;
+    char const* const type = typestr && PyUnicode_Check(typestr) ? PyUnicode_AsUTF8(typestr) : NULL;
+    int failed = 0;
+    if (!data || !PyTuple_Check(data) || PyTuple_GET_SIZE(data) != 2 || !shape || !PyTuple_Check(shape) || !type)
+        failed = uform_py_raise(uform_status_invalid_argument_k,
+                                "the CUDA Array Interface lacks data, shape or typestr");
+    else if ((strides && strides != Py_None) || (mask && mask != Py_None))
+        failed = uform_py_raise(uform_status_unsupported_layout_k, "the CUDA array must be C-contiguous and unmasked");
+    // The interface names a stream as an integer: a handle, or 1 and 2 for default streams, never 0
+    void* const producer = stream && stream != Py_None && !failed ? PyLong_AsVoidPtr(stream) : NULL;
+    if (!failed && stream && stream != Py_None && !producer)
+        failed = PyErr_Occurred() ? -1 : uform_py_raise(uform_status_invalid_argument_k, "a CUDA array stream of 0");
+    char const* format = NULL;
+    if (!failed && strlen(type) == 3 && (type[0] == '<' || type[0] == '|')) {
+        uint8_t const code = type[1] == 'u' ? kDLUInt : type[1] == 'i' ? kDLInt : type[1] == 'f' ? kDLFloat : 0xFF;
+        for (size_t row = 0; row != sizeof(dlpack_formats) / sizeof(*dlpack_formats) && !format; ++row)
+            if (dlpack_formats[row].dtype.code == code && dlpack_formats[row].dtype.bits == (type[2] - '0') * 8)
+                format = dlpack_formats[row].format;
+    }
+    if (!failed && !format)
+        failed = uform_py_raise(uform_status_unsupported_layout_k, "the CUDA array holds items no format names");
+    Py_ssize_t const item_bytes = failed ? 0 : (Py_ssize_t)(type[2] - '0');
+    Py_ssize_t items = 1;
+    for (Py_ssize_t axis = 0; !failed && axis != PyTuple_GET_SIZE(shape); ++axis) {
+        Py_ssize_t const extent = PyLong_AsSsize_t(PyTuple_GET_ITEM(shape, axis));
+        failed = extent < 0
+                     ? (PyErr_Occurred() ? -1 : uform_py_raise(uform_status_shape_mismatch_k, "a negative extent"))
+                     : 0;
+        items *= extent;
+    }
+    void* const address = failed ? NULL : PyLong_AsVoidPtr(PyTuple_GET_ITEM(data, 0));
+    if (!failed && PyErr_Occurred()) failed = -1;
+    if (!failed && producer > (void*)2) { // a handle names its device, unlike the default streams 1 and 2
+        uform_outcome_t outcome = {0};
+        uform_executor_accepts(&(uform_executor_accepts_t) {.executor = arena_executor(arena),
+                                                            .position = 0,
+                                                            .stream = producer,
+                                                            .outcome = &outcome});
+        failed = outcome.status == uform_status_config_mismatch_k
+                     ? uform_py_raise(uform_status_device_k, "the CUDA array's stream sits on another device")
+                     : uform_py_raise_on_outcome(&outcome);
+    }
+    uform_status_t const followed = failed ? uform_status_success_k : arena_follow((Arena*)arena, NULL, producer);
+    if (followed != uform_status_success_k) // the call reads after the producer
+        failed = uform_py_raise(followed, "the arena's stream could not follow the CUDA array's producer");
+    // A tuple owns the exporter, so releasing the view calls no buffer hook it never armed
+    PyObject* const owner = failed ? NULL : PyTuple_Pack(1, object);
+    Py_DECREF(exported);
+    if (failed || !owner) return -1;
+    *view = (Py_buffer) {.buf = address,
+                         .obj = owner,
+                         .len = items * item_bytes,
+                         .itemsize = item_bytes,
+                         .readonly = 1,
+                         .ndim = 1,
+                         .format = (char*)format};
+    return 1;
 }
 
 #pragma endregion DLPack
@@ -1472,27 +1632,15 @@ static PyObject* Arena_tp_new(PyTypeObject* type, PyObject* args, PyObject* keyw
         return NULL;
     }
     arena->handle = handle;
-    uform_arena_description_t description = {0};
-    uform_arena_describe(&(uform_arena_describe_t) {.arena = handle, .outcome = &outcome, .description = &description});
-    if (uform_py_raise_on_outcome(&outcome) != 0) {
-        Py_DECREF(arena);
-        return NULL;
-    }
-    if (description.residency == uform_residency_vram_k) { // a GPU arena frees on its executor's first stream
+    if (executor_object != Py_None) { // a GPU arena frees on its executor's first stream, and none outlives it
         atomic_fetch_add(&((Executor*)executor_object)->holds, 1);
         arena->executor = Py_NewRef(executor_object);
     }
     return (PyObject*)arena;
 }
 
-static void Arena_dealloc(Arena* self) {
-    Py_BEGIN_ALLOW_THREADS;
-    uform_arena_free(self->handle); // every export holds this object, so none is open
-    Py_END_ALLOW_THREADS;
-    if (self->executor) executor_release((Executor*)self->executor);
-    Py_XDECREF(self->executor);
-    Py_TYPE(self)->tp_free((PyObject*)self);
-}
+static void Arena_dealloc(Arena* self);
+static uform_status_t arena_follow_unfollowed(Arena* arena);
 
 PyTypeObject ArenaType = {
     PyVarObject_HEAD_INIT(NULL, 0) //
@@ -1509,6 +1657,10 @@ int uform_py_call_hold_arena(uform_py_call_t* call, PyObject* object) {
         PyErr_Format(PyExc_TypeError, "the 'arena' argument must be an Arena, got %S", Py_TYPE(object));
         return -1;
     }
+    // Dropped exports still open wait for their consumers' kernels, which may still read the memory
+    uform_status_t const followed = arena_follow_unfollowed((Arena*)object);
+    if (followed != uform_status_success_k)
+        return uform_py_raise(followed, "the arena's stream could not wait for a dropped export's consumer");
     call->arena = Py_NewRef(object);
     return 0;
 }
@@ -1524,6 +1676,10 @@ typedef struct ArenaBuffer {
     /** The arena the output lives in, kept alive so the memory outlives every other name for it. */
     PyObject* arena;
 
+    /** Exports of the arena this object opened, one per read of @c __cuda_array_interface__, which
+     *  has no release of its own, so they close as the object dies. */
+    size_t cuda_array_interface_reads;
+
     void const* data;
     char const* format;
     Py_ssize_t item_bytes;
@@ -1531,6 +1687,10 @@ typedef struct ArenaBuffer {
     Py_ssize_t shape[arena_buffer_max_rank_k];
     Py_ssize_t strides[arena_buffer_max_rank_k];
 } ArenaBuffer;
+
+/** The format of rows whose scalar no buffer format names, @c bf16 among them, read as their bytes:
+ *  told apart from @c u8 rows by its address, since only DLPack and buffers can take raw bytes. */
+static char const opaque_rows_format[] = "B";
 
 /** A ragged run of rows in an arena, and the offsets around its items. */
 typedef struct RowsTape {
@@ -1550,6 +1710,14 @@ static int arena_buffer_describe(ArenaBuffer const* buffer, uform_arena_descript
     return uform_py_raise_on_outcome(&outcome);
 }
 
+/** Opens one export of the arena behind @p buffer, raising the status that refuses it; 0, or -1
+ *  with an exception set. */
+static int arena_buffer_export_open(ArenaBuffer const* buffer) {
+    uform_status_t const opened = uform_arena_export_open(((Arena*)buffer->arena)->handle);
+    if (opened == uform_status_success_k) return 0;
+    return uform_py_raise(opened, "the output's arena could not count another export");
+}
+
 /** Whether host code may read the pages of the arena behind @p buffer: 1 or 0, or -1 with an
  *  exception set. */
 static int uform_py_host_readable(ArenaBuffer const* buffer) {
@@ -1566,6 +1734,7 @@ static int ArenaBuffer_getbuffer(ArenaBuffer* self, Py_buffer* view, int flags) 
         PyErr_SetString(PyExc_BufferError, "the host may not read the output's memory; read `__dlpack__`");
         return -1;
     }
+    if (arena_buffer_export_open(self) != 0) return -1;
     Py_ssize_t bytes = self->item_bytes;
     for (int axis = 0; axis != self->rank; ++axis) bytes *= self->shape[axis];
     view->obj = Py_NewRef((PyObject*)self);
@@ -1596,14 +1765,24 @@ static PyObject* extents_to_tuple(Py_ssize_t const* extents, int rank) {
     return tuple;
 }
 
-static PyObject* ArenaBuffer_get_cuda_array_interface(ArenaBuffer* self, void* closure) {
+/** The DLPack device the outputs of @p buffer live on; 0, or -1 with an exception set. */
+static int arena_buffer_device(ArenaBuffer const* buffer, DLDevice* device) {
     uform_arena_description_t description = {0};
-    if (arena_buffer_describe(self, &description) != 0) return NULL;
-    if (description.residency != uform_residency_vram_k) {
-        PyErr_SetString(PyExc_AttributeError, "the output lives in host memory; read it through the buffer protocol");
+    if (arena_buffer_describe(buffer, &description) != 0) return -1;
+    *device = uform_py_dlpack_device(&description);
+    return 0;
+}
+
+static PyObject* ArenaBuffer_get_cuda_array_interface(ArenaBuffer* self, void* closure) {
+    DLDevice device;
+    if (arena_buffer_device(self, &device) != 0) return NULL;
+    if (device.device_type != kDLCUDA && device.device_type != kDLCUDAManaged) {
+        PyErr_SetString(PyExc_AttributeError, "only CUDA device and managed memory cross the CUDA Array Interface");
         return NULL;
     }
-    char const kind = *self->format == 'b' ? 'i' : strchr("efd", *self->format) ? 'f' : 'u';
+    if (arena_buffer_export_open(self) != 0) return NULL; // a consumer reads the pointer while it holds this object
+    ++self->cuda_array_interface_reads;
+    char const kind = strchr("bi", *self->format) ? 'i' : strchr("efd", *self->format) ? 'f' : 'u';
     char const typestr[3] = {self->item_bytes == 1 ? '|' : '<', kind, (char)('0' + self->item_bytes)};
     PyObject* const address = PyLong_FromVoidPtr((void*)self->data);
     PyObject* const data = address ? PyTuple_Pack(2, address, Py_False) : NULL;
@@ -1617,38 +1796,12 @@ static PyObject* ArenaBuffer_get_cuda_array_interface(ArenaBuffer* self, void* c
         uform_py_dict_steal_item(array_interface, "shape", extents_to_tuple(self->shape, self->rank)) != 0 ||
         uform_py_dict_steal_item(array_interface, "strides", extents_to_tuple(self->strides, self->rank)) != 0 ||
         uform_py_dict_steal_item(array_interface, "typestr", PyUnicode_FromStringAndSize(typestr, 3)) != 0 ||
+        uform_py_dict_steal_item(array_interface, "stream", Py_NewRef(Py_None)) != 0 || // the writing call is final
         uform_py_dict_steal_item(array_interface, "version", PyLong_FromLong(3)) != 0) {
         Py_DECREF(array_interface);
         return NULL;
     }
     return array_interface;
-}
-
-/** The DLPack device of the memory @p description names, derived as its type documents: VRAM
- *  the host may not read is device memory, VRAM it may read is CUDA managed or Metal shared
- *  memory, RAM placed for a device is page-locked for it, and other RAM is host memory. */
-static DLDevice uform_py_dlpack_device(uform_arena_description_t const* description) {
-    int32_t const ordinal = description->vendor_ordinal;
-    int const readable = description->host_access == uform_host_access_readable_k;
-    if (description->residency == uform_residency_vram_k && description->vendor == uform_gpu_vendor_apple_k)
-        return (DLDevice) {kDLMetal, ordinal};
-    if (description->residency == uform_residency_vram_k && description->vendor == uform_gpu_vendor_amd_k)
-        return (DLDevice) {kDLROCM, ordinal};
-    if (description->residency == uform_residency_vram_k)
-        return (DLDevice) {readable ? kDLCUDAManaged : kDLCUDA, ordinal};
-    if (description->device >= 0 && description->vendor == uform_gpu_vendor_nvidia_k)
-        return (DLDevice) {kDLCUDAHost, ordinal};
-    if (description->device >= 0 && description->vendor == uform_gpu_vendor_amd_k)
-        return (DLDevice) {kDLROCMHost, ordinal};
-    return (DLDevice) {kDLCPU, 0};
-}
-
-/** The DLPack device the outputs of @p buffer live on; 0, or -1 with an exception set. */
-static int arena_buffer_device(ArenaBuffer const* buffer, DLDevice* device) {
-    uform_arena_description_t description = {0};
-    if (arena_buffer_describe(buffer, &description) != 0) return -1;
-    *device = uform_py_dlpack_device(&description);
-    return 0;
 }
 
 /** What a DLPack capsule over an @c ArenaBuffer owns: the managed tensor, its extents and strides,
@@ -1659,16 +1812,90 @@ typedef struct dlpack_export_t {
         DLManagedTensorVersioned versioned;
     } managed;
     ArenaBuffer* buffer;
+
+    /** The stream the consumer's kernels read the tensor on, which the arena's stream follows
+     *  before the export closes, or NULL when the consumer named none. */
+    void* consumer_stream;
+
+    /** The next export on the arena's @c unfollowed stack, once this one waits there. */
+    struct dlpack_export_t* next;
+
     int64_t shape[arena_buffer_max_rank_k];
     int64_t strides[arena_buffer_max_rank_k];
 } dlpack_export_t;
 
-/** Releases an export from whichever thread its consumer drops it on, taking the GIL itself. */
+/** Pushes the exports @p first through @p last onto the @c unfollowed stack of @p arena. */
+static void arena_push_unfollowed(Arena* arena, dlpack_export_t* first, dlpack_export_t* last) {
+    last->next = atomic_load(&arena->unfollowed);
+    while (!atomic_compare_exchange_weak(&arena->unfollowed, &last->next, first)) {}
+}
+
+/** Follows and closes every export on the @c unfollowed stack of @p arena, answering the first
+ *  failed follow's status with that export and the rest pushed back. */
+static uform_status_t arena_follow_unfollowed(Arena* arena) {
+    dlpack_export_t* exported = atomic_exchange(&arena->unfollowed, NULL);
+    while (exported) {
+        uform_status_t const followed = arena_follow(arena, NULL, exported->consumer_stream);
+        if (followed != uform_status_success_k) {
+            dlpack_export_t* last = exported;
+            while (last->next) last = last->next;
+            arena_push_unfollowed(arena, exported, last);
+            return followed;
+        }
+        dlpack_export_t* const next = exported->next;
+        uform_arena_export_close(arena->handle);
+        PyMem_Free(exported);
+        exported = next;
+    }
+    return uform_status_success_k;
+}
+
+static void Arena_dealloc(Arena* self) {
+    uform_status_t const followed = arena_follow_unfollowed(self);
+    if (followed != uform_status_success_k) {
+        // The consumers' streams can't be followed, so the arena waits for its own work instead
+        uform_outcome_t outcome = {0};
+        uform_executor_t const executor = arena_executor((PyObject*)self);
+        Py_BEGIN_ALLOW_THREADS;
+        if (executor)
+            uform_executor_drain(
+                &(uform_executor_drain_t) {.executor = executor, .outcome = &outcome, .mood = uform_mood_parked_k});
+        Py_END_ALLOW_THREADS;
+        for (dlpack_export_t* exported = atomic_exchange(&self->unfollowed, NULL); exported;) {
+            dlpack_export_t* const next = exported->next;
+            uform_arena_export_close(self->handle);
+            PyMem_Free(exported);
+            exported = next;
+        }
+        PyObject* const pending = PyErr_GetRaisedException();
+        uform_py_raise(followed, "the arena was freed before its stream could wait for a dropped export's consumer");
+        PyErr_WriteUnraisable(NULL);
+        PyErr_SetRaisedException(pending);
+    }
+    Py_BEGIN_ALLOW_THREADS;
+    uform_arena_free(self->handle); // every export holds this object or waits on its stack, so none is open
+    Py_END_ALLOW_THREADS;
+    if (self->executor) executor_release((Executor*)self->executor);
+    Py_XDECREF(self->executor);
+    Py_TYPE(self)->tp_free((PyObject*)self);
+}
+
+/** Closes the export, or leaves it for the arena's next user to follow and close, taking the
+ *  interpreter, as a consumer may delete from a thread of its own. */
 static void dlpack_export_release(dlpack_export_t* exported) {
     PyGILState_STATE const state = PyGILState_Ensure();
-    uform_arena_export_close(((Arena*)exported->buffer->arena)->handle);
-    Py_DECREF(exported->buffer);
-    PyMem_Free(exported);
+    // The consumer's kernels may still read the memory, so the arena's stream waits for them first
+    ArenaBuffer* const buffer = exported->buffer;
+    Arena* const arena = (Arena*)buffer->arena;
+    if (arena_follow(arena, NULL, exported->consumer_stream) == uform_status_contended_k)
+        // A call on another arena holds the executor: the export stays open until the arena's next
+        // user follows the stream, and the buffer goes, as the stack must not keep the arena alive
+        arena_push_unfollowed(arena, exported, exported);
+    else {
+        uform_arena_export_close(arena->handle);
+        PyMem_Free(exported);
+    }
+    Py_DECREF(buffer);
     PyGILState_Release(state);
 }
 
@@ -1707,6 +1934,31 @@ static PyObject* ArenaBuffer_dlpack(ArenaBuffer* self, PyObject* const* args, Py
     if (copied) return PyErr_Format(PyExc_BufferError, "an arena output exports only in place, never a copy");
     DLDevice device;
     if (arena_buffer_device(self, &device) != 0) return NULL;
+    void* consumer_stream = NULL;
+    if (stream != Py_None) { // checked as the standard asks, and followed once the consumer is done
+        if (!PyLong_Check(stream) || PyBool_Check(stream))
+            return PyErr_Format(PyExc_TypeError, "stream must be an integer or None, got %S", Py_TYPE(stream));
+        long long const handle = PyLong_AsLongLong(stream);
+        if (handle == -1 && PyErr_Occurred()) return NULL;
+        int const cuda = device.device_type == kDLCUDA || device.device_type == kDLCUDAManaged;
+        int const rocm = device.device_type == kDLROCM;
+        if (handle != -1 && !(cuda && handle > 0) && !(rocm && handle >= 0))
+            return PyErr_Format(PyExc_ValueError, "stream %lld names no stream on DLPack device (%d, %d)", handle,
+                                (int)device.device_type, (int)device.device_id);
+        if (handle != -1 && !arena_executor(self->arena))
+            return uform_py_raise(uform_status_uninitialized_k, "the executor is closed"), NULL;
+        if ((cuda && handle > 2) || (rocm && handle > 0)) { // a handle rather than a default stream
+            uform_outcome_t outcome = {0};
+            uform_executor_accepts(&(uform_executor_accepts_t) {.executor = arena_executor(self->arena),
+                                                                .position = 0,
+                                                                .stream = PyLong_AsVoidPtr(stream),
+                                                                .outcome = &outcome});
+            if (outcome.status == uform_status_config_mismatch_k)
+                return PyErr_Format(PyExc_ValueError, "stream %lld sits on another device than the output", handle);
+            if (uform_py_raise_on_outcome(&outcome) != 0) return NULL;
+        }
+        if (handle != -1) consumer_stream = PyLong_AsVoidPtr(stream);
+    }
     if (dl_device != Py_None) {
         if (!PyTuple_Check(dl_device) || PyTuple_GET_SIZE(dl_device) != 2)
             return PyErr_Format(PyExc_TypeError, "dl_device must be a (device_type, device_id) tuple");
@@ -1737,6 +1989,7 @@ static PyObject* ArenaBuffer_dlpack(ArenaBuffer* self, PyObject* const* args, Py
         return uform_py_raise(opened, "the output's arena could not count another export"), NULL;
     }
     exported->buffer = (ArenaBuffer*)Py_NewRef((PyObject*)self);
+    exported->consumer_stream = consumer_stream;
     for (int axis = 0; axis != self->rank; ++axis) {
         exported->shape[axis] = self->shape[axis];
         exported->strides[axis] = self->strides[axis] / self->item_bytes;
@@ -1744,8 +1997,11 @@ static PyObject* ArenaBuffer_dlpack(ArenaBuffer* self, PyObject* const* args, Py
     DLTensor const tensor = {(void*)self->data, device, self->rank, dtype, exported->shape, exported->strides, 0};
     void* managed = NULL;
     if (major >= 1) {
-        exported->managed.versioned =
-            (DLManagedTensorVersioned) {{1, 0}, exported, dlpack_versioned_deleter, 0, tensor};
+        exported->managed.versioned = (DLManagedTensorVersioned) {{DLPACK_MAJOR_VERSION, DLPACK_MINOR_VERSION},
+                                                                  exported,
+                                                                  dlpack_versioned_deleter,
+                                                                  0,
+                                                                  tensor};
         managed = &exported->managed.versioned;
     }
     else {
@@ -1770,12 +2026,378 @@ static PyObject* ArenaBuffer_dlpack_device(ArenaBuffer* self, PyObject* unused) 
     return NULL;
 }
 
+/** The levels an Arrow export of an output nests: offsets around rows, rows of columns, values. */
+enum { arrow_export_max_levels_k = 3 };
+
+/**
+ *  @brief What one Arrow export over an @c ArenaBuffer owns: its arrays and schemas level by level,
+ *      outermost first, and the export it holds on the buffer's arena while any array is alive.
+ *
+ *  Every array and schema counts in @c alive, as a consumer may move a child out and release it
+ *  after its parent, and the last release frees the block.
+ */
+typedef struct arrow_export_t {
+    ArenaBuffer* buffer;
+    int levels;
+    atomic_int alive;
+    struct ArrowArray arrays[arrow_export_max_levels_k];
+    struct ArrowArray* array_children[arrow_export_max_levels_k];
+    void const* array_buffers[arrow_export_max_levels_k][2];
+    struct ArrowSchema schemas[arrow_export_max_levels_k];
+    struct ArrowSchema* schema_children[arrow_export_max_levels_k];
+    char formats[arrow_export_max_levels_k][24];
+} arrow_export_t;
+
+/** Drops one of the arrays and schemas of @p exported, freeing it after the last, from whichever
+ *  thread its consumer releases on. */
+static void arrow_export_drop(arrow_export_t* exported) {
+    if (atomic_fetch_sub(&exported->alive, 1) != 1) return;
+    PyGILState_STATE const state = PyGILState_Ensure();
+    if (exported->buffer) {
+        uform_arena_export_close(((Arena*)exported->buffer->arena)->handle);
+        Py_DECREF(exported->buffer);
+    }
+    PyMem_RawFree(exported);
+    PyGILState_Release(state);
+}
+
+static void arrow_export_array_release(struct ArrowArray* array) {
+    for (int64_t child = 0; child != array->n_children; ++child)
+        if (array->children[child]->release) array->children[child]->release(array->children[child]);
+    array->release = NULL;
+    arrow_export_drop((arrow_export_t*)array->private_data);
+}
+
+static void arrow_export_schema_release(struct ArrowSchema* schema) {
+    for (int64_t child = 0; child != schema->n_children; ++child)
+        if (schema->children[child]->release) schema->children[child]->release(schema->children[child]);
+    schema->release = NULL;
+    arrow_export_drop((arrow_export_t*)schema->private_data);
+}
+
+/** The Arrow format of the values of @p buffer, or NULL for rows no Arrow type names, like
+ *  @c bf16 ones. */
+static char const* arrow_value_format(ArenaBuffer const* buffer) {
+    if (buffer->format == opaque_rows_format) return NULL;
+    switch (*buffer->format) {
+    case 'B': return "C";
+    case 'b': return "c";
+    case 'I': return "I";
+    case 'i': return "i";
+    case 'Q':
+    case 'N': return "L";
+    case 'e': return "e";
+    case 'f': return "f";
+    case 'd': return "g";
+    default: return NULL;
+    }
+}
+
+/**
+ *  @brief Lays @p buffer out as Arrow: a run of values, rows as fixed-size lists of their
+ *      columns, and a @c RowsTape as a large list of those, its @c size_t offsets read as
+ *      @c int64 in place.
+ *  @return A new export holding @p buffer and one export on its arena, or NULL with an error.
+ */
+static arrow_export_t* arrow_export_new(ArenaBuffer* buffer) {
+    char const* const value_format = arrow_value_format(buffer);
+    if (!value_format) {
+        PyErr_Format(PyExc_BufferError, "the output's values have no Arrow type");
+        return NULL;
+    }
+    ArenaBuffer const* const offsets = PyObject_TypeCheck((PyObject*)buffer, &RowsTapeType)
+                                           ? (ArenaBuffer const*)((RowsTape*)buffer)->offsets
+                                           : NULL;
+    arrow_export_t* const exported = (arrow_export_t*)PyMem_RawCalloc(1, sizeof(arrow_export_t));
+    if (!exported) return (arrow_export_t*)PyErr_NoMemory();
+    uform_status_t const opened = uform_arena_export_open(((Arena*)buffer->arena)->handle);
+    if (opened != uform_status_success_k) {
+        PyMem_RawFree(exported);
+        uform_py_raise(opened, "the output's arena could not count another export");
+        return NULL;
+    }
+    exported->buffer = (ArenaBuffer*)Py_NewRef((PyObject*)buffer);
+
+    // Outermost first: the large list of a tape's items, each row's fixed-size list, the values
+    int64_t const rows = buffer->shape[0], columns = buffer->rank == 2 ? buffer->shape[1] : 1;
+    int level = 0;
+    if (offsets) {
+        snprintf(exported->formats[level], sizeof(exported->formats[level]), "+L");
+        exported->array_buffers[level][1] = offsets->data;
+        exported->arrays[level].length = offsets->shape[0] - 1;
+        ++level;
+    }
+    if (buffer->rank == 2) {
+        snprintf(exported->formats[level], sizeof(exported->formats[level]), "+w:%lld", (long long)columns);
+        exported->arrays[level].length = rows;
+        ++level;
+    }
+    snprintf(exported->formats[level], sizeof(exported->formats[level]), "%s", value_format);
+    exported->array_buffers[level][1] = buffer->data;
+    exported->arrays[level].length = rows * columns;
+    exported->levels = ++level;
+    atomic_store(&exported->alive, 2 * level);
+    for (int at = 0; at != level; ++at) {
+        int const nested = at + 1 != level;
+        int const values = !nested;
+        exported->array_children[at] = nested ? &exported->arrays[at + 1] : NULL;
+        exported->schema_children[at] = nested ? &exported->schemas[at + 1] : NULL;
+        struct ArrowArray* const array = &exported->arrays[at];
+        array->n_buffers = values || exported->array_buffers[at][1] ? 2 : 1;
+        array->buffers = exported->array_buffers[at];
+        array->n_children = nested;
+        array->children = nested ? &exported->array_children[at] : NULL;
+        array->release = arrow_export_array_release;
+        array->private_data = exported;
+        exported->schemas[at] = (struct ArrowSchema) {.format = exported->formats[at],
+                                                      .name = nested || !at ? "" : "item",
+                                                      .n_children = nested,
+                                                      .children = nested ? &exported->schema_children[at] : NULL,
+                                                      .release = arrow_export_schema_release,
+                                                      .private_data = exported};
+    }
+    return exported;
+}
+
+/** Releases a schema or array capsule no consumer took; a consumer moves the struct out and
+ *  leaves its release NULL. */
+static void arrow_schema_capsule_release(PyObject* capsule) {
+    struct ArrowSchema* const schema = (struct ArrowSchema*)PyCapsule_GetPointer(capsule, "arrow_schema");
+    if (schema->release) schema->release(schema);
+    PyMem_Free(schema);
+}
+
+static void arrow_array_capsule_release(PyObject* capsule) {
+    struct ArrowArray* const array = (struct ArrowArray*)PyCapsule_GetPointer(capsule, "arrow_array");
+    if (array->release) array->release(array);
+    PyMem_Free(array);
+}
+
+static void arrow_device_array_capsule_release(PyObject* capsule) {
+    struct ArrowDeviceArray* const device_array = (struct ArrowDeviceArray*)PyCapsule_GetPointer(capsule,
+                                                                                                 "arrow_device_array");
+    if (device_array->array.release) device_array->array.release(&device_array->array);
+    PyMem_Free(device_array);
+}
+
+/** A capsule moving @p schema out of an export; a new reference, or NULL with it released. */
+static PyObject* arrow_schema_capsule(struct ArrowSchema* schema) {
+    struct ArrowSchema* const moved = (struct ArrowSchema*)PyMem_Malloc(sizeof(*moved));
+    PyObject* const capsule = moved ? PyCapsule_New(moved, "arrow_schema", arrow_schema_capsule_release) : NULL;
+    if (!capsule) {
+        PyMem_Free(moved);
+        schema->release(schema);
+        return moved ? NULL : PyErr_NoMemory();
+    }
+    *moved = *schema;
+    schema->release = NULL;
+    return capsule;
+}
+
+/**
+ *  @brief Exports @p buffer as an Arrow schema capsule and array capsule, on a device when
+ *      @p device names one, after the host check the caller made.
+ *  @return A new tuple, or NULL with an exception set.
+ */
+static PyObject* arrow_export_pair(ArenaBuffer* buffer, DLDevice const* device) {
+    arrow_export_t* const exported = arrow_export_new(buffer);
+    if (!exported) return NULL;
+    PyObject* const schema = arrow_schema_capsule(&exported->schemas[0]);
+    struct ArrowArray* const top = &exported->arrays[0];
+    PyObject* array = NULL;
+    if (!schema) top->release(top);
+    else if (device) {
+        struct ArrowDeviceArray* const moved = (struct ArrowDeviceArray*)PyMem_Calloc(1, sizeof(*moved));
+        array = moved ? PyCapsule_New(moved, "arrow_device_array", arrow_device_array_capsule_release) : NULL;
+        if (array) {
+            // The call that wrote the output is final, so a consumer waits on no event.
+            *moved = (struct ArrowDeviceArray) {.array = *top,
+                                                .device_id = device->device_type == kDLCPU ? -1 : device->device_id,
+                                                .device_type = (ArrowDeviceType)device->device_type};
+            top->release = NULL;
+        }
+        else {
+            if (!moved) PyErr_NoMemory();
+            PyMem_Free(moved);
+            top->release(top);
+        }
+    }
+    else {
+        struct ArrowArray* const moved = (struct ArrowArray*)PyMem_Malloc(sizeof(*moved));
+        array = moved ? PyCapsule_New(moved, "arrow_array", arrow_array_capsule_release) : NULL;
+        if (array) *moved = *top, top->release = NULL;
+        else {
+            if (!moved) PyErr_NoMemory();
+            PyMem_Free(moved);
+            top->release(top);
+        }
+    }
+    PyObject* const pair = array ? PyTuple_Pack(2, schema, array) : NULL;
+    Py_XDECREF(schema);
+    Py_XDECREF(array);
+    return pair;
+}
+
+/**
+ *  @brief Reads the arguments of an Arrow export: a @c requested_schema, which a producer may
+ *      ignore and the consumer casts after, and, where @p extra_allowed, keywords a later
+ *      version may add, refused unless @c None.
+ *  @return 0, or -1 with an exception set.
+ */
+static int arrow_export_arguments(char const* method, PyObject* const* args, Py_ssize_t positional, PyObject* names,
+                                  int extra_allowed) {
+    if (positional > 1) return PyErr_Format(PyExc_TypeError, "%s() takes at most one positional argument", method), -1;
+    for (Py_ssize_t keyword = 0; names && keyword != PyTuple_GET_SIZE(names); ++keyword) {
+        PyObject* const name = PyTuple_GET_ITEM(names, keyword);
+        if (PyUnicode_CompareWithASCIIString(name, "requested_schema") == 0 && !positional) continue;
+        if (!extra_allowed)
+            return PyErr_Format(PyExc_TypeError, "%s() got an unexpected keyword argument '%S'", method, name), -1;
+        if (args[positional + keyword] != Py_None)
+            return PyErr_Format(PyExc_NotImplementedError, "%s() does not support '%S'", method, name), -1;
+    }
+    return 0;
+}
+
+/** Refuses an Arrow export the host would read when it may not read the output; 0, or -1 with an
+ *  exception set. */
+static int arrow_export_host_check(ArenaBuffer* buffer) {
+    int const readable = uform_py_host_readable(buffer);
+    if (readable < 0) return -1;
+    if (!readable)
+        return uform_py_raise(uform_status_device_k,
+                              "the host may not read the output; read `__arrow_c_device_array__`");
+    return 0;
+}
+
+static PyObject* ArenaBuffer_arrow_c_array(ArenaBuffer* self, PyObject* const* args, Py_ssize_t positional,
+                                           PyObject* names) {
+    if (arrow_export_arguments("__arrow_c_array__", args, positional, names, 0) != 0 ||
+        arrow_export_host_check(self) != 0)
+        return NULL;
+    return arrow_export_pair(self, NULL);
+}
+
+static PyObject* ArenaBuffer_arrow_c_device_array(ArenaBuffer* self, PyObject* const* args, Py_ssize_t positional,
+                                                  PyObject* names) {
+    DLDevice device;
+    if (arrow_export_arguments("__arrow_c_device_array__", args, positional, names, 1) != 0 ||
+        arena_buffer_device(self, &device) != 0)
+        return NULL;
+    return arrow_export_pair(self, &device);
+}
+
+/** What an Arrow stream over a @c RowsTape owns: the tape, whose arena counts the stream as an
+ *  export until it is released, and whether its one batch was handed out. */
+typedef struct arrow_stream_t {
+    ArenaBuffer* buffer;
+    int exhausted;
+} arrow_stream_t;
+
+static int arrow_stream_get_schema(struct ArrowArrayStream* stream, struct ArrowSchema* out) {
+    arrow_stream_t* const state = (arrow_stream_t*)stream->private_data;
+    PyGILState_STATE const gil = PyGILState_Ensure();
+    arrow_export_t* const exported = arrow_export_new(state->buffer);
+    if (exported) {
+        *out = exported->schemas[0];
+        exported->schemas[0].release = NULL;
+        exported->arrays[0].release(&exported->arrays[0]);
+    }
+    else PyErr_Clear();
+    PyGILState_Release(gil);
+    return exported ? 0 : EIO;
+}
+
+static int arrow_stream_get_next(struct ArrowArrayStream* stream, struct ArrowArray* out) {
+    arrow_stream_t* const state = (arrow_stream_t*)stream->private_data;
+    out->release = NULL;
+    if (state->exhausted) return 0;
+    PyGILState_STATE const gil = PyGILState_Ensure();
+    arrow_export_t* const exported = arrow_export_new(state->buffer);
+    if (exported) {
+        *out = exported->arrays[0];
+        exported->arrays[0].release = NULL;
+        exported->schemas[0].release(&exported->schemas[0]);
+        state->exhausted = 1;
+    }
+    else PyErr_Clear();
+    PyGILState_Release(gil);
+    return exported ? 0 : EIO;
+}
+
+static char const* arrow_stream_get_last_error(struct ArrowArrayStream* stream) {
+    return "the output's arena could not count another export, or memory ran out";
+}
+
+static void arrow_stream_release(struct ArrowArrayStream* stream) {
+    arrow_stream_t* const state = (arrow_stream_t*)stream->private_data;
+    PyGILState_STATE const gil = PyGILState_Ensure();
+    uform_arena_export_close(((Arena*)state->buffer->arena)->handle);
+    Py_DECREF(state->buffer);
+    PyMem_RawFree(state);
+    PyGILState_Release(gil);
+    stream->release = NULL;
+}
+
+static void arrow_stream_capsule_release(PyObject* capsule) {
+    struct ArrowArrayStream* const stream = (struct ArrowArrayStream*)PyCapsule_GetPointer(capsule,
+                                                                                           "arrow_array_stream");
+    if (stream->release) stream->release(stream);
+    PyMem_Free(stream);
+}
+
+static PyObject* RowsTape_arrow_c_stream(ArenaBuffer* self, PyObject* const* args, Py_ssize_t positional,
+                                         PyObject* names) {
+    if (arrow_export_arguments("__arrow_c_stream__", args, positional, names, 0) != 0 ||
+        arrow_export_host_check(self) != 0)
+        return NULL;
+    arrow_stream_t* const state = (arrow_stream_t*)PyMem_RawCalloc(1, sizeof(arrow_stream_t));
+    struct ArrowArrayStream* const stream = state ? (struct ArrowArrayStream*)PyMem_Calloc(1, sizeof(*stream)) : NULL;
+    if (!stream) {
+        PyMem_RawFree(state);
+        return PyErr_NoMemory();
+    }
+    uform_status_t const opened = uform_arena_export_open(((Arena*)self->arena)->handle);
+    PyObject* const capsule = opened == uform_status_success_k
+                                  ? PyCapsule_New(stream, "arrow_array_stream", arrow_stream_capsule_release)
+                                  : NULL;
+    if (!capsule) {
+        if (opened != uform_status_success_k)
+            uform_py_raise(opened, "the output's arena could not count another export");
+        else uform_arena_export_close(((Arena*)self->arena)->handle);
+        PyMem_RawFree(state);
+        PyMem_Free(stream);
+        return NULL;
+    }
+    state->buffer = (ArenaBuffer*)Py_NewRef((PyObject*)self);
+    *stream = (struct ArrowArrayStream) {.get_schema = arrow_stream_get_schema,
+                                         .get_next = arrow_stream_get_next,
+                                         .get_last_error = arrow_stream_get_last_error,
+                                         .release = arrow_stream_release,
+                                         .private_data = state};
+    return capsule;
+}
+
 static char const doc_ArenaBuffer_dlpack[] =                                                 //
     "__dlpack__(*, stream=None, max_version=None, dl_device=None, copy=None) -> PyCapsule\n" //
     "\n"                                                                                     //
     "Exports the output in place as a DLPack capsule, on host pages or the GPU its arena\n"  //
     "lives on, valid until the next call handed the arena rewinds it. A `max_version` of\n"  //
-    "1 or more asks for a versioned capsule.";
+    "1 or more asks for a versioned capsule. A `stream` handle must sit on that GPU, and\n"  //
+    "once the consumer deletes the capsule, the arena's next call waits for the work\n"      //
+    "queued on it before it rewinds the memory.";
+
+static char const doc_ArenaBuffer_arrow_c_array[] =                                              //
+    "__arrow_c_array__(requested_schema=None) -> tuple[PyCapsule, PyCapsule]\n"                  //
+    "\n"                                                                                         //
+    "Exports the output in place as an Arrow array: values, rows as fixed-size lists of their\n" //
+    "columns, and a `RowsTape` as a large list of those. Memory the host may not read raises\n"  //
+    "`DeviceError`; `bf16` rows have no Arrow type and raise `BufferError`.";
+
+static char const doc_ArenaBuffer_arrow_c_device_array[] =                                       //
+    "__arrow_c_device_array__(requested_schema=None, **kwargs) -> tuple[PyCapsule, PyCapsule]\n" //
+    "\n"                                                                                         //
+    "Exports the output in place as an Arrow device array on the device its arena lives on,\n"   //
+    "laid out as `__arrow_c_array__` lays it out, with no event to wait on.";
 
 static char const doc_ArenaBuffer_dlpack_device[] = //
     "__dlpack_device__() -> tuple[int, int]\n"      //
@@ -1786,10 +2408,16 @@ static PyMethodDef ArenaBuffer_methods[] = {
     {"__dlpack__", (PyCFunction)(void (*)(void))ArenaBuffer_dlpack, METH_FASTCALL | METH_KEYWORDS,
      doc_ArenaBuffer_dlpack},
     {"__dlpack_device__", (PyCFunction)ArenaBuffer_dlpack_device, METH_NOARGS, doc_ArenaBuffer_dlpack_device},
+    {"__arrow_c_array__", (PyCFunction)(void (*)(void))ArenaBuffer_arrow_c_array, METH_FASTCALL | METH_KEYWORDS,
+     doc_ArenaBuffer_arrow_c_array},
+    {"__arrow_c_device_array__", (PyCFunction)(void (*)(void))ArenaBuffer_arrow_c_device_array,
+     METH_FASTCALL | METH_KEYWORDS, doc_ArenaBuffer_arrow_c_device_array},
     {NULL, NULL, 0, NULL},
 };
 
 static void ArenaBuffer_dealloc(ArenaBuffer* self) {
+    for (; self->cuda_array_interface_reads; --self->cuda_array_interface_reads)
+        uform_arena_export_close(((Arena*)self->arena)->handle);
     Py_DECREF(self->arena);
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
@@ -1798,13 +2426,18 @@ static Py_ssize_t ArenaBuffer_length(ArenaBuffer* self) { return self->shape[0];
 
 static PySequenceMethods ArenaBuffer_as_sequence = {.sq_length = (lenfunc)ArenaBuffer_length};
 
+static void ArenaBuffer_releasebuffer(ArenaBuffer* self, Py_buffer* view) {
+    uform_arena_export_close(((Arena*)self->arena)->handle);
+}
+
 static PyBufferProcs ArenaBuffer_as_buffer = {
     .bf_getbuffer = (getbufferproc)ArenaBuffer_getbuffer,
+    .bf_releasebuffer = (releasebufferproc)ArenaBuffer_releasebuffer,
 };
 
 static PyGetSetDef ArenaBuffer_getset[] = {
     {"__cuda_array_interface__", (getter)ArenaBuffer_get_cuda_array_interface, NULL,
-     "Version 3 of the CUDA Array Interface, present only over device memory. Python-only.", NULL},
+     "Version 3 of the CUDA Array Interface, present only over CUDA device and managed memory. Python-only.", NULL},
     {NULL, NULL, NULL, NULL, NULL},
 };
 
@@ -1813,8 +2446,9 @@ static char const doc_ArenaBuffer[] =                                           
     "\n"                                                                                     //
     "One output a call left in an `Arena`, viewing it until it rewinds: a (rows, columns)\n" //
     "matrix for the scalars a buffer can format, and a (rows, stride) run of 'B' for the\n"  //
-    "rest, `bf16` among them. Every output exports `__dlpack__`; host outputs also export\n" //
-    "the writable buffer protocol, and device ones `__cuda_array_interface__`.";
+    "rest, `bf16` among them. Every output exports `__dlpack__` and the Arrow arrays;\n"     //
+    "outputs the host may read also export the writable buffer protocol, and CUDA device\n"  //
+    "and managed ones `__cuda_array_interface__`.";
 
 PyTypeObject ArenaBufferType = {
     PyVarObject_HEAD_INIT(NULL, 0) //
@@ -1841,6 +2475,18 @@ static PyMemberDef RowsTape_members[] = {
     {NULL, 0, 0, 0, NULL},
 };
 
+static char const doc_RowsTape_arrow_c_stream[] =                                           //
+    "__arrow_c_stream__(requested_schema=None) -> PyCapsule\n"                              //
+    "\n"                                                                                    //
+    "Exports the tape in place as an Arrow stream of one batch, its `__arrow_c_array__`,\n" //
+    "for consumers that read batches of rows, like `pyarrow.chunked_array`.";
+
+static PyMethodDef RowsTape_methods[] = {
+    {"__arrow_c_stream__", (PyCFunction)(void (*)(void))RowsTape_arrow_c_stream, METH_FASTCALL | METH_KEYWORDS,
+     doc_RowsTape_arrow_c_stream},
+    {NULL, NULL, 0, NULL},
+};
+
 static char const doc_RowsTape[] =                                                          //
     "RowsTape\n"                                                                            //
     "\n"                                                                                    //
@@ -1860,6 +2506,7 @@ PyTypeObject RowsTapeType = {
     .tp_new = NULL, // Returned as the states of an encoding, never constructed by name.
     .tp_dealloc = (destructor)RowsTape_dealloc,
     .tp_members = RowsTape_members,
+    .tp_methods = RowsTape_methods,
 };
 
 /** The buffer format of the scalars a @c memoryview can format, and the bytes one value takes. */
@@ -1894,7 +2541,7 @@ static ArenaBuffer* arena_buffer_new(PyTypeObject* type, PyObject* arena, void c
 }
 
 PyObject* uform_py_rows_answer(PyTypeObject* type, PyObject* arena, uform_rows_view_t const* rows, size_t count) {
-    char const* format = "B";
+    char const* format = opaque_rows_format;
     Py_ssize_t item_bytes = 1;
     Py_ssize_t shape[2] = {(Py_ssize_t)count, (Py_ssize_t)rows->stride};
     for (size_t row = 0; row != sizeof(scalar_formats) / sizeof(*scalar_formats); ++row)
@@ -1958,13 +2605,129 @@ static char buffer_format(Py_buffer const* buffer) {
     return *format;
 }
 
+/** Releases the Arrow array a capsule owns, the owner of a tape read in place from Arrow memory. */
+static void arrow_import_capsule_release(PyObject* capsule) {
+    struct ArrowDeviceArray* const imported = (struct ArrowDeviceArray*)PyCapsule_GetPointer(capsule, NULL);
+    if (imported->array.release) imported->array.release(&imported->array);
+    PyMem_Free(imported);
+}
+
+/** Whether the host may read memory Arrow places on @p device_type, as the device-type table in
+ *  @c c/uform/types.h has it. */
+static int arrow_device_host_readable(ArrowDeviceType device_type) {
+    return device_type == ARROW_DEVICE_CPU || device_type == ARROW_DEVICE_CUDA_HOST ||
+           device_type == ARROW_DEVICE_ROCM_HOST || device_type == ARROW_DEVICE_CUDA_MANAGED;
+}
+
+/** Calls the Arrow export @p name of @p object with no requested schema; a new reference, or NULL
+ *  with an exception set. */
+static PyObject* arrow_export_call(PyObject* object, char const* name) {
+    PyObject* const method = PyObject_GetAttrString(object, name);
+    if (!method) return NULL;
+    PyObject* const exported = PyObject_CallNoArgs(method);
+    Py_DECREF(method);
+    return exported;
+}
+
+/** The buffer formats a primitive Arrow array crosses as, and the bytes of each item. */
+static struct {
+    char arrow;
+    char const* format;
+    Py_ssize_t bytes;
+} const arrow_formats[] = {
+    {'C', "B", 1}, {'c', "b", 1}, {'I', "I", 4}, {'i', "i", 4},
+    {'L', "Q", 8}, {'e', "e", 2}, {'f', "f", 4}, {'g', "d", 8},
+};
+
+/**
+ *  @brief Reads the one primitive Arrow array @p object exports, through
+ *      @c __arrow_c_device_array__ first and @c __arrow_c_array__ otherwise, into @p view: host
+ *      memory, or memory of the GPU @p arena lives on, as the DLPack route takes.
+ *  @return 1 when it does, 0 when @p object exports no Arrow array, or -1 with an exception set.
+ */
+static int arrow_buffer_acquire(PyObject* object, PyObject* arena, Py_buffer* view) {
+    int const device = PyObject_HasAttrString(object, "__arrow_c_device_array__");
+    if (!device && !PyObject_HasAttrString(object, "__arrow_c_array__")) return 0;
+    PyObject* const pair = arrow_export_call(object, device ? "__arrow_c_device_array__" : "__arrow_c_array__");
+    if (!pair) return -1;
+    struct ArrowSchema* const schema = PyTuple_Check(pair) && PyTuple_GET_SIZE(pair) == 2
+                                           ? (struct ArrowSchema*)PyCapsule_GetPointer(PyTuple_GET_ITEM(pair, 0),
+                                                                                       "arrow_schema")
+                                           : NULL;
+    void* const array =
+        schema ? PyCapsule_GetPointer(PyTuple_GET_ITEM(pair, 1), device ? "arrow_device_array" : "arrow_array") : NULL;
+    struct ArrowDeviceArray* const imported = array ? (struct ArrowDeviceArray*)PyMem_Calloc(1, sizeof(*imported))
+                                                    : NULL;
+    PyObject* const owner = imported ? PyCapsule_New(imported, NULL, arrow_import_capsule_release) : NULL;
+    if (!owner) {
+        if (array && !imported) PyErr_NoMemory();
+        else if (!PyErr_Occurred())
+            PyErr_SetString(PyExc_TypeError, "the Arrow export is no pair of a schema and an array");
+        PyMem_Free(imported);
+        Py_DECREF(pair);
+        return -1;
+    }
+    // The array moves into the owner, and the capsule, seeing its release cleared, leaves it alone
+    if (device) *imported = *(struct ArrowDeviceArray*)array;
+    else
+        *imported = (struct ArrowDeviceArray) {.array = *(struct ArrowArray*)array,
+                                               .device_id = -1,
+                                               .device_type = ARROW_DEVICE_CPU};
+    ((struct ArrowArray*)array)->release = NULL;
+    char const* format = NULL;
+    Py_ssize_t item_bytes = 0;
+    for (size_t row = 0; row != sizeof(arrow_formats) / sizeof(*arrow_formats); ++row)
+        if (schema->format[0] == arrow_formats[row].arrow && !schema->format[1])
+            format = arrow_formats[row].format, item_bytes = arrow_formats[row].bytes;
+    struct ArrowArray const* const values = &imported->array;
+    int const host_readable = arrow_device_host_readable(imported->device_type);
+    DLDevice accepted = {kDLCPU, 0};
+    int const on_device = host_readable ? 0 : arena_device(arena, &accepted);
+    int const same_vendor = (int)imported->device_type == (int)accepted.device_type ||
+                            (imported->device_type == ARROW_DEVICE_CUDA && accepted.device_type == kDLCUDAManaged);
+    int failed = on_device < 0 ? -1 : 0;
+    if (!failed && imported->device_type == ARROW_DEVICE_METAL)
+        failed = uform_py_raise(uform_status_unsupported_k, "Metal arrays don't cross Arrow yet; pass host memory");
+    else if (!failed && !host_readable && !(on_device && same_vendor && imported->device_id == accepted.device_id))
+        failed = uform_py_raise(uform_status_device_k, "this input cannot take memory of Arrow device (%d, %d)",
+                                (int)imported->device_type, (int)imported->device_id);
+    else if (!failed && !format)
+        failed = uform_py_raise(uform_status_unsupported_layout_k, "the Arrow array of format '%s' holds no scalars",
+                                schema->format);
+    else if (!failed && values->null_count != 0 && values->buffers[0])
+        failed = uform_py_raise(uform_status_invalid_argument_k, "the Arrow array holds nulls");
+    // The call or the host reads the values, so the host waits for a producer still writing them
+    if (!failed && imported->sync_event && arena_wait(arena, imported->sync_event) != 0) failed = -1;
+    if (!failed)
+        *view = (Py_buffer) {.buf = (char*)values->buffers[1] + values->offset * item_bytes,
+                             .obj = Py_NewRef(owner),
+                             .len = (Py_ssize_t)values->length * item_bytes,
+                             .itemsize = item_bytes,
+                             .readonly = 1,
+                             .ndim = 1,
+                             .format = (char*)format};
+    Py_DECREF(owner);
+    Py_DECREF(pair);
+    return failed ? -1 : 1;
+}
+
+/** Acquires @p object into @p view through DLPack, versioned then legacy, then Arrow, device then
+ *  host, then the CUDA Array Interface on a CUDA @p arena, then the buffer protocol under
+ *  @p flags; 0, or -1 with an exception set. */
+static int uform_py_buffer_from_object(PyObject* object, PyObject* arena, int flags, Py_buffer* view) {
+    int consumed = dlpack_acquire(object, arena, view);
+    if (!consumed) consumed = arrow_buffer_acquire(object, arena, view);
+    if (!consumed) consumed = cuda_array_interface_acquire(object, arena, view);
+    return consumed ? (consumed > 0 ? 0 : -1) : PyObject_GetBuffer(object, view, flags);
+}
+
 /**
  *  @brief Acquires the offsets of a @c (data, offsets) pair into @p tape when @p candidate exports
  *      a C-contiguous run of unsigned words as wide as a @c size_t.
  *  @return 1 when it does, 0 when it is no offsets buffer at all, with no exception set.
  */
 static int tape_offsets_acquire(PyObject* candidate, uform_py_tape_t* tape) {
-    if (buffer_acquire(candidate, 0, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT, &tape->offsets) != 0) {
+    if (uform_py_buffer_from_object(candidate, NULL, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT, &tape->offsets) != 0) {
         PyErr_Clear();
         return 0;
     }
@@ -1979,8 +2742,9 @@ static int tape_offsets_acquire(PyObject* candidate, uform_py_tape_t* tape) {
 
 /** Acquires the data of a pair whose offsets @p tape already holds; returns 0 or -1 with
  *  an exception set. */
-static int tape_data_acquire(PyObject* data, char const* field, uform_py_element_t element, uform_py_tape_t* tape) {
-    if (buffer_acquire(data, 1, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT, &tape->data) != 0) return -1;
+static int tape_data_acquire(PyObject* data, char const* field, uform_py_element_t element, PyObject* arena,
+                             uform_py_tape_t* tape) {
+    if (uform_py_buffer_from_object(data, arena, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT, &tape->data) != 0) return -1;
     char const* const expected = element_format(element);
     if ((size_t)tape->data.itemsize != element_bytes(element) || (expected && buffer_format(&tape->data) != *expected))
         return uform_py_raise(uform_status_unsupported_layout_k, "the '%s' data holds items the verb cannot read",
@@ -2008,7 +2772,8 @@ static int tape_entry_acquire(PyObject* entry, char const* field, Py_ssize_t pos
     int const flags = element == uform_py_element_pixels_k || element == uform_py_element_samples_k
                           ? PyBUF_C_CONTIGUOUS | PyBUF_FORMAT
                           : PyBUF_C_CONTIGUOUS;
-    if (buffer_acquire(entry, 0, flags, view) != 0) {
+    if (uform_py_buffer_from_object(entry, NULL, flags, view) != 0) {
+        if (!PyErr_ExceptionMatches(PyExc_TypeError)) return -1; // a producer's own refusal says more
         PyErr_Clear();
         PyErr_Format(PyExc_TypeError, "entry %zd of '%s' must be a %s, got %S", position, field,
                      element == uform_py_element_text_k ? "str or a bytes-like object" : "contiguous buffer",
@@ -2081,7 +2846,264 @@ static int tape_gather(PyObject* sequence, char const* field, uform_py_element_t
     return failed ? -1 : 0;
 }
 
-int uform_py_tape_from_object(PyObject* object, char const* field, uform_py_element_t element, uform_py_tape_t* tape) {
+/** One chunk of an Arrow import, as a tape reads it: the elements, and the offsets around them,
+ *  either 32 or 64 bits wide. */
+typedef struct arrow_chunk_t {
+    void const* data;
+    void const* offsets;
+    size_t offset_bytes;
+    size_t count;
+} arrow_chunk_t;
+
+/**
+ *  @brief Checks @p schema names a batch of @p element entries, strings, binaries or lists of
+ *      @c float32, and finds the width of its offsets.
+ *  @return The bytes one offset takes, or 0 with an exception set.
+ */
+static size_t arrow_schema_offset_bytes(struct ArrowSchema const* schema, char const* field,
+                                        uform_py_element_t element) {
+    char const* const format = schema->format;
+    int const bytes_like = element == uform_py_element_text_k || element == uform_py_element_bytes_k;
+    if (bytes_like && (!strcmp(format, "u") || !strcmp(format, "z"))) return sizeof(int32_t);
+    if (bytes_like && (!strcmp(format, "U") || !strcmp(format, "Z"))) return sizeof(int64_t);
+    int const floats = element == uform_py_element_samples_k && schema->n_children == 1 &&
+                       !strcmp(schema->children[0]->format, "f");
+    if (floats && !strcmp(format, "+l")) return sizeof(int32_t);
+    if (floats && !strcmp(format, "+L")) return sizeof(int64_t);
+    uform_py_raise(uform_status_unsupported_layout_k, "the '%s' Arrow array of format '%s' holds no %s", field, format,
+                   bytes_like ? "strings or binaries" : "lists of float32");
+    return 0;
+}
+
+/** Reads one Arrow array into @p chunk after @p schema checked its layout; 0, or -1 with an
+ *  exception set. */
+static int arrow_chunk_read(struct ArrowDeviceArray const* imported, size_t offset_bytes, char const* field,
+                            PyObject* arena, arrow_chunk_t* chunk) {
+    struct ArrowArray const* const array = &imported->array;
+    if (imported->device_type == ARROW_DEVICE_METAL)
+        return uform_py_raise(uform_status_unsupported_k, "Metal arrays don't cross Arrow yet; pass host memory");
+    if (!arrow_device_host_readable(imported->device_type))
+        return uform_py_raise(uform_status_device_k, "the '%s' Arrow offsets live where the host may not read them",
+                              field);
+    // The host reads the offsets while dispatching the call, so it waits for the producer itself
+    if (imported->sync_event && arena_wait(arena, imported->sync_event) != 0) return -1;
+    int const nested = array->n_children == 1;
+    struct ArrowArray const* const values = nested ? array->children[0] : array;
+    if ((array->null_count != 0 && array->buffers[0]) || (values->null_count != 0 && values->buffers[0]))
+        return uform_py_raise(uform_status_invalid_argument_k, "the '%s' Arrow array holds nulls", field);
+    chunk->data = nested ? (char const*)values->buffers[1] + values->offset * (int64_t)sizeof(float)
+                         : array->buffers[2];
+    chunk->offsets = (char const*)array->buffers[1] + array->offset * (int64_t)offset_bytes;
+    chunk->offset_bytes = offset_bytes;
+    chunk->count = (size_t)array->length;
+    return 0;
+}
+
+/** Offset @p position of @p chunk, whatever its width. */
+static size_t arrow_chunk_offset(arrow_chunk_t const* chunk, size_t position) {
+    int64_t const* const wide = (int64_t const*)chunk->offsets;
+    int32_t const* const narrow = (int32_t const*)chunk->offsets;
+    return chunk->offset_bytes == sizeof(int64_t) ? (size_t)wide[position] : (size_t)narrow[position];
+}
+
+/**
+ *  @brief Points @p tape at one Arrow array in place, its 64-bit offsets included; 32-bit
+ *      offsets alone are widened into a block the tape owns. @p owner keeps the array alive.
+ *  @return 0, or -1 with an exception set.
+ */
+static int arrow_tape_in_place(PyObject* owner, arrow_chunk_t const* chunk, uform_py_element_t element,
+                               uform_py_tape_t* tape) {
+    size_t const bytes = element == uform_py_element_samples_k ? sizeof(float) : 1;
+    size_t const elements = chunk->count ? arrow_chunk_offset(chunk, chunk->count) : 0;
+    if (PyBuffer_FillInfo(&tape->data, owner, (void*)chunk->data, (Py_ssize_t)(elements * bytes), 1, PyBUF_SIMPLE) != 0)
+        return -1;
+    size_t const* offsets = (size_t const*)chunk->offsets;
+    if (chunk->offset_bytes == sizeof(size_t) && chunk->count) { // an empty array may carry no offsets at all
+        if (PyBuffer_FillInfo(&tape->offsets, owner, (void*)chunk->offsets,
+                              (Py_ssize_t)((chunk->count + 1) * sizeof(size_t)), 1, PyBUF_SIMPLE) != 0)
+            return -1;
+    }
+    else {
+        size_t* const widened = (size_t*)PyMem_Malloc((chunk->count + 1) * sizeof(size_t));
+        if (!(tape->gathered = widened)) return PyErr_NoMemory(), -1;
+        for (size_t position = 0; position <= chunk->count; ++position)
+            widened[position] = chunk->count ? arrow_chunk_offset(chunk, position) : 0;
+        offsets = widened;
+    }
+    tape->count = chunk->count;
+    tape->view = (uform_tape_view_t) {chunk->data, offsets,
+                                      element == uform_py_element_samples_k ? uform_scalar_f32_k : uform_scalar_u8_k};
+    return 0;
+}
+
+/** Gathers @p count Arrow chunks into one block @p tape owns, with one copy; 0, or -1 with an
+ *  exception set. */
+static int arrow_tape_gather(arrow_chunk_t const* chunks, size_t count, uform_py_element_t element,
+                             uform_py_tape_t* tape) {
+    size_t const bytes = element == uform_py_element_samples_k ? sizeof(float) : 1;
+    size_t entries = 0, elements = 0;
+    for (size_t chunk = 0; chunk != count; ++chunk) {
+        entries += chunks[chunk].count;
+        if (chunks[chunk].count)
+            elements += arrow_chunk_offset(&chunks[chunk], chunks[chunk].count) - arrow_chunk_offset(&chunks[chunk], 0);
+    }
+    size_t const head = (entries + 1) * sizeof(size_t);
+    if (!(tape->gathered = PyMem_Malloc(head + elements * bytes))) return PyErr_NoMemory(), -1;
+    size_t* const offsets = (size_t*)tape->gathered;
+    char* const data = (char*)tape->gathered + head;
+    size_t entry = 0, written = 0;
+    offsets[0] = 0;
+    for (size_t chunk = 0; chunk != count; ++chunk) {
+        if (!chunks[chunk].count) continue;
+        size_t const first = arrow_chunk_offset(&chunks[chunk], 0);
+        size_t const last = arrow_chunk_offset(&chunks[chunk], chunks[chunk].count);
+        memcpy(data + written * bytes, (char const*)chunks[chunk].data + first * bytes, (last - first) * bytes);
+        for (size_t position = 1; position <= chunks[chunk].count; ++position)
+            offsets[++entry] = written + arrow_chunk_offset(&chunks[chunk], position) - first;
+        written += last - first;
+    }
+    tape->count = entries;
+    tape->view = (uform_tape_view_t) {data, offsets,
+                                      element == uform_py_element_samples_k ? uform_scalar_f32_k : uform_scalar_u8_k};
+    return 0;
+}
+
+/**
+ *  @brief Reads an object exporting one Arrow array, on a device or in host memory, into @p tape.
+ *  @return 0, or -1 with an exception set.
+ */
+static int arrow_tape_from_array(PyObject* object, int device, char const* field, uform_py_element_t element,
+                                 PyObject* arena, uform_py_tape_t* tape) {
+    PyObject* const pair = arrow_export_call(object, device ? "__arrow_c_device_array__" : "__arrow_c_array__");
+    if (!pair) return -1;
+    struct ArrowSchema* const schema = PyTuple_Check(pair) && PyTuple_GET_SIZE(pair) == 2
+                                           ? (struct ArrowSchema*)PyCapsule_GetPointer(PyTuple_GET_ITEM(pair, 0),
+                                                                                       "arrow_schema")
+                                           : NULL;
+    void* const array =
+        schema ? PyCapsule_GetPointer(PyTuple_GET_ITEM(pair, 1), device ? "arrow_device_array" : "arrow_array") : NULL;
+    if (!array) {
+        if (!PyErr_Occurred())
+            PyErr_Format(PyExc_TypeError, "the '%s' Arrow export is no pair of a schema and an array", field);
+        Py_DECREF(pair);
+        return -1;
+    }
+    struct ArrowDeviceArray* const imported = (struct ArrowDeviceArray*)PyMem_Calloc(1, sizeof(*imported));
+    PyObject* const owner = imported ? PyCapsule_New(imported, NULL, arrow_import_capsule_release) : NULL;
+    if (!owner) {
+        PyMem_Free(imported);
+        Py_DECREF(pair);
+        return imported ? -1 : (PyErr_NoMemory(), -1);
+    }
+    // The array moves into the owner, and the capsule, seeing its release cleared, leaves it alone
+    if (device) *imported = *(struct ArrowDeviceArray*)array;
+    else
+        *imported = (struct ArrowDeviceArray) {.array = *(struct ArrowArray*)array,
+                                               .device_id = -1,
+                                               .device_type = ARROW_DEVICE_CPU};
+    ((struct ArrowArray*)array)->release = NULL;
+    arrow_chunk_t chunk;
+    size_t const offset_bytes = arrow_schema_offset_bytes(schema, field, element);
+    int const failed = !offset_bytes || arrow_chunk_read(imported, offset_bytes, field, arena, &chunk) != 0 ||
+                       arrow_tape_in_place(owner, &chunk, element, tape) != 0;
+    Py_DECREF(owner);
+    Py_DECREF(pair);
+    return failed ? -1 : 0;
+}
+
+/**
+ *  @brief Reads an object exporting a stream of Arrow arrays, on a device or in host memory, into
+ *      @p tape: one chunk in place, several gathered with one copy.
+ *  @return 0, or -1 with an exception set.
+ */
+static int arrow_tape_from_stream(PyObject* object, int device, char const* field, uform_py_element_t element,
+                                  PyObject* arena, uform_py_tape_t* tape) {
+    PyObject* const capsule = arrow_export_call(object, device ? "__arrow_c_device_stream__" : "__arrow_c_stream__");
+    if (!capsule) return -1;
+    void* const stream = PyCapsule_GetPointer(capsule, device ? "arrow_device_array_stream" : "arrow_array_stream");
+    if (!stream) {
+        Py_DECREF(capsule);
+        return -1;
+    }
+    struct ArrowDeviceArrayStream* const device_stream = (struct ArrowDeviceArrayStream*)stream;
+    struct ArrowArrayStream* const host_stream = (struct ArrowArrayStream*)stream;
+    struct ArrowSchema schema = {0};
+    int failed = (device ? device_stream->get_schema(device_stream, &schema)
+                         : host_stream->get_schema(host_stream, &schema))
+                     ? uform_py_raise(uform_status_invalid_argument_k, "the '%s' Arrow stream has no schema", field)
+                     : 0;
+    size_t const offset_bytes = failed ? 0 : arrow_schema_offset_bytes(&schema, field, element);
+    if (schema.release) schema.release(&schema);
+    failed = failed || !offset_bytes;
+
+    // Every chunk stays owned until the tape is built, so a single one is read in place.
+    PyObject** owners = NULL;
+    arrow_chunk_t* chunks = NULL;
+    size_t count = 0, capacity = 0;
+    while (!failed) {
+        struct ArrowDeviceArray next = {0};
+        int const code = device ? device_stream->get_next(device_stream, &next)
+                                : host_stream->get_next(host_stream, &next.array);
+        if (code) {
+            failed = uform_py_raise(uform_status_invalid_argument_k, "the '%s' Arrow stream failed with code %d", field,
+                                    code);
+            break;
+        }
+        if (!next.array.release) break;
+        if (!device) next.device_type = ARROW_DEVICE_CPU, next.device_id = -1;
+        if (count == capacity) {
+            capacity = capacity ? capacity * 2 : 4;
+            PyObject** const grown_owners = (PyObject**)PyMem_Realloc(owners, capacity * sizeof(*owners));
+            if (grown_owners) owners = grown_owners;
+            arrow_chunk_t* const grown_chunks = (arrow_chunk_t*)PyMem_Realloc(chunks, capacity * sizeof(*chunks));
+            if (grown_chunks) chunks = grown_chunks;
+            if (!grown_owners || !grown_chunks) {
+                next.array.release(&next.array);
+                failed = (PyErr_NoMemory(), -1);
+                break;
+            }
+        }
+        struct ArrowDeviceArray* const imported = (struct ArrowDeviceArray*)PyMem_Malloc(sizeof(*imported));
+        owners[count] = imported ? PyCapsule_New(imported, NULL, arrow_import_capsule_release) : NULL;
+        if (!owners[count]) {
+            PyMem_Free(imported);
+            next.array.release(&next.array);
+            failed = imported ? -1 : (PyErr_NoMemory(), -1);
+            break;
+        }
+        *imported = next;
+        failed = arrow_chunk_read(imported, offset_bytes, field, arena, &chunks[count++]) != 0;
+    }
+    if (!failed)
+        failed = count == 1 ? arrow_tape_in_place(owners[0], &chunks[0], element, tape) != 0
+                            : arrow_tape_gather(chunks, count, element, tape) != 0;
+    while (count) Py_DECREF(owners[--count]);
+    PyMem_Free(owners);
+    PyMem_Free(chunks);
+    Py_DECREF(capsule); // releases the stream
+    return failed ? -1 : 0;
+}
+
+/**
+ *  @brief Reads @p object into @p tape through the Arrow PyCapsule interface, device exports first.
+ *  @return 1 when it does, 0 when @p object exports no Arrow, or -1 with an exception set.
+ */
+static int arrow_tape_acquire(PyObject* object, char const* field, uform_py_element_t element, PyObject* arena,
+                              uform_py_tape_t* tape) {
+    static char const* const protocols[] = {"__arrow_c_device_stream__", "__arrow_c_device_array__",
+                                            "__arrow_c_stream__", "__arrow_c_array__"};
+    for (int protocol = 0; protocol != 4; ++protocol) {
+        if (!PyObject_HasAttrString(object, protocols[protocol])) continue;
+        int const device = protocol < 2, streamed = protocol % 2 == 0;
+        int const read = streamed ? arrow_tape_from_stream(object, device, field, element, arena, tape)
+                                  : arrow_tape_from_array(object, device, field, element, arena, tape);
+        return read == 0 ? 1 : -1;
+    }
+    return 0;
+}
+
+int uform_py_tape_from_object(PyObject* object, char const* field, uform_py_element_t element, PyObject* arena,
+                              uform_py_tape_t* tape) {
     memset(tape, 0, sizeof(*tape));
     if (PyUnicode_Check(object) || PyBytes_Check(object) || PyByteArray_Check(object) || PyMemoryView_Check(object)) {
         PyErr_Format(PyExc_TypeError, "the '%s' argument takes a sequence or a (data, offsets) pair, got one %S", field,
@@ -2090,7 +3112,11 @@ int uform_py_tape_from_object(PyObject* object, char const* field, uform_py_elem
     }
     if (element != uform_py_element_pixels_k && PyTuple_Check(object) && PyTuple_GET_SIZE(object) == 2 &&
         tape_offsets_acquire(PyTuple_GET_ITEM(object, 1), tape))
-        return tape_data_acquire(PyTuple_GET_ITEM(object, 0), field, element, tape);
+        return tape_data_acquire(PyTuple_GET_ITEM(object, 0), field, element, arena, tape);
+    if (element != uform_py_element_pixels_k) {
+        int const imported = arrow_tape_acquire(object, field, element, arena, tape);
+        if (imported) return imported > 0 ? 0 : -1;
+    }
     PyObject* const sequence = PySequence_Fast(object, "expected a sequence");
     if (!sequence) return -1;
     int const gathered = tape_gather(sequence, field, element, tape);
@@ -2106,7 +3132,7 @@ void uform_py_words_release(uform_py_words_t* words) {
 
 int uform_py_words_from_object(PyObject* object, char const* field, size_t count, uform_py_words_t* words) {
     if (!object || object == Py_None) return 0;
-    if (buffer_acquire(object, 0, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT, &words->buffer) == 0) {
+    if (uform_py_buffer_from_object(object, NULL, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT, &words->buffer) == 0) {
         if (words->buffer.itemsize != sizeof(uint32_t) || buffer_format(&words->buffer) != 'I')
             return uform_py_raise(uform_status_unsupported_layout_k, "the '%s' buffer must hold uint32 words", field);
         if ((size_t)words->buffer.len != count * sizeof(uint32_t))
