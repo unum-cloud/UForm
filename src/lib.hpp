@@ -1156,6 +1156,14 @@ struct holding_call_t {
 /** Lets go of @p arena when the call whose published outcome is @p call holds it. */
 void release_arena(uform_arena_t arena, uform_outcome_t const* call) noexcept;
 
+/** How a call stands with an arena it names: refused by another holder, newly taken, or taken
+ *  before by itself. */
+enum class arena_hold_t { refused_k, taken_k, retaken_k };
+
+/** Holds @p arena for the call whose published outcome is @p call ; a null arena holds nothing,
+ *  left for the verb to refuse, and has no generation to advance. */
+arena_hold_t hold_arena(uform_arena_t arena, uform_outcome_t const* call) noexcept;
+
 /** Takes @p executor for one call, once its pool's thread 0 left the last call's slice; false while
  *  another call holds it. */
 bool take_call_claim(uform_executor_handle_t& executor) noexcept;
@@ -1217,6 +1225,24 @@ bool submitted(arguments_type_* arguments) noexcept {
                    true;
     if (!take_call_claim(*executor))
         return propagate_error(uform_status_contended_k, arguments->outcome, "Another call holds the executor"), true;
+    if constexpr (an_arena_naming_call<arguments_type_>) {
+        arena_hold_t const hold = hold_arena(arguments->arena, arguments->outcome);
+        // An export opened since the check above sees the hold and backs out, or this load sees it
+        bool const exported = hold == arena_hold_t::taken_k &&
+                              fu::standard_atomic_ref<util::u32_t> {arguments->arena->exports}.load() != 0;
+        if (hold == arena_hold_t::refused_k || exported) {
+            if (exported) release_arena(arguments->arena, arguments->outcome);
+            fu::standard_atomic_ref<call_claim_t> {executor->holding_call.claim}.store(call_claim_t::free_k,
+                                                                                       std::memory_order_release);
+            return propagate_error(
+                       uform_status_contended_k, arguments->outcome,
+                       exported ? "An export of the arena's outputs is open" : "The arena serves another call"),
+                   true;
+        }
+        // Relaxed, as the arena hold's release and the export handshake order it for readers
+        if (hold == arena_hold_t::taken_k)
+            fu::standard_atomic_ref<util::u64_t> {arguments->arena->generation}.fetch_add(1, std::memory_order_relaxed);
+    }
     auto& call = executor->holding_call;
     call.outcome = arguments->outcome;
     call.recorded = {uform_status_internal_k, "The call finished without reporting a status"};
@@ -1250,8 +1276,11 @@ bool submitted(arguments_type_* arguments) noexcept {
     };
     // A local token: thread 0 may end the call, and a waiter free the executor, before it lands
     fu_generation_t generation = 0;
-    if (fu::failed(executor->threads.unsafe_for_threads(delegated_body, executor, generation)))
+    if (fu::failed(executor->threads.unsafe_for_threads(delegated_body, executor, generation))) {
+        // No body runs to let go of the arena the entry took
+        if constexpr (an_arena_naming_call<arguments_type_>) release_arena(arguments->arena, arguments->outcome);
         call.recorded = {uform_status_contended_k, "The executor's threads run another dispatch"}, end_call(*executor);
+    }
     return true;
 }
 
@@ -1396,6 +1425,10 @@ struct uform_arena_handle_t {
     /** Open exports of the outputs, which refuse every call naming the arena and its free; set
      *  through the standard reference, as a consumer closes one from any thread. */
     util::u32_t exports = 0;
+
+    /** Calls that took the arena and found no export open, each advancing it once before it
+     *  writes, through the standard reference; @c uform_arena_generation reads it. */
+    util::u64_t generation = 0;
 };
 
 /** What @c uform_model_t owns: the geometry its checkpoint held, the precision its blocks run in,

@@ -53,17 +53,17 @@ type Encoded struct {
 
 // kept points the surfaces outputs names into encoded, sized for count items, and nil for the
 // rest.
-func kept(outputs EncodeOutputs, encoded *Encoded, count uint) (*C.uform_rows_view_t, *C.uform_rows_tape_view_t, *C.uform_rows_tape_view_t) {
+func kept(outputs EncodeOutputs, encoded *Encoded, count uint, write arenaWrite) (*C.uform_rows_view_t, *C.uform_rows_tape_view_t, *C.uform_rows_tape_view_t) {
 	var embeddings *C.uform_rows_view_t
 	var states, tokenVectors *C.uform_rows_tape_view_t
 	if outputs&EncodeOutputsEmbeddings != 0 {
-		embeddings, encoded.Embeddings.count = &encoded.Embeddings.raw, count
+		embeddings, encoded.Embeddings.count, encoded.Embeddings.arena = &encoded.Embeddings.raw, count, write
 	}
 	if outputs&EncodeOutputsStates != 0 {
-		states, encoded.States.count = &encoded.States.raw, count
+		states, encoded.States.count, encoded.States.arena = &encoded.States.raw, count, write
 	}
 	if outputs&EncodeOutputsTokenVectors != 0 {
-		tokenVectors, encoded.TokenVectors.count = &encoded.TokenVectors.raw, count
+		tokenVectors, encoded.TokenVectors.count, encoded.TokenVectors.arena = &encoded.TokenVectors.raw, count, write
 	}
 	return embeddings, states, tokenVectors
 }
@@ -315,7 +315,7 @@ func (receiver modelReceiver) textEncode(call *callWithResult[Encoded], completi
 		return err
 	}
 	arguments := open[C.uform_text_encode_t](call)
-	embeddings, states, tokenVectors := kept(outputs, call.result, texts.Entries())
+	embeddings, states, tokenVectors := kept(outputs, call.result, texts.Entries(), call.stamp(arena, outputsArena))
 	*arguments = C.uform_text_encode_t{
 		model:          model,
 		executor:       executor,
@@ -375,7 +375,7 @@ func (receiver modelReceiver) imageEncode(call *callWithResult[Encoded], complet
 		return err
 	}
 	arguments := open[C.uform_image_encode_t](call)
-	embeddings, states, tokenVectors := kept(outputs, call.result, images.Entries())
+	embeddings, states, tokenVectors := kept(outputs, call.result, images.Entries(), call.stamp(arena, outputsArena))
 	*arguments = C.uform_image_encode_t{
 		model:          model,
 		executor:       executor,
@@ -407,7 +407,7 @@ func (receiver modelReceiver) imageEncodePixels(call *callWithResult[Encoded], c
 		return fail(StatusShapeMismatch, "every item needs one height and one width")
 	}
 	arguments := open[C.uform_image_encode_pixels_t](call)
-	embeddings, states, tokenVectors := kept(outputs, call.result, pixels.Entries())
+	embeddings, states, tokenVectors := kept(outputs, call.result, pixels.Entries(), call.stamp(arena, outputsArena))
 	*arguments = C.uform_image_encode_pixels_t{
 		model:          model,
 		executor:       executor,
@@ -437,7 +437,7 @@ func (receiver modelReceiver) videoEncode(call *callWithResult[Encoded], complet
 		return err
 	}
 	arguments := open[C.uform_video_encode_t](call)
-	embeddings, states, tokenVectors := kept(outputs, call.result, videos.Entries())
+	embeddings, states, tokenVectors := kept(outputs, call.result, videos.Entries(), call.stamp(arena, outputsArena))
 	*arguments = C.uform_video_encode_t{
 		model:          model,
 		executor:       executor,
@@ -465,7 +465,7 @@ func (receiver modelReceiver) audioEncode(call *callWithResult[Encoded], complet
 		return err
 	}
 	arguments := open[C.uform_audio_encode_t](call)
-	embeddings, states, tokenVectors := kept(outputs, call.result, recordings.Entries())
+	embeddings, states, tokenVectors := kept(outputs, call.result, recordings.Entries(), call.stamp(arena, outputsArena))
 	*arguments = C.uform_audio_encode_t{
 		model:          model,
 		executor:       executor,
@@ -493,7 +493,7 @@ func (receiver modelReceiver) audioEncodeSamples(call *callWithResult[Encoded], 
 		return err
 	}
 	arguments := open[C.uform_audio_encode_samples_t](call)
-	embeddings, states, tokenVectors := kept(outputs, call.result, samples.Entries())
+	embeddings, states, tokenVectors := kept(outputs, call.result, samples.Entries(), call.stamp(arena, outputsArena))
 	*arguments = C.uform_audio_encode_samples_t{
 		model:          model,
 		executor:       executor,

@@ -50,6 +50,13 @@ func TestTextEncodeSurfaces(t *testing.T) {
 	if encoded.TokenVectors.Count() != 0 || encoded.TokenVectors.Offsets() != nil {
 		t.Fatal("a surface left out stays empty")
 	}
+	if _, err := model.On(executor).TextEncode(uform.TapeOf([]string{"a"}), uform.EncodeOutputsEmbeddings,
+		uform.ScalarF32, arena, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := uform.RowValues[float32](encoded.Embeddings, 0); !errors.Is(err, uform.StatusContended) {
+		t.Fatalf("a result read after a later call answers %v", err)
+	}
 }
 
 func TestEncodeRefusals(t *testing.T) {
@@ -110,6 +117,18 @@ func TestOtherForms(t *testing.T) {
 			t.Fatalf("%s encodes %d rows, %v", name, encoded.Embeddings.Count(), err)
 		}
 	}
+}
+
+func TestADroppedCallSettlesAfterItsArenaClosed(t *testing.T) {
+	executor, arena, model := newFixture(t)
+	if _, err := model.Deferred(executor).TextEncode(uform.TapeOf([]string{"a fox"}), uform.EncodeOutputsEmbeddings, uform.ScalarF32, arena, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := arena.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runtime.GC()
+	runtime.GC()
 }
 
 func TestDeferredEncode(t *testing.T) {

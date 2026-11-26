@@ -106,7 +106,9 @@ Every output whose length scales with the call - pooled embeddings, per-token st
 There is one verb per operation: no allocating twin, no caller buffers, and no default arena.
 `Arena(on: executor)` places it where that executor computes, decided once, and `Arena()` makes host pages for the calling thread.
 Each call rewinds its arena, so the previous call's views die and a steady loop allocates once it reaches its high-water mark.
-Reading a stale view traps, as an out-of-bounds index does; to keep a result past the next call, pass that call another arena.
+A view read after a later call took its arena fails as `Contended`.
+A slice or segment an accessor returned is valid only until the arena's next call.
+To keep a result past the next call, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own, and a call naming an arena another call holds finishes `contended`.
 An arena from a VRAM executor holds device memory, which `placement` describes; where its `hostAccess` is `.refused`, host accessors refuse with a trap, while managed memory and Apple's shared memory read like host pages.
 An arena never outlives the executor that made it: one in device memory holds that executor, so ARC releases the arena first, and one from `Arena()` has no executor and lives until its last reference goes.

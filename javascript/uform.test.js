@@ -130,7 +130,7 @@ test("arenas describe where their outputs live and whether the host reads them",
     hostAccess: "readable",
   });
   arena.free();
-  throwsStatus(() => arena.describe(), Status.Uninitialized);
+  throwsStatus(() => arena.describe(), Status.InvalidArgument);
 });
 
 test("models load from paths and buffers and describe themselves", () => {

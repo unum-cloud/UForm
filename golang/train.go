@@ -746,7 +746,7 @@ func (receiver trainerReceiver) step(call *callWithResult[Rows], completion C.uf
 	arguments := open[C.uform_trainer_step_t](call)
 	var embeddings *C.uform_rows_view_t
 	if options.Arena != nil {
-		embeddings, call.result.count = &call.result.raw, count
+		embeddings, call.result.count, call.result.arena = &call.result.raw, count, call.stamp(options.Arena, outputsArena)
 	}
 	*arguments = C.uform_trainer_step_t{
 		trainer:            trainer,

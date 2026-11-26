@@ -407,9 +407,6 @@ final class Landing {
     private var slots: [UnsafeMutableRawPointer] = []
     /// The callback states the call reads.
     private var anchors: [AnyObject] = []
-    /// The arena the call writes into, which the caller owns, until `rewind` learns whether the
-    /// call took it.
-    private var arenaWrite: ArenaWrite?
 
     init(_ completion: uform_completion_t = uform_completion_blocking_k) {
         self.completion = completion
@@ -508,28 +505,15 @@ final class Landing {
         )
     }
 
-    /// Marks `arena`, which the caller owns, as the one the call writes into, answering the stamp
-    /// its views hold once `rewind` advances the arena to it.
+    /// Answers the stamp the views of `arena`, which the caller owns, hold: the engine's generation
+    /// once the call takes the arena, so every later call that takes it makes them stop reading.
     func write(_ arena: Arena) -> ArenaWrite {
-        let write = ArenaWrite(arena: arena, generation: arena.generation &+ 1)
-        arenaWrite = write
-        return write
-    }
-
-    /// Advances the call's arena once the library took the call, after a blocking one returns or
-    /// right after a deferred one is submitted, so the views earlier calls wrote there stop
-    /// reading. Failed calls advance it too, and only a `contended` one, which never touched the
-    /// arena, does not.
-    func rewind() {
-        guard let write = arenaWrite else { return }
-        arenaWrite = nil
-        if uform_outcome_status(outcome) != uform_status_contended_k { write.arena.generation &+= 1 }
+        ArenaWrite(arena: arena, generation: uform_arena_generation(arena.raw) &+ 1)
     }
 
     /// Waits until the call is final, then answers its result or throws its failure.
     func read<Value>(_ result: () throws(UFormError) -> Value) throws(UFormError) -> Value {
         let status = uform_outcome_wait(outcome)
-        rewind()
         guard status == uform_status_success_k else { throw UFormError(outcome.pointee) }
         return try result()
     }
@@ -578,7 +562,6 @@ public final class Deferred<Value> {
 
     init(_ submission: Submission<Value>) {
         self.submission = submission
-        if case .pending(let landing, _) = submission { landing.rewind() }
     }
 
     /// Calls `uform_outcome_wait`.
@@ -783,8 +766,6 @@ public final class Arena {
     /// Where the outputs live, as the executor that made it decided once. Read from
     /// `uform_arena_describe`.
     public let placement: ArenaDescription
-    /// Advanced by every call given the arena, so a view remembers which call wrote it.
-    var generation: UInt64 = 0
 
     /// Makes an arena where `executor` computes, host pages or its GPU's memory, decided once; nil
     /// makes host pages for calls on the calling thread. Calls `uform_arena_init`.
@@ -812,16 +793,20 @@ struct ArenaWrite {
     let arena: Arena
     let generation: UInt64
 
-    /// Refuses a read of an arena a later call rewound, or of memory the host may not read.
-    func check() {
-        precondition(arena.generation == generation, "the arena was rewound since this view was written")
+    /// Runs `body`, which copies out of the arena, under an open export, so no call takes the arena
+    /// meanwhile. Refuses a read of an arena a later call rewound, or of host-unreadable memory.
+    func read<Value, Failure: Swift.Error>(_ body: () throws(Failure) -> Value) throws(Failure) -> Value {
+        precondition(uform_arena_export_open(arena.raw) == uform_status_success_k, "a call holds the arena")
+        defer { uform_arena_export_close(arena.raw) }
+        precondition(uform_arena_generation(arena.raw) == generation, "the arena was rewound since this view was written")
         precondition(arena.placement.hostAccess == .readable, "the outputs are memory the host may not read")
+        return try body()
     }
 
-    /// Refuses as `check()` does, then a `position` past `count`, as a collection does.
-    func check(_ position: Int, below count: Int) {
-        check()
+    /// Reads as `read` does, after refusing a `position` past `count`, as a collection does.
+    func read<Value>(_ position: Int, below count: Int, _ body: () -> Value) -> Value {
         precondition(position >= 0 && position < count, "the position is out of bounds")
+        return read(body)
     }
 }
 
@@ -872,16 +857,18 @@ public struct Rows: RandomAccessCollection {
 
     /// One row's values.
     public subscript(row: Int) -> Row {
-        write.check(row, below: endIndex)
-        return Row(write: write, base: base! + row * stride, scalar: scalar, endIndex: columns)
+        write.read(row, below: endIndex) {
+            Row(write: write, base: base! + row * stride, scalar: scalar, endIndex: columns)
+        }
     }
 
     /// Passes the rows' bytes as stored to `body`, which must not keep the buffer past its return.
     public func withUnsafeBytes<Result, Failure: Swift.Error>(
         _ body: (UnsafeRawBufferPointer) throws(Failure) -> Result
     ) throws(Failure) -> Result {
-        write.check()
-        return try body(UnsafeRawBufferPointer(start: endIndex == 0 ? nil : base, count: endIndex * stride))
+        try write.read { () throws(Failure) in
+            try body(UnsafeRawBufferPointer(start: endIndex == 0 ? nil : base, count: endIndex * stride))
+        }
     }
 
     /// One row of an arena's values, read in place and widened to `Float`.
@@ -900,14 +887,15 @@ public struct Rows: RandomAccessCollection {
 
         /// The value at a position, widened from the row's scalar.
         public subscript(position: Int) -> Float {
-            write.check(position, below: endIndex)
-            switch scalar {
-            case .f32: return base.loadUnaligned(fromByteOffset: position * 4, as: Float.self)
-            case .bf16:
-                let bits = base.loadUnaligned(fromByteOffset: position * 2, as: UInt16.self)
-                return Float(bitPattern: UInt32(bits) << 16)
-            case .f16: return widened(half: base.loadUnaligned(fromByteOffset: position * 2, as: UInt16.self))
-            default: preconditionFailure("\(scalar) rows read through withUnsafeBytes")
+            write.read(position, below: endIndex) {
+                switch scalar {
+                case .f32: return base.loadUnaligned(fromByteOffset: position * 4, as: Float.self)
+                case .bf16:
+                    let bits = base.loadUnaligned(fromByteOffset: position * 2, as: UInt16.self)
+                    return Float(bitPattern: UInt32(bits) << 16)
+                case .f16: return widened(half: base.loadUnaligned(fromByteOffset: position * 2, as: UInt16.self))
+                default: preconditionFailure("\(scalar) rows read through withUnsafeBytes")
+                }
             }
         }
     }
@@ -947,16 +935,17 @@ public struct RowsTape: RandomAccessCollection {
 
     /// One item's rows, one per token it kept.
     public subscript(item: Int) -> Rows {
-        rows.write.check(item, below: endIndex)
-        let first = offsets![item]
-        return Rows(
-            write: rows.write,
-            base: rows.base.map { $0 + first * rows.stride },
-            stride: rows.stride,
-            columns: rows.columns,
-            scalar: rows.scalar,
-            count: offsets![item + 1] - first
-        )
+        rows.write.read(item, below: endIndex) {
+            let first = offsets![item]
+            return Rows(
+                write: rows.write,
+                base: rows.base.map { $0 + first * rows.stride },
+                stride: rows.stride,
+                columns: rows.columns,
+                scalar: rows.scalar,
+                count: offsets![item + 1] - first
+            )
+        }
     }
 }
 
@@ -984,12 +973,13 @@ public struct Tape: RandomAccessCollection {
 
     /// One item's values.
     public subscript(item: Int) -> Rows.Row {
-        write.check(item, below: endIndex)
-        let first = offsets![item]
-        let length = offsets![item + 1] - first
-        // An item asking for nothing may sit on a null base, which its empty row never reads.
-        let start = base.map { $0 + first * MemoryLayout<Float>.stride } ?? UnsafeRawPointer(bitPattern: 4)!
-        return Rows.Row(write: write, base: start, scalar: .f32, endIndex: length)
+        write.read(item, below: endIndex) {
+            let first = offsets![item]
+            let length = offsets![item + 1] - first
+            // An item asking for nothing may sit on a null base, which its empty row never reads.
+            let start = base.map { $0 + first * MemoryLayout<Float>.stride } ?? UnsafeRawPointer(bitPattern: 4)!
+            return Rows.Row(write: write, base: start, scalar: .f32, endIndex: length)
+        }
     }
 }
 

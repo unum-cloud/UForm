@@ -1068,6 +1068,11 @@ UFORM_EXPORT uform_status_t uform_arena_export_open(uform_arena_t arena);
  *  a @c NULL arena or one with no open export is left as it is. */
 UFORM_EXPORT void uform_arena_export_close(uform_arena_t arena);
 
+/** The arena's generation: every successful call naming the arena advances it exactly once, when
+ *  it takes the arena and finds no export open, before it writes. An output made under @c g is
+ *  current while this answers @c g. @c NULL answers 0. */
+UFORM_EXPORT uint64_t uform_arena_generation(uform_arena_t arena);
+
 /** Where an arena's outputs live, as the executor that made it decided. */
 typedef enum uform_residency_t {
 

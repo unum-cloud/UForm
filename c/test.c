@@ -1132,6 +1132,36 @@ static void drain(uform_executor_t executor) {
     expect_at(!outcome.message, __FILE__, __LINE__, outcome.message);
 }
 
+/** Every successful call naming an arena advances its generation once, on an executor or without,
+ *  deferred or blocking; a call refused over an open export leaves it, and @c NULL answers 0. */
+static void test_arena_generation(void) {
+    uform_executor_t const executor = create_executor();
+    uform_model_description_t description = {0};
+    uform_model_t const model = load_model(executor, &description);
+    size_t const lengths[] = {5, 9};
+    texts_t texts;
+    fill_texts(&texts, 2, lengths);
+    text_outputs_t outputs = {.arena = create_arena(executor)};
+    uform_progress_t const silent = {0};
+    expect_(uform_arena_generation(NULL) == 0 && uform_arena_generation(outputs.arena) == 0);
+
+    encode_texts(model, executor, uform_completion_blocking_k, &texts, &outputs, silent);
+    expect_(outputs.outcome.status == uform_status_success_k && uform_arena_generation(outputs.arena) == 1);
+    encode_texts(model, NULL, uform_completion_blocking_k, &texts, &outputs, silent);
+    expect_(outputs.outcome.status == uform_status_success_k && uform_arena_generation(outputs.arena) == 2);
+    encode_texts(model, executor, uform_completion_deferred_k, &texts, &outputs, silent);
+    expect_(uform_outcome_wait(&outputs.outcome) == uform_status_success_k);
+    expect_(uform_arena_generation(outputs.arena) == 3);
+    expect_(uform_arena_export_open(outputs.arena) == uform_status_success_k);
+    encode_texts(model, executor, uform_completion_blocking_k, &texts, &outputs, silent);
+    expect_(outputs.outcome.status == uform_status_contended_k && uform_arena_generation(outputs.arena) == 3);
+    uform_arena_export_close(outputs.arena);
+
+    expect_(uform_arena_free(outputs.arena) == uform_status_success_k);
+    uform_model_free(model);
+    expect_(uform_executor_free(executor) == uform_status_success_k);
+}
+
 /** An executor refuses to be freed while an arena made with it lives, a RAM one included, and
  *  frees once that arena is gone. */
 static void test_executor_free_with_live_arena(void) {
@@ -1668,6 +1698,7 @@ int main(int argc, char* argv[]) {
     start_test_case("test_heads"), test_heads(), finish_test_case(NULL);
     start_test_case("test_media_shapes"), test_media_shapes(), finish_test_case(NULL);
     start_test_case("test_executor_free_with_live_arena"), test_executor_free_with_live_arena(), finish_test_case(NULL);
+    start_test_case("test_arena_generation"), test_arena_generation(), finish_test_case(NULL);
     start_test_case("test_blocking_and_deferred"), test_blocking_and_deferred(), finish_test_case(NULL);
 #if !UFORM_TEST_STUB
     start_test_case("test_held_calls"), test_held_calls(), finish_test_case(NULL);

@@ -147,12 +147,9 @@ typedef struct Executor {
     /** The library's executor as verbs read it, @c NULL once a @c with block closed it. */
     _Atomic(uform_executor_t) handle;
 
-    /** The library's executor, freed once nothing holds it. */
+    /** The library's executor, freed as this object dies, which no verb, arena or result can race,
+     *  as each holds the object. */
     uform_executor_t owned;
-
-    /** One while it is open, plus one per arena it made that is still alive, since a GPU arena
-     *  frees on its first stream and every arena may follow a consumer on it. */
-    atomic_size_t holds;
 } Executor;
 
 struct dlpack_export_t;
@@ -354,6 +351,10 @@ typedef struct uform_py_call_t {
 
     /** The @c Arena the call's outputs land in, held, or NULL for a verb with none. */
     PyObject* arena;
+
+    /** The generation the call advances @c arena to as it takes it, which its results carry, so a
+     *  later call's take marks them stale however late they are built. */
+    uint64_t generation;
 
     /** The report the library writes into and the call answers, held, or NULL for a verb whose
      *  answer is built over its arena. */
@@ -585,11 +586,14 @@ int uform_py_words_from_object(PyObject* object, char const* field, size_t count
 void uform_py_words_release(uform_py_words_t* words);
 
 /**
- *  @brief Holds the @c Arena @p object as the one @p call writes into; the library refuses an
- *      arena another call holds with @c uform_status_contended_k.
+ *  @brief Holds the @c Arena @p object as the one @p call writes into, whose take advances its
+ *      generation so results of earlier calls on it read as stale; the library refuses an arena
+ *      another call holds with @c uform_status_contended_k.
+ *  @param[in] object The caller's arena; NULL or @c None makes a fresh one on the executor of
+ *      @p receiver, which the call's result then owns alone.
  *  @return 0 on success, -1 with a @c TypeError set when @p object is no @c Arena.
  */
-int uform_py_call_hold_arena(uform_py_call_t* call, PyObject* object);
+int uform_py_call_hold_arena(uform_py_call_t* call, uform_py_receiver_t const* receiver, PyObject* object);
 
 /**
  *  @brief An @c ArenaBuffer over the @p count rows a call wrote packed into the @c Arena
@@ -601,21 +605,24 @@ int uform_py_call_hold_arena(uform_py_call_t* call, PyObject* object);
  *  @param[in] type @c ArenaBufferType or a subtype.
  *  @return A new reference, or NULL with an exception set.
  */
-PyObject* uform_py_rows_answer(PyTypeObject* type, PyObject* arena, uform_rows_view_t const* rows, size_t count);
+PyObject* uform_py_rows_answer(PyTypeObject* type, uform_py_call_t const* call, uform_rows_view_t const* rows,
+                               size_t count);
 
 /**
- *  @brief A @c RowsTape over the @p tokens rows of @p states a call wrote into @p arena, its
+ *  @brief A @c RowsTape over the @p tokens rows of @p states @p call wrote into its arena, its
  *      @c offsets an @c ArenaBuffer of the @p count + 1 @c 'N' words beside them.
  *  @return A new reference, or NULL with an exception set.
  */
-PyObject* uform_py_rows_tape_answer(PyObject* arena, uform_rows_tape_view_t const* states, size_t count, size_t tokens);
+PyObject* uform_py_rows_tape_answer(uform_py_call_t const* call, uform_rows_tape_view_t const* states, size_t count,
+                                    size_t tokens);
 
 /**
- *  @brief A @c RowsTape over the flat run of @p elements @c f32 values of @p tape a call wrote
- *      into @p arena, its @c offsets an @c ArenaBuffer of the @p count + 1 @c 'N' words.
+ *  @brief A @c RowsTape over the flat run of @p elements @c f32 values of @p tape @p call wrote
+ *      into its arena, its @c offsets an @c ArenaBuffer of the @p count + 1 @c 'N' words.
  *  @return A new reference, or NULL with an exception set.
  */
-PyObject* uform_py_tape_answer(PyObject* arena, uform_tape_view_t const* tape, size_t count, size_t elements);
+PyObject* uform_py_tape_answer(uform_py_call_t const* call, uform_tape_view_t const* tape, size_t count,
+                               size_t elements);
 
 extern char const doc_version[];
 extern char const doc_capabilities_compiled[];

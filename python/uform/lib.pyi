@@ -267,13 +267,13 @@ class CapacityOverflowError(Error, OverflowError):
     """A count would pass the largest value its type holds."""
 
 class UninitializedError(Error):
-    """The handle the call operates on is missing, refused before any other check."""
+    """The handle the call operates on is missing or closed, refused before any other check."""
 
 class ConfigMismatchError(Error, ValueError):
     """The request contradicts a frozen configuration, like resuming a checkpoint of another geometry."""
 
-class ContendedError(Error):
-    """Another call already holds the executor or the arena."""
+class ContendedError(Error, BufferError):
+    """Another call holds the executor or the arena, an export of the arena is alive, or an arena of the executor is."""
 
 class CancelledError(Error):
     """A progress handler stopped the call, which published nothing."""
@@ -282,7 +282,7 @@ class UnsupportedError(Error, NotImplementedError):
     """The verb is declared, but this residency or model does not implement it."""
 
 class InvalidArgumentError(Error, ValueError):
-    """An argument breaks the verb's contract, a closed executor included."""
+    """An argument breaks the verb's contract."""
 
 @final
 class Executor:
@@ -321,7 +321,8 @@ class Executor:
     def __exit__(
         self, kind: type[BaseException] | None, value: BaseException | None, traceback: TracebackType | None, /
     ) -> None:
-        """Closes it once its calls finish, or leaves that to its last live GPU arena. Calls `uform_executor_free`."""
+        """Stops it serving verbs and never raises; it is freed through `uform_executor_free` once the last arena,
+        result and receiver holding it is gone."""
         ...
 
     def __repr__(self) -> str: ...
@@ -330,7 +331,9 @@ class Executor:
 class Arena:
     """The memory every output whose length scales with a call lands in, rewound by each call handed it.
 
-    An arena never outlives the executor that made it: drop it before the executor closes.
+    The arena holds the executor that made it, which is freed only once the arena and every result over it are gone.
+    A call given no arena makes a fresh one its result owns; a result of an earlier call on a reused arena raises
+    `ValueError` once read.
     """
 
     def __new__(cls, executor: Executor | None = None, /) -> Self:
@@ -596,8 +599,8 @@ class Model:
     def text_encode(
         self,
         texts: _Texts,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         outputs: Outputs = ...,
         outputs_scalar: Scalar = ...,
@@ -611,8 +614,8 @@ class Model:
     def image_encode(
         self,
         files: _Files,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         outputs: Outputs = ...,
         outputs_scalar: Scalar = ...,
@@ -626,8 +629,8 @@ class Model:
     def image_encode_pixels(
         self,
         pixels: Sequence[Buffer],
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         outputs: Outputs = ...,
         outputs_scalar: Scalar = ...,
@@ -641,8 +644,8 @@ class Model:
     def video_encode(
         self,
         files: _Files,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         outputs: Outputs = ...,
         outputs_scalar: Scalar = ...,
@@ -656,8 +659,8 @@ class Model:
     def audio_encode(
         self,
         files: _Files,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         outputs: Outputs = ...,
         outputs_scalar: Scalar = ...,
@@ -672,8 +675,8 @@ class Model:
         self,
         samples: Sequence[Buffer] | _Tape,
         sample_rate: int,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         outputs: Outputs = ...,
         outputs_scalar: Scalar = ...,
@@ -688,8 +691,8 @@ class Model:
         self,
         texts: _Texts,
         choices: _Texts,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         temperature_groups: _Words | None = None,
         progress: _Progress | None = None,
@@ -1110,8 +1113,8 @@ class On[TargetT]:
     def text_encode(
         self: On[Model],
         texts: _Texts,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         outputs: Outputs = ...,
         outputs_scalar: Scalar = ...,
@@ -1122,8 +1125,8 @@ class On[TargetT]:
     def image_encode(
         self: On[Model],
         files: _Files,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         outputs: Outputs = ...,
         outputs_scalar: Scalar = ...,
@@ -1134,8 +1137,8 @@ class On[TargetT]:
     def image_encode_pixels(
         self: On[Model],
         pixels: Sequence[Buffer],
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         outputs: Outputs = ...,
         outputs_scalar: Scalar = ...,
@@ -1146,8 +1149,8 @@ class On[TargetT]:
     def video_encode(
         self: On[Model],
         files: _Files,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         outputs: Outputs = ...,
         outputs_scalar: Scalar = ...,
@@ -1158,8 +1161,8 @@ class On[TargetT]:
     def audio_encode(
         self: On[Model],
         files: _Files,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         outputs: Outputs = ...,
         outputs_scalar: Scalar = ...,
@@ -1171,8 +1174,8 @@ class On[TargetT]:
         self: On[Model],
         samples: Sequence[Buffer] | _Tape,
         sample_rate: int,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         outputs: Outputs = ...,
         outputs_scalar: Scalar = ...,
@@ -1184,8 +1187,8 @@ class On[TargetT]:
         self: On[Model],
         texts: _Texts,
         choices: _Texts,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         temperature_groups: _Words | None = None,
         progress: _Progress | None = None,
@@ -1229,8 +1232,8 @@ class DeferredOn[TargetT]:
     def text_encode(
         self: DeferredOn[Model],
         texts: _Texts,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         outputs: Outputs = ...,
         outputs_scalar: Scalar = ...,
@@ -1241,8 +1244,8 @@ class DeferredOn[TargetT]:
     def image_encode(
         self: DeferredOn[Model],
         files: _Files,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         outputs: Outputs = ...,
         outputs_scalar: Scalar = ...,
@@ -1253,8 +1256,8 @@ class DeferredOn[TargetT]:
     def image_encode_pixels(
         self: DeferredOn[Model],
         pixels: Sequence[Buffer],
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         outputs: Outputs = ...,
         outputs_scalar: Scalar = ...,
@@ -1265,8 +1268,8 @@ class DeferredOn[TargetT]:
     def video_encode(
         self: DeferredOn[Model],
         files: _Files,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         outputs: Outputs = ...,
         outputs_scalar: Scalar = ...,
@@ -1277,8 +1280,8 @@ class DeferredOn[TargetT]:
     def audio_encode(
         self: DeferredOn[Model],
         files: _Files,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         outputs: Outputs = ...,
         outputs_scalar: Scalar = ...,
@@ -1290,8 +1293,8 @@ class DeferredOn[TargetT]:
         self: DeferredOn[Model],
         samples: Sequence[Buffer] | _Tape,
         sample_rate: int,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         outputs: Outputs = ...,
         outputs_scalar: Scalar = ...,
@@ -1303,8 +1306,8 @@ class DeferredOn[TargetT]:
         self: DeferredOn[Model],
         texts: _Texts,
         choices: _Texts,
-        arena: Arena,
         /,
+        arena: Arena | None = None,
         *,
         temperature_groups: _Words | None = None,
         progress: _Progress | None = None,

@@ -169,6 +169,8 @@ An executor runs one call at a time, so two goroutines that genuinely overlap ta
 Every output whose length only the call knows, the embeddings, the states and their offsets, lands in an `Arena` you pass, and the verb answers views over it without copying.
 `uform.NewArena(executor)` places it where that executor computes, decided once, and `uform.NewArena(nil)` makes host pages for the calling goroutine.
 Each call rewinds its arena, so the previous call's views and every slice they handed out end there, and a steady loop allocates once.
+A view read after a later call took its arena fails as `Contended`.
+A slice or segment an accessor returned is valid only until the arena's next call.
 To keep a result past the next call, pass that call another arena; an arena serves one call at a time, so each deferred call needs its own.
 An arena from a VRAM executor holds device memory, which `Describe` reports as `ResidencyVram`; where its `HostAccess` is `HostAccessRefused` no Go code may read it, so a verb given that arena fails with `StatusDevice` before it runs, while managed memory and Apple's shared memory read like host pages.
 The Go binding has no pointer accessor or device export that could hand device outputs on unread, so CUDA and HIP device arenas are not usable from Go.

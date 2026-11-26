@@ -587,7 +587,7 @@ def _widened[T: Copyable, origin: ImmOrigin, //, wider: ImmOrigin](items: Span[T
 
 
 @fieldwise_init
-struct Edges[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Defaultable):
+struct Edges[origin: ImmOrigin = ImmUntrackedOrigin](Defaultable, ImplicitlyCopyable):
     """One edge set over a step's items as compressed sparse rows; empty offsets name no edges.
 
     Parameters:
@@ -612,7 +612,9 @@ struct Edges[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Default
         offsets: Span[c_size_t, offsets_origin], ids: Span[UInt32, ids_origin], weights: Span[Float32, weights_origin]
     ) -> Edges[ImmOrigin(origin_of(_anchor[offsets_origin](), _anchor[ids_origin](), _anchor[weights_origin]()))]:
         """Points at the caller's three arrays of one edge set; an empty `weights` weighs every edge one."""
-        comptime union = ImmOrigin(origin_of(_anchor[offsets_origin](), _anchor[ids_origin](), _anchor[weights_origin]()))
+        comptime union = ImmOrigin(
+            origin_of(_anchor[offsets_origin](), _anchor[ids_origin](), _anchor[weights_origin]())
+        )
         return Edges[union](_widened[union](offsets), _widened[union](ids), _widened[union](weights))
 
     def _arguments(self) -> EdgesViewArguments:
@@ -621,7 +623,7 @@ struct Edges[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Default
 
 
 @fieldwise_init
-struct Relations[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Defaultable):
+struct Relations[origin: ImmOrigin = ImmUntrackedOrigin](Defaultable, ImplicitlyCopyable):
     """The contrastive targets of one step, resolved per pair in this order: a pair `ignore` names is
     skipped, one `attract` names pulls together, one `repel` names pushes apart, and every other pair
     follows the run's negatives.
@@ -650,9 +652,13 @@ struct Relations[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, Def
         ignore: Edges[ignore_origin] = Edges(),
     ) -> Relations[ImmOrigin(origin_of(_anchor[attract_origin](), _anchor[repel_origin](), _anchor[ignore_origin]()))]:
         """Gathers the three edge sets of one step."""
-        comptime union = ImmOrigin(origin_of(_anchor[attract_origin](), _anchor[repel_origin](), _anchor[ignore_origin]()))
+        comptime union = ImmOrigin(
+            origin_of(_anchor[attract_origin](), _anchor[repel_origin](), _anchor[ignore_origin]())
+        )
         return Relations[union](
-            Edges[union](_widened[union](attract.offsets), _widened[union](attract.ids), _widened[union](attract.weights)),
+            Edges[union](
+                _widened[union](attract.offsets), _widened[union](attract.ids), _widened[union](attract.weights)
+            ),
             Edges[union](_widened[union](repel.offsets), _widened[union](repel.ids), _widened[union](repel.weights)),
             Edges[union](_widened[union](ignore.offsets), _widened[union](ignore.ids), _widened[union](ignore.weights)),
         )
@@ -701,7 +707,9 @@ struct TrainerStepConfig[
         choice_targets: Optional[TapeView[Self.targets_origin]] = Optional[TapeView[Self.targets_origin]](),
         relations: Relations[Self.relations_origin] = Relations[Self.relations_origin](),
         outputs_scalar: ScalarKind = ScalarKind.F32,
-        stats: Optional[Pointer[TrainerStepStats, Self.stats_origin]] = Optional[Pointer[TrainerStepStats, Self.stats_origin]](),
+        stats: Optional[Pointer[TrainerStepStats, Self.stats_origin]] = Optional[
+            Pointer[TrainerStepStats, Self.stats_origin]
+        ](),
     ):
         """Names only the arrays and knobs a step uses."""
         self.bags = bags
@@ -874,9 +882,9 @@ struct _TrainerStepCall[origin: MutOrigin](Call):
             library.symbols().trainer_step,
         )
 
-    def served(self, status: Status) -> Int:
+    def served(self) -> Int:
         if case .Some(arena_pointer) = self.arena:
-            return _served(arena_pointer, status)
+            return _served(arena_pointer)
         return 0
 
     def conclude(deinit self, outputs: RowsViewArguments, generation: Int) -> Self.Result:
@@ -1132,15 +1140,11 @@ struct Trainer[mesh_origin: ImmOrigin = ImmUntrackedOrigin](Movable):
 
     def on(ref self, ref executor: Executor) -> TrainerOn[ImmOrigin(origin_of(self, executor))]:
         """The trainer's verbs, blocking on `executor`, the one it was made over. Binding-only."""
-        return TrainerOn[ImmOrigin(origin_of(self, executor))](
-            self.library, self.address, executor.address
-        )
+        return TrainerOn[ImmOrigin(origin_of(self, executor))](self.library, self.address, executor.address)
 
     def deferred(ref self, ref executor: Executor) -> TrainerDeferredOn[ImmOrigin(origin_of(self, executor))]:
         """The trainer's verbs, each submitted to `executor` and answering a `Deferred` at once. Binding-only."""
-        return TrainerDeferredOn[ImmOrigin(origin_of(self, executor))](
-            self.library, self.address, executor.address
-        )
+        return TrainerDeferredOn[ImmOrigin(origin_of(self, executor))](self.library, self.address, executor.address)
 
 
 trait TrainVerbs:
@@ -1208,11 +1212,11 @@ trait TrainVerbs:
     ) raises Error -> Rows[origin_of(arena)]:
         """The same step, also landing the pooled embedding of every item in `arena`, as the contrastive
         loss scored it before the update. Calls `uform_trainer_step`."""
-        return self._route(
-            _step_call[origin_of(arena)](modalities, contents, arena._pointer(), config)
-        ).value()
+        return self._route(_step_call[origin_of(arena)](modalities, contents, arena._pointer(), config)).value()
 
-    def save[path_origin: ImmOrigin, //](self, path: StringSlice[path_origin], progress: Progress = Progress()) raises Error:
+    def save[
+        path_origin: ImmOrigin, //
+    ](self, path: StringSlice[path_origin], progress: Progress = Progress()) raises Error:
         """Writes the weights and the step, which the model loads serve and `init_vram` resumes; only the
         process of index zero writes. Calls `uform_trainer_save`."""
         _ = self._route(_TrainerSaveCall(BytesView.of(path).arguments(), progress))

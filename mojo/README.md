@@ -137,7 +137,9 @@ A call finding another one holding its executor finishes at once with `Status.CO
 
 Every output whose length only the call knows, embeddings, states, token vectors and probabilities, lands in an `Arena` you pass, and the verb answers a view over it without copying.
 `Arena(executor)` places it where that executor computes, decided once, and `Arena(library)` makes host pages for the calling thread.
-Each call rewinds its arena, so the previous call's views die and a steady loop allocates once; reading a stale one raises `Status.INVALID_ARGUMENT`.
+Each call rewinds its arena, so the previous call's views die and a steady loop allocates once.
+A view read after a later call took its arena fails as `Contended`.
+A slice or segment an accessor returned is valid only until the arena's next call.
 To keep a result past the next call, pass that call another arena, and give every deferred call its own.
 An arena from a VRAM executor holds device memory and serves only that executor's calls; where `describe().host_access` is `HostAccess.REFUSED`, host accessors refuse with `Status.DEVICE`, while managed memory and Apple's shared memory read like host pages.
 Every arena refers to the executor that made it, so Mojo frees the arena before that executor.

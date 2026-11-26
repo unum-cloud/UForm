@@ -44,6 +44,8 @@ bool uf::hold_arena(uform_arena_t arena, uform_outcome_t const* call) {
     if (!arena) return true;
     std::lock_guard<std::mutex> lock(calls.guard);
     if (arena->exports || (arena->holder && arena->holder != call)) return false;
+    if (arena->holder != call)
+        serial_atomic_ref<std::uint64_t> {arena->generation}.fetch_add(1, std::memory_order_relaxed);
     arena->holder = call;
     return true;
 }
@@ -232,6 +234,10 @@ void uform_arena_export_close(uform_arena_t arena) {
     if (!arena) return;
     std::lock_guard<std::mutex> lock(calls.guard);
     if (arena->exports) --arena->exports;
+}
+
+uint64_t uform_arena_generation(uform_arena_t arena) {
+    return arena ? serial_atomic_ref<std::uint64_t> {arena->generation}.load(std::memory_order_relaxed) : 0;
 }
 
 void uform_arena_describe(uform_arena_describe_t* arguments) {

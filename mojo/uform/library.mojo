@@ -49,6 +49,7 @@ from uform.train import (
 )
 from uform.types import (
     ArenaDescribe,
+    ArenaGeneration,
     ArenaInit,
     BytesView,
     CPUClass,
@@ -183,6 +184,12 @@ struct Symbols:
     """`uform_arena_describe`."""
     var arena_free: StatusRelease
     """`uform_arena_free`."""
+    var arena_export_open: StatusRelease
+    """`uform_arena_export_open`."""
+    var arena_export_close: Release
+    """`uform_arena_export_close`."""
+    var arena_generation: ArenaGeneration
+    """`uform_arena_generation`."""
 
     var model_load_ram: ModelLoadRam
     """`uform_model_load_ram`."""
@@ -288,6 +295,9 @@ struct Symbols:
         self.arena_init = _resolve[ArenaInit](handle, "uform_arena_init")
         self.arena_describe = _resolve[ArenaDescribe](handle, "uform_arena_describe")
         self.arena_free = _resolve[StatusRelease](handle, "uform_arena_free")
+        self.arena_export_open = _resolve[StatusRelease](handle, "uform_arena_export_open")
+        self.arena_export_close = _resolve[Release](handle, "uform_arena_export_close")
+        self.arena_generation = _resolve[ArenaGeneration](handle, "uform_arena_generation")
 
         self.model_load_ram = _resolve[ModelLoadRam](handle, "uform_model_load_ram")
         self.model_load_ram_buffer = _resolve[ModelLoadRamBuffer](handle, "uform_model_load_ram_buffer")

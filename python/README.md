@@ -2,7 +2,7 @@
 
 The bindings are pure CPython, with no PyBind11, no NanoBind, and no SWIG.
 They need CPython 3.12 or newer on Linux, macOS or Windows, free-threaded builds included, and the extension never requires NumPy.
-Every verb is a batch over buffer-protocol inputs, and every output whose length the call decides lands in an arena you reuse.
+Every verb is a batch over buffer-protocol inputs, and every output whose length the call decides lands in an arena, a fresh one per call or one you pass to reuse.
 
 - `uform.Model` encodes text, images, video and audio into pooled embeddings, per-token states and token vectors, and scores calibrated choices over texts.
 - `uform.Trainer` trains one on GPUs, joined across hosts by a `uform.Mesh`.
@@ -31,13 +31,12 @@ import numpy as np
 import uform
 
 executor = uform.Executor.for_ram()  # the threads every receiver names
-arena = uform.Arena(executor)  # where outputs land; each call rewinds it
 model = uform.Model.load_ram("model.safetensors")
 
 captions = ["a cat on a mat", "a sunrise over the bay"]
-texts = np.array(model.on(executor).text_encode(captions, arena).embeddings)  # a copy outlives the next call
+texts = np.array(model.on(executor).text_encode(captions).embeddings)  # each call owns a fresh arena
 with open("cat.png", "rb") as photo:
-    image = np.array(model.on(executor).image_encode([photo.read()], arena).embeddings)[0]
+    image = np.array(model.on(executor).image_encode([photo.read()]).embeddings)[0]
 
 cosines = texts @ image / (np.linalg.norm(texts, axis=1) * np.linalg.norm(image))
 print(f"{captions[cosines.argmax()]!r} describes the photo best")
@@ -51,7 +50,7 @@ The receiver's type alone chooses the completion, so all three offer the same ve
 In a coroutine, `await` a deferred call; anywhere else, `wait()` blocks the thread with its state detached:
 
 ```python
-call = model.deferred(executor).image_encode(files, uform.Arena(executor))
+call = model.deferred(executor).image_encode(files)
 encoded = await call  # or: call.wait()
 ```
 
@@ -60,8 +59,8 @@ encoded = await call  # or: call.wait()
 
 ```python
 async def fan_out(model, left, right, files, texts):
-    images = model.deferred(left).image_encode(files, uform.Arena(left))
-    captions = model.deferred(right).text_encode(texts, uform.Arena(right))
+    images = model.deferred(left).image_encode(files)
+    captions = model.deferred(right).text_encode(texts)
     return await asyncio.gather(images, captions)  # both submitted before either is awaited
 ```
 
@@ -75,36 +74,37 @@ A device is named by its position in `uform.gpu_devices()`, which lists every GP
 A `uform.CPUClass` or `uform.GPUClass` ceiling dispatches as the best class under it the hardware runs, and `None` sets no ceiling.
 An executor runs one call at a time, and a call finding another one holding it raises `ContendedError` once waited for. A deferred call on the executor's own threads finishes while Python only awaits it, and its progress callbacks run on those threads, holding the GIL while they do.
 `executor.drain(uform.Mood.PARKED)` waits until no call holds the executor and its devices are idle, then applies the mood.
-In a `with` block, it waits for its calls and closes on exit.
+In a `with` block, it closes on exit, which never raises: later verbs naming it raise `UninitializedError`, and its threads or streams are freed once the last arena, result and receiver holding it is gone.
 
 ## Arenas
 
-Every output whose length only the call knows, the embeddings, the states and their offsets, lands in a `uform.Arena` you pass, and the verb answers views over it without copying.
-`uform.Arena(executor)` places it where that executor computes, decided once, and `uform.Arena()` makes host pages for the calling thread.
-Each call rewinds its arena, so the previous call's views die and a steady loop allocates once.
-To keep a result past the next call, pass that call another arena; an arena serves one call at a time, so each deferred call needs its own.
-A live `memoryview`, NumPy view, DLPack capsule, Arrow array or CUDA Array Interface consumer of a result keeps its arena from rewinding: a call naming it raises `ContendedError`, as does a call naming an arena another call holds.
+Every output whose length only the call knows, the embeddings, the states and their offsets, lands in a `uform.Arena`, and the verb answers views over it without copying.
+A call given no arena makes a fresh one on its executor, which its result owns, so results of separate calls never collide.
+Passing one reuses it: `uform.Arena(executor)` places it where that executor computes, decided once, and `uform.Arena()` makes host pages for the calling thread.
+Each call naming an arena rewinds it, so a steady loop allocates once, and a result of an earlier call on it raises `ValueError` once read.
+A live `memoryview`, NumPy view, DLPack capsule, Arrow array or CUDA Array Interface consumer of a result keeps its arena from rewinding: a call naming it raises `ContendedError`, which is also a `BufferError`, as does a call naming an arena another call holds.
+A long-lived view, such as `np.from_dlpack` of a result kept across calls, belongs on the arena-less path, where its arena is its own.
 An arena from a VRAM executor holds device memory: the buffer protocol raises `BufferError` wherever the host may not read the pages, and CUDA device and managed memory also export `__cuda_array_interface__` for CuPy or Numba.
 An Apple GPU arena's outputs cross as host memory, through `kDLCPU`, plain Arrow arrays and the buffer protocol, and Metal tensors or Arrow arrays offered as inputs raise `UnsupportedError`, as no Metal exchange is supported yet.
-An arena never outlives the executor that made it, so drop every arena before the executor's `with` block ends, and an arena from `uform.Arena()` lives until it is dropped.
+Every arena and result holds the executor it was made on, so results stay readable after the executor's `with` block ends, and the executor is freed once the last of them is gone.
 
 ```python
 arena = uform.Arena(executor)
 for batch in batches:
-    encoded = model.on(executor).text_encode(batch, arena)  # rewinds: the last batch's views are gone
-    index.add(np.array(encoded.embeddings))  # a copy, so it outlives the next rewind
+    encoded = model.on(executor).text_encode(batch, arena)  # rewinds: the last batch's results are stale
+    index.add(np.array(encoded.embeddings))  # a copy, which outlives the next rewind and holds no view
 ```
 
 ## Encoding
 
 One verb per input form, each spelled as in C:
 
-- `text_encode(texts, arena)` takes UTF-8 texts, a byte per token, since models are tokenizer-free.
-- `image_encode(files, arena)` takes JPEG, PNG or WebP files.
-- `image_encode_pixels(pixels, arena)` takes C-contiguous `[height, width, 3]` `uint8` buffers.
-- `video_encode(files, arena)` takes MP4 or WebM clips.
-- `audio_encode(files, arena)` takes WAV, FLAC, MP3 or Opus recordings.
-- `audio_encode_samples(samples, sample_rate, arena)` takes 1-D `float32` buffers.
+- `text_encode(texts)` takes UTF-8 texts, a byte per token, since models are tokenizer-free.
+- `image_encode(files)` takes JPEG, PNG or WebP files.
+- `image_encode_pixels(pixels)` takes C-contiguous `[height, width, 3]` `uint8` buffers.
+- `video_encode(files)` takes MP4 or WebM clips.
+- `audio_encode(files)` takes WAV, FLAC, MP3 or Opus recordings.
+- `audio_encode_samples(samples, sample_rate)` takes 1-D `float32` buffers.
 
 A batch is a sequence of separate objects, `str` or bytes-like for texts and bytes-like for files, gathered into one tape with one copy.
 A `(data, offsets)` tuple of buffers, the data and `count + 1` `size_t` offsets, is read in place as a tape without a copy, and both buffers must stay alive and unchanged until the call is final:
@@ -112,7 +112,7 @@ A `(data, offsets)` tuple of buffers, the data and `count + 1` `size_t` offsets,
 ```python
 data = b"first documentthe second"
 offsets = np.array([0, 14, 24], dtype=np.uint64)
-encoded = model.text_encode((data, offsets), arena)
+encoded = model.text_encode((data, offsets))
 ```
 
 Each member of the pair crosses through DLPack first, a versioned capsule before a legacy one, then a primitive Arrow array, a device export before a host one, then the CUDA Array Interface on a CUDA arena, then the buffer protocol; device memory crosses only onto the GPU the arena lives on.
@@ -122,17 +122,17 @@ Arrow nulls are refused, and its offsets must be memory the host may read, as th
 
 ```python
 texts = pyarrow.array(["first document", "the second"], pyarrow.large_string())
-encoded = model.text_encode(texts, arena)
+encoded = model.text_encode(texts)
 ```
 
 Every output exports itself in place: `__dlpack__` for NumPy, PyTorch or CuPy, `__arrow_c_array__` and `__arrow_c_device_array__` for PyArrow, rows as fixed-size lists of their columns, and a `RowsTape` also as `__arrow_c_stream__`, a large list of each item's rows.
-While any such export is alive, a call naming its arena raises `ContendedError`, so a consumer never reads rows a later call rewrote.
+While any such export is alive, a call naming its arena raises `ContendedError`, a `BufferError`, so a consumer never reads rows a later call rewrote.
 A `stream` handed to `__dlpack__` must sit on the output's device, and once the consumer drops the capsule, the arena's next call waits for the work queued on that stream before it rewinds.
 
 `outputs` names the surfaces a call keeps, and decides which C output pointers the binding passes:
 
 ```python
-encoded = model.text_encode(texts, arena, outputs=uform.Outputs.EMBEDDINGS | uform.Outputs.STATES)
+encoded = model.text_encode(texts, outputs=uform.Outputs.EMBEDDINGS | uform.Outputs.STATES)
 embeddings, states, token_vectors = encoded  # an `ArenaBuffer` of (count, dimensions), a `RowsTape`, and None
 offsets = np.asarray(states.offsets)  # item `i` spans rows `offsets[i]` up to `offsets[i + 1]`
 ```
@@ -145,10 +145,10 @@ offsets = np.asarray(states.offsets)  # item `i` spans rows `offsets[i]` up to `
 
 ## Choices
 
-`text_choose(texts, choices, arena)` scores each text's legal single-byte choices through one forward, a softmax over them alone at the calibrated inverse temperature of the text's question type:
+`text_choose(texts, choices)` scores each text's legal single-byte choices through one forward, a softmax over them alone at the calibrated inverse temperature of the text's question type:
 
 ```python
-probabilities = model.text_choose(["keep this candidate? ", "expand which neighbour? "], ["yn", "ABCD"], arena)
+probabilities = model.text_choose(["keep this candidate? ", "expand which neighbour? "], ["yn", "ABCD"])
 offsets = np.asarray(probabilities.offsets)  # [0, 2, 6]: one float32 per choice, in `choices` order
 ```
 
@@ -214,7 +214,7 @@ Every failure raises a subclass of `uform.Error`, itself a `RuntimeError`, and e
 
 ```python
 try:
-    model.on(executor).text_encode(texts, arena, progress=lambda completed, total: completed < 100)
+    model.on(executor).text_encode(texts, progress=lambda completed, total: completed < 100)
 except uform.CancelledError:
     ...  # The handler stopped the call, which published nothing
 except uform.Error as error:
@@ -234,7 +234,7 @@ except uform.Error as error:
 - `OVERFLOW` → `CapacityOverflowError`, an `OverflowError`
 - `UNINITIALIZED` → `UninitializedError`
 - `CONFIG_MISMATCH` → `ConfigMismatchError`, a `ValueError`
-- `CONTENDED` → `ContendedError`
+- `CONTENDED` → `ContendedError`, a `BufferError`
 - `CANCELLED` → `CancelledError`
 - `UNSUPPORTED` → `UnsupportedError`, a `NotImplementedError`
 - `INVALID_ARGUMENT` → `InvalidArgumentError`, a `ValueError`
@@ -252,10 +252,10 @@ Arguments the binding refuses raise at the call, while the library's refusals of
   `status` polls through `uform_outcome_status`, `wait` blocks through `uform_outcome_wait`, and `await` re-polls `status` once per turn of the running loop through `loop.call_soon`, so no thread waits.
 - __No life of its own.__
   The binding starts no threads and keeps no queues or caches; releasing a `Deferred` rides reference counting, which waits for the call first.
-- __Arenas belong to the caller and are reused, never shared.__
-  Every output verb takes an arena and answers views into it; a view lasts until the next call on that arena rewinds it, and the library refuses an arena another call holds.
+- __Arenas are fresh by default and reused by choice, never shared.__
+  Every output verb answers views into an arena, its own unless the caller passes one; a result is current until the next call on that arena, a live view keeps that call from rewinding it, and the library refuses an arena another call holds.
 - __Nothing costs anything until it is used.__
   Blocking calls take no deferred-table entry, a surface `outputs` leaves out is never computed, and an arena allocates only when a call writes into it.
 - __Blocking calls stay as simple as the language allows.__
-  `model.text_encode(texts, arena)` takes no executor, completion or receiver argument and returns its result.
+  `model.text_encode(texts)` takes no executor, completion, receiver or arena argument and returns its result.
 - __Suites run against the stub library__, and against the real one with the tiny checkpoint `UFORM_TEST_CHECKPOINT` names.

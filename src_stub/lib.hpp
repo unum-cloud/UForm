@@ -57,6 +57,10 @@ struct uform_arena_handle_t {
     /** Open exports of the outputs, which refuse every call naming the arena and its free; read
      *  and written under the running calls' lock. */
     std::uint32_t exports = 0;
+
+    /** Calls that took the arena and found no export open, each advancing it once before writing;
+     *  written under the running calls' lock, read through @c serial_atomic_ref . */
+    std::uint64_t generation = 0;
 };
 
 /** What @c uform_model_t owns: the geometry a checkpoint would hold, and the bytes it

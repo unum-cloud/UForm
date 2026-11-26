@@ -48,6 +48,12 @@ import (
 #cgo nocallback uform_cpu_class_from_name
 #cgo noescape uform_gpu_class_from_name
 #cgo nocallback uform_gpu_class_from_name
+#cgo noescape uform_arena_export_open
+#cgo nocallback uform_arena_export_open
+#cgo noescape uform_arena_export_close
+#cgo nocallback uform_arena_export_close
+#cgo noescape uform_arena_generation
+#cgo nocallback uform_arena_generation
 
 #include "shim.h"
 */
@@ -299,12 +305,14 @@ func scalarOf[Value Element]() Scalar {
 // region: Rows
 
 // Rows is a run of rows a call wrote packed into its arena, one per item, readable until the arena
-// serves another call. A call into an arena the host may not read is refused before it runs.
+// serves another call, after which [RowValues] fails with [StatusContended]. A call into an arena
+// the host may not read is refused before it runs.
 //
 // Mirrors uform_rows_view_t, beside the count the call was given.
 type Rows struct {
 	raw   C.uform_rows_view_t
 	count uint
+	arena arenaWrite
 }
 
 // Count reports how many rows the call wrote, zero for a surface it did not keep.
@@ -319,8 +327,9 @@ func (rows Rows) Stride() uint { return uint(rows.raw.stride) }
 // Scalar reports the scalar type the rows were written as.
 func (rows Rows) Scalar() Scalar { return Scalar(rows.raw.scalar) }
 
-// RowValues views one row's values in the arena, refused with StatusInvalidArgument when Value
-// is not the scalar type they were written as or row is not below Count.
+// RowValues views one row's values in the arena, refused with StatusInvalidArgument when Value is
+// not the scalar type they were written as or row is not below Count, and with StatusContended
+// once a later call took the arena. The slice is valid only until that call.
 func RowValues[Value Element](rows Rows, row uint) ([]Value, error) {
 	if scalar := scalarOf[Value](); scalar != rows.Scalar() {
 		return nil, fail(StatusInvalidArgument, "rows written as "+rows.Scalar().String()+" cannot be read as "+scalar.String())
@@ -328,6 +337,10 @@ func RowValues[Value Element](rows Rows, row uint) ([]Value, error) {
 	if row >= rows.count {
 		return nil, fail(StatusInvalidArgument, "the row is past the rows the call wrote")
 	}
+	if err := rows.arena.open(); err != nil {
+		return nil, err
+	}
+	defer rows.arena.close()
 	first := unsafe.Add(rows.raw.data, row*rows.Stride())
 	return unsafe.Slice((*Value)(first), rows.Columns()/rows.Scalar().dimensionsPerValue()), nil
 }
@@ -339,16 +352,22 @@ func RowValues[Value Element](rows Rows, row uint) ([]Value, error) {
 type RowsTape struct {
 	raw   C.uform_rows_tape_view_t
 	count uint
+	arena arenaWrite
 }
 
 // Count reports how many items the call wrote rows for, zero for a surface it did not keep.
 func (tape RowsTape) Count() uint { return tape.count }
 
-// Offsets views the Count + 1 offsets into the rows, in rows.
+// Offsets views the Count + 1 offsets into the rows, in rows. It panics with [StatusContended]
+// once a later call took the arena, as a slice bound does, and the slice is valid only until then.
 func (tape RowsTape) Offsets() []uint {
 	if tape.raw.offsets == nil {
 		return nil
 	}
+	if err := tape.arena.open(); err != nil {
+		panic(err)
+	}
+	defer tape.arena.close()
 	return unsafe.Slice((*uint)(unsafe.Pointer(tape.raw.offsets)), tape.count+1)
 }
 
@@ -358,10 +377,14 @@ func (tape RowsTape) Item(item uint) (Rows, error) {
 	if item >= tape.count {
 		return Rows{}, fail(StatusInvalidArgument, "the item is past the items the call wrote")
 	}
-	offsets := tape.Offsets()
+	if err := tape.arena.open(); err != nil {
+		return Rows{}, err
+	}
+	defer tape.arena.close()
+	offsets := unsafe.Slice((*uint)(unsafe.Pointer(tape.raw.offsets)), tape.count+1)
 	rows := tape.raw.rows
 	rows.data = unsafe.Add(rows.data, offsets[item]*uint(rows.stride))
-	return Rows{raw: rows, count: offsets[item+1] - offsets[item]}, nil
+	return Rows{raw: rows, count: offsets[item+1] - offsets[item], arena: tape.arena}, nil
 }
 
 // endregion: Rows
@@ -950,6 +973,22 @@ type call struct {
 type callWithResult[Result any] struct {
 	call
 	result *Result
+	// answer is the result once settled, kept outside the frame so a settled frame holds no Go
+	// pointer.
+	answer Result
+}
+
+// settle settles the call, then moves its result out of the frame, where a Go pointer would
+// outlive the pin that covers it.
+func (request *callWithResult[Result]) settle() error {
+	err := request.call.settle()
+	if request.result != nil {
+		request.answer = *request.result
+		var none Result
+		*request.result = none
+		request.result = nil
+	}
+	return err
 }
 
 // open pins a fresh frame and hands back its argument structure, which a verb fills and passes to
@@ -997,7 +1036,7 @@ func block[Result any](call *callWithResult[Result], refusal error) (Result, err
 	if err := call.settle(); err != nil {
 		return none, err
 	}
-	return *call.result, nil
+	return call.answer, nil
 }
 
 // configOf reads a nil config as the zero one, by value, so generic verbs allocate nothing for it.
@@ -1165,6 +1204,42 @@ func (arena *Arena) Close() error {
 }
 
 // endregion: Receivers
+
+// arenaWrite is the arena a result reads, and the generation the call that wrote it brought the
+// arena to.
+type arenaWrite struct {
+	arena      *Arena
+	generation uint64
+}
+
+// stamp names the arena a call about to take it writes into, at the generation the call brings it
+// to. The call pins the arena with its other pointers, since its frame holds the result.
+func (call *call) stamp(arena *Arena, handle C.uform_arena_t) arenaWrite {
+	if arena != nil {
+		call.pinner.Pin(arena)
+	}
+	return arenaWrite{arena: arena, generation: uint64(C.uform_arena_generation(handle)) + 1}
+}
+
+// open holds an export of the arena, so no call takes it until close, after refusing a closed arena
+// and with [StatusContended] a result a later call overwrote or a call holds the arena for.
+func (write arenaWrite) open() error {
+	handle, err := write.arena.lower()
+	if err != nil {
+		return err
+	}
+	if C.uform_arena_export_open(handle) != C.uform_status_success_k {
+		return fail(StatusContended, "a call holds the arena")
+	}
+	if uint64(C.uform_arena_generation(handle)) != write.generation {
+		C.uform_arena_export_close(handle)
+		return fail(StatusContended, "a later call took the arena since this result was written")
+	}
+	return nil
+}
+
+// close ends the export open took.
+func (write arenaWrite) close() { C.uform_arena_export_close(write.arena.handle) }
 
 // lowerReadableInto is lowerInto for a verb whose results wrap the arena's outputs as Go slices, so
 // it refuses an arena whose memory the host may not read before the call rather than after it.

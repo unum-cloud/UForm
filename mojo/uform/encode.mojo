@@ -163,9 +163,9 @@ struct EncodeConfig[stats_origin: MutOrigin = MutUntrackedOrigin](ImplicitlyCopy
         self.stats = stats
 
 
-struct TextChooseConfig[
-    groups_origin: ImmOrigin = ImmUntrackedOrigin, stats_origin: MutOrigin = MutUntrackedOrigin
-](ImplicitlyCopyable):
+struct TextChooseConfig[groups_origin: ImmOrigin = ImmUntrackedOrigin, stats_origin: MutOrigin = MutUntrackedOrigin](
+    ImplicitlyCopyable
+):
     """The question types, the progress handler and the report slot of `text_choose`.
 
     Parameters:
@@ -194,7 +194,9 @@ struct TextChooseConfig[
         self.stats = stats
 
 
-def _slot[T: AnyType, origin: MutOrigin, //](slot: Optional[Pointer[T, origin]]) -> Optional[Pointer[T, MutUntrackedOrigin]]:
+def _slot[
+    T: AnyType, origin: MutOrigin, //
+](slot: Optional[Pointer[T, origin]]) -> Optional[Pointer[T, MutUntrackedOrigin]]:
     """The caller's output slot with its origin erased, as the C layout names it."""
     if case .Some(pointer) = slot:
         return pointer.unsafe_origin_cast[MutUntrackedOrigin]()
@@ -331,9 +333,7 @@ def _kept_tape(
 
 
 @fieldwise_init
-struct _EncodeCall[
-    origin: MutOrigin, inputs_origin: ImmOrigin, stats_origin: MutOrigin, name: StaticString
-](Call):
+struct _EncodeCall[origin: MutOrigin, inputs_origin: ImmOrigin, stats_origin: MutOrigin, name: StaticString](Call):
     """The crossing of `uform_text_encode`, `uform_image_encode`, `uform_video_encode` or
     `uform_audio_encode`, which share one layout and write their surfaces into the caller's arena."""
 
@@ -382,8 +382,8 @@ struct _EncodeCall[
             verb,
         )
 
-    def served(self, status: Status) -> Int:
-        return _served(self.arena, status)
+    def served(self) -> Int:
+        return _served(self.arena)
 
     def conclude(deinit self, outputs: EncodedArguments, generation: Int) -> Self.Result:
         return Self.Result(self.arena, generation, self.kept, outputs, self.inputs.count)
@@ -441,17 +441,15 @@ struct _ImageEncodePixelsCall[
             library.symbols().image_encode_pixels,
         )
 
-    def served(self, status: Status) -> Int:
-        return _served(self.arena, status)
+    def served(self) -> Int:
+        return _served(self.arena)
 
     def conclude(deinit self, outputs: EncodedArguments, generation: Int) -> Self.Result:
         return Self.Result(self.arena, generation, self.kept, outputs, self.pixels.count)
 
 
 @fieldwise_init
-struct _AudioEncodeSamplesCall[
-    origin: MutOrigin, samples_origin: ImmOrigin, stats_origin: MutOrigin
-](Call):
+struct _AudioEncodeSamplesCall[origin: MutOrigin, samples_origin: ImmOrigin, stats_origin: MutOrigin](Call):
     """The crossing of `uform_audio_encode_samples`, which writes its surfaces into the caller's arena."""
 
     comptime Outputs = EncodedArguments
@@ -492,8 +490,8 @@ struct _AudioEncodeSamplesCall[
             library.symbols().audio_encode_samples,
         )
 
-    def served(self, status: Status) -> Int:
-        return _served(self.arena, status)
+    def served(self) -> Int:
+        return _served(self.arena)
 
     def conclude(deinit self, outputs: EncodedArguments, generation: Int) -> Self.Result:
         return Self.Result(self.arena, generation, self.kept, outputs, self.samples.count)
@@ -547,8 +545,8 @@ struct _TextChooseCall[
             library.symbols().text_choose,
         )
 
-    def served(self, status: Status) -> Int:
-        return _served(self.arena, status)
+    def served(self) -> Int:
+        return _served(self.arena)
 
     def conclude(deinit self, outputs: TapeViewArguments, generation: Int) -> Self.Result:
         return Self.Result(self.arena, generation, outputs, self.texts.count)

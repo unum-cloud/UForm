@@ -137,7 +137,7 @@ def test_executor_drains_and_closes(model: uform.Model):
     with uform.Executor.for_ram(threads=1) as executor:
         executor.drain(uform.Mood.SPINNING)
         executor.drain()
-    with pytest.raises(uform.InvalidArgumentError):
+    with pytest.raises(uform.UninitializedError):
         model.on(executor)
 
 

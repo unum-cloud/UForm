@@ -46,10 +46,11 @@ static struct {
     {uform_status_overflow_k, "uform.CapacityOverflowError", &PyExc_OverflowError,
      "A count would pass the largest value its type holds."},
     {uform_status_uninitialized_k, "uform.UninitializedError", NULL,
-     "The handle the call operates on is missing, refused before any other check."},
+     "The handle the call operates on is missing or closed, refused before any other check."},
     {uform_status_config_mismatch_k, "uform.ConfigMismatchError", &PyExc_ValueError,
      "The request contradicts a frozen configuration, like resuming a checkpoint of another geometry."},
-    {uform_status_contended_k, "uform.ContendedError", NULL, "Another call already holds the executor or the arena."},
+    {uform_status_contended_k, "uform.ContendedError", &PyExc_BufferError,
+     "Another call holds the executor or the arena, an export of the arena is alive, or an arena of the executor is."},
     {uform_status_cancelled_k, "uform.CancelledError", NULL,
      "A progress handler stopped the call, which published nothing."},
     {uform_status_unsupported_k, "uform.UnsupportedError", &PyExc_NotImplementedError,
@@ -574,9 +575,28 @@ void* uform_py_call_open(uform_py_receiver_t const* receiver, uform_py_verb_t co
     return call;
 }
 
-/** Answers a final @p call: the outcome's failure, else the verb's answer. */
+/** Raises the ValueError of a result a later call made stale; always -1. */
+static int result_stale(void) {
+    PyErr_SetString(PyExc_ValueError, "the arena was reused by a later call");
+    return -1;
+}
+
+/** Answers a final @p call: the outcome's failure, else a @c ValueError when a later call
+ *  rewound its arena, else the verb's answer. */
 static PyObject* call_answer(uform_py_verb_t const* verb, void* call) {
-    return uform_py_raise_on_outcome(&((uform_py_call_t*)call)->outcome) == 0 ? verb->answer(call) : NULL;
+    uform_py_call_t* const header = (uform_py_call_t*)call;
+    if (uform_py_raise_on_outcome(&header->outcome) != 0) return NULL; // the call's own failure comes first
+    if (!header->arena) return verb->answer(call);
+    // An answer may copy out of the arena, so it reads under an export, never after a later rewind
+    uform_arena_t const arena = ((Arena*)header->arena)->handle;
+    uform_status_t const opened = uform_arena_export_open(arena);
+    if (opened == uform_status_contended_k) return result_stale(), NULL;
+    if (opened != uform_status_success_k)
+        return uform_py_raise(opened, "the arena could not count another export"), NULL;
+    PyObject* const answer = header->generation == uform_arena_generation(arena) ? verb->answer(call)
+                                                                                 : (result_stale(), NULL);
+    uform_arena_export_close(arena);
+    return answer;
 }
 
 /** Lets go of what @p call gathered, keeping whatever exception is set. */
@@ -587,6 +607,9 @@ static void call_release(uform_py_verb_t const* verb, void* call) {
 }
 
 PyObject* uform_py_call_run(uform_py_receiver_t const* receiver, uform_py_verb_t const* verb, void* call) {
+    // The call's take makes the next generation; a racing take can only make the result read stale
+    uform_py_call_t* const header = (uform_py_call_t*)call;
+    if (header->arena) header->generation = uform_arena_generation(((Arena*)header->arena)->handle) + 1;
     Py_BEGIN_ALLOW_THREADS;
     verb->submit(call);
     Py_END_ALLOW_THREADS;
@@ -967,25 +990,25 @@ PyTypeObject DeferredType = {
 
 #pragma region Executors
 
-static char const doc_Executor[] =                                                             //
-    "Executor\n"                                                                               //
-    "\n"                                                                                       //
-    "The threads or streams a verb runs on, the activation scratch and the staging, shared\n"  //
-    "across models.\n"                                                                         //
-    "\n"                                                                                       //
-    "An executor owns host threads or device streams; a model owns weights. Keeping them\n"    //
-    "apart is what lets one executor serve several models, and what makes the cost of\n"       //
-    "spawning visible at the line that spawns rather than hidden in a constructor.\n"          //
-    "\n"                                                                                       //
-    "Construct one through the residency it drives - `for_ram` or `for_vram` - since each\n"   //
-    "spawns something different and takes different arguments. A receiver names it:\n"         //
-    "`model.on(executor)` blocks on it, `model.deferred(executor)` submits to it. It runs\n"   //
-    "one call at a time, and a call finding another one holding it raises a\n"                 //
-    "`ContendedError` once waited for. In a `with` block, it waits for its calls and closes\n" //
-    "on exit, or leaves both to the last arena it made that is alive.\n"                       //
-    "\n"                                                                                       //
-    "Example:\n"                                                                               //
-    "  >>> with uform.Executor.for_ram() as executor:\n"                                       //
+static char const doc_Executor[] =                                                              //
+    "Executor\n"                                                                                //
+    "\n"                                                                                        //
+    "The threads or streams a verb runs on, the activation scratch and the staging, shared\n"   //
+    "across models.\n"                                                                          //
+    "\n"                                                                                        //
+    "An executor owns host threads or device streams; a model owns weights. Keeping them\n"     //
+    "apart is what lets one executor serve several models, and what makes the cost of\n"        //
+    "spawning visible at the line that spawns rather than hidden in a constructor.\n"           //
+    "\n"                                                                                        //
+    "Construct one through the residency it drives - `for_ram` or `for_vram` - since each\n"    //
+    "spawns something different and takes different arguments. A receiver names it:\n"          //
+    "`model.on(executor)` blocks on it, `model.deferred(executor)` submits to it. It runs\n"    //
+    "one call at a time, and a call finding another one holding it raises a `ContendedError`\n" //
+    "once waited for. In a `with` block, it closes on exit, refusing further verbs; its\n"      //
+    "threads are freed once every arena, result and receiver holding it is gone.\n"             //
+    "\n"                                                                                        //
+    "Example:\n"                                                                                //
+    "  >>> with uform.Executor.for_ram() as executor:\n"                                        //
     "  ...     executor.drain(uform.Mood.PARKED)";
 
 /** Wraps a fresh handle, or frees it when the wrapper cannot be allocated; a new
@@ -998,7 +1021,6 @@ static PyObject* executor_adopt(PyTypeObject* type, uform_executor_t handle) {
     }
     atomic_init(&executor->handle, handle);
     executor->owned = handle;
-    atomic_init(&executor->holds, 1);
     return (PyObject*)executor;
 }
 
@@ -1007,29 +1029,25 @@ static PyObject* Executor_tp_new(PyTypeObject* type, PyObject* args, PyObject* k
     return NULL;
 }
 
-/** Drops one hold on @p executor, the last freeing its handle, waiting in C for every deferred
- *  call naming it. */
-static void executor_release(Executor* executor) {
-    if (atomic_fetch_sub(&executor->holds, 1) != 1) return;
-    Py_BEGIN_ALLOW_THREADS;
-    uform_executor_free(executor->owned);
-    Py_END_ALLOW_THREADS;
-}
-
-/** Closes @p executor once, so verbs refuse it and its handle goes with its last hold. */
-static void executor_close(Executor* executor) {
-    if (atomic_exchange(&executor->handle, NULL)) executor_release(executor);
-}
-
 static void Executor_dealloc(Executor* executor) {
-    executor_close(executor);
+    uform_status_t freed = uform_status_success_k;
+    Py_BEGIN_ALLOW_THREADS;
+    freed = uform_executor_free(executor->owned);
+    Py_END_ALLOW_THREADS;
+    // Every Arena holds its Executor, so the free never refuses; were it to, the threads leak
+    if (freed != uform_status_success_k) {
+        PyObject* const pending = PyErr_GetRaisedException();
+        uform_py_raise(freed, "an Executor died while an Arena made with it lived, so its threads leak");
+        PyErr_WriteUnraisable(NULL);
+        PyErr_SetRaisedException(pending);
+    }
     Py_TYPE(executor)->tp_free((PyObject*)executor);
 }
 
 static PyObject* Executor_enter(PyObject* self, PyObject* unused) { return Py_NewRef(self); }
 
 static PyObject* Executor_exit(PyObject* self, PyObject* const* args, Py_ssize_t count) {
-    executor_close((Executor*)self);
+    atomic_store(&((Executor*)self)->handle, NULL);
     Py_RETURN_NONE;
 }
 
@@ -1038,9 +1056,11 @@ int uform_py_executor_from_object(PyObject* object, uform_executor_t* executor) 
         PyErr_Format(PyExc_TypeError, "expected an Executor, got %S", Py_TYPE(object));
         return -1;
     }
-    *executor = atomic_load(&((Executor*)object)->handle);
-    if (!*executor) // a null executor would quietly run the call on the calling thread
-        return uform_py_raise(uform_status_invalid_argument_k, "the executor was closed");
+    // A null executor would quietly run the call on the calling thread
+    if (!atomic_load(&((Executor*)object)->handle))
+        return uform_py_raise(uform_status_uninitialized_k, "the executor is closed");
+    // A close racing the verb past this check stops only later verbs, as dealloc frees the executor
+    *executor = ((Executor*)object)->owned;
     return 0;
 }
 
@@ -1287,11 +1307,10 @@ static int arena_device(PyObject* arena, DLDevice* device) {
     return 1;
 }
 
-/** The executor @p arena serves as verbs read it, NULL for an arena of the calling thread or once
- *  the executor's @c with block closed it. */
+/** The executor @p arena serves, which it holds, or NULL for an arena of the calling thread. */
 static uform_executor_t arena_executor(PyObject* arena) {
     PyObject* const executor = ((Arena*)arena)->executor;
-    return executor ? atomic_load(&((Executor*)executor)->handle) : NULL;
+    return executor ? ((Executor*)executor)->owned : NULL;
 }
 
 /** Orders the first stream of @p arena 's executor after a foreign @p event or @p stream. */
@@ -1587,18 +1606,18 @@ static char const doc_Arena[] =                                                 
     "Arena(executor=None, /)\n"                                                                //
     "\n"                                                                                       //
     "The memory every output whose length scales with a call lands in - embeddings, states\n"  //
-    "and their offsets - which every such verb requires and each call rewinds, so a steady\n"  //
-    "loop allocates once.\n"                                                                   //
+    "and their offsets - which a verb makes afresh when given none, and which each call\n"     //
+    "naming it rewinds, so a steady loop allocates once.\n"                                    //
     "\n"                                                                                       //
     "The executor makes it where its calls compute, host pages or the memory of its GPU,\n"    //
     "and none makes host pages for calls on the calling thread. Results are zero-copy views\n" //
-    "over it, valid until the next call handed it rewinds it, as a C view is. It serves one\n" //
-    "call at a time, and a call finding another one holding it raises `ContendedError`. A\n"   //
-    "deferred call holds it until it is final. Results over memory the host may not read\n"    //
-    "export `__dlpack__`, and host reads of them raise `BufferError`. A GPU arena serves\n"    //
-    "only calls on the executor that made it. An arena never outlives that executor: drop\n"   //
-    "it before the executor closes. One made with no executor lives until it is dropped.\n"    //
-    "Calls `uform_arena_init`.\n"                                                              //
+    "over it until the next call handed it rewinds it, after which they raise `ValueError`.\n" //
+    "It serves one call at a time, and a call finding another one holding it, or a view of\n"  //
+    "a result still alive, raises `ContendedError`, a `BufferError`. A deferred call holds\n"  //
+    "it until it is final. Results over memory the host may not read export `__dlpack__`,\n"   //
+    "and host reads of them raise `BufferError`. A GPU arena serves only calls on the\n"       //
+    "executor that made it, which the arena holds, so that executor is freed only once the\n"  //
+    "arena and every result over it are gone. Calls `uform_arena_init`.\n"                     //
     "\n"                                                                                       //
     "Args:\n"                                                                                  //
     "  executor (Executor, optional): The executor whose calls it serves; None serves the\n"   //
@@ -1607,7 +1626,7 @@ static char const doc_Arena[] =                                                 
     "Example:\n"                                                                               //
     "  >>> model = uform.Model.load_ram_buffer(b'any bytes the stub accepts')\n"               //
     "  >>> arena = uform.Arena()\n"                                                            //
-    "  >>> first = model.text_encode(['first'], arena)  # its views die at the next call\n"    //
+    "  >>> first = model.text_encode(['first'], arena)  # stale once the next call rewinds\n"  //
     "  >>> memoryview(model.text_encode(['second'], arena).embeddings).shape\n"                //
     "  (1, 64)";
 
@@ -1632,10 +1651,7 @@ static PyObject* Arena_tp_new(PyTypeObject* type, PyObject* args, PyObject* keyw
         return NULL;
     }
     arena->handle = handle;
-    if (executor_object != Py_None) { // a GPU arena frees on its executor's first stream, and none outlives it
-        atomic_fetch_add(&((Executor*)executor_object)->holds, 1);
-        arena->executor = Py_NewRef(executor_object);
-    }
+    if (executor_object != Py_None) arena->executor = Py_NewRef(executor_object); // freed after the arena
     return (PyObject*)arena;
 }
 
@@ -1652,7 +1668,13 @@ PyTypeObject ArenaType = {
     .tp_dealloc = (destructor)Arena_dealloc,
 };
 
-int uform_py_call_hold_arena(uform_py_call_t* call, PyObject* object) {
+int uform_py_call_hold_arena(uform_py_call_t* call, uform_py_receiver_t const* receiver, PyObject* object) {
+    if (!object || object == Py_None) {
+        int const bound = receiver->origin != receiver->target; // an `On` or `DeferredOn` names its executor
+        call->arena = bound ? PyObject_CallOneArg((PyObject*)&ArenaType, ((On*)receiver->origin)->executor)
+                            : PyObject_CallNoArgs((PyObject*)&ArenaType);
+        return call->arena ? 0 : -1;
+    }
     if (!PyObject_TypeCheck(object, &ArenaType)) {
         PyErr_Format(PyExc_TypeError, "the 'arena' argument must be an Arena, got %S", Py_TYPE(object));
         return -1;
@@ -1675,6 +1697,9 @@ typedef struct ArenaBuffer {
 
     /** The arena the output lives in, kept alive so the memory outlives every other name for it. */
     PyObject* arena;
+
+    /** The arena's generation the output was made under; a later one has rewound it. */
+    uint64_t generation;
 
     /** Exports of the arena this object opened, one per read of @c __cuda_array_interface__, which
      *  has no release of its own, so they close as the object dies. */
@@ -1710,12 +1735,26 @@ static int arena_buffer_describe(ArenaBuffer const* buffer, uform_arena_descript
     return uform_py_raise_on_outcome(&outcome);
 }
 
-/** Opens one export of the arena behind @p buffer, raising the status that refuses it; 0, or -1
- *  with an exception set. */
-static int arena_buffer_export_open(ArenaBuffer const* buffer) {
-    uform_status_t const opened = uform_arena_export_open(((Arena*)buffer->arena)->handle);
-    if (opened == uform_status_success_k) return 0;
-    return uform_py_raise(opened, "the output's arena could not count another export");
+/**
+ *  @brief Opens one export of the arena the output @p buffer reads, then checks @p buffer is of
+ *      its current generation, so no call rewinds the memory until @c uform_py_view_export_close.
+ *      Every export of an output goes through it.
+ *  @return 0, or -1 raising ValueError for a result a later call made stale.
+ */
+static int uform_py_view_export_open(ArenaBuffer const* buffer) {
+    uform_arena_t const arena = ((Arena*)buffer->arena)->handle;
+    uform_status_t const opened = uform_arena_export_open(arena);
+    // A call holding the arena has already moved it past every earlier result
+    if (opened == uform_status_contended_k) return result_stale();
+    if (opened != uform_status_success_k) return uform_py_raise(opened, "the arena could not count another export");
+    if (buffer->generation == uform_arena_generation(arena)) return 0;
+    uform_arena_export_close(arena);
+    return result_stale();
+}
+
+/** Closes one export @c uform_py_view_export_open opened on the arena @p buffer reads. */
+static void uform_py_view_export_close(ArenaBuffer const* buffer) {
+    uform_arena_export_close(((Arena*)buffer->arena)->handle);
 }
 
 /** Whether host code may read the pages of the arena behind @p buffer: 1 or 0, or -1 with an
@@ -1734,7 +1773,7 @@ static int ArenaBuffer_getbuffer(ArenaBuffer* self, Py_buffer* view, int flags) 
         PyErr_SetString(PyExc_BufferError, "the host may not read the output's memory; read `__dlpack__`");
         return -1;
     }
-    if (arena_buffer_export_open(self) != 0) return -1;
+    if (uform_py_view_export_open(self) != 0) return -1;
     Py_ssize_t bytes = self->item_bytes;
     for (int axis = 0; axis != self->rank; ++axis) bytes *= self->shape[axis];
     view->obj = Py_NewRef((PyObject*)self);
@@ -1780,7 +1819,7 @@ static PyObject* ArenaBuffer_get_cuda_array_interface(ArenaBuffer* self, void* c
         PyErr_SetString(PyExc_AttributeError, "only CUDA device and managed memory cross the CUDA Array Interface");
         return NULL;
     }
-    if (arena_buffer_export_open(self) != 0) return NULL; // a consumer reads the pointer while it holds this object
+    if (uform_py_view_export_open(self) != 0) return NULL; // a consumer reads the pointer while it holds this object
     ++self->cuda_array_interface_reads;
     char const kind = strchr("bi", *self->format) ? 'i' : strchr("efd", *self->format) ? 'f' : 'u';
     char const typestr[3] = {self->item_bytes == 1 ? '|' : '<', kind, (char)('0' + self->item_bytes)};
@@ -1875,7 +1914,6 @@ static void Arena_dealloc(Arena* self) {
     Py_BEGIN_ALLOW_THREADS;
     uform_arena_free(self->handle); // every export holds this object or waits on its stack, so none is open
     Py_END_ALLOW_THREADS;
-    if (self->executor) executor_release((Executor*)self->executor);
     Py_XDECREF(self->executor);
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
@@ -1983,10 +2021,9 @@ static PyObject* ArenaBuffer_dlpack(ArenaBuffer* self, PyObject* const* args, Py
 
     dlpack_export_t* const exported = (dlpack_export_t*)PyMem_Calloc(1, sizeof(dlpack_export_t));
     if (!exported) return PyErr_NoMemory();
-    uform_status_t const opened = uform_arena_export_open(((Arena*)self->arena)->handle);
-    if (opened != uform_status_success_k) {
+    if (uform_py_view_export_open(self) != 0) {
         PyMem_Free(exported);
-        return uform_py_raise(opened, "the output's arena could not count another export"), NULL;
+        return NULL;
     }
     exported->buffer = (ArenaBuffer*)Py_NewRef((PyObject*)self);
     exported->consumer_stream = consumer_stream;
@@ -2016,6 +2053,7 @@ static PyObject* ArenaBuffer_dlpack(ArenaBuffer* self, PyObject* const* args, Py
 
 static PyObject* ArenaBuffer_dlpack_device(ArenaBuffer* self, PyObject* unused) {
     DLDevice device;
+    if (self->generation != uform_arena_generation(((Arena*)self->arena)->handle)) return result_stale(), NULL;
     if (arena_buffer_device(self, &device) != 0) return NULL;
     PyObject* const pair = PyTuple_New(2);
     if (!pair) return NULL;
@@ -2110,10 +2148,8 @@ static arrow_export_t* arrow_export_new(ArenaBuffer* buffer) {
                                            : NULL;
     arrow_export_t* const exported = (arrow_export_t*)PyMem_RawCalloc(1, sizeof(arrow_export_t));
     if (!exported) return (arrow_export_t*)PyErr_NoMemory();
-    uform_status_t const opened = uform_arena_export_open(((Arena*)buffer->arena)->handle);
-    if (opened != uform_status_success_k) {
+    if (uform_py_view_export_open(buffer) != 0) {
         PyMem_RawFree(exported);
-        uform_py_raise(opened, "the output's arena could not count another export");
         return NULL;
     }
     exported->buffer = (ArenaBuffer*)Py_NewRef((PyObject*)buffer);
@@ -2356,14 +2392,10 @@ static PyObject* RowsTape_arrow_c_stream(ArenaBuffer* self, PyObject* const* arg
         PyMem_RawFree(state);
         return PyErr_NoMemory();
     }
-    uform_status_t const opened = uform_arena_export_open(((Arena*)self->arena)->handle);
-    PyObject* const capsule = opened == uform_status_success_k
-                                  ? PyCapsule_New(stream, "arrow_array_stream", arrow_stream_capsule_release)
-                                  : NULL;
+    int const opened = uform_py_view_export_open(self) == 0;
+    PyObject* const capsule = opened ? PyCapsule_New(stream, "arrow_array_stream", arrow_stream_capsule_release) : NULL;
     if (!capsule) {
-        if (opened != uform_status_success_k)
-            uform_py_raise(opened, "the output's arena could not count another export");
-        else uform_arena_export_close(((Arena*)self->arena)->handle);
+        if (opened) uform_py_view_export_close(self);
         PyMem_RawFree(state);
         PyMem_Free(stream);
         return NULL;
@@ -2519,14 +2551,15 @@ static struct {
     {uform_scalar_i32_k, "i", 4}, {uform_scalar_i8_k, "b", 1},  {uform_scalar_u8_k, "B", 1},
 };
 
-/** A new @c ArenaBuffer of @p type over @p data inside the held @p arena, C-contiguous;
- *  NULL on failure. */
-static ArenaBuffer* arena_buffer_new(PyTypeObject* type, PyObject* arena, void const* data, char const* format,
-                                     Py_ssize_t item_bytes, Py_ssize_t const* shape, int rank) {
+/** A new @c ArenaBuffer of @p type over @p data inside the arena @p call held, C-contiguous and
+ *  of the call's generation; NULL on failure. */
+static ArenaBuffer* arena_buffer_new(PyTypeObject* type, uform_py_call_t const* call, void const* data,
+                                     char const* format, Py_ssize_t item_bytes, Py_ssize_t const* shape, int rank) {
     static char const empty_output = 0; // stands in for a null output, which no exporter may hand out
     ArenaBuffer* const exporter = (ArenaBuffer*)type->tp_alloc(type, 0);
     if (!exporter) return NULL;
-    exporter->arena = Py_NewRef(arena);
+    exporter->arena = Py_NewRef(call->arena);
+    exporter->generation = call->generation;
     exporter->data = data ? data : &empty_output;
     exporter->format = format;
     exporter->item_bytes = item_bytes;
@@ -2540,7 +2573,8 @@ static ArenaBuffer* arena_buffer_new(PyTypeObject* type, PyObject* arena, void c
     return exporter;
 }
 
-PyObject* uform_py_rows_answer(PyTypeObject* type, PyObject* arena, uform_rows_view_t const* rows, size_t count) {
+PyObject* uform_py_rows_answer(PyTypeObject* type, uform_py_call_t const* call, uform_rows_view_t const* rows,
+                               size_t count) {
     char const* format = opaque_rows_format;
     Py_ssize_t item_bytes = 1;
     Py_ssize_t shape[2] = {(Py_ssize_t)count, (Py_ssize_t)rows->stride};
@@ -2551,25 +2585,26 @@ PyObject* uform_py_rows_answer(PyTypeObject* type, PyObject* arena, uform_rows_v
             item_bytes = scalar_formats[row].bytes;
             shape[1] = (Py_ssize_t)rows->columns;
         }
-    return (PyObject*)arena_buffer_new(type, arena, rows->data, format, item_bytes, shape, 2);
+    return (PyObject*)arena_buffer_new(type, call, rows->data, format, item_bytes, shape, 2);
 }
 
-PyObject* uform_py_rows_tape_answer(PyObject* arena, uform_rows_tape_view_t const* states, size_t count,
+PyObject* uform_py_rows_tape_answer(uform_py_call_t const* call, uform_rows_tape_view_t const* states, size_t count,
                                     size_t tokens) {
     Py_ssize_t const offsets_shape[1] = {(Py_ssize_t)count + 1};
-    RowsTape* rows_tape = (RowsTape*)uform_py_rows_answer(&RowsTapeType, arena, &states->rows, tokens);
+    RowsTape* rows_tape = (RowsTape*)uform_py_rows_answer(&RowsTapeType, call, &states->rows, tokens);
     if (!rows_tape) return NULL;
-    rows_tape->offsets = (PyObject*)arena_buffer_new(&ArenaBufferType, arena, states->offsets, "N", sizeof(size_t),
+    rows_tape->offsets = (PyObject*)arena_buffer_new(&ArenaBufferType, call, states->offsets, "N", sizeof(size_t),
                                                      offsets_shape, 1);
     if (!rows_tape->offsets) Py_CLEAR(rows_tape);
     return (PyObject*)rows_tape;
 }
 
-PyObject* uform_py_tape_answer(PyObject* arena, uform_tape_view_t const* tape, size_t count, size_t elements) {
+PyObject* uform_py_tape_answer(uform_py_call_t const* call, uform_tape_view_t const* tape, size_t count,
+                               size_t elements) {
     Py_ssize_t const shape[1] = {(Py_ssize_t)elements}, offsets_shape[1] = {(Py_ssize_t)count + 1};
-    RowsTape* rows_tape = (RowsTape*)arena_buffer_new(&RowsTapeType, arena, tape->data, "f", sizeof(float), shape, 1);
+    RowsTape* rows_tape = (RowsTape*)arena_buffer_new(&RowsTapeType, call, tape->data, "f", sizeof(float), shape, 1);
     if (!rows_tape) return NULL;
-    rows_tape->offsets = (PyObject*)arena_buffer_new(&ArenaBufferType, arena, tape->offsets, "N", sizeof(size_t),
+    rows_tape->offsets = (PyObject*)arena_buffer_new(&ArenaBufferType, call, tape->offsets, "N", sizeof(size_t),
                                                      offsets_shape, 1);
     if (!rows_tape->offsets) Py_CLEAR(rows_tape);
     return (PyObject*)rows_tape;

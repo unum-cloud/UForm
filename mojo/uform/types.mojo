@@ -538,6 +538,9 @@ comptime Release = def(Address) thin abi("C") -> None
 comptime StatusRelease = def(Address) thin abi("C") -> c_int
 """The arena and executor `_free`: `contended`, with nothing freed, while an export is open or an arena lives."""
 
+comptime ArenaGeneration = def(Address) thin abi("C") -> UInt64
+"""`uform_arena_generation`: the calls the engine took on an arena, advanced once by each that names it."""
+
 comptime OutcomeStatus = def(Pointer[Outcome, MutAnyOrigin]) thin abi("C") -> c_int
 """`uform_outcome_wait` and `uform_outcome_status`: an outcome's status, the first once it is final."""
 
@@ -768,7 +771,7 @@ struct Rows[origin: MutOrigin](ImplicitlyCopyable, Sized):
         """One row's values, or its packed bytes for a sub-byte kind, read in place from the arena.
 
         Raises:
-            `Error` with `DEVICE` over device memory, `INVALID_ARGUMENT` once a later call rewound the arena, or when the rows hold
+            `Error` with `DEVICE` over device memory, `CONTENDED` once a later call rewound the arena, or when the rows hold
             a kind `dtype` does not store.
         """
         _readable(self.arena, self.generation, "Rows.row")
@@ -783,7 +786,7 @@ struct Rows[origin: MutOrigin](ImplicitlyCopyable, Sized):
         """Every row's values end to end, refused for padded rows.
 
         Raises:
-            `Error` with `DEVICE` over device memory, `INVALID_ARGUMENT` once a later call rewound the arena or for another kind,
+            `Error` with `DEVICE` over device memory, `CONTENDED` once a later call rewound the arena or for another kind,
             and with `UNSUPPORTED_LAYOUT` when the rows are padded.
         """
         _readable(self.arena, self.generation, "Rows.values")
@@ -823,7 +826,7 @@ struct RowsTape[origin: MutOrigin](ImplicitlyCopyable, Sized):
         """The items' boundaries in rows, one more of them than items.
 
         Raises:
-            `Error` with `INVALID_ARGUMENT` once a later call rewound the arena, or `DEVICE` over device memory.
+            `Error` with `CONTENDED` once a later call rewound the arena, or `DEVICE` over device memory.
         """
         _readable(self.arena, self.generation, "RowsTape.offsets")
         return _in_arena[c_size_t, origin_of(self)](_address_of(self.view.offsets), self.count + 1)
@@ -832,24 +835,28 @@ struct RowsTape[origin: MutOrigin](ImplicitlyCopyable, Sized):
         """Every item's rows end to end, as one run.
 
         Raises:
-            `Error` with `INVALID_ARGUMENT` once a later call rewound the arena, or `DEVICE` over device memory.
+            `Error` with `CONTENDED` once a later call rewound the arena, or `DEVICE` over device memory.
         """
-        _readable(self.arena, self.generation, "RowsTape.rows")
+        _open_read(self.arena, self.generation, "RowsTape.rows")
         var total = _in_arena[c_size_t, ImmUntrackedOrigin](_address_of(self.view.offsets), self.count + 1)
-        return Rows[Self.origin](self.arena, self.generation, self.view.rows, Int(total[self.count]))
+        var count = Int(total[self.count])
+        _close_read(self.arena)
+        return Rows[Self.origin](self.arena, self.generation, self.view.rows, count)
 
     def item(self, item: Int) raises Error -> Rows[Self.origin]:
         """One item's rows.
 
         Raises:
-            `Error` with `INVALID_ARGUMENT` once a later call rewound the arena, or `DEVICE` over device memory.
+            `Error` with `CONTENDED` once a later call rewound the arena, or `DEVICE` over device memory.
         """
-        _readable(self.arena, self.generation, "RowsTape.item")
+        _open_read(self.arena, self.generation, "RowsTape.item")
         var offsets = _in_arena[c_size_t, ImmUntrackedOrigin](_address_of(self.view.offsets), self.count + 1)
         var first = Int(offsets[item])
+        var count = Int(offsets[item + 1]) - first
+        _close_read(self.arena)
         var view = self.view.rows
         view.data += first * Int(view.stride)
-        return Rows[Self.origin](self.arena, self.generation, view, Int(offsets[item + 1]) - first)
+        return Rows[Self.origin](self.arena, self.generation, view, count)
 
 
 @fieldwise_init
@@ -883,7 +890,7 @@ struct Tape[origin: MutOrigin](ImplicitlyCopyable, Sized):
         """The items' boundaries in values, one more of them than items.
 
         Raises:
-            `Error` with `INVALID_ARGUMENT` once a later call rewound the arena, or `DEVICE` over device memory.
+            `Error` with `CONTENDED` once a later call rewound the arena, or `DEVICE` over device memory.
         """
         _readable(self.arena, self.generation, "Tape.offsets")
         return _in_arena[c_size_t, origin_of(self)](_address_of(self.view.offsets), self.count + 1)
@@ -892,17 +899,17 @@ struct Tape[origin: MutOrigin](ImplicitlyCopyable, Sized):
         """One item's values.
 
         Raises:
-            `Error` with `DEVICE` over device memory, `INVALID_ARGUMENT` once a later call rewound the arena, or when the values
+            `Error` with `DEVICE` over device memory, `CONTENDED` once a later call rewound the arena, or when the values
             hold a kind `dtype` does not store.
         """
-        _readable(self.arena, self.generation, "Tape.item")
         if not self.view.scalar.stores[dtype]():
             raise Error(Status.INVALID_ARGUMENT, "Tape.item")
+        _open_read(self.arena, self.generation, "Tape.item")
         var offsets = _in_arena[c_size_t, ImmUntrackedOrigin](_address_of(self.view.offsets), self.count + 1)
         var first = Int(offsets[item])
-        return _in_arena[Scalar[dtype], origin_of(self)](
-            self.view.data + first * size_of[dtype](), Int(offsets[item + 1]) - first
-        )
+        var count = Int(offsets[item + 1]) - first
+        _close_read(self.arena)
+        return _in_arena[Scalar[dtype], origin_of(self)](self.view.data + first * size_of[dtype](), count)
 
 
 def _address_of[T: AnyType, origin: Origin, //](pointer: Optional[Pointer[T, origin]]) -> Address:
@@ -1295,15 +1302,12 @@ struct Arena[origin: ImmOrigin]:
     """The loaded engine, held so the release can still reach `uform_arena_free`."""
     var _address: Address
     """The `uform_arena_t`, never null."""
-    var _generation: Int
-    """Calls the engine took on it so far, which every result records to know when a later one rewound it."""
 
     def __init__(out self: Arena[ImmUntrackedOrigin], library: Library) raises Error:
         """Host pages for calls on the calling thread. Calls `uform_arena_init`."""
         var address = _arena_init(library, NULL_ADDRESS)
         self._library = library
         self._address = address
-        self._generation = 0
 
     def __init__(out self, ref[Self.origin] executor: Executor) raises Error:
         """Memory where `executor` computes, serving the calls of its residency. Calls `uform_arena_init`.
@@ -1314,7 +1318,6 @@ struct Arena[origin: ImmOrigin]:
         var address = _arena_init(executor.library, executor.address)
         self._library = executor.library
         self._address = address
-        self._generation = 0
 
     def __deinit__(deinit self):
         """Frees the arena and every output in it. Calls `uform_arena_free`.
@@ -1349,22 +1352,39 @@ struct Arena[origin: ImmOrigin]:
         return description.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0]
 
 
-def _served[origin: MutOrigin](arena: Pointer[Arena[ImmUntrackedOrigin], origin], status: Status) -> Int:
-    """Retires every earlier result once the engine took a call naming the arena; a `CONTENDED` refusal
-    never touched it. Answers the generation the call's result is stamped with."""
-    var served = Pointer[Arena[ImmUntrackedOrigin], MutAnyOrigin](unsafe_from_address=Int(arena))
-    if status != Status.CONTENDED:
-        served[]._generation += 1
-    return served[]._generation
+def _served[origin: MutOrigin](arena: Pointer[Arena[ImmUntrackedOrigin], origin]) -> Int:
+    """The engine's generation of the arena, which every call that took it advanced once, so a result
+    stamped with it reads current until a later call takes the arena."""
+    return Int(arena[]._library.symbols().arena_generation(arena[]._address))
+
+
+def _open_read[
+    origin: MutOrigin
+](arena: Pointer[Arena[ImmUntrackedOrigin], origin], generation: Int, detail: StaticString) raises Error:
+    """Opens an export on the arena, so no call takes it until `_close_read`, after refusing a read of a result
+    over memory the host may not read. An arena a later call rewound, like one a call holds, reads as `CONTENDED`."""
+    if arena[]._library.symbols().arena_export_open(arena[]._address) != 0:
+        raise Error(Status.CONTENDED, detail)
+    try:
+        arena[].describe().host(detail)
+        if Int(arena[]._library.symbols().arena_generation(arena[]._address)) != generation:
+            raise Error(Status.CONTENDED, detail)
+    except error:
+        arena[]._library.symbols().arena_export_close(arena[]._address)
+        raise error
+
+
+def _close_read[origin: MutOrigin](arena: Pointer[Arena[ImmUntrackedOrigin], origin]):
+    """Closes the export `_open_read` opened."""
+    arena[]._library.symbols().arena_export_close(arena[]._address)
 
 
 def _readable[
     origin: MutOrigin
 ](arena: Pointer[Arena[ImmUntrackedOrigin], origin], generation: Int, detail: StaticString) raises Error:
-    """Refuses a host read of a result over memory the host may not read, or over an arena a later call rewound."""
-    arena[].describe().host(detail)
-    if arena[]._generation != generation:
-        raise Error(Status.INVALID_ARGUMENT, detail)
+    """Refuses a read as `_open_read` does, for an accessor that copies nothing out of the arena."""
+    _open_read(arena, generation, detail)
+    _close_read(arena)
 
 
 # endregion Arenas
@@ -1419,9 +1439,9 @@ trait Call(Deinitable, Movable):
         """Crosses into the engine, or writes the binding's own refusal into `outcome` without crossing."""
         ...
 
-    def served(self, status: Status) -> Int:
-        """Stamps the call's arena once the engine took the call, and answers the stamp; arena-free calls
-        keep none."""
+    def served(self) -> Int:
+        """Answers the generation the engine's arena stands at, which stamps the call's result; arena-free
+        calls keep none."""
         return 0
 
     def conclude(deinit self, outputs: Self.Outputs, generation: Int) -> Self.Result:
@@ -1448,7 +1468,7 @@ def _block[C: Call](library: Library, var call: C, handle: Address, executor: Ad
         Pointer(to=mutable_slots[unsafe_offset=0].outputs).unsafe_origin_cast[MutUntrackedOrigin](),
     )
     var written = mutable_slots[unsafe_offset=0]
-    var generation = call.served(Status.of(written.outcome.status))
+    var generation = call.served()
     var result = call^.conclude(written.outputs, generation)
     library._check(written.outcome, C.symbol)
     return result^
@@ -1500,7 +1520,7 @@ struct Deferred[C: Call, origin: ImmOrigin]:
             Pointer(to=slots[].outcome).unsafe_origin_cast[MutUntrackedOrigin](),
             Pointer(to=slots[].outputs).unsafe_origin_cast[MutUntrackedOrigin](),
         )
-        self.generation = self.call.value().served(self.status())
+        self.generation = self.call.value().served()
 
     def __deinit__(deinit self):
         """Waits until the call is final, then frees the inputs it kept alive for the call. Calls `uform_outcome_wait`.

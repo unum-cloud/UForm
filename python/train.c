@@ -348,6 +348,9 @@ uform_py_fields_t RelationsType = {
 typedef struct Mesh {
     PyObject ob_base;
     uform_mesh_t handle;
+
+    /** The @c Executor the mesh was made over, whose handle the C mesh keeps until it is freed. */
+    PyObject* executor;
 } Mesh;
 
 static char const doc_Mesh[] =                                                                 //
@@ -366,6 +369,7 @@ static void Mesh_dealloc(Mesh* self) {
     Py_BEGIN_ALLOW_THREADS;
     uform_mesh_free(self->handle);
     Py_END_ALLOW_THREADS;
+    Py_XDECREF(self->executor);
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
@@ -442,6 +446,7 @@ static PyObject* Mesh_bootstrap(PyTypeObject* type, PyObject* const* args, Py_ss
         goto release;
     }
     mesh->handle = handle;
+    mesh->executor = Py_NewRef(executor_object);
     result = (PyObject*)mesh;
 
 release:
@@ -885,7 +890,7 @@ static void step_submit(void* call) { uform_trainer_step(&((step_call_t*)call)->
 static PyObject* step_answer(void* erased) {
     step_call_t* const call = (step_call_t*)erased;
     if (!call->call.arena) Py_RETURN_NONE;
-    return uform_py_rows_answer(&ArenaBufferType, call->call.arena, &call->embeddings, call->contents.count);
+    return uform_py_rows_answer(&ArenaBufferType, erased, &call->embeddings, call->contents.count);
 }
 
 static void step_release(void* erased) {
@@ -1052,7 +1057,8 @@ static PyObject* Trainer_step(PyObject* self, PyObject* const* args, Py_ssize_t 
                                              &call->repel, &relations.repel) != 0 ||
                            edges_from_object(uform_py_fields_value(relations_object, relations_ignore_k), "ignore",
                                              count, &call->ignore, &relations.ignore) != 0)) ||
-        (arena_object && arena_object != Py_None && uform_py_call_hold_arena(&call->call, arena_object) != 0))
+        (arena_object && arena_object != Py_None &&
+         uform_py_call_hold_arena((uform_py_call_t*)call, &receiver, arena_object) != 0))
         return uform_py_call_discard(&receiver, &step_verb, call);
     if (stats_object && stats_object != Py_None) call->stats_object = Py_NewRef(stats_object);
     call->arguments = (uform_trainer_step_t) {

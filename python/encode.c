@@ -67,7 +67,7 @@ static PyStructSequence_Field Encoded_fields[] = {
 PyStructSequence_Desc uform_py_encoded_desc = {
     "uform.Encoded",
     "What an encoding wrote into its arena, unpacking as `embeddings, states, token_vectors = encoded`; each views " //
-    "the arena until a later call rewinds it.",
+    "the arena until a later call rewinds it, and raises `ValueError` after.",
     Encoded_fields, 3};
 
 PyTypeObject EncodedType;
@@ -224,15 +224,14 @@ static PyObject* encode_answer(void* erased) {
     size_t const count = call->inputs.count, tokens = call->stats->text.tokens;
     PyObject* fields[3] = {NULL, NULL, NULL};
     fields[0] = call->outputs & outputs_embeddings_k
-                    ? uform_py_rows_answer(&ArenaBufferType, call->call.arena, &call->embeddings, count)
+                    ? uform_py_rows_answer(&ArenaBufferType, erased, &call->embeddings, count)
                     : Py_NewRef(Py_None);
     if (fields[0])
-        fields[1] = call->outputs & outputs_states_k
-                        ? uform_py_rows_tape_answer(call->call.arena, &call->states, count, tokens)
-                        : Py_NewRef(Py_None);
+        fields[1] = call->outputs & outputs_states_k ? uform_py_rows_tape_answer(erased, &call->states, count, tokens)
+                                                     : Py_NewRef(Py_None);
     if (fields[1])
         fields[2] = call->outputs & outputs_token_vectors_k
-                        ? uform_py_rows_tape_answer(call->call.arena, &call->token_vectors, count, tokens)
+                        ? uform_py_rows_tape_answer(erased, &call->token_vectors, count, tokens)
                         : Py_NewRef(Py_None);
     return uform_py_struct_sequence_steal(&EncodedType, fields, 3);
 }
@@ -292,7 +291,7 @@ static int encode_parse(char const* verb, encode_verb_t const* descriptor, PyObj
         {"stats", &parsed->stats},
     };
     parsed->sample_rate = NULL;
-    return uform_py_arguments_parse(verb, args, positional_args_count, args_names_tuple, 2, 2, arguments,
+    return uform_py_arguments_parse(verb, args, positional_args_count, args_names_tuple, 1, 2, arguments,
                                     sizeof(arguments) / sizeof(*arguments));
 }
 
@@ -322,7 +321,7 @@ static encode_call_t* encode_open(PyObject* self, encode_verb_t const* descripto
     if (uform_py_tape_from_object(parsed->inputs, descriptor->input_name, descriptor->element, parsed->arena,
                                   &call->inputs) != 0 ||
         uform_py_callable_from_object(parsed->progress, "progress", &call->progress) != 0 ||
-        uform_py_call_hold_arena(&call->call, parsed->arena) != 0) {
+        uform_py_call_hold_arena((uform_py_call_t*)call, receiver, parsed->arena) != 0) {
         uform_py_call_discard(receiver, &descriptor->verb, call);
         return NULL;
     }
@@ -390,7 +389,7 @@ static encode_verb_t const audio_encode_samples_verb = {
     {sizeof(encode_call_t), audio_encode_samples_submit, encode_answer, encode_release, encode_traverse}};
 
 static char const doc_Model_text_encode[] =                                                             //
-    "text_encode(texts, arena, /, *, outputs=Outputs.EMBEDDINGS, outputs_scalar=Scalar.F32, "           //
+    "text_encode(texts, /, arena=None, *, outputs=Outputs.EMBEDDINGS, outputs_scalar=Scalar.F32, "      //
     "progress=None, progress_steps=0, stats=None) -> Encoded\n"                                         //
     "\n"                                                                                                //
     "Encodes UTF-8 texts through one forward, keeping the surfaces `outputs` names. Models are\n"       //
@@ -402,7 +401,7 @@ static char const doc_Model_text_encode[] =                                     
     "    tape, or a (data, offsets) pair of a byte buffer and count + 1 size_t offsets, or an Arrow\n"  //
     "    array or stream of strings, read in place. Either must stay alive and unchanged until the\n"   //
     "    call is final.\n"                                                                              //
-    "  arena (Arena): Where the outputs land, rewound by the call.\n"                                   //
+    "  arena (Arena, optional): Where the outputs land, rewound; None makes one the result owns.\n"     //
     "  outputs (Outputs, optional): Any union of `Outputs.EMBEDDINGS`, `Outputs.STATES` and\n"          //
     "    `Outputs.TOKEN_VECTORS`; a model without a token head raises `UnsupportedError` for\n"         //
     "    the last.\n"                                                                                   //
@@ -451,18 +450,18 @@ static PyObject* Model_text_encode(PyObject* self, PyObject* const* args, Py_ssi
     return uform_py_call_run(&receiver, &text_encode_verb.verb, call);
 }
 
-static char const doc_Model_image_encode[] =                                                     //
-    "image_encode(files, arena, /, *, outputs=Outputs.EMBEDDINGS, outputs_scalar=Scalar.F32, "   //
-    "progress=None, progress_steps=0, stats=None) -> Encoded\n"                                  //
-    "\n"                                                                                         //
-    "Decodes and encodes JPEG, PNG or WebP files; an undecodable one raises `MalformedError`.\n" //
-    "Calls `uform_image_encode`.\n"                                                              //
-    "\n"                                                                                         //
-    "Args:\n"                                                                                    //
-    "  files (Sequence[bytes-like] | tuple[buffer, buffer]): The encoded files, or a (data,\n"   //
-    "    offsets) pair read in place.\n"                                                         //
-    "  arena (Arena): Where the outputs land, rewound by the call.\n"                            //
-    "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"               //
+static char const doc_Model_image_encode[] =                                                        //
+    "image_encode(files, /, arena=None, *, outputs=Outputs.EMBEDDINGS, outputs_scalar=Scalar.F32, " //
+    "progress=None, progress_steps=0, stats=None) -> Encoded\n"                                     //
+    "\n"                                                                                            //
+    "Decodes and encodes JPEG, PNG or WebP files; an undecodable one raises `MalformedError`.\n"    //
+    "Calls `uform_image_encode`.\n"                                                                 //
+    "\n"                                                                                            //
+    "Args:\n"                                                                                       //
+    "  files (Sequence[bytes-like] | tuple[buffer, buffer]): The encoded files, or a (data,\n"      //
+    "    offsets) pair read in place.\n"                                                            //
+    "  arena (Arena, optional): Where the outputs land, rewound; None makes one the result owns.\n" //
+    "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"                  //
     "  stats (ImageEncodeStats, optional): Overwritten with this call's report.";
 
 static PyObject* Model_image_encode(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
@@ -493,18 +492,18 @@ static PyObject* Model_image_encode(PyObject* self, PyObject* const* args, Py_ss
     return uform_py_call_run(&receiver, &image_encode_verb.verb, call);
 }
 
-static char const doc_Model_image_encode_pixels[] =                                                    //
-    "image_encode_pixels(pixels, arena, /, *, outputs=Outputs.EMBEDDINGS, outputs_scalar=Scalar.F32, " //
-    "progress=None, progress_steps=0, stats=None) -> Encoded\n"                                        //
-    "\n"                                                                                               //
-    "Encodes decoded images, resizing on the executor's side.\n"                                       //
-    "Calls `uform_image_encode_pixels`.\n"                                                             //
-    "\n"                                                                                               //
-    "Args:\n"                                                                                          //
-    "  pixels (Sequence[buffer]): C-contiguous [height, width, 3] buffers of uint8 RGB, gathered\n"    //
-    "    into one tape with their heights and widths.\n"                                               //
-    "  arena (Arena): Where the outputs land, rewound by the call.\n"                                  //
-    "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"                     //
+static char const doc_Model_image_encode_pixels[] =                                                 //
+    "image_encode_pixels(pixels, /, arena=None, *, outputs=Outputs.EMBEDDINGS, "                    //
+    "outputs_scalar=Scalar.F32, progress=None, progress_steps=0, stats=None) -> Encoded\n"          //
+    "\n"                                                                                            //
+    "Encodes decoded images, resizing on the executor's side.\n"                                    //
+    "Calls `uform_image_encode_pixels`.\n"                                                          //
+    "\n"                                                                                            //
+    "Args:\n"                                                                                       //
+    "  pixels (Sequence[buffer]): C-contiguous [height, width, 3] buffers of uint8 RGB, gathered\n" //
+    "    into one tape with their heights and widths.\n"                                            //
+    "  arena (Arena, optional): Where the outputs land, rewound; None makes one the result owns.\n" //
+    "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"                  //
     "  stats (ImageEncodeStats, optional): Overwritten with this call's report.";
 
 static PyObject* Model_image_encode_pixels(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
@@ -539,18 +538,18 @@ static PyObject* Model_image_encode_pixels(PyObject* self, PyObject* const* args
     return uform_py_call_run(&receiver, &image_encode_pixels_verb.verb, call);
 }
 
-static char const doc_Model_video_encode[] =                                                   //
-    "video_encode(files, arena, /, *, outputs=Outputs.EMBEDDINGS, outputs_scalar=Scalar.F32, " //
-    "progress=None, progress_steps=0, stats=None) -> Encoded\n"                                //
-    "\n"                                                                                       //
-    "Decodes and encodes MP4 or WebM clips.\n"                                                 //
-    "Calls `uform_video_encode`.\n"                                                            //
-    "\n"                                                                                       //
-    "Args:\n"                                                                                  //
-    "  files (Sequence[bytes-like] | tuple[buffer, buffer]): The encoded clips, or a (data,\n" //
-    "    offsets) pair read in place.\n"                                                       //
-    "  arena (Arena): Where the outputs land, rewound by the call.\n"                          //
-    "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"             //
+static char const doc_Model_video_encode[] =                                                        //
+    "video_encode(files, /, arena=None, *, outputs=Outputs.EMBEDDINGS, outputs_scalar=Scalar.F32, " //
+    "progress=None, progress_steps=0, stats=None) -> Encoded\n"                                     //
+    "\n"                                                                                            //
+    "Decodes and encodes MP4 or WebM clips.\n"                                                      //
+    "Calls `uform_video_encode`.\n"                                                                 //
+    "\n"                                                                                            //
+    "Args:\n"                                                                                       //
+    "  files (Sequence[bytes-like] | tuple[buffer, buffer]): The encoded clips, or a (data,\n"      //
+    "    offsets) pair read in place.\n"                                                            //
+    "  arena (Arena, optional): Where the outputs land, rewound; None makes one the result owns.\n" //
+    "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"                  //
     "  stats (VideoEncodeStats, optional): Overwritten with this call's report.";
 
 static PyObject* Model_video_encode(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
@@ -581,18 +580,18 @@ static PyObject* Model_video_encode(PyObject* self, PyObject* const* args, Py_ss
     return uform_py_call_run(&receiver, &video_encode_verb.verb, call);
 }
 
-static char const doc_Model_audio_encode[] =                                                   //
-    "audio_encode(files, arena, /, *, outputs=Outputs.EMBEDDINGS, outputs_scalar=Scalar.F32, " //
-    "progress=None, progress_steps=0, stats=None) -> Encoded\n"                                //
-    "\n"                                                                                       //
-    "Decodes, resamples to mono and encodes WAV, FLAC, MP3 or Opus recordings.\n"              //
-    "Calls `uform_audio_encode`.\n"                                                            //
-    "\n"                                                                                       //
-    "Args:\n"                                                                                  //
-    "  files (Sequence[bytes-like] | tuple[buffer, buffer]): The encoded recordings, or a\n"   //
-    "    (data, offsets) pair or Arrow binaries, read in place.\n"                             //
-    "  arena (Arena): Where the outputs land, rewound by the call.\n"                          //
-    "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"             //
+static char const doc_Model_audio_encode[] =                                                        //
+    "audio_encode(files, /, arena=None, *, outputs=Outputs.EMBEDDINGS, outputs_scalar=Scalar.F32, " //
+    "progress=None, progress_steps=0, stats=None) -> Encoded\n"                                     //
+    "\n"                                                                                            //
+    "Decodes, resamples to mono and encodes WAV, FLAC, MP3 or Opus recordings.\n"                   //
+    "Calls `uform_audio_encode`.\n"                                                                 //
+    "\n"                                                                                            //
+    "Args:\n"                                                                                       //
+    "  files (Sequence[bytes-like] | tuple[buffer, buffer]): The encoded recordings, or a\n"        //
+    "    (data, offsets) pair or Arrow binaries, read in place.\n"                                  //
+    "  arena (Arena, optional): Where the outputs land, rewound; None makes one the result owns.\n" //
+    "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"                  //
     "  stats (AudioEncodeStats, optional): Overwritten with this call's report.";
 
 static PyObject* Model_audio_encode(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
@@ -624,7 +623,7 @@ static PyObject* Model_audio_encode(PyObject* self, PyObject* const* args, Py_ss
 }
 
 static char const doc_Model_audio_encode_samples[] =                                                 //
-    "audio_encode_samples(samples, sample_rate, arena, /, *, outputs=Outputs.EMBEDDINGS, "           //
+    "audio_encode_samples(samples, sample_rate, /, arena=None, *, outputs=Outputs.EMBEDDINGS, "      //
     "outputs_scalar=Scalar.F32, progress=None, progress_steps=0, stats=None) -> Encoded\n"           //
     "\n"                                                                                             //
     "Encodes decoded mono recordings, resampled to the model's rate where `sample_rate` differs.\n"  //
@@ -634,7 +633,7 @@ static char const doc_Model_audio_encode_samples[] =                            
     "  samples (Sequence[buffer] | tuple[buffer, buffer]): 1-D float32 buffers, gathered into one\n" //
     "    tape, or a (data, offsets) pair counted in samples or Arrow float32 lists, in place.\n"     //
     "  sample_rate (int): Samples per second shared by every recording.\n"                           //
-    "  arena (Arena): Where the outputs land, rewound by the call.\n"                                //
+    "  arena (Arena, optional): Where the outputs land, rewound; None makes one the result owns.\n"  //
     "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"                   //
     "  stats (AudioEncodeStats, optional): Overwritten with this call's report.";
 
@@ -655,7 +654,7 @@ static PyObject* Model_audio_encode_samples(PyObject* self, PyObject* const* arg
         {"stats", &parsed.stats},
     };
     size_t sample_rate = 0;
-    if (uform_py_arguments_parse("audio_encode_samples", args, positional_args_count, args_names_tuple, 3, 3, arguments,
+    if (uform_py_arguments_parse("audio_encode_samples", args, positional_args_count, args_names_tuple, 2, 3, arguments,
                                  sizeof(arguments) / sizeof(*arguments)) != 0 ||
         uform_py_size_from_object(parsed.sample_rate, "sample_rate", &sample_rate) != 0)
         return NULL;
@@ -704,7 +703,7 @@ static void text_choose_submit(void* call) { uform_text_choose(&((choose_call_t*
 static PyObject* choose_answer(void* erased) {
     choose_call_t* const call = (choose_call_t*)erased;
     size_t const count = call->texts.count, *const offsets = call->choices.view.offsets;
-    return uform_py_tape_answer(call->call.arena, &call->probabilities, count, offsets[count] - offsets[0]);
+    return uform_py_tape_answer(erased, &call->probabilities, count, offsets[count] - offsets[0]);
 }
 
 static void choose_release(void* erased) {
@@ -728,7 +727,7 @@ static uform_py_verb_t const text_choose_verb = {sizeof(choose_call_t), text_cho
                                                  choose_release, choose_traverse};
 
 static char const doc_Model_text_choose[] =                                                        //
-    "text_choose(texts, choices, arena, /, *, temperature_groups=None, progress=None, "            //
+    "text_choose(texts, choices, /, arena=None, *, temperature_groups=None, progress=None, "       //
     "progress_steps=0, stats=None) -> RowsTape\n"                                                  //
     "\n"                                                                                           //
     "Scores each text's legal choices through one forward, a softmax over them alone at the\n"     //
@@ -741,7 +740,7 @@ static char const doc_Model_text_choose[] =                                     
     "    choice goes; one longer than the context loses its head, never its end.\n"                //
     "  choices (Sequence[str | bytes] | tuple[buffer, buffer]): Each text's legal choices, one\n"  //
     "    byte each, such as 'yn'; an empty entry chooses nothing.\n"                               //
-    "  arena (Arena): Where the probabilities land, rewound by the call.\n"                        //
+    "  arena (Arena, optional): Where they land, rewound; None makes one the result owns.\n"       //
     "  temperature_groups (buffer | Sequence[int], optional): The question type of each text,\n"   //
     "    below `choice_temperature_groups`; None puts every text in group zero.\n"                 //
     "  progress, progress_steps: As for `text_encode`.\n"                                          //
@@ -763,7 +762,7 @@ static PyObject* Model_text_choose(PyObject* self, PyObject* const* args, Py_ssi
     };
     uform_py_receiver_t receiver;
     size_t progress_steps = 0;
-    if (uform_py_arguments_parse("text_choose", args, positional_args_count, args_names_tuple, 3, 3, arguments,
+    if (uform_py_arguments_parse("text_choose", args, positional_args_count, args_names_tuple, 2, 3, arguments,
                                  sizeof(arguments) / sizeof(*arguments)) != 0 ||
         uform_py_receiver_from_object(self, &ModelType, &receiver) != 0 ||
         uform_py_size_from_object(progress_steps_object, "progress_steps", &progress_steps) != 0)
@@ -789,7 +788,7 @@ static PyObject* Model_text_choose(PyObject* self, PyObject* const* args, Py_ssi
     if (uform_py_words_from_object(temperature_groups_object, "temperature_groups", count, &call->temperature_groups) !=
             0 ||
         uform_py_callable_from_object(progress_object, "progress", &call->progress) != 0 ||
-        uform_py_call_hold_arena(&call->call, arena_object) != 0)
+        uform_py_call_hold_arena((uform_py_call_t*)call, &receiver, arena_object) != 0)
         return uform_py_call_discard(&receiver, &text_choose_verb, call);
     if (stats_object && stats_object != Py_None) call->stats_object = Py_NewRef(stats_object);
     call->arguments = (uform_text_choose_t) {

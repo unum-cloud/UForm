@@ -73,13 +73,12 @@ import numpy as np
 import uform
 
 executor = uform.Executor.for_ram()  # the threads every receiver names
-arena = uform.Arena(executor)  # where outputs land; each call rewinds it
 model = uform.Model.load_ram("model.safetensors")
 
 captions = ["a cat on a mat", "a sunrise over the bay"]
-texts = np.array(model.on(executor).text_encode(captions, arena).embeddings)  # a copy outlives the next call
+texts = np.array(model.on(executor).text_encode(captions).embeddings)  # each call owns a fresh arena
 with open("cat.png", "rb") as photo:
-    image = np.array(model.on(executor).image_encode([photo.read()], arena).embeddings)[0]
+    image = np.array(model.on(executor).image_encode([photo.read()]).embeddings)[0]
 
 cosines = texts @ image / (np.linalg.norm(texts, axis=1) * np.linalg.norm(image))
 print(f"{captions[cosines.argmax()]!r} describes the photo best")

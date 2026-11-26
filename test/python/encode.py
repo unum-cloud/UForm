@@ -248,6 +248,46 @@ def test_a_live_buffer_view_refuses_reuse_of_its_arena(model: uform.Model, arena
     model.text_encode(TEXTS, arena)
 
 
+def test_a_result_of_an_earlier_call_is_stale(model: uform.Model, arena: uform.Arena):
+    """Once a later call rewinds the arena, an earlier result refuses every read of its memory."""
+    earlier = model.text_encode(TEXTS, arena).embeddings
+    later = model.text_encode(TEXTS, arena).embeddings
+    with pytest.raises(ValueError):  # noqa: PT011 - the stale result raises the built-in alone
+        memoryview(earlier)
+    with pytest.raises(ValueError):  # noqa: PT011 - the stale result raises the built-in alone
+        earlier.__dlpack__()
+    assert len(earlier) == len(later)
+    assert bytes(memoryview(later))
+
+
+def test_a_deferred_call_naming_the_arena_makes_earlier_results_stale(
+    model: uform.Model, executor: uform.Executor, arena: uform.Arena
+):
+    """A deferred call takes its arena as it is submitted, so an earlier result over the arena reads as stale at once."""
+    earlier = model.text_encode(TEXTS, arena).embeddings
+    pending = model.deferred(executor).text_encode(TEXTS[:1], arena)
+    with pytest.raises(ValueError):  # noqa: PT011 - the stale result raises the built-in alone
+        memoryview(earlier)
+    assert len(memoryview(pending.wait().embeddings)) == 1
+
+
+def test_calls_without_an_arena_own_a_fresh_one(model: uform.Model, executor: uform.Executor):
+    """A call naming no arena writes into a fresh one its result owns, so results of separate calls stay valid."""
+    first = model.text_encode(TEXTS).embeddings
+    second = model.on(executor).text_encode(TEXTS, outputs=uform.Outputs.EMBEDDINGS).embeddings
+    third = model.deferred(executor).text_encode(TEXTS).wait().embeddings
+    assert bytes(memoryview(first)) == bytes(memoryview(second)) == bytes(memoryview(third))
+
+
+def test_closing_an_executor_stops_its_verbs_and_keeps_results(model: uform.Model):
+    """Leaving an executor's `with` block stops its verbs, and results over its arenas stay readable."""
+    with uform.Executor.for_ram() as pool:
+        embeddings = model.on(pool).text_encode(TEXTS).embeddings
+    assert bytes(memoryview(embeddings))
+    with pytest.raises(uform.UninitializedError):
+        model.on(pool).text_encode(TEXTS)
+
+
 def test_a_tape_pair_past_its_data_is_refused(model: uform.Model, arena: uform.Arena):
     """Offsets ending past the data would read out of bounds, so the binding refuses them."""
     with pytest.raises(uform.ShapeMismatchError):

@@ -429,7 +429,7 @@ def test_a_later_call_retires_earlier_rows() raises:
         _ = first.row[DType.float32](0)
     except error:
         refused = error.status
-    assert_true(refused == Status.INVALID_ARGUMENT, "a rewound arena's rows must be refused")
+    assert_true(refused == Status.CONTENDED, "a rewound arena's rows must be refused")
 
 
 def test_deferred_encoding_matches_the_blocking_one() raises:

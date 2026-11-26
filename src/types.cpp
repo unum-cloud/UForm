@@ -24,14 +24,13 @@ using namespace unum::uform;
 
 #pragma region Executor Calls
 
-/** Holds @p arena for the call whose published outcome is @p call, answering whether it was free or
- *  already that call's; a null arena holds nothing, left for the verb to refuse. */
-static bool hold_arena(uform_arena_t arena, uform_outcome_t const* call) noexcept {
-    if (!arena) return true;
+arena_hold_t uf::hold_arena(uform_arena_t arena, uform_outcome_t const* call) noexcept {
+    if (!arena) return arena_hold_t::retaken_k;
     uform_outcome_t const* holder = nullptr;
     // Sequentially consistent, as an export opening re-reads the holder after its own count
-    return fu::standard_atomic_ref<uform_outcome_t const*> {arena->holder}.compare_exchange_strong(holder, call) ||
-           holder == call;
+    if (fu::standard_atomic_ref<uform_outcome_t const*> {arena->holder}.compare_exchange_strong(holder, call))
+        return arena_hold_t::taken_k;
+    return holder == call ? arena_hold_t::retaken_k : arena_hold_t::refused_k;
 }
 
 void uf::release_arena(uform_arena_t arena, uform_outcome_t const* call) noexcept {
@@ -98,12 +97,19 @@ uform_arena_t uf::claim_arena(uform_arena_t arena, uform_executor_t executor, st
                nullptr;
     if (!arena_on_device && executor && !std::holds_alternative<std::monostate>(executor->device))
         return propagate_error(uform_status_device_k, outcome, "Host pages serve no call computing on a GPU"), nullptr;
-    if (!hold_arena(arena, outcome.published()))
+    // A call on an executor took the arena at its entry, which checked the exports and advanced it
+    arena_hold_t const hold = hold_arena(arena, outcome.published());
+    if (hold == arena_hold_t::refused_k)
         return propagate_error(uform_status_contended_k, outcome, "The arena serves another call"), nullptr;
-    // An export opened between the entry's check and the hold above sees the hold and backs out,
-    // or this load sees its count
-    if (fu::standard_atomic_ref<util::u32_t> {arena->exports}.load())
-        return propagate_error(uform_status_contended_k, outcome, "An export of the arena's outputs is open"), nullptr;
+    if (hold == arena_hold_t::taken_k) {
+        // An export opened between the entry's check and the hold above sees the hold and backs
+        // out, or this load sees its count
+        if (fu::standard_atomic_ref<util::u32_t> {arena->exports}.load())
+            return propagate_error(uform_status_contended_k, outcome, "An export of the arena's outputs is open"),
+                   nullptr;
+        // Relaxed, as the arena hold's release and the export handshake order it for readers
+        fu::standard_atomic_ref<util::u64_t> {arena->generation}.fetch_add(1, std::memory_order_relaxed);
+    }
     for (void const* input : inputs)
         if (input && arena->chunks.contains(input))
             return propagate_error(uform_status_invalid_argument_k, outcome,
@@ -628,6 +634,11 @@ UFORM_EXPORT void uform_arena_export_close(uform_arena_t arena) {
     util::u32_t open = exports.load(std::memory_order_relaxed);
     while (open &&
            !exports.compare_exchange_weak(open, open - 1, std::memory_order_release, std::memory_order_relaxed));
+}
+
+UFORM_EXPORT uint64_t uform_arena_generation(uform_arena_t arena) {
+    if (!arena) return 0;
+    return fu::standard_atomic_ref<util::u64_t> {arena->generation}.load(std::memory_order_relaxed);
 }
 
 UFORM_EXPORT void uform_arena_describe(uform_arena_describe_t* arguments) {
