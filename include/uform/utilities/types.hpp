@@ -142,7 +142,7 @@ inline constexpr unsigned kernel_block_size_default_k = 256u;
 /**
  *  @brief The typical upper bound on the number of GPUs attached to the same host process
  *      within the same "multimem" domain.
- *  @sa Defines the upper bound for @ref unum::uform::utilities::mesh_shape_t::gpus_per_host_domain.
+ *  @sa Defines the upper bound for @ref util::mesh_shape_t::gpus_per_host_domain.
  */
 inline constexpr unsigned max_gpus_per_host_k = 32u;
 
@@ -289,8 +289,8 @@ struct splitmix64_hash_t {
 };
 
 /** The keyed bijection over @c [0,count) : a 4-round Feistel — its round the one
- *  @ref unum::uform::utilities::splitmix64_hash_t — over the smallest even-bit domain covering
- *  @p count , cycle-walked back into range. Identical on every host and GPU for the same
+ *  @ref util::splitmix64_hash_t — over the smallest even-bit domain covering @p count ,
+ *  cycle-walked back into range. Identical on every host and GPU for the same
  *  @c (seed,data_epoch) , so no shuffle ever needs an exchange, and @b without replacement (a
  *  bijection) — the guarantee the hasher's draws, which collide, cannot give. */
 [[nodiscard]] constexpr std::size_t epoch_permutation(u64_t seed, data_epoch_t data_epoch, std::size_t index,

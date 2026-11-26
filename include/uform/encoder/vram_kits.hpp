@@ -48,7 +48,7 @@ struct vram_nvidia_entries_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_cuda_k;
 
     /** The executor whose streams every step queues on, and one stream record of it. */
-    using executor_t = uu::cuda_executor_t;
+    using executor_t = util::cuda_executor_t;
     using stream_t = executor_t::stream_t;
 
     /** The raw handle of @p stream that NumKong's kernels take. */
@@ -67,13 +67,13 @@ struct vram_nvidia_entries_kit_t {
 
     /** What this build holds NumKong code for that the device's loader runs, its vendor's group
      *  bit included; zero when the runtime refuses. */
-    static nk_capability_t capabilities_compiled(uu::gpu_device_t const& device) noexcept;
+    static nk_capability_t capabilities_compiled(util::gpu_device_t const& device) noexcept;
 
     /** @p source into @p target , as long, either side in host or device memory. */
-    static nk_status_t copy(uu::bytes_span_t target, uu::bytes_view_t source, stream_t& stream) noexcept;
+    static nk_status_t copy(util::bytes_span_t target, util::bytes_view_t source, stream_t& stream) noexcept;
 
     /** Zeros into device memory at @p target . */
-    static nk_status_t zero(uu::bytes_span_t target, stream_t& stream) noexcept;
+    static nk_status_t zero(util::bytes_span_t target, stream_t& stream) noexcept;
 
     /** Prefix sums of @p lengths into @p packed_offsets @b [segments+1] , and @c pool_offsets[s]=s
      *  over @b [segments+1] , the one query row per item the pool attends with. */
@@ -104,16 +104,16 @@ struct vram_nvidia_entries_kit_t {
 /** AMD's twin of @ref vram_nvidia_entries_kit_t , which @c vram_entries_amd.cpp defines. */
 struct vram_amd_entries_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    using executor_t = uu::hip_executor_t;
+    using executor_t = util::hip_executor_t;
     using stream_t = executor_t::stream_t;
     static nk_stream_t raw(stream_t& stream) noexcept {
         return static_cast<nk_stream_t>(static_cast<void*>(stream.handle)); // vendor-boundary: an opaque handle
     }
     static void bind(std::size_t vendor_ordinal) noexcept;
     static nk_allocator_t policy(stream_t& stream) noexcept;
-    static nk_capability_t capabilities_compiled(uu::gpu_device_t const& device) noexcept;
-    static nk_status_t copy(uu::bytes_span_t target, uu::bytes_view_t source, stream_t& stream) noexcept;
-    static nk_status_t zero(uu::bytes_span_t target, stream_t& stream) noexcept;
+    static nk_capability_t capabilities_compiled(util::gpu_device_t const& device) noexcept;
+    static nk_status_t copy(util::bytes_span_t target, util::bytes_view_t source, stream_t& stream) noexcept;
+    static nk_status_t zero(util::bytes_span_t target, stream_t& stream) noexcept;
     static nk_status_t fill_layout(u32r1_view_t lengths, u32r1_span_t packed_offsets, u32r1_span_t pool_offsets,
                                    stream_t& stream) noexcept;
     static nk_status_t fill_coords(segment_layout_t layout, nk::tensor_view<u16_t, 2> image_shapes,
@@ -145,7 +145,7 @@ struct vram_amd_entries_kit_t {
  */
 struct vram_apple_entries_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_metal_k;
-    using executor_t = uu::metal_executor_t;
+    using executor_t = util::metal_executor_t;
     using stream_t = executor_t::stream_t;
 
     /** @p stream as the opaque handle Apple's kits take, which they turn back into the record to
@@ -161,9 +161,9 @@ struct vram_apple_entries_kit_t {
 
     /** The Metal families the device's newest family reaches, as its kernels compile there at
      *  first use. */
-    static nk_capability_t capabilities_compiled(uu::gpu_device_t const& device) noexcept;
-    static nk_status_t copy(uu::bytes_span_t target, uu::bytes_view_t source, stream_t& stream) noexcept;
-    static nk_status_t zero(uu::bytes_span_t target, stream_t& stream) noexcept;
+    static nk_capability_t capabilities_compiled(util::gpu_device_t const& device) noexcept;
+    static nk_status_t copy(util::bytes_span_t target, util::bytes_view_t source, stream_t& stream) noexcept;
+    static nk_status_t zero(util::bytes_span_t target, stream_t& stream) noexcept;
     static nk_status_t fill_layout(u32r1_view_t lengths, u32r1_span_t packed_offsets, u32r1_span_t pool_offsets,
                                    stream_t& stream) noexcept;
     static nk_status_t fill_coords(segment_layout_t layout, nk::tensor_view<u16_t, 2> image_shapes,

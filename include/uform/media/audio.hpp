@@ -18,16 +18,14 @@
 
 namespace unum::uform::media {
 
-namespace uu = unum::uform::utilities;
-
-using uu::b8_t;
-using uu::bytes_view_t;
-using uu::expected_t;
-using uu::f32_t;
-using uu::f32r1_span_t;
-using uu::status_code_t;
-using uu::status_t;
-using uu::u32_t;
+using util::b8_t;
+using util::bytes_view_t;
+using util::expected_t;
+using util::f32_t;
+using util::f32r1_span_t;
+using util::status_code_t;
+using util::status_t;
+using util::u32_t;
 
 /**
  *  @brief Decode one encoded clip and resample it to mono Float32 at @p sample_rate , filling all

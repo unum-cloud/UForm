@@ -15,7 +15,7 @@
  *         every peer host_domain's published facts, and the once-per-job exchange primitives later
  *         wiring phases reuse.
  *      4. @ref make_mesh_shape / @ref discover_mesh_shape /
- *         @ref unum::uform::utilities::mesh_topology_t::bootstrap — the
+ *         @ref util::mesh_topology_t::bootstrap — the
  *         validated construction paths.
  *
  *  @section mesh_purpose Purpose — why a bootstrap exchange exists at all
@@ -35,9 +35,9 @@
  *
  *  Secondary roles, in descending importance: @b phase @b ordering (arenas allocated → MRs
  *  registered → QPs connected → training starts;
- *  @ref unum::uform::utilities::mesh_topology_t::barrier keeps any host_domain from running ahead),
- *  @b agreement @b validation (GPU model, count and class, world size, multimem extent, schema and
- *  job identity), and @b boot @b verification (a bounded await turns a wedged host_domain into a
+ *  @ref util::mesh_topology_t::barrier keeps any host_domain from running ahead), @b agreement
+ *  @b validation (GPU model, count and class, world size, multimem extent, schema and job
+ *  identity), and @b boot @b verification (a bounded await turns a wedged host_domain into a
  *  named failure, never a hang). The exchange runs once per job, before step 0; the moment the
  *  transport is wired, all synchronization moves onto NVLink / InfiniBand and the directory is
  *  never touched again.
@@ -238,15 +238,15 @@ struct mesh_location_t {
 /**
  *  @brief Discover the single-host_domain shape: all three domains span the visible devices.
  *
- *  Neither multicast nor P2P is required here: a @ref unum::uform::utilities::multimem_domain_t
+ *  Neither multicast nor P2P is required here: a @ref util::multimem_domain_t
  *  without multicast runs its peer-read tier, and only a domain asks
- *  @ref unum::uform::utilities::peers_reach_each_other of its own members.
+ *  @ref util::peers_reach_each_other of its own members.
  *
  *  Covers the common one-box world (an HGX box driven by one process); the multi-host_domain world
- *  builds on it through @ref unum::uform::utilities::mesh_topology_t::bootstrap . The probe sees
- *  @b only this process's devices — a wider fabric extent (NVL72 / NVL144) is explicit
- *  configuration, cross-checked during the exchange and proven when the multicast object binds.
- *  Requires @c cuInit to have run; needs no CUDA context.
+ *  builds on it through @ref util::mesh_topology_t::bootstrap . The probe sees @b only this
+ *  process's devices — a wider fabric extent (NVL72 / NVL144) is explicit configuration,
+ *  cross-checked during the exchange and proven when the multicast object binds. Requires
+ *  @c cuInit to have run; needs no CUDA context.
  */
 [[nodiscard]] inline expected<mesh_shape_t> discover_mesh_shape() noexcept {
     int device_count = 0;
@@ -320,7 +320,7 @@ struct mesh_host_domain_t {
     char device_name[device_name_capacity_k] = {};
 };
 
-/** Why a kernel trapped — the meaning of a @ref unum::uform::utilities::gpu_fault_t
+/** Why a kernel trapped — the meaning of a @ref util::gpu_fault_t
  *  's three operands. */
 enum class gpu_fault_code_t : u32_t {
     none_k = 0,
@@ -1117,9 +1117,8 @@ struct mesh_topology_t {
  *  @c $UFORM_HOST_DOMAIN_INDEX , then Slurm's @c $SLURM_NODEID , then Open MPI's
  *  @c $OMPI_COMM_WORLD_RANK ; 0 if none is set. Reading the launcher's environment costs nothing
  *  and links nothing — no MPI library enters the build. Identity only: it selects @b which
- *  host_domain, never a count — the counts are explicit
- *  @ref unum::uform::utilities::mesh_topology_t::bootstrap arguments, so a misconfigured launcher
- *  cannot change the math. */
+ *  host_domain, never a count — the counts are explicit @ref util::mesh_topology_t::bootstrap
+ *  arguments, so a misconfigured launcher cannot change the math. */
 [[nodiscard]] inline u32_t host_domain_index_from_environment() noexcept {
     // `std::getenv` speaks C strings; the names never escape this loop.
     char const* const variables[] = {"UFORM_HOST_DOMAIN_INDEX", "SLURM_NODEID", // vendor-boundary
@@ -1132,10 +1131,10 @@ struct mesh_topology_t {
 
 /** The world's host_domain count, read at the @b launcher boundary — @c $UFORM_HOST_DOMAIN_COUNT ,
  *  then Slurm's @c $SLURM_JOB_NUM_NODES , then Open MPI's @c $OMPI_COMM_WORLD_SIZE ; 1 if none is
- *  set. For the mains alone, which pass the count on as
- *  @ref unum::uform::utilities::mesh_topology_t::bootstrap 's explicit argument — bootstrap itself
- *  never reads it, so a misconfigured launcher cannot change the math behind an already-constructed
- *  world. The whole contract is tabled in @c scripts/slurm/README.md . */
+ *  set. For the mains alone, which pass the count on as @ref util::mesh_topology_t::bootstrap 's
+ *  explicit argument — bootstrap itself never reads it, so a misconfigured launcher cannot change
+ *  the math behind an already-constructed world. The whole contract is tabled in
+ *  @c scripts/slurm/README.md . */
 [[nodiscard]] inline u32_t host_domain_count_from_environment() noexcept {
     // `std::getenv` speaks C strings; the names never escape this loop.
     char const* const variables[] = {"UFORM_HOST_DOMAIN_COUNT", "SLURM_JOB_NUM_NODES", // vendor-boundary

@@ -7,8 +7,8 @@
  *
  *  Every verb takes its path as a view and terminates it on the stack in the encoding the platform
  *  calls take, UTF-16 on Windows, so no verb allocates on the heap. After a crash
- *  @ref unum::uform::utilities::replace_file_durably leaves either the old file or the new one
- *  whole, which is what checkpoints and the mesh exchange files rely on.
+ *  @ref util::replace_file_durably leaves either the old file or the new one whole, which is what
+ *  checkpoints and the mesh exchange files rely on.
  */
 #pragma once
 

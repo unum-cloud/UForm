@@ -6,11 +6,11 @@
  *      through @c multimem PTX over one shared multicast object — the level-1 transport of the
  *      two-level contrastive step and the distributed optimizer.
  *
- *  The domain's replicas live in one @ref unum::uform::utilities::gpu_symmetric_arena_t : a single
- *  contiguous VA range whose per-member slices are physically resident on each member's device, so
- *  a peer's address is @c base+member · stride — plain arithmetic, no pointer tables anywhere.
- *  Every member additionally binds its slice into one multicast object, and one multicast address
- *  reaches all replicas at once. That turns the collective the loss and optimizer steps need — the
+ *  The domain's replicas live in one @ref util::gpu_symmetric_arena_t : a single contiguous VA
+ *  range whose per-member slices are physically resident on each member's device, so a peer's
+ *  address is @c base+member · stride — plain arithmetic, no pointer tables anywhere. Every member
+ *  additionally binds its slice into one multicast object, and one multicast address reaches all
+ *  replicas at once. That turns the collective the loss and optimizer steps need — the
  *  @b reduce-scatter — into a single instruction per element: a member issues
  *  @c multimem.ld_reduce.add.f32 over its shard of the multicast range, and the NVSwitch returns
  *  the @b sum across every member's replica in one load, deterministic by construction (one fused
@@ -288,7 +288,7 @@ struct multimem_tier_choice_t {
 
     multimem_tier_t tier = multimem_tier_t::peer_read_k;
 
-    /** Why the domain runs @ref unum::uform::utilities::multimem_domain_t::tier , naming the device
+    /** Why the domain runs @ref util::multimem_domain_t::tier , naming the device
      *  and the failure when it fell back. */
     sz::string_t reason {};
 
@@ -383,8 +383,8 @@ struct multimem_window_t {
 
 /**
  *  @brief One multimem_domain's collective surface: every member's same-sized Float32 replica
- *      inside one @ref unum::uform::utilities::gpu_symmetric_arena_t , bound into one multicast
- *      object — the replicas @b are whatever force or gradient surface the consumers reduce over.
+ *      inside one @ref util::gpu_symmetric_arena_t , bound into one multicast object — the
+ *      replicas @b are whatever force or gradient surface the consumers reduce over.
  *
  *  Created @b once in main, sized for every consumer's window (each exposes a
  *  @c payload_scalars_needed helper), and threaded by reference — multicast objects are a scarce
@@ -400,9 +400,8 @@ struct multimem_window_t {
  *
  *  Falls back to the peer-read tier when multicast is unsupported or the switch kernels do not load
  *  — same API, same determinism, the reduce just walks members serially.
- *  @ref unum::uform::utilities::multimem_domain_t::tier() names which one is live and
- *  @ref description says why. Every local pair of members must reach each other over P2P, or
- *  @ref make refuses.
+ *  @ref util::multimem_domain_t::tier() names which one is live and @ref description says why.
+ *  Every local pair of members must reach each other over P2P, or @ref make refuses.
  */
 struct multimem_domain_t {
 
@@ -454,7 +453,7 @@ struct multimem_domain_t {
     /** The reduction tier this domain runs — see @ref multimem_tier_t . */
     [[nodiscard]] multimem_tier_t tier() const noexcept { return tier_.tier; }
 
-    /** Why the domain runs its @ref unum::uform::utilities::multimem_domain_t::tier , naming the
+    /** Why the domain runs its @ref util::multimem_domain_t::tier , naming the
      *  failed check when it fell back to reading peers. */
     [[nodiscard]] sz::string_view_t description() const noexcept { return tier_.reason.view(); }
 

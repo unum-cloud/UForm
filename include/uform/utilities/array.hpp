@@ -4,9 +4,9 @@
  *  @date July 2, 2026
  *  @brief Exception-free fixed-capacity arrays with inline storage, for the per-GPU object tables.
  *
- *  @ref unum::uform::utilities::stack_array holds up to a compile-time number of elements inline
+ *  @ref util::stack_array holds up to a compile-time number of elements inline
  *  and can never throw: every fallible operation returns a @c [[nodiscard]]
- *  @ref unum::uform::utilities::status_t , copies are deleted, and moves are @c noexcept by
+ *  @ref util::status_t , copies are deleted, and moves are @c noexcept by
  *  construction. Growable arrays are @c st::basic_vector .
  */
 #pragma once

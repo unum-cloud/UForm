@@ -215,7 +215,7 @@ Engines receive these as template parameters and never spell a class, an instruc
 Includes form groups separated by blank lines: C library headers such as `<cstdint>`, platform headers such as `<unistd.h>`, C++ standard headers, external libraries such as `<yyjson.h>`, sibling projects such as `<numkong/tensor.hpp>`, then UForm's own headers in quotes.
 Those come last in three groups of their own: the C ABI as `"uform/types.h"`, the families as `"uform/<dir>/..."`, and the private headers of `src/` such as `"lib.hpp"`.
 Each include line names in a trailing comment what the file takes from it.
-Sibling projects are reached through the aliases `fu`, `nk`, `sz` and `st`, and the families through `uu`, `ue`, `um`, `ul` and `ut`, as [`include/uform/README.md`](include/uform/README.md) lists.
+Sibling projects are reached through the aliases `fu`, `nk`, `sz` and `st`, and the families through `util`, `ue`, `um`, `ul` and `ut`, as [`include/uform/README.md`](include/uform/README.md) lists.
 CUDA sources call the Driver API alone, never include `<cuda_runtime.h>`, and launch kernels through `launch_kernel` or `cuLaunchKernel`, never through triple chevrons.
 The library never prints, and suites, tools and benchmarks print whole lines through `fmt::println`, never through `printf`, `fprintf` or iostreams, while the C tests keep their stdio.
 Return types are declared before the name, never after an arrow.

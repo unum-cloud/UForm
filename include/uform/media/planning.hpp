@@ -17,16 +17,15 @@
 namespace unum::uform::media {
 
 namespace ue = unum::uform::encoder;
-namespace uu = unum::uform::utilities;
 namespace fu = ashvardanian::forkunion;
 namespace nk = ashvardanian::numkong;
 namespace st = ashvardanian::smashtable;
 
 using ue::video_batch_shape_t;
-using uu::f64_t;
-using uu::u16_t;
-using uu::u32_t;
-using uu::u64_t;
+using util::f64_t;
+using util::u16_t;
+using util::u32_t;
+using util::u64_t;
 
 /** A picture's pixel dimensions — a size travels as one value, not two loose scalars. */
 struct image_extent_t {

@@ -36,7 +36,7 @@ struct vram_placer {
         target = placed_array<value_type_> {nk::allocator<value_type_> {allocator}};
         if (values.empty()) return {};
         if (st::failed(target.resize(st::assume_uninitialized, values.size())))
-            return expected_t::fail(uu::status_code_t::out_of_memory_k, "{} allocation failed ({} bytes)", what,
+            return expected_t::fail(util::status_code_t::out_of_memory_k, "{} allocation failed ({} bytes)", what,
                                     values.size_bytes());
         return checked(entries_kit_type_::copy(std::as_writable_bytes(std::span<value_type_> {target}),
                                                std::as_bytes(values), *stream),
@@ -70,11 +70,11 @@ struct vram_steps {
         return checked(body(0, tasks), what);
     }
 
-    [[nodiscard]] expected_t zero(uu::bytes_span_t target) noexcept {
+    [[nodiscard]] expected_t zero(util::bytes_span_t target) noexcept {
         return checked(entries_kit_t::zero(target, *stream_record), "zeroing");
     }
 
-    [[nodiscard]] expected_t copy(uu::bytes_span_t target, uu::bytes_view_t source) noexcept {
+    [[nodiscard]] expected_t copy(util::bytes_span_t target, util::bytes_view_t source) noexcept {
         return checked(entries_kit_t::copy(target, source, *stream_record), "copying");
     }
 
@@ -146,7 +146,7 @@ struct vram_tower {
      *  - @c status_code_t::invalid_argument_k A tensor is missing or misshapen.
      *  - @c status_code_t::device_k The device failed the copies.
      */
-    [[nodiscard]] static expected<vram_tower> make(uu::checkpoint_to_load_t const& checkpoint,
+    [[nodiscard]] static expected<vram_tower> make(util::checkpoint_to_load_t const& checkpoint,
                                                    geometry_t const& geometry, precision_t precision,
                                                    nk_allocator_t policy,
                                                    typename entries_kit_type_::stream_t& stream) noexcept {

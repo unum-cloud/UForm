@@ -9,15 +9,14 @@
  *  @section checkpoint_containers Two containers, two directions
  *
  *  The checkpoint types are the containers — no caller-side table of views to materialize. Both are
- *  host-only: a device-resident model downloads into
- *  @ref unum::uform::utilities::checkpoint_to_save_t and uploads out of
- *  @ref unum::uform::utilities::checkpoint_to_load_t with its own copies.
- *  @ref unum::uform::utilities::checkpoint_to_save_t snapshots each inserted tensor into its
- *  payload immediately, so training may keep mutating the source; @c checkpoint_to_save_t::save is
- *  then pure host I/O. @ref unum::uform::utilities::checkpoint_to_load_t maps a whole file once and
- *  hands out zero-copy by-name views into the mapping — the caller copies what it wants and decides
- *  what a missing name means, which is the whole warm-start policy: a masked-pretraining checkpoint
- *  fills the shared encoder, the objective heads come back empty, and the caller re-seeds them.
+ *  host-only: a device-resident model downloads into @ref util::checkpoint_to_save_t and uploads
+ *  out of @ref util::checkpoint_to_load_t with its own copies. @ref util::checkpoint_to_save_t
+ *  snapshots each inserted tensor into its payload immediately, so training may keep mutating the
+ *  source; @c checkpoint_to_save_t::save is then pure host I/O. @ref util::checkpoint_to_load_t
+ *  maps a whole file once and hands out zero-copy by-name views into the mapping — the caller
+ *  copies what it wants and decides what a missing name means, which is the whole warm-start
+ *  policy: a masked-pretraining checkpoint fills the shared encoder, the objective heads come back
+ *  empty, and the caller re-seeds them.
  *
  *  Each cell's @c fill spells its own weights' names — the tower its structure ( @c embedding ,
  *  @c blocks.{i}.qkv , … ), each objective head its instance name — and the composition root adds

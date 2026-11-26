@@ -25,14 +25,14 @@
 
 namespace unum::uform::media {
 
-using uu::b8_t;
-using uu::bytes_view_t;
-using uu::expected;
-using uu::expected_t;
-using uu::pixel_t;
-using uu::status_code_t;
-using uu::status_t;
-using uu::u8_t;
+using util::b8_t;
+using util::bytes_view_t;
+using util::expected;
+using util::expected_t;
+using util::pixel_t;
+using util::status_code_t;
+using util::status_t;
+using util::u8_t;
 
 /** The channels every decoded pixel has — interleaved RGBA. */
 inline constexpr u32_t image_channels_k = 4u;

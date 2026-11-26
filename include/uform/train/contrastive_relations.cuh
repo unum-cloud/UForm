@@ -43,12 +43,11 @@
  *  invariant host-side, where the data still is, and fails @b loudly (capacity overflow included:
  *  an overflowing graph is an error, never a silent fallback to the self-edge default).
  *
- *  The device columns are NumKong rank-1 tensors owning memory through
- *  @ref unum::uform::utilities::gpu_arena_alloc — allocated @b once at fixed capacity, so device
- *  addresses never change; only per-step @b contents are re-uploaded, and a captured graph replays
- *  against fresh edges. One loud exception: the view a kernel took @b by value at capture bakes in
- *  the explicit-vs-self-edge mode — flipping between them requires a @b recapture; contents-only
- *  changes never do.
+ *  The device columns are NumKong rank-1 tensors owning memory through @ref util::gpu_arena_alloc
+ *  — allocated @b once at fixed capacity, so device addresses never change; only per-step
+ *  @b contents are re-uploaded, and a captured graph replays against fresh edges. One loud
+ *  exception: the view a kernel took @b by value at capture bakes in the explicit-vs-self-edge
+ *  mode — flipping between them requires a @b recapture; contents-only changes never do.
  */
 #pragma once
 
@@ -495,9 +494,8 @@ template <typename alloc_type_>
 
 /**
  *  @brief The host owner of the relation graph — one memory-owning NumKong tensor per column,
- *      allocated through @ref unum::uform::utilities::gpu_arena_alloc at fixed capacity,
- *      re-uploaded per step, and viewed by kernels through @ref contrastive_relations_view_t
- *      windows over the live extents.
+ *      allocated through @ref util::gpu_arena_alloc at fixed capacity, re-uploaded per step, and
+ *      viewed by kernels through @ref contrastive_relations_view_t windows over the live extents.
  *
  *  Eight columns: three offset rows @b [max_vertices+1] , three id runs @b [max_edges] , two score
  *  runs @b [max_edges] . Addresses never change after @ref make — the capture-stability contract —

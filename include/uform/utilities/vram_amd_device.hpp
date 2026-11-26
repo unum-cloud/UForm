@@ -6,10 +6,10 @@
  *      use, and the stream, event and module owners every AMD executor queues through.
  *
  *  The inference library never links @c libamdhip64 , so it loads on a machine without ROCm:
- *  @ref unum::uform::utilities::hip_api_t::load opens it, and a machine without it keeps an empty
- *  table. Plain C++ needing no SDK: the types, constants and prototypes the table calls are spelled
- *  here, copied from the runtime's stable ABI, so any host compiler builds the launches. Every
- *  sibling engine carries the @c Shared @c VRAM regions word for word, which @c selftest checks.
+ *  @ref util::hip_api_t::load opens it, and a machine without it keeps an empty table. Plain C++
+ *  needing no SDK: the types, constants and prototypes the table calls are spelled here, copied
+ *  from the runtime's stable ABI, so any host compiler builds the launches. Every sibling engine
+ *  carries the @c Shared @c VRAM regions word for word, which @c selftest checks.
  */
 #pragma once
 

@@ -8,14 +8,15 @@
  *  Two artifacts every step loop keys on:
  *
  *      1. @ref executor_stream_t — one stream of the executor the trainer runs on.
- *      2. @ref unum::uform::utilities::gpu_replay_graph_t — the capture-once / replay-forever
- *         contract: @c make captures a body of kernel launches into a @c CUgraph , instantiates it,
- *         uploads the executable, and keeps only that; every later step is one @c cuGraphLaunch
- *         with @b zero host-side re-derivation.
+ *      2. @ref util::gpu_replay_graph_t — the capture-once / replay-forever contract.
  *
  *  The executor stream, @ref executor_stream_t , is a real non-blocking stream the CUDA executor
  *  owns, so ordering is explicit and capture is legal, as stream capture rejects the legacy null
  *  stream; @ref native_stream hands its handle to the toolkit, and its @c bind selects its device.
+ *
+ *  The replay graph, @ref util::gpu_replay_graph_t , has @c make capture a body of kernel launches
+ *  into a @c CUgraph , instantiate it, upload the executable, and keep only that; every later step
+ *  is one @c cuGraphLaunch with @b zero host-side re-derivation.
  *
  *  @section schedule_contract The capture contract
  *
@@ -27,20 +28,20 @@
  *  deadlocks device-local multi-GPU worlds at first launch, and there is no correct fallback.
  *
  *  Construction absorbs the whole setup pipeline — capture, instantiate, guard, @b upload — so a
- *  @ref unum::uform::utilities::gpu_replay_graph_t that exists is always launchable, with device
- *  staging already done. Uploading eagerly matters: lazily staged MMIO nodes are a measured
- *  first-launch deadlock on device-initiated transports.
+ *  @ref util::gpu_replay_graph_t that exists is always launchable, with device staging already
+ *  done. Uploading eagerly matters: lazily staged MMIO nodes are a measured first-launch
+ *  deadlock on device-initiated transports.
  *
  *  @section schedule_regions The captured region is model math only
  *
  *  A captured graph holds @b model math only — entry / embedding, the block stack, the final
  *  RMSNorm, the @b local loss, and backward. The distributed work — cross-GPU loss exchange, the
- *  gradient reduce, the @ref unum::uform::utilities::barrier_round_t barriers, and the optimizer's
- *  world step — is @b never fused into it; it is its own region the parent scope sequences after
- *  the model region. UForm is a distributed-loss training stack, so a monolithic all-in-one graph
- *  welds the pure math to world state, and the round, the reduce, and the loss exchange can no
- *  longer be reasoned about — or replayed — independently. Forward and backward stay together (one
- *  contiguous, shape-stable computation); the only boundary is model-vs-collective.
+ *  gradient reduce, the @ref util::barrier_round_t barriers, and the optimizer's world step — is
+ *  @b never fused into it; it is its own region the parent scope sequences after the model region.
+ *  UForm is a distributed-loss training stack, so a monolithic all-in-one graph welds the pure
+ *  math to world state, and the round, the reduce, and the loss exchange cannot be reasoned about
+ *  — or replayed — independently. Forward and backward stay together (one contiguous, shape-stable
+ *  computation); the only boundary is model-vs-collective.
  *
  *  @section schedule_fork Multi-GPU capture — fork / join
  *
@@ -141,12 +142,11 @@ template <typename value_type_>
     return {};
 }
 
-/** The mirror of @ref unum::uform::utilities::copy_host_to_device : enqueue a device → host copy
- *  of a rank-1 view into a same-typed host span on @p stream — the typed spelling of
- *  @c cuMemcpyDtoHAsync , device source first, host destination second, which converts from a
- *  @c std::span as the source names the type. An empty @p device_source is a no-op; a source
- *  longer than the destination is a loud failure. The host span must stay alive until the stream
- *  reaches the copy. */
+/** The mirror of @ref util::copy_host_to_device : enqueue a device → host copy of a rank-1 view
+ *  into a same-typed host span on @p stream — the typed spelling of @c cuMemcpyDtoHAsync , device
+ *  source first, host destination second, which converts from a @c std::span as the source names
+ *  the type. An empty @p device_source is a no-op; a source longer than the destination is a loud
+ *  failure. The host span must stay alive until the stream reaches the copy. */
 template <typename value_type_>
 [[nodiscard]] inline expected_t copy_device_to_host(
     nk::tensor_view<value_type_, 1> device_source,
@@ -163,10 +163,9 @@ template <typename value_type_>
     return {};
 }
 
-/** The device-only sibling of @ref unum::uform::utilities::copy_host_to_device : enqueue a device →
- *  device copy of a rank-1 view into a same-typed device span on @p stream , which names the type,
- *  so a span source converts. An empty @p source is a no-op; a source longer than the destination
- *  is a loud failure. */
+/** The device-only sibling of @ref util::copy_host_to_device : enqueue a device → device copy of a
+ *  rank-1 view into a same-typed device span on @p stream , which names the type, so a span source
+ *  converts. An empty @p source is a no-op; a source longer than the destination fails loudly. */
 template <typename value_type_>
 [[nodiscard]] inline expected_t copy_device_to_device(std::type_identity_t<nk::tensor_view<value_type_, 1>> source,
                                                       nk::tensor_span<value_type_, 1> destination,
@@ -522,11 +521,10 @@ struct cuda_warp_t {
 
 #endif // defined(__CUDACC__)
 
-/** How a §10 model region runs: captured once into a
- *  @ref unum::uform::utilities::gpu_replay_graph_t and replayed every step (the production
- *  default), or re-enqueued eagerly each step — the bring-up / debugging path, and the other half
- *  of every capture-vs-eager parity test. A trainer keeps it as a run knob; the two modes must
- *  land on bitwise-identical weights over identical seeds. */
+/** How a §10 model region runs: captured once into a @ref util::gpu_replay_graph_t and replayed
+ *  every step (the production default), or re-enqueued eagerly each step — the bring-up /
+ *  debugging path, and the other half of every capture-vs-eager parity test. A trainer keeps it
+ *  as a run knob; the two modes must land on bitwise-identical weights over identical seeds. */
 enum capture_t : u32_t {
     replayed_k = 0,
     eager_k = 1,

@@ -4,16 +4,15 @@
  *  @date July 2, 2026
  *  @brief Device-initiated InfiniBand collectives across multimem_domains — the vertex all-gather
  *      and the force / gradient all-reduce-sum, each an argument-free method of one member's wired
- *      @ref unum::uform::utilities::infiniband_reach_t .
+ *      @ref util::infiniband_reach_t .
  *
  *  The doorbell path is the one NVIDIA documents as GDAKI, GPUDirect Async Kernel-Initiated.
  *
  *  Both collectives walk the same @b recursive-doubling schedule over @c D =
- *  multimem_domain_count() domains: @c ceil(log2 D) rounds, one
- *  @ref unum::uform::utilities::infiniband_link_t per round, partner @c this_domain^(1<<round) .
- *  Every kernel is a capture-safe graph node — the posts and waits are device-initiated (
- *  @c infiniband_post_write / @c infiniband_load_acquire_u32 ), and per-step variability reaches
- *  replays only through device memory:
+ *  multimem_domain_count() domains: <tt>ceil(log2 D)</tt> rounds, one @ref util::infiniband_link_t per
+ *  round, partner @c this_domain^(1<<round) . Every kernel is a capture-safe graph node: the posts
+ *  and waits are device-initiated ( @c infiniband_post_write / @c infiniband_load_acquire_u32 ),
+ *  and per-step variability reaches replays only through device memory. The two collectives are:
  *
  *      - @b all-gather — each round posts the contiguous run of domain blocks this domain already
  *        holds into the partner's symmetric buffer at the @b identical byte offset, so blocks land
@@ -32,16 +31,16 @@
  *  Reliable-Connection delivery is in-order, so the flag's arrival proves the payload landed. Flags
  *  are @b monotonic never-reset counters — a waiter spins with @c >= against the absolute target
  *  @c *round+round+1 , so replays of a captured step need no flag reset (a reset would be a host
- *  write inside the replay loop). Each @ref unum::uform::utilities::infiniband_reach_t owns its
- *  round scalar and @c advance() s it once per step by its round count — distinct members' flags
- *  can never alias, because they live in distinct heaps.
+ *  write inside the replay loop). Each @ref util::infiniband_reach_t owns its round scalar and
+ *  @c advance() s it once per step by its round count — distinct members' flags can never alias,
+ *  because they live in distinct heaps.
  *
  *  @section infiniband_layers The transport underneath, smallest dependency surface first
  *
  *      1. Wire PODs — @ref infiniband_coordinates_t (what two queue pairs exchange to connect),
  *         @ref infiniband_queue_handles_t / @ref infiniband_completion_handles_t (what a kernel
- *         needs to post and drain), and @ref unum::uform::utilities::infiniband_link_t (how one GPU
- *         reaches one remote multimem_domain). These are ibverbs-free and always compiled.
+ *         needs to post and drain), and @ref util::infiniband_link_t (how one GPU reaches one
+ *         remote multimem_domain). These are ibverbs-free and always compiled.
  *      2. @c infiniband_endpoint_t — one (GPU, NIC) Reliable-Connection queue pair with its memory
  *         region registered over GPU VRAM: dmabuf-first ( @c cuMemGetHandleForAddressRange +
  *         @c ibv_reg_dmabuf_mr ), @c nvidia_peermem @c ibv_reg_mr fallback. Host-posted writes and
@@ -52,9 +51,8 @@
  *         GPU's address space so @c infiniband_post_write builds one MLX5 work-queue entry and
  *         rings the doorbell entirely from device code — capture-safe graph nodes, no
  *         @c ibv_post_send .
- *      4. @ref unum::uform::utilities::infiniband_reach_t — one member's wired reach into the
- *         other domains, owning the registered symmetric heap and running the two collectives
- *         above as methods.
+ *      4. @ref util::infiniband_reach_t — one member's wired reach into the other domains, owning
+ *         the registered symmetric heap and running the two collectives above as methods.
  *
  *  @section infiniband_platform Platform contract
  *
@@ -1049,8 +1047,7 @@ __device__ inline void infiniband_drain_one(infiniband_completion_handles_t comp
 #endif // UFORM_WITH_INFINIBAND
 
 /** Rank-1 device view of the per-round link table, shaped @b [ceil(log2(D))] — one
- *  @ref unum::uform::utilities::infiniband_link_t per recursive-doubling round,
- *  indexed by round. */
+ *  @ref util::infiniband_link_t per recursive-doubling round, indexed by round. */
 using infiniband_links_view_t = nk::tensor_view<infiniband_link_t, 1>;
 
 /** Rank-1 device view of the flag-round scalar, shaped @b [1] — the monotonic base every
@@ -1058,9 +1055,8 @@ using infiniband_links_view_t = nk::tensor_view<infiniband_link_t, 1>;
 using infiniband_round_view_t = nk::tensor_view<infiniband_round_t, 1>;
 
 /** The static description of one all-gather invocation — the two scalars its kernels need beyond
- *  the links and the round. Internal to @ref unum::uform::utilities::infiniband_reach_t 's
- *  dispatch: the member bakes both at wiring time and builds this by value at enqueue; consumers
- *  never construct one. */
+ *  the links and the round. Internal to @ref util::infiniband_reach_t 's dispatch: the member bakes
+ *  both at wiring time and builds this by value at enqueue; consumers never construct one. */
 struct infiniband_allgather_plan_t {
 
     /** Bytes per domain block; the gathered payload spans @b [D·block_bytes] at heap offset 0. */
@@ -1073,7 +1069,7 @@ struct infiniband_allgather_plan_t {
 /** The static description of one all-to-all invocation — this domain's per-peer send blocks live at
  *  @b [D·block_bytes] ( block @c p is what this domain sends domain @c p ; block @c self stays
  *  local ), and each round's landing receives that round's partner's block. Internal to
- *  @ref unum::uform::utilities::infiniband_reach_t 's dispatch; consumers never construct one. */
+ *  @ref util::infiniband_reach_t 's dispatch; consumers never construct one. */
 struct infiniband_alltoall_plan_t {
 
     /** Bytes this domain sends to (and receives from) any one peer — the per-pair block size. */

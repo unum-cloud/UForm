@@ -15,14 +15,13 @@
 
 namespace unum::uform::encoder {
 
-namespace uu = unum::uform::utilities;
 namespace fu = ashvardanian::forkunion;
 namespace nk = ashvardanian::numkong;
 namespace sz = ashvardanian::stringzilla;
 
-using uu::expected;
-using uu::f32_t;
-using uu::u32_t;
+using util::expected;
+using util::f32_t;
+using util::u32_t;
 
 /** Most channels a pixel holds, the extent of the per-channel statistics. */
 inline constexpr u32_t pixel_channels_max_k = 4;
@@ -85,7 +84,7 @@ struct geometry_t {
      *  - @c status_code_t::invalid_argument_k A key is missing or unparsable, or a shape disagrees;
      *    the C layer reports it as @c uform_status_malformed_k .
      */
-    [[nodiscard]] static expected<geometry_t> from(uu::checkpoint_to_load_t const& checkpoint) noexcept;
+    [[nodiscard]] static expected<geometry_t> from(util::checkpoint_to_load_t const& checkpoint) noexcept;
 };
 
 } // namespace unum::uform::encoder

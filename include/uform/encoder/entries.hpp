@@ -35,27 +35,26 @@
 
 namespace unum::uform::encoder {
 
-namespace uu = unum::uform::utilities;
 namespace nk = ashvardanian::numkong;
 namespace st = ashvardanian::smashtable;
 
-using uu::expected;
-using uu::f32_t;
-using uu::i16_t;
-using uu::pixel_t;
-using uu::token_id_t;
-using uu::u16_t;
-using uu::u32_t;
-using uu::u64_t;
+using util::expected;
+using util::f32_t;
+using util::i16_t;
+using util::pixel_t;
+using util::token_id_t;
+using util::u16_t;
+using util::u32_t;
+using util::u64_t;
 
-using uu::f32r1_span_t;
-using uu::f32r1_view_t;
-using uu::f32r2_span_t;
-using uu::f32r2_view_t;
-using uu::i16r2_span_t;
-using uu::i16r2_view_t;
-using uu::u32r1_span_t;
-using uu::u32r1_view_t;
+using util::f32r1_span_t;
+using util::f32r1_view_t;
+using util::f32r2_span_t;
+using util::f32r2_view_t;
+using util::i16r2_span_t;
+using util::i16r2_view_t;
+using util::u32r1_span_t;
+using util::u32r1_view_t;
 
 /** BFloat16 and E4M3 views and spans into memory owned elsewhere, in NumKong's vendor-neutral
  *  scalars. */

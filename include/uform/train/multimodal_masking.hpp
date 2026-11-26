@@ -75,10 +75,9 @@ enum class masking_draw_purpose_t : u32_t {
     span_anchor_k = 6,
 };
 
-/** One counter-based draw in @b [0,1) , keyed through the one
- *  @ref unum::uform::utilities::splitmix64_hash_t — pure, stateless, device-callable,
- *  bit-reproducible on every rank. @p purpose is a @ref unum::uform::train::masking_draw_purpose_t
- *  salt cast to @c u32_t . */
+/** One counter-based draw in @b [0,1) , keyed through the one @ref util::splitmix64_hash_t — pure,
+ *  stateless, device-callable, bit-reproducible on every rank. @p purpose is a
+ *  @ref unum::uform::train::masking_draw_purpose_t salt cast to @c u32_t . */
 [[nodiscard]] constexpr f32_t masking_draw(u64_t seed, data_epoch_t data_epoch, u32_t sample_index, u32_t position,
                                            u32_t purpose) noexcept {
     u64_t const mixed = splitmix64_hash_t {}(seed, data_epoch.ordinal, purpose, sample_index, position);

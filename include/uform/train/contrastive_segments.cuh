@@ -71,8 +71,8 @@
  *  potential summand (one all-reduce-sum yields the global mean), @c from_vertices_grad is the full
  *  force on the rank-owned vertices, and each subgraph's @c to_vertices_grad is this rank's Float32
  *  force contribution to that subgraph's vertices (reduce-scatter-summed across ranks by the caller
- *  — @ref unum::uform::utilities::infiniband_all_reduce across domains — then cast). Ordering is
- *  the caller's; no rank writes memory another rank reads during the loss.
+ *  — @ref util::infiniband_all_reduce across domains — then cast). Ordering is the caller's; no
+ *  rank writes memory another rank reads during the loss.
  *
  *  @section traffic What the distributed case actually moves
  *

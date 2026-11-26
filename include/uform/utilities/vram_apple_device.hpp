@@ -7,12 +7,12 @@
  *
  *  Metal's API is Objective-C, reached here through @c objc_msgSend cast to each call's exact
  *  prototype, so a plain C++ unit drives it with no SDK header. Nothing links Metal, Foundation,
- *  I/O Kit or the Objective-C runtime: @ref unum::uform::utilities::metal_api_t::load opens them
- *  and resolves the few C entry points UForm calls into one table, which stays empty where any is
- *  absent, so Apple then lists no devices and the binary still loads. Kernels travel as MSL source
- *  and compile on the device at first use, so no Metal toolchain is needed to build. Memory is
- *  unified and every buffer is shared, so the host reads and writes it in place. A device context
- *  records every buffer UForm allocates on it, and a launch makes the ones it touches resident.
+ *  I/O Kit or the Objective-C runtime: @ref util::metal_api_t::load opens them and resolves the
+ *  few C entry points UForm calls into one table, which stays empty where any is absent, so Apple
+ *  then lists no devices and the binary still loads. Kernels travel as MSL source and compile on
+ *  the device at first use, so no Metal toolchain is needed to build. Memory is unified and every
+ *  buffer is shared, so the host reads and writes it in place. A device context records every
+ *  buffer UForm allocates on it, and a launch makes the ones it touches resident.
  */
 #pragma once
 

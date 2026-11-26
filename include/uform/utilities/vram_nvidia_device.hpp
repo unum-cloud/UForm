@@ -5,12 +5,12 @@
  *  @brief The CUDA driver's entry points, resolved into one table from a library opened at first
  *      use, and the stream, event and module owners every NVIDIA executor queues through.
  *
- *  The inference library never links @c libcuda : @ref unum::uform::utilities::cuda_api_t::load
- *  opens it at first use and resolves the entry points into one table, which stays empty on a
- *  machine without the driver. Plain C++ needing no SDK: the table spells its own types, constants
- *  and prototypes, so any host compiler builds the launches, and the training allocators that link
- *  the driver live in @c vram_nvidia_memory.hpp . The @c Shared @c VRAM regions are text every
- *  sibling engine carries word for word, which @c selftest @c --siblings compares.
+ *  The inference library never links @c libcuda : @ref util::cuda_api_t::load opens it at first
+ *  use and resolves the entry points into one table, which stays empty on a machine without the
+ *  driver. Plain C++ needing no SDK: the table spells its own types, constants and prototypes, so
+ *  any host compiler builds the launches, and the training allocators that link the driver live
+ *  in @c vram_nvidia_memory.hpp . The @c Shared @c VRAM regions are text every sibling engine
+ *  carries word for word, which @c selftest @c --siblings compares.
  */
 #pragma once
 

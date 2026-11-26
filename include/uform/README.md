@@ -47,7 +47,7 @@ Nothing here names a class, holds a capability mask other than a kit's own `capa
 Every folder opens `unum::uform::<dir>`, and its headers are spelled `"uform/<dir>/..."` everywhere, `src/` included.
 A file reaching another family names it through one alias, declared in the namespace or translation unit that uses it:
 
-- `uu` for `unum::uform::utilities`.
+- `util` for `unum::uform::utilities`, declared once in `unum::uform` by `"uform/utilities/types.hpp"`.
 - `ue` for `unum::uform::encoder`.
 - `um` for `unum::uform::media`.
 - `ul` for `unum::uform::loaders`.

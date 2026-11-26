@@ -983,14 +983,14 @@ class progress_ticks_t {
 
 /** Memory one call at a time rewinds and allocates from, whose owner reserves and frees its
  *  chunks. */
-using utilities::chunked_arena_t;
+using util::chunked_arena_t;
 
 #pragma endregion Memory
 
 #pragma region Executors
 
 /** One vendor's bundle as every device of the process loaded it. */
-using utilities::kernel_tables;
+using util::kernel_tables;
 
 #pragma region Shared VRAM
 
