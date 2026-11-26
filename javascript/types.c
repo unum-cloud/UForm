@@ -731,11 +731,11 @@ static napi_value uform_js_executor_drain(napi_env env, napi_callback_info info)
 static napi_value uform_js_executor_release(napi_env env, napi_callback_info info) {
     uform_js_executor_t* const executor = (uform_js_executor_t*)uform_js_self(env, info, 0, NULL, NULL);
     if (!executor) return NULL;
-    if (executor->arenas) {
-        uform_js_throw(env, uform_status_contended_k, "Free the GPU arenas made on the Executor before it");
+    uform_status_t const freed = uform_executor_free(executor->handle);
+    if (freed != uform_status_success_k) {
+        uform_js_throw(env, freed, "Free the Arenas made on the Executor before it");
         return NULL;
     }
-    uform_executor_free(executor->handle);
     executor->handle = NULL;
     return uform_js_undefined(env);
 }
@@ -796,10 +796,9 @@ static void uform_js_arena_detach(napi_env env, uform_js_arena_t* arena) {
 
 /** Lets go of the executor a GPU arena held, once the arena's memory is freed. */
 static void uform_js_arena_unbind(napi_env env, uform_js_arena_t* arena) {
-    if (!arena->executor) return;
-    --arena->executor->arenas;
+    if (!arena->executor_reference) return;
     napi_delete_reference(env, arena->executor_reference);
-    arena->executor = NULL;
+    arena->executor_reference = NULL;
 }
 
 static void uform_js_arena_finalize(napi_env env, void* data, void* hint) {
@@ -852,15 +851,13 @@ static napi_value uform_js_arena_construct(napi_env env, napi_callback_info info
         free(arena);
         return NULL;
     }
-    if (residency == uform_residency_vram_k) { // a GPU arena frees on its executor's first stream
+    if (executor) { // the engine refuses to free an executor under its arena, so the arena holds it
         if (napi_create_reference(env, argument, 1, &arena->executor_reference) != napi_ok) {
             uform_arena_free(arena->handle);
             free(arena);
             uform_js_throw(env, uform_status_internal_k, "Could not hold the Executor");
             return NULL;
         }
-        arena->executor = executor;
-        ++executor->arenas;
     }
     if (napi_wrap(env, self, arena, uform_js_arena_finalize, NULL, NULL) != napi_ok) {
         uform_arena_free(arena->handle);

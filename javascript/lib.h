@@ -100,8 +100,6 @@ typedef struct uform_js_executor_t {
     /** The library handle, freed by @c free or when the JavaScript wrapper is collected. */
     uform_executor_t handle;
 
-    /** Live GPU arenas it made, each of which must be freed before it is. */
-    size_t arenas;
 } uform_js_executor_t;
 
 /** Memory every output whose length scales with a call lands in, and the views handed
@@ -111,11 +109,8 @@ typedef struct uform_js_arena_t {
     /** The library handle, made with the wrapper and @c NULL once freed. */
     uform_arena_t handle;
 
-    /** The executor a GPU arena grows, fills and frees on, held until the arena is freed; @c NULL
-     *  for host pages. Every arena is freed before the executor that made it. */
-    uform_js_executor_t* executor;
-
-    /** The strong reference keeping @c executor's wrapper alive alongside it. */
+    /** The strong reference keeping its executor's wrapper alive until the arena is freed, as the
+     *  engine refuses to free an executor under its arena; @c NULL when made without one. */
     napi_ref executor_reference;
 
     /** The last call the library took naming it, compared and never read; @c NULL once freed. */

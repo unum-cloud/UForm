@@ -49,7 +49,6 @@ from uform.train import (
 )
 from uform.types import (
     ArenaDescribe,
-    ArenaFree,
     ArenaInit,
     BytesView,
     CPUClass,
@@ -72,12 +71,11 @@ from uform.types import (
     Release,
     ScalarKind,
     Status,
+    StatusRelease,
     text_at,
 )
 
-comptime LIBRARY_FILE = StaticString(
-    "libuform_shared.dylib" if CompilationTarget.is_macos() else "libuform_shared.so"
-)
+comptime LIBRARY_FILE = StaticString("libuform_shared.dylib" if CompilationTarget.is_macos() else "libuform_shared.so")
 """The loader already searches the environment's library directory, because `mojo build` bakes it
 into the binary's runpath, so an unqualified name is enough for a library installed there."""
 
@@ -179,13 +177,13 @@ struct Symbols:
     """`uform_executor_for_vram`."""
     var executor_drain: ExecutorDrain
     """`uform_executor_drain`."""
-    var executor_free: Release
+    var executor_free: StatusRelease
     """`uform_executor_free`."""
     var arena_init: ArenaInit
     """`uform_arena_init`."""
     var arena_describe: ArenaDescribe
     """`uform_arena_describe`."""
-    var arena_free: ArenaFree
+    var arena_free: StatusRelease
     """`uform_arena_free`."""
 
     var model_load_ram: ModelLoadRam
@@ -289,10 +287,10 @@ struct Symbols:
         self.executor_for_ram = _resolve[ExecutorForRam](handle, "uform_executor_for_ram")
         self.executor_for_vram = _resolve[ExecutorForVram](handle, "uform_executor_for_vram")
         self.executor_drain = _resolve[ExecutorDrain](handle, "uform_executor_drain")
-        self.executor_free = _resolve[Release](handle, "uform_executor_free")
+        self.executor_free = _resolve[StatusRelease](handle, "uform_executor_free")
         self.arena_init = _resolve[ArenaInit](handle, "uform_arena_init")
         self.arena_describe = _resolve[ArenaDescribe](handle, "uform_arena_describe")
-        self.arena_free = _resolve[ArenaFree](handle, "uform_arena_free")
+        self.arena_free = _resolve[StatusRelease](handle, "uform_arena_free")
 
         self.model_load_ram = _resolve[ModelLoadRam](handle, "uform_model_load_ram")
         self.model_load_ram_buffer = _resolve[ModelLoadRamBuffer](handle, "uform_model_load_ram_buffer")
@@ -512,8 +510,11 @@ struct Library(ImplicitlyCopyable):
         return text_at(self.symbols().multimem_tier_name(tier.code))
 
     def multimem_tier_from_name(self, name: StringSlice) raises Error -> MultimemTier:
-        """Reads a spelling back, raising `INVALID_ARGUMENT` when unrecognized. Calls `uform_multimem_tier_from_name`."""
-        return MultimemTier(self._from_name(self.symbols().multimem_tier_from_name, name, "uform_multimem_tier_from_name"))
+        """Reads a spelling back, raising `INVALID_ARGUMENT` when unrecognized. Calls `uform_multimem_tier_from_name`.
+        """
+        return MultimemTier(
+            self._from_name(self.symbols().multimem_tier_from_name, name, "uform_multimem_tier_from_name")
+        )
 
     def pair_loss_form_name(self, form: PairLossForm) -> String:
         """The engine's spelling of a pair-loss form, as `SIGMOID` spells "sigmoid". Calls `uform_pair_loss_form_name`.
@@ -523,7 +524,9 @@ struct Library(ImplicitlyCopyable):
     def pair_loss_form_from_name(self, name: StringSlice) raises Error -> PairLossForm:
         """Reads a spelling back, raising `INVALID_ARGUMENT` when unrecognized. Calls `uform_pair_loss_form_from_name`.
         """
-        return PairLossForm(self._from_name(self.symbols().pair_loss_form_from_name, name, "uform_pair_loss_form_from_name"))
+        return PairLossForm(
+            self._from_name(self.symbols().pair_loss_form_from_name, name, "uform_pair_loss_form_from_name")
+        )
 
     def late_interaction_side_name(self, side: LateInteractionSide) -> String:
         """The engine's spelling of a late-interaction side, as `QUERY_AND_DOCUMENT` spells "query-and-document".
@@ -536,7 +539,9 @@ struct Library(ImplicitlyCopyable):
         `uform_late_interaction_side_from_name`.
         """
         return LateInteractionSide(
-            self._from_name(self.symbols().late_interaction_side_from_name, name, "uform_late_interaction_side_from_name")
+            self._from_name(
+                self.symbols().late_interaction_side_from_name, name, "uform_late_interaction_side_from_name"
+            )
         )
 
     def _error(self, outcome: Outcome, symbol: StaticString) -> Error:

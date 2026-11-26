@@ -101,6 +101,10 @@ func TestExecutorsAndArenas(t *testing.T) {
 		t.Fatal("the stub carries no GPU")
 	}
 
+	if err := executor.Close(); !errors.Is(err, uform.StatusContended) {
+		t.Fatalf("an executor under a live arena closes with %v", err)
+	}
+
 	closed, err := uform.ExecutorForRam(nil, uform.CPUClassUnknown, 1)
 	if err != nil {
 		t.Fatal(err)

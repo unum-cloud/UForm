@@ -88,7 +88,7 @@ Every output whose length scales with the call lands in an arena, and the verb a
 Each call rewinds the arena it is given, detaching the buffers under the previous call's views, so a stale view refuses its reads with `invalid-argument` instead of reading another call's memory.
 To keep one result past the next call, give that call another arena.
 A deferred call holds its arena until final, and a second call naming it finishes `contended`.
-An arena never outlives the executor that made it, so `arena.free()` comes before `executor.free()`, a `using` executor is declared before its arenas, and an arena from `new Arena()` lives until it is freed.
+An arena never outlives the executor that made it, and `executor.free()` throws `contended` while one lives, so `arena.free()` comes first, a `using` executor is declared before its arenas, and an arena from `new Arena()` lives until it is freed.
 
 ```js
 const first = model.textEncode(["first"], arena);

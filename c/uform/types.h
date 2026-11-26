@@ -885,10 +885,12 @@ typedef struct uform_executor_drain_t {
 UFORM_EXPORT void uform_executor_drain(uform_executor_drain_t* arguments);
 
 /** Waits until no call holds the executor, releases what it owns, its streams included, and frees
- *  it; @c NULL is safe, and it cannot fail, so it takes no outcome. Free every arena, trainer and
- *  mesh made with it before calling it, and never call it from a callback of a call on the same
- *  executor: it would wait on that call forever, which Debug builds assert. */
-UFORM_EXPORT void uform_executor_free(uform_executor_t executor);
+ *  it; @c NULL is safe. Answers @c uform_status_contended_k and frees nothing while an arena made
+ *  with it lives, as @c uform_arena_free does while an export is open. Free every trainer and mesh
+ *  made with it first; a thread must not free an executor another thread still submits to. Never
+ *  call it from a callback of a call on the same executor: it would wait on that call forever,
+ *  which Debug builds assert. */
+UFORM_EXPORT uform_status_t uform_executor_free(uform_executor_t executor);
 
 /**
  *  @brief Memory the library allocates for the outputs only a call can size, reused across

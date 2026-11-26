@@ -703,8 +703,9 @@ public final class Executor: @unchecked Sendable {
         return try landing.read { () throws(UFormError) in Executor(raw: try created(executor)) }
     }
 
+    /// Every arena made with it holds it, so ARC frees it after them and the refusal never arises.
     /// Calls `uform_executor_free`.
-    deinit { uform_executor_free(raw) }
+    deinit { _ = uform_executor_free(raw) }
 
     /// Waits until no call holds the executor, then applies `mood` until its next call; a
     /// failure is the executor's own, never one of a drained call. Calls `uform_executor_drain`.
@@ -777,15 +778,15 @@ public struct ArenaDescription: Hashable, Sendable {
 /// rewinds it, so the views an earlier call answered stop reading: any read of them traps, as an
 /// out-of-bounds index does. To keep a result past the next call, give that call another arena. An
 /// arena serves one call at a time, deferred ones included, and a call naming it while another
-/// holds it is refused with `contended`. An arena never outlives the executor that made it: one in
-/// device memory holds that executor, so ARC releases the arena first. Where `placement` refuses
-/// host access, any read of a view traps, as an out-of-bounds index does. `deinit` cannot report a
-/// refused free, so the arena must outlive every export opened on it.
+/// holds it is refused with `contended`. An arena never outlives the executor that made it: it
+/// holds that executor, so ARC releases the arena first. Where `placement` refuses host access, any
+/// read of a view traps, as an out-of-bounds index does. `deinit` cannot report a refused free, so
+/// the arena must outlive every export opened on it.
 public final class Arena {
     /// The native handle, released by `deinit`.
     let raw: uform_arena_t
-    /// The device executor that made it, held so the arena is freed first; nil for host pages.
-    let device: Executor?
+    /// The executor that made it, held so the arena is freed first, as the engine insists.
+    let executor: Executor?
     /// Where the outputs live, as the executor that made it decided once. Read from
     /// `uform_arena_describe`.
     public let placement: ArenaDescription
@@ -805,12 +806,12 @@ public final class Arena {
         var describe = uform_arena_describe_t(arena: raw, outcome: asked.outcome, description: description)
         uform_arena_describe(&describe)
         placement = ArenaDescription(description.pointee)
-        device = placement.residency == .vram ? executor : nil
+        self.executor = executor
         try asked.read { () throws(UFormError) in }
     }
 
     /// Calls `uform_arena_free`.
-    deinit { uform_arena_free(raw) }
+    deinit { _ = uform_arena_free(raw) }
 }
 
 /// The arena a view reads, and which of the calls given it wrote the view.

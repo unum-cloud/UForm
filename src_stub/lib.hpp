@@ -33,14 +33,22 @@
 
 #include "uform/uform.h" // every argument structure a call copies
 
-/** What @c uform_executor_t owns: nothing, since every call runs on its caller. */
-struct uform_executor_handle_t {};
+/** What @c uform_executor_t owns: its arena count alone, as each call runs on its caller. */
+struct uform_executor_handle_t {
+
+    /** Arenas made with the executor and not yet freed, which refuse its free; read and written
+     *  under the running calls' lock. */
+    std::uint32_t arenas = 0;
+};
 
 /** What @c uform_arena_t owns: one host buffer, rewound by every call and grown to
  *  a high-water mark. */
 struct uform_arena_handle_t {
     std::unique_ptr<std::byte[]> memory;
     std::size_t capacity = 0;
+
+    /** The executor the arena was made with, which counts it until its free. */
+    uform_executor_t executor = nullptr;
 
     /** The outcome of the call holding the arena, null while free; read and written under
      *  the running calls' lock. */

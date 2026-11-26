@@ -1337,6 +1337,10 @@ struct uform_executor_handle_t {
     /** The one call that holds the executor, from its claim to its end. */
     uf::holding_call_t holding_call;
 
+    /** Arenas made with the executor and not yet freed, which refuse its free; set through the
+     *  standard reference, as any thread may make or free one. */
+    util::u32_t arenas = 0;
+
     /** What the threads may run: the machine's masks under the executor's ceiling class. */
     uf::cpu_ceiling_t cpu_ceiling;
 
@@ -1378,8 +1382,8 @@ struct uform_arena_handle_t {
      *  @c uform_arena_init . */
     uf::chunked_arena_t chunks;
 
-    /** The executor whose first stream the device memory rides, the only one whose calls it serves;
-     *  null for host pages, which serve any call computing on the host. */
+    /** The executor the arena was made with, which counts it until its free. Device memory rides
+     *  the first stream of a VRAM one and serves only its calls; host pages serve any host call. */
     uform_executor_t executor = nullptr;
 
     /** The published outcome of the call holding the arena, from its claim until just before its

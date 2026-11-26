@@ -149,9 +149,15 @@ void uform_executor_drain(uform_executor_drain_t* arguments) {
     if (arguments->executor) wait_for_calls_using(arguments->executor);
 }
 
-void uform_executor_free(uform_executor_t executor) {
+uform_status_t uform_executor_free(uform_executor_t executor) {
+    if (!executor) return uform_status_success_k;
+    {
+        std::lock_guard<std::mutex> lock(calls.guard);
+        if (executor->arenas) return uform_status_contended_k;
+    }
     wait_for_calls_using(executor);
     delete executor;
+    return uform_status_success_k;
 }
 
 void uform_arena_init(uform_arena_init_t* arguments) {
@@ -161,6 +167,14 @@ void uform_arena_init(uform_arena_init_t* arguments) {
     *arguments->arena = nullptr;
     uform_arena_handle_t* const arena = new (std::nothrow) uform_arena_handle_t {};
     if (reject_if(!arena, uform_status_out_of_memory_k, "The arena could not be allocated", outcome)) return;
+    if (uform_executor_t const executor = arguments->executor) {
+        std::lock_guard<std::mutex> lock(calls.guard);
+        if (executor->arenas == (std::numeric_limits<std::uint32_t>::max)())
+            return delete arena,
+                   propagate_error(uform_status_overflow_k, outcome, "The executor counts too many arenas");
+        ++executor->arenas;
+        arena->executor = executor;
+    }
     *arguments->arena = arena;
 }
 
@@ -171,7 +185,12 @@ uform_status_t uform_arena_free(uform_arena_t arena) {
         std::lock_guard<std::mutex> lock(calls.guard);
         if (arena->exports) return uform_status_contended_k;
     }
+    uform_executor_t const executor = arena->executor;
     delete arena;
+    if (executor) {
+        std::lock_guard<std::mutex> lock(calls.guard);
+        --executor->arenas;
+    }
     return uform_status_success_k;
 }
 

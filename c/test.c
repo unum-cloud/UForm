@@ -469,13 +469,13 @@ static void test_executors(void) {
                                                         .ram = {first_domain, 1, uform_cpu_class_unknown_k},
                                                         .threads = 2});
     expect_(outcome.status == uform_status_success_k && placed != NULL);
-    uform_executor_free(placed);
+    expect_(uform_executor_free(placed) == uform_status_success_k);
 
     uform_executor_t gpu = NULL;
     uform_executor_for_vram(&(uform_executor_for_vram_t) {.executor = &gpu, .outcome = &outcome});
     expect_(outcome.status == uform_status_success_k || outcome.status == uform_status_device_k);
     expect_((outcome.status == uform_status_success_k) == (gpu != NULL));
-    uform_executor_free(gpu);
+    expect_(uform_executor_free(gpu) == uform_status_success_k);
 
     // Streams pair with the devices named beside them, one each, which every build checks before
     // looking for a device; a null stream is refused once the device answers.
@@ -512,12 +512,12 @@ static void test_executors(void) {
                                                           .streams = caller_streams});
     expect_(outcome.status == uform_status_invalid_argument_k);
 
-    uform_executor_free(NULL);
+    expect_(uform_executor_free(NULL) == uform_status_success_k);
     uform_arena_free(NULL);
     uform_model_free(NULL);
     uform_mesh_free(NULL);
     uform_trainer_free(NULL);
-    uform_executor_free(executor);
+    expect_(uform_executor_free(executor) == uform_status_success_k);
 }
 
 /** A checkpoint loads from a path and from a buffer, in either quantization, and its description
@@ -641,7 +641,7 @@ static void test_model_load(void) {
 
     uform_model_free(buffered);
     uform_model_free(model);
-    uform_executor_free(executor);
+    expect_(uform_executor_free(executor) == uform_status_success_k);
 }
 
 /** Text in every output scalar: one embedding per item, one state per byte up to the context, and
@@ -697,7 +697,7 @@ static void test_text_shapes(void) {
 
     uform_model_free(model);
     uform_arena_free(arena);
-    uform_executor_free(executor);
+    expect_(uform_executor_free(executor) == uform_status_success_k);
 }
 
 /** Token vectors and choices: with the heads, unit-length vectors on the states' offsets and
@@ -775,7 +775,7 @@ static void test_heads(void) {
 
     uform_model_free(model);
     uform_arena_free(arena);
-    uform_executor_free(executor);
+    expect_(uform_executor_free(executor) == uform_status_success_k);
 }
 
 /** CRC-32 of @p length bytes, as PNG chunks store it. */
@@ -1034,7 +1034,7 @@ static void test_media_shapes(void) {
 
     uform_model_free(handle);
     uform_arena_free(arena);
-    uform_executor_free(executor);
+    expect_(uform_executor_free(executor) == uform_status_success_k);
 }
 
 /** One text call's outputs, the arena they land in, and its outcome, which a deferred call
@@ -1077,6 +1077,16 @@ static void drain(uform_executor_t executor) {
     expect_at(!outcome.message, __FILE__, __LINE__, outcome.message);
 }
 
+/** An executor refuses to be freed while an arena made with it lives, a RAM one included, and
+ *  frees once that arena is gone. */
+static void test_executor_free_with_live_arena(void) {
+    uform_executor_t const executor = create_executor();
+    uform_arena_t const arena = create_arena(executor);
+    expect_(uform_executor_free(executor) == uform_status_contended_k);
+    expect_(uform_arena_free(arena) == uform_status_success_k);
+    expect_(uform_executor_free(executor) == uform_status_success_k);
+}
+
 /** A deferred call finishes on the executor's own thread while its caller only polls, lands what a
  *  blocking one does though its descriptor died at submission, and refuses every other call on its
  *  executor meanwhile; without an executor a call is final when it returns. */
@@ -1087,7 +1097,7 @@ static void test_blocking_and_deferred(void) {
     size_t const lengths[] = {3, 40, 17, 1};
     texts_t texts;
     fill_texts(&texts, 4, lengths);
-    text_outputs_t blocking = {.arena = create_arena(executor)};
+    text_outputs_t blocking = {.arena = create_arena(NULL)};
     text_outputs_t deferred = {.arena = create_arena(executor)};
     uform_progress_t const silent = {0};
 
@@ -1112,9 +1122,11 @@ static void test_blocking_and_deferred(void) {
     encode_texts(model, executor, uform_completion_blocking_k, &texts, &blocking, silent);
     expect_(!blocking.outcome.message);
 
-    // Freeing the executor waits for the call holding it.
+    // Freeing the executor waits for the call holding it, over host pages no executor made.
+    expect_(uform_arena_free(deferred.arena) == uform_status_success_k);
+    deferred.arena = create_arena(NULL);
     encode_texts(model, executor, uform_completion_deferred_k, &texts, &deferred, silent);
-    uform_executor_free(executor);
+    expect_(uform_executor_free(executor) == uform_status_success_k);
     expect_(deferred.outcome.status == uform_status_success_k);
     expect_(same_outputs(&blocking, &deferred, texts.count));
 
@@ -1198,7 +1210,7 @@ static void test_held_calls(void) {
     uform_arena_free(deferred.arena);
     uform_arena_free(blocking.arena);
     uform_model_free(model);
-    uform_executor_free(executor);
+    expect_(uform_executor_free(executor) == uform_status_success_k);
 }
 
 #endif
@@ -1269,7 +1281,7 @@ static void test_arenas(void) {
 
     expect_(uform_arena_free(outputs.arena) == uform_status_success_k);
     uform_model_free(model);
-    uform_executor_free(executor);
+    expect_(uform_executor_free(executor) == uform_status_success_k);
 }
 
 /** What a progress handler heard over one call, and the report at which it stops the call;
@@ -1331,7 +1343,7 @@ static void test_progress(void) {
 
     uform_arena_free(outputs.arena);
     uform_model_free(model);
-    uform_executor_free(executor);
+    expect_(uform_executor_free(executor) == uform_status_success_k);
 }
 
 #if !UFORM_TEST_STUB
@@ -1481,7 +1493,7 @@ static void test_refusals(void) {
 
     uform_model_free(model);
     uform_arena_free(arena);
-    uform_executor_free(executor);
+    expect_(uform_executor_free(executor) == uform_status_success_k);
 }
 
 /** Writes a small stand-in checkpoint to the temporary directory, answering its path. */
@@ -1568,7 +1580,8 @@ static void test_quickstart(void) {
     expect_(strlen(captions[best]) != 0 && cosine == cosine);
 
     uform_arena_free(images_arena), uform_arena_free(texts_arena);
-    uform_model_free(model), uform_executor_free(executor);
+    uform_model_free(model);
+    expect_(uform_executor_free(executor) == uform_status_success_k);
 }
 
 /** Prints the version line, then the capabilities as "- Compiled for:" and "- This machine:". */
@@ -1598,6 +1611,7 @@ int main(int argc, char* argv[]) {
     start_test_case("test_text_shapes"), test_text_shapes(), finish_test_case(NULL);
     start_test_case("test_heads"), test_heads(), finish_test_case(NULL);
     start_test_case("test_media_shapes"), test_media_shapes(), finish_test_case(NULL);
+    start_test_case("test_executor_free_with_live_arena"), test_executor_free_with_live_arena(), finish_test_case(NULL);
     start_test_case("test_blocking_and_deferred"), test_blocking_and_deferred(), finish_test_case(NULL);
 #if !UFORM_TEST_STUB
     start_test_case("test_held_calls"), test_held_calls(), finish_test_case(NULL);

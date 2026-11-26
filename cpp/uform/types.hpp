@@ -13,6 +13,7 @@
  */
 #pragma once
 
+#include <cassert> // `assert`
 #include <cstddef> // `std::size_t`, `std::byte`
 #include <cstdint> // `std::uint8_t`, `std::uint16_t`, `std::int8_t`, `std::int32_t`
 #include <cstring> // `std::memcpy`
@@ -483,6 +484,7 @@ struct written_rows_tape_t {
 
     /** The rows of the item at @p position, below @c written. */
     written_rows_t item(std::size_t position) const noexcept {
+        assert(position < written && "The item lies past what the call wrote");
         std::size_t const begin = view.offsets[position], end = view.offsets[position + 1];
         uform_rows_view_t rows = view.rows;
         rows.data = static_cast<std::byte const*>(view.rows.data) + begin * view.rows.stride;
@@ -520,10 +522,17 @@ class progress_t {
     uform_progress_t raw() const noexcept { return raw_; }
 };
 
+/** Frees @p executor as its owner dies, which every arena made with it refuses while it lives;
+ *  declaring the executor before its arenas destroys them first. */
+inline void free_executor(uform_executor_t executor) noexcept {
+    [[maybe_unused]] uform_status_t const freed = uform_executor_free(executor);
+    assert(freed == uform_status_success_k && "Every arena made with the executor dies before it");
+}
+
 /** Owns one executor: the host threads or device streams every call runs on, apart from any model;
  *  an empty one runs every call on the caller's own thread. It outlives every arena it made. */
 class executor_t {
-    owner<uform_executor_t, uform_executor_free> owner_;
+    owner<uform_executor_t, free_executor> owner_;
 
   public:
     uform_executor_t handle() const noexcept { return owner_.handle(); }

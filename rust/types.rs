@@ -234,7 +234,7 @@ unsafe extern "C" {
     pub fn uform_executor_for_ram(arguments: *mut uform_executor_for_ram_t);
     pub fn uform_executor_for_vram(arguments: *mut uform_executor_for_vram_t);
     pub fn uform_executor_drain(arguments: *mut uform_executor_drain_t);
-    pub fn uform_executor_free(executor: uform_executor_t);
+    pub fn uform_executor_free(executor: uform_executor_t) -> uform_status_t;
 
     pub fn uform_arena_init(arguments: *mut uform_arena_init_t);
     pub fn uform_arena_free(arena: uform_arena_t) -> uform_status_t;
@@ -1453,7 +1453,8 @@ impl Executor {
 
 impl Drop for Executor {
     fn drop(&mut self) {
-        unsafe { uform_executor_free(self.handle) }
+        // Arenas borrow the executor, so none lives here and the free cannot be refused.
+        let _status = unsafe { uform_executor_free(self.handle) };
     }
 }
 

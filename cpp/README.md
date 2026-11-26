@@ -154,7 +154,7 @@ Naming one memory domain spawns the threads near it, while none or several inter
 `for_vram` opens one stream per device, or adopts the caller's `streams`, one per named device, and the executor destroys them; naming no devices drives every listed device of the first vendor with a known class.
 `uf::gpu_devices(devices)` fills a span of `uform_gpu_device_t` and answers how many GPUs the process can drive, and a device's position there is the ordinal `for_vram` and `load_vram` name it by, while `uf::version_name()` spells the linked library's version.
 An executor runs one call at a time, so two threads that genuinely overlap take one apiece.
-Destroying an executor waits until no call holds it.
+Destroying an executor waits until no call holds it, and asserts in Debug builds that no arena made with it lives.
 
 ## Arenas
 
@@ -163,6 +163,7 @@ Every output whose length only the call knows, the embeddings, the states and th
 Each call rewinds its arena, so the previous call's views die and a steady loop allocates once.
 To keep a result past the next call, pass that call another arena; an arena serves one call at a time, so each deferred call needs its own.
 An arena from a VRAM executor holds device memory, which `describe()` reports as `uform_residency_vram_k` and host code must not read, while `view.data` still hands the rows to another library, such as a USearch VRAM index.
+Views are plain spans that nothing invalidates, so check `describe().host_access` before host code reads one, and copy what you keep instead of holding a span across calls.
 
 ```cpp
 auto [arena, arena_status] = uf::arena_t::make({.executor = executor.handle()});

@@ -347,8 +347,8 @@ export class Arena implements Disposable {
   readonly compiled: CompiledArena;
 
   /** Makes an arena where `executor` computes, or host pages for calls on the calling
-   *  thread. It never outlives `executor`: free it first, or declare that executor's `using`
-   *  before it. Calls `uform_arena_init`. */
+   *  thread. It never outlives `executor`, whose `free` throws `contended` while it lives: free it
+   *  first, or declare that executor's `using` before it. Calls `uform_arena_init`. */
   constructor(executor?: Executor) {
     this.compiled = new (backend().Arena)(executor?.compiled);
   }

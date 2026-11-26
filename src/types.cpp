@@ -91,11 +91,12 @@ void uf::take_idle_claim(uform_executor_handle_t& executor) noexcept {
 uform_arena_t uf::claim_arena(uform_arena_t arena, uform_executor_t executor, std::initializer_list<void const*> inputs,
                               call_outcome_t& outcome) noexcept {
     if (!arena) return propagate_error(uform_status_invalid_argument_k, outcome, "The arena must not be null"), nullptr;
-    if (arena->executor && arena->executor != executor)
+    bool const arena_on_device = arena->executor && !std::holds_alternative<std::monostate>(arena->executor->device);
+    if (arena_on_device && arena->executor != executor)
         return propagate_error(uform_status_device_k, outcome,
                                "A device arena serves calls on the executor that made it"),
                nullptr;
-    if (!arena->executor && executor && !std::holds_alternative<std::monostate>(executor->device))
+    if (!arena_on_device && executor && !std::holds_alternative<std::monostate>(executor->device))
         return propagate_error(uform_status_device_k, outcome, "Host pages serve no call computing on a GPU"), nullptr;
     if (!hold_arena(arena, outcome.published()))
         return propagate_error(uform_status_contended_k, outcome, "The arena serves another call"), nullptr;
@@ -115,7 +116,8 @@ uform_arena_t uf::claim_arena(uform_arena_t arena, uform_executor_t executor, st
 util::status_t uf::reserve_arena(uform_arena_handle_t& arena, std::size_t bytes) noexcept {
     chunked_arena_t& chunks = arena.chunks;
     if (chunks.room() >= bytes) return {};
-    if (!arena.executor) return util::reserve_host_pages(chunks, bytes);
+    if (!arena.executor || std::holds_alternative<std::monostate>(arena.executor->device))
+        return util::reserve_host_pages(chunks, bytes);
     std::size_t const held = chunks.held(), width = held > bytes ? held : bytes;
     return std::visit(
         [&]<typename executor_type_>(executor_type_& gpus) noexcept -> util::status_t {
@@ -437,12 +439,16 @@ UFORM_EXPORT void uform_executor_drain(uform_executor_drain_t* arguments) {
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
 
-UFORM_EXPORT void uform_executor_free(uform_executor_t executor) {
-    if (!executor) return;
+UFORM_EXPORT uform_status_t uform_executor_free(uform_executor_t executor) {
+    if (!executor) return uform_status_success_k;
     assert(!runs_holding_call(*executor) && "A callback cannot free the executor running it");
+    // A refusal never waits: the count is read before the claim
+    if (fu::standard_atomic_ref<util::u32_t> {executor->arenas}.load(std::memory_order_acquire) != 0)
+        return uform_status_contended_k;
     take_idle_claim(*executor); // never released: the executor dies holding it
     // Each stream record drains its stream, frees its scratch with its device bound, then closes
     delete executor;
+    return uform_status_success_k;
 }
 
 UFORM_EXPORT void uform_arena_init(uform_arena_init_t* arguments) {
@@ -450,9 +456,14 @@ UFORM_EXPORT void uform_arena_init(uform_arena_init_t* arguments) {
     *arguments->arena = nullptr;
     // A VRAM executor lands outputs on its first stream's device, any other on the host
     uform_executor_t const executor = arguments->executor;
-    bool const on_device = executor && !std::holds_alternative<std::monostate>(executor->device);
-    uform_arena_t const arena = new (std::nothrow) uform_arena_handle_t {{}, on_device ? executor : nullptr};
+    uform_arena_t const arena = new (std::nothrow) uform_arena_handle_t {{}, executor};
     if (!arena) return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the arena"), void();
+    // Every arena made with an executor counts, RAM included
+    util::u32_t constexpr most_k = (std::numeric_limits<util::u32_t>::max)();
+    if (executor && fu::atomic_fetch_add_if_at_most(fu::standard_atomic_ref<util::u32_t> {executor->arenas}, 1u, most_k,
+                                                    std::memory_order_acq_rel) == most_k)
+        return delete arena, propagate_error(uform_status_overflow_k, outcome, "The executor counts too many arenas"),
+               void();
     *arguments->arena = arena;
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
@@ -461,10 +472,13 @@ UFORM_EXPORT uform_status_t uform_arena_free(uform_arena_t arena) {
     if (!arena) return uform_status_success_k;
     host_verbs().wait_named_calls(&arena->named_calls);
     if (fu::standard_atomic_ref<util::u32_t> {arena->exports}.load()) return uform_status_contended_k;
-    if (!arena->executor) util::release_host_pages(arena->chunks);
-    else std::visit([&](auto& gpus) noexcept { release_device_chunks(gpus, arena->chunks); }, arena->executor->device);
+    uform_executor_t const executor = arena->executor;
+    if (!executor || std::holds_alternative<std::monostate>(executor->device)) util::release_host_pages(arena->chunks);
+    else std::visit([&](auto& gpus) noexcept { release_device_chunks(gpus, arena->chunks); }, executor->device);
     arena->chunks.forget();
     delete arena;
+    // Last, as the memory went back through the executor
+    if (executor) fu::standard_atomic_ref<util::u32_t> {executor->arenas}.fetch_sub(1, std::memory_order_release);
     return uform_status_success_k;
 }
 

@@ -535,8 +535,8 @@ comptime Verb[Arguments: AnyType] = def(Pointer[Arguments, MutAnyOrigin]) thin a
 comptime Release = def(Address) thin abi("C") -> None
 """The positional `_free` family of executors, models, meshes and trainers; `NULL` is safe."""
 
-comptime ArenaFree = def(Address) thin abi("C") -> c_int
-"""`uform_arena_free`: `CONTENDED`, with nothing freed, while an export of the arena is open."""
+comptime StatusRelease = def(Address) thin abi("C") -> c_int
+"""The arena and executor `_free`: `contended`, with nothing freed, while an export is open or an arena lives."""
 
 comptime OutcomeStatus = def(Pointer[Outcome, MutAnyOrigin]) thin abi("C") -> c_int
 """`uform_outcome_wait` and `uform_outcome_status`: an outcome's status, the first once it is final."""
@@ -764,9 +764,7 @@ struct Rows[origin: MutOrigin](ImplicitlyCopyable, Sized):
         """The scalar type the rows hold."""
         return self.view.scalar
 
-    def row[
-        dtype: DType
-    ](ref self, row: Int) raises Error -> Span[Scalar[dtype], origin_of(self)]:
+    def row[dtype: DType](ref self, row: Int) raises Error -> Span[Scalar[dtype], origin_of(self)]:
         """One row's values, or its packed bytes for a sub-byte kind, read in place from the arena.
 
         Raises:
@@ -781,9 +779,7 @@ struct Rows[origin: MutOrigin](ImplicitlyCopyable, Sized):
             self.view.data + row * Int(self.view.stride), row_bytes // size_of[dtype]()
         )
 
-    def values[
-        dtype: DType
-    ](ref self) raises Error -> Span[Scalar[dtype], origin_of(self)]:
+    def values[dtype: DType](ref self) raises Error -> Span[Scalar[dtype], origin_of(self)]:
         """Every row's values end to end, refused for padded rows.
 
         Raises:
@@ -797,7 +793,6 @@ struct Rows[origin: MutOrigin](ImplicitlyCopyable, Sized):
         if row_bytes != Int(self.view.stride):
             raise Error(Status.UNSUPPORTED_LAYOUT, "Rows.values")
         return _in_arena[Scalar[dtype], origin_of(self)](self.view.data, self.count * row_bytes // size_of[dtype]())
-
 
 
 @fieldwise_init
@@ -857,7 +852,6 @@ struct RowsTape[origin: MutOrigin](ImplicitlyCopyable, Sized):
         return Rows[Self.origin](self.arena, self.generation, view, Int(offsets[item + 1]) - first)
 
 
-
 @fieldwise_init
 struct Tape[origin: MutOrigin](ImplicitlyCopyable, Sized):
     """A ragged run of values a call wrote into the caller's arena, `uform_tape_view_t` read in place.
@@ -894,9 +888,7 @@ struct Tape[origin: MutOrigin](ImplicitlyCopyable, Sized):
         _readable(self.arena, self.generation, "Tape.offsets")
         return _in_arena[c_size_t, origin_of(self)](_address_of(self.view.offsets), self.count + 1)
 
-    def item[
-        dtype: DType
-    ](ref self, item: Int) raises Error -> Span[Scalar[dtype], origin_of(self)]:
+    def item[dtype: DType](ref self, item: Int) raises Error -> Span[Scalar[dtype], origin_of(self)]:
         """One item's values.
 
         Raises:
@@ -911,7 +903,6 @@ struct Tape[origin: MutOrigin](ImplicitlyCopyable, Sized):
         return _in_arena[Scalar[dtype], origin_of(self)](
             self.view.data + first * size_of[dtype](), Int(offsets[item + 1]) - first
         )
-
 
 
 def _address_of[T: AnyType, origin: Origin, //](pointer: Optional[Pointer[T, origin]]) -> Address:
@@ -1113,17 +1104,16 @@ struct Executor:
 
         The loader reference is surrendered only after the call: reading the entry point is the
         last use of `library`, so without the trailing move Mojo would `dlclose` the engine between
-        the load and the branch to it.
+        the load and the branch to it. Every arena's origin holds the executor, so none lives here
+        and the status is dropped.
         """
-        self.library.symbols().executor_free(self.address)
+        _ = self.library.symbols().executor_free(self.address)
         _ = self.library^
 
     @staticmethod
     def for_ram[
         ram_origin: ImmOrigin, //
-    ](
-        library: Library, ram: RamOptions[ram_origin] = RamOptions(), threads: Int = 0
-    ) raises Error -> Self:
+    ](library: Library, ram: RamOptions[ram_origin] = RamOptions(), threads: Int = 0) raises Error -> Self:
         """Creates an executor of host threads for RAM-resident models. Calls `uform_executor_for_ram`.
 
         Args:
@@ -1368,7 +1358,9 @@ def _served[origin: MutOrigin](arena: Pointer[Arena[ImmUntrackedOrigin], origin]
     return served[]._generation
 
 
-def _readable[origin: MutOrigin](arena: Pointer[Arena[ImmUntrackedOrigin], origin], generation: Int, detail: StaticString) raises Error:
+def _readable[
+    origin: MutOrigin
+](arena: Pointer[Arena[ImmUntrackedOrigin], origin], generation: Int, detail: StaticString) raises Error:
     """Refuses a host read of a result over memory the host may not read, or over an arena a later call rewound."""
     arena[].describe().host(detail)
     if arena[]._generation != generation:
@@ -1511,9 +1503,12 @@ struct Deferred[C: Call, origin: ImmOrigin]:
         self.generation = self.call.value().served(self.status())
 
     def __deinit__(deinit self):
-        """Waits until the call is final, then frees the inputs it kept alive for the call. Calls `uform_outcome_wait`."""
+        """Waits until the call is final, then frees the inputs it kept alive for the call. Calls `uform_outcome_wait`.
+        """
         if self.call:
-            var slots = Pointer[CallSlots[Self.C.Outputs], MutAnyOrigin](unsafe_from_address=Int(Pointer(to=self.slots)))
+            var slots = Pointer[CallSlots[Self.C.Outputs], MutAnyOrigin](
+                unsafe_from_address=Int(Pointer(to=self.slots))
+            )
             _ = self.library.symbols().outcome_wait(Pointer(to=slots[].outcome))
             _ = self.call.take().conclude(slots[].outputs, self.generation)
         _ = self.library^

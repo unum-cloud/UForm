@@ -112,6 +112,14 @@ test("executors: RAM spawns, while VRAM without a device refuses", () => {
   assert.throws(() => new Executor(Symbol(), {}), (error) => error.code === Status.InvalidArgument);
 });
 
+test("an executor refuses to free under an arena made with it", () => {
+  const executor = Executor.forRam();
+  const arena = new Arena(executor);
+  throwsStatus(() => executor.free(), Status.Contended);
+  arena.free();
+  executor.free();
+});
+
 test("arenas describe where their outputs live and whether the host reads them", () => {
   using arena = new Arena();
   assert.deepStrictEqual(arena.describe(), {

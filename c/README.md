@@ -129,7 +129,7 @@ An executor owns what a call runs on but a model does not: host threads or devic
 - `uform_executor_for_ram` creates an executor of host threads, near the one memory domain its `uform_ram_options_t` names or across the machine for none or several, 7/8 of those domains' cores, less the coordinating caller's own, when `threads` is zero.
 - `uform_executor_for_vram` opens one stream on every device of its `uform_vram_options_t`, named by their position in `uform_gpu_devices`, beside host threads for the decoding the devices cannot do, and adopts the caller's `streams` instead when given, one per named device, destroying them in `uform_executor_free`; `NULL` devices drive every listed device of the first vendor with a known class.
 - `uform_executor_drain` waits until no call holds the executor, then holds it as a call would, so a call submitted meanwhile finishes `uform_status_contended_k`, while its devices go idle and it applies the `uform_mood_t` its threads keep until the next call: parked sleeps in the kernel, spinning keeps polling.
-- `uform_executor_free` waits the same way, releases what the executor owns and leaves what the caller owns untouched.
+- `uform_executor_free` waits the same way, releases what the executor owns and leaves what the caller owns untouched; it answers `uform_status_contended_k`, freeing nothing, while an arena made with it lives.
 
 ```c
 int32_t const nodes[] = {0}, devices[] = {0, 1};

@@ -1133,12 +1133,15 @@ func (executor *Executor) lower() (C.uform_executor_t, error) {
 }
 
 // Close waits out the call holding the executor, then releases its threads, rings or streams; every
-// arena it made must be closed first. It is idempotent; a closed executor must not be used again.
+// arena it made must be closed first, or it fails with [StatusContended] and frees nothing, so a
+// later Close retries. It is idempotent; a closed executor must not be used again.
 func (executor *Executor) Close() error {
 	if executor == nil || executor.handle == nil {
 		return nil
 	}
-	C.uform_executor_free(executor.handle)
+	if status := C.uform_executor_free(executor.handle); status != C.uform_status_success_k {
+		return fail(Status(status), "an arena made with this executor is still alive")
+	}
 	executor.handle = nil
 	return nil
 }

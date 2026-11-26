@@ -440,7 +440,7 @@ static void test_executor_leaves_its_creator_cores(void) {
         &(uform_executor_for_vram_t) {.executor = &executor, .outcome = &outcome, .vram = {&device, 1}});
     expect_success_at(&outcome, __FILE__, __LINE__);
     expect_(caller_cores() == cores);
-    uform_executor_free(executor);
+    expect_(uform_executor_free(executor) == uform_status_success_k);
 }
 
 /** A mesh spans every visible GPU, so it gets an executor of its own over all of them; a build
@@ -468,7 +468,7 @@ static char const* test_mesh_dispatches_as_a_known_class(void) {
                uform_gpu_class_name(layout.gpu_class));
         uform_mesh_free(mesh);
     }
-    uform_executor_free(box);
+    expect_(uform_executor_free(box) == uform_status_success_k);
     return trains ? NULL : "built without UFORM_BUILD_TRAIN";
 }
 
@@ -497,7 +497,7 @@ static void test_model_loads_on_every_listed_ordinal(uform_bytes_view_t path) {
                                                           .quantization = uform_scalar_bf16_k});
         expect_success_at(&outcome, __FILE__, __LINE__);
         uform_model_free(replica);
-        uform_executor_free(single);
+        expect_(uform_executor_free(single) == uform_status_success_k);
     }
 }
 
@@ -625,8 +625,8 @@ int main(int argc, char* argv[]) {
     uform_arena_free(host.arena);
     uform_model_free(gpu.model);
     uform_model_free(host.model);
-    uform_executor_free(gpu.executor);
-    uform_executor_free(host.executor);
+    expect_(uform_executor_free(gpu.executor) == uform_status_success_k);
+    expect_(uform_executor_free(host.executor) == uform_status_success_k);
     cuDevicePrimaryCtxRelease(handle);
     return finish_test_run();
 }
