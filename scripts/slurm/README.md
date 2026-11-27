@@ -117,7 +117,7 @@ The contrastive line of the training log is the whole world's loss, both nodes' 
 ## GPU Masking
 
 A `{4,8,16}` runner puts __two__ host_domains (processes) on each node, each owning 4 of the 8 GPUs.
-For that split to be real, Slurm must mask GPUs per task — `TaskPlugin=task/cgroup` + `cgroup.conf` `ConstrainDevices=yes`, and __no__ `--exclusive` (it hands every task all 8 GPUs, so each process sees `CUDA_VISIBLE_DEVICES=0..7` and the bootstrap silently builds a fictitious 8-GPU-per-process world).
+For that split to be real, Slurm must mask GPUs per task — `TaskPlugin=task/cgroup` + `ConstrainDevices=yes` in cgroup.conf, and __no__ `--exclusive` (it hands every task all 8 GPUs, so each process sees `CUDA_VISIBLE_DEVICES=0..7` and the bootstrap silently builds a fictitious 8-GPU-per-process world).
 Correct masking shows each task `CUDA_VISIBLE_DEVICES=0,1,2,3` (its own four, remapped) and the merged manifest reports `devices 4` per host_domain.
 
 ## Environment Variables

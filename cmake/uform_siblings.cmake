@@ -51,15 +51,15 @@ set(NUMKONG_ROCM_ARCH "${UFORM_ROCM_ARCH}")
 set(NUMKONG_METAL_ARCH "${UFORM_METAL_ARCH}")
 uform_sibling(
     numkong FETCHCONTENT_SOURCE_DIR_NUMKONG https://github.com/ashvardanian/NumKong
-    d8df8d51b2f6250b8f3f1b8c9999884067050023
+    f85bdd47ca28d03c3c82716a1a1e44c465587928
 )
 uform_sibling(
     stringzilla FETCHCONTENT_SOURCE_DIR_STRINGZILLA https://github.com/ashvardanian/StringZilla
-    930a52c38505d37165194b72009da2df15a4dcfa
+    e0bf6b066bd7f966e6eb302458c4f2d863e77f2b
 )
 uform_sibling(
     forkunion FETCHCONTENT_SOURCE_DIR_FORKUNION https://github.com/ashvardanian/ForkUnion
-    94969cc654e6a8855dfb27f85e3c19a92ca85212
+    2797304869337c41500e8e2d1ca9bbc278c351c5
 )
 
 # SmashTable's containers, header-only

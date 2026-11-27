@@ -167,10 +167,10 @@ Tensors index by rank, `tensor[row, column]`, and slice through the same subscri
 
 ### Threads and Placement
 
-Host threads come from ForkUnion's `fu::pool_t` and the machine's topology from its `fu::topology_t`, the RAII owners `forkunion/forkunion.hpp` declares over the C ABI, both reached through `include/uform/utilities/ram_device.hpp`, and nothing else calls a `fu_*` function.
-There `spawn_pool` fills a `fu::pool_t` over a harvested `fu::topology_t` through its `spawn` or `spawn_near`, allowed only the ForkUnion facilities that `forkunion_allowed_of` grants the executor's CPU ceiling; a build without OS threads runs one thread on the caller and refuses more as unsupported.
-An executor holds its `fu::pool_t` by value, declared last so its threads join before anything they write is freed; a call, a tower step or a site takes it as `fu::pool_t&`, and a loader, which moves, holds a `fu::pool_t*`.
-Engines, loaders, tools and tests dispatch through it, `for_n` for tasks of similar cost and `for_n_dynamic` for uneven ones, and a dispatch finding the pool busy answers `fu::status_t::contended_k` rather than waiting.
+Host threads come from ForkUnion's `fu::pool_t` and the machine's topology from its `fu::topology_t`, the RAII owners `forkunion/forkunion.hpp` declares over the C ABI, which the library reaches only in `src/`, while `include/uform/utilities/ram_device.hpp` alone calls a `fu_*` function.
+The `spawn_pool` template of `ram_device.hpp`, instantiated only in units that include `forkunion/forkunion.hpp`, returns a `fu::pool_t` spawned over a harvested `fu::topology_t` through its `spawn` or `spawn_near`, allowed only the ForkUnion facilities that `forkunion_allowed_of` grants the executor's CPU ceiling; a build without OS threads runs one thread on the caller and refuses more as unsupported.
+An executor holds its `fu::pool_t` by value, declared last so its threads join before anything they write is freed; a call, a tower step or a site takes it as `fu::pool_t&`, and a loader, which moves, takes and holds its C handle `fu_pool_t`, dispatching through the `for_n` of `ram_device.hpp`.
+Engines, tools and tests dispatch through it, `for_n` for tasks of similar cost and `for_n_dynamic` for uneven ones, and a dispatch finding the pool busy answers `fu::status_t::contended_k` rather than waiting.
 An empty `fu::pool_t` runs every dispatch on the calling thread, as thread 0: a call without an executor dispatches on one, and its scratch is the arena the call names.
 A caller naming no thread count gets `fu::default_threads_count`, the rule every sibling library shares.
 The hook refuses a ForkUnion pool or topology class under `include/uform/`, a `fu_pool_new`, `fu_pool_spawn` or `fu_topology_new` outside `ram_device.hpp`, and a `std::thread` in a CUDA source, where one host thread drives every device through its streams and events.
@@ -204,6 +204,7 @@ Engines receive these as template parameters and never spell a class, an instruc
 - Every `@param` states its direction: `@param[in]`, `@param[out]` or `@param[in,out]`.
 - A closing `@par Statuses:` block lists only the statuses a verb's contract adds, while resource failures, cancellation, deferral and defects are covered once by the categories in the `uform_status_t` docblock.
 - Docblocks mark code with `@c`, `@p`, `@b` and `@ref`, never Markdown emphasis, and a `//` comment names code in backticks, never through a Doxygen command.
+- Markdown and Rust doc comments never set two code spans side by side; name one in prose and keep one span, as `.githooks/pre-commit` checks.
 - Comment prose stops at 100 columns while code runs to 120, and a paragraph is refilled when an edit leaves room on a line.
 - Comments state what the code cannot, never narrate history, and never justify a design by another project's.
 - Prose arrows are → with a space on each side, never `->`.
@@ -221,6 +222,13 @@ The library never prints, and suites, tools and benchmarks print whole lines thr
 Return types are declared before the name, never after an arrow.
 clang-format 22 with the checked-in `.clang-format` judges every changed line, and no file turns a formatter off in-band.
 A file never includes both a library's SDK umbrella `<X/X.hpp>` and its native umbrella `<X.hpp>`, for this library and every sibling, and nothing under `include/` includes a header that resolves under `cpp/`; C headers are the ABI every SDK sits on, so they are free everywhere. `.githooks/pre-commit` refuses both.
+
+Each library keeps its containers in `include/<lib>/*.hpp` behind its `::types` target, which links only the C ABI, carries no define, includes no kernel and calls nothing the library exports.
+ForkUnion and SmashTable define nothing for header-only builds, so their `::header` is also their container layer.
+Every operation one of a library's kernels backs is a verb under `cpp/`, which links the library, calls only `_best` exports and includes only C and `::types` headers.
+No relative header path sits in two of `c/`, `include/` and `cpp/`.
+A product's `include/` takes a sibling's `::types` and C headers, never its `cpp/` verbs, and no binding calls a `_serial` kernel.
+`.githooks/pre-commit` refuses each of these.
 
 ### Query Views
 
@@ -410,6 +418,7 @@ These rules are shared by every sibling library, and the pre-commit hook enforce
 
 The C++ suites are plain `int main` binaries, one `uform_test_<name>` per cell, built under `UFORM_BUILD_TEST` and sharing `test/harness.hpp` rather than a framework.
 The C suites, `c/test.c` and `test/vram.c`, reach the library through `c/uform/*.h` alone, and each binding's suite through that binding.
+Tests never read a library's internal layouts, and each family's oracle is the `<verb>_reference` beside it, never a serial kernel or a helper named `_oracle`, `_naive` or `_golden`.
 Oracles compute in Float64 through NumKong's `nk::cast` and `nk::dot` rather than loops widening one BFloat16 at a time, and never through `assert`, so every test unit opens with `#undef NDEBUG // ! A test's oracle must stay live in every build`.
 Benchmarks never include `test/`, each tree keeps its own harness, and neither uses a test or benchmark framework.
 
@@ -558,7 +567,7 @@ The C++ suites test the templates in `include/uform/`, as those are the cells, a
 
 Every CMake option takes the `UFORM_` prefix, and every `UFORM_BUILD_*` switch is off and every `UFORM_*_ARCH` empty by default, so a build names only what it wants:
 
-- `UFORM_BUILD_SHARED`: `uform_static` and `uform_shared` in the default build and the install; without it they build only for the targets that link them.
+- `UFORM_BUILD_LIBRARIES`: `uform_static` and `uform_shared` in the default build and the install; without it they build only for the targets that link them.
 - `UFORM_BUILD_STUB`: `uform_static_stub` and `uform_shared_stub` from `src_stub/`, which the bindings then link instead.
 - `UFORM_CUDA_ARCH`: the NVIDIA residency, for `all` the release set, `native` the family code of each visible GPU, or one code like `100f`; only the GPU classes NumKong compiles for those codes exist.
 - `UFORM_ROCM_ARCH`: the AMD residency, for `all` of `gfx942`, `gfx950`, `gfx1250` and `gfx1251`, `native`, or one target.
@@ -569,7 +578,7 @@ Every CMake option takes the `UFORM_` prefix, and every `UFORM_BUILD_*` switch i
 - `UFORM_BUILD_BENCH`: the benchmarks in `bench/`.
 - `UFORM_BUILD_PYTHON` and `UFORM_BUILD_NODE`: the CPython extension and the Node addon, which scikit-build-core and cmake-js set.
 - `UFORM_WERROR`: warnings as errors, which the `check` preset sets.
-- `UFORM_INSTALL`: with `UFORM_BUILD_SHARED`, the C headers, `uform_static`, `uform_shared`, a `uform.pc` and a CMake package under `lib/cmake/uform`, which `find_package(uform)` reads as `uform::abi`, `uform::static`, `uform::shared` and `uform::cpp`, the C++ SDK linking the C headers and the archive, on in a top-level build. Its `sdk` component holds both libraries, the C and C++ headers, both package files and the license, and `cpack --config build_library/CPackConfig.cmake` packs it alone, stripped, into `uform-<version>-<platform>-sdk.tar.gz`; the `library` and `release` presets remap the source directory out of every binary.
+- `UFORM_INSTALL`: with `UFORM_BUILD_LIBRARIES`, the C headers, `uform_static`, `uform_shared`, a `uform.pc` and a CMake package under `lib/cmake/uform`, which `find_package(uform)` reads as `uform::abi`, `uform::static`, `uform::shared` and `uform::cpp`, the C++ SDK linking the C headers and the archive, on in a top-level build. Its `sdk` component holds both libraries, the C and C++ headers, both package files and the license, and `cpack --config build_library/CPackConfig.cmake` packs it alone, stripped, into `uform-<version>-<platform>-sdk.tar.gz`; the `library` and `release` presets remap the source directory out of every binary.
 - `UFORM_WITH_INFINIBAND`: `AUTO` probes for InfiniBand and enables it when present, `ON` requires it and `OFF` leaves it out.
 - `UFORM_WITH_CODECS`: the host image, video and audio codecs the verbs over files decode with, on by default and off on WebAssembly, Android and Windows presets; CUDA needs it.
 - `UFORM_MARCH`: the `-march` floor of UForm's units and its libraries', an ISA level, `native` or a CPU name like `graniterapids`, and on WebAssembly the module's `serial`, `v128` or `v128relaxed`; empty by default, seeded from the environment.

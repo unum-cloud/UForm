@@ -33,6 +33,7 @@
 
 #include <forkunion/atomics.hpp>      // `fu::standard_atomic_ref` & kin - the classes' atomic references
 #include <forkunion/capabilities.hpp> // `fu::x86_pause_t`, `fu::arm64_wfet_t` & waiter kin
+#include <forkunion/forkunion.hpp>    // `fu::pool_t`, `fu::topology_t`
 #include <forkunion/locks.hpp>        // `fu::spin_mutex_t` - the executors' holds
 #include <forkunion/topology.hpp>     // `fu::current_thread_id` - the thread running an executor's call
 #include <forkunion/types.hpp>        // `fu::wait_capped_k`
@@ -41,7 +42,7 @@
 #include "uform/uform.h" // every argument structure
 
 #include "uform/utilities/array.hpp"       // `per_gpu_array`
-#include "uform/utilities/ram_device.hpp"  // `spawn_pool`, `fu::topology_t`
+#include "uform/utilities/ram_device.hpp"  // `status_from_`, `no_memory_domain_k`, `spawn_pool`
 #include "uform/utilities/types.hpp"       // `status_t`, the integer aliases, `sz::string_view_t`, `st::basic_vector`
 #include "uform/utilities/vram_device.hpp" // `gpu_drivers_t`, `gpu_executor_t`, `spawn_gpu_executor`
 #include "uform/encoder/tower.hpp"         // `geometry_t`, `precision_t`, `outputs_t` - what a model's towers take
@@ -244,7 +245,7 @@ template <cpu_class_t cpu_class_>
 struct waiter_for_cpu_class {
     using type = fu::standard_yield_t;
 };
-#if FORKUNION_TARGET_X86_PAUSE
+#if FORKUNION_TARGET_X8664_PAUSE
 template <>
 struct waiter_for_cpu_class<cpu_class_t::intel_haswell_k> {
     using type = fu::x86_pause_t;
@@ -270,7 +271,7 @@ struct waiter_for_cpu_class<cpu_class_t::intel_granite_k> {
     using type = fu::x86_pause_t;
 };
 #endif
-#if FORKUNION_TARGET_X86_TPAUSE
+#if FORKUNION_TARGET_X8664_TPAUSE
 template <>
 struct waiter_for_cpu_class<cpu_class_t::intel_sierra_k> {
     using type = fu::x86_tpause_t;
@@ -341,7 +342,7 @@ struct atomic_ref_for_cpu_class {
     template <typename value_type_>
     using type = fu::standard_atomic_ref<value_type_>;
 };
-#if FORKUNION_TARGET_X86_CMPCCXADD
+#if FORKUNION_TARGET_X8664_CMPCCXADD
 template <>
 struct atomic_ref_for_cpu_class<cpu_class_t::intel_sierra_k> {
     template <typename value_type_>

@@ -36,6 +36,9 @@
 
 #include <cuda.h> // `cuInit`, `cuStreamSynchronize`
 
+#include <forkunion/forkunion.hpp> // `fu::pool_t`, `fu::topology_t` — the CPU decode pool
+#include <stringzilla/find.hpp>    // `sz::split`
+
 #include "uform/utilities/array.hpp"              // `stack_array` — the host-oracle and staging scratch
 #include "uform/utilities/vram_nvidia_memory.hpp" // `gpu_arena_t`, `gpu_arena_alloc_t`, `pinned_alloc`, the tensor aliases
 #include "uform/utilities/mesh.hpp"               // `mesh_topology_t`, `host_domain_index_from_environment`
@@ -192,7 +195,7 @@ template <typename path_fn_>
 static void for_each_env_input(char const* name, path_fn_&& on_path) noexcept {
     char const* value = std::getenv(name);
     if (value == nullptr) return;
-    for (sz::string_view_t path : sz::string_view_t {value}.split(","))
+    for (sz::string_view_t path : sz::split(sz::string_view_t {value}, ","))
         if (!path.empty()) on_path(path);
 }
 
@@ -204,7 +207,7 @@ static void for_each_env_input(char const* name, path_fn_&& on_path) noexcept {
 [[nodiscard]] static st::basic_vector<util::b8_t> first_env_fixture(char const* name) noexcept {
     char const* value = std::getenv(name);
     if (value == nullptr) return {};
-    for (sz::string_view_t path : sz::string_view_t {value}.split(","))
+    for (sz::string_view_t path : sz::split(sz::string_view_t {value}, ","))
         if (!path.empty()) return read_fixture(path);
     return {};
 }
@@ -699,9 +702,10 @@ static case_result_t test_audio_decode(sz::string_view_t label, st::basic_vector
     [[maybe_unused]] util::status_t const pushed = drawn.push_back(0);
     audio_batch_shape_t const representation {chunk, sample_rate};
     std::span<audio_batch_shape_t const> const representations {&representation, 1};
-    util::expected_t decoded = decode_audios(
-        pool, tape.view(), drawn.view(), representations, batch.audio_samples.span(), batch.segment_offsets.span(),
-        batch.segment_lengths.span(), batch.segment_modality.span(), batch.dropped.span(), stream);
+    util::expected_t decoded = decode_audios(pool.get(), tape.view(), drawn.view(), representations,
+                                             batch.audio_samples.span(), batch.segment_offsets.span(),
+                                             batch.segment_lengths.span(), batch.segment_modality.span(),
+                                             batch.dropped.span(), stream);
     expect_true(static_cast<bool>(decoded), "[{}] decode_audios should succeed: {}", label,
                 util::to_string(decoded.status_));
     if (!decoded) return {};
@@ -775,9 +779,10 @@ static case_result_t test_audio_fault_isolation(util::gpu_arena_t& arena, util::
     [[maybe_unused]] util::status_t const pushed_second = drawn.push_back(1);
     audio_batch_shape_t const representation {chunk, sample_rate};
     std::span<audio_batch_shape_t const> const representations {&representation, 1};
-    util::expected_t decoded = decode_audios(
-        pool, tape.view(), drawn.view(), representations, batch.audio_samples.span(), batch.segment_offsets.span(),
-        batch.segment_lengths.span(), batch.segment_modality.span(), batch.dropped.span(), stream);
+    util::expected_t decoded = decode_audios(pool.get(), tape.view(), drawn.view(), representations,
+                                             batch.audio_samples.span(), batch.segment_offsets.span(),
+                                             batch.segment_lengths.span(), batch.segment_modality.span(),
+                                             batch.dropped.span(), stream);
     expect_true(static_cast<bool>(decoded), "one corrupt clip among good must not fail the batch: {}",
                 util::to_string(decoded.status_));
     if (!decoded) return {};
@@ -836,7 +841,7 @@ static case_result_t test_image_decode(sz::string_view_t label, st::basic_vector
     [[maybe_unused]] util::status_t const pushed = drawn.push_back(0);
     image_batch_shape_t const representation {patch, channels};
     std::span<image_batch_shape_t const> const representations {&representation, 1};
-    util::expected_t decoded = decode_images(jpeg, pool, tape.view(), drawn.view(), representations,
+    util::expected_t decoded = decode_images(jpeg, pool.get(), tape.view(), drawn.view(), representations,
                                              batch.images.span(), batch.image_shapes.span(),
                                              batch.segment_offsets.span(), batch.segment_lengths.span(),
                                              batch.segment_modality.span(), batch.dropped.span(), stream);
@@ -908,7 +913,7 @@ static case_result_t test_image_batch_matches_single(std::span<st::basic_vector<
     auto decode = [&](std::span<util::u64_t const> drawn, landed_t& landed) -> bool {
         auto [batch, make_batch_status] = multimodal_batch_on_gpu_t::make(util::gpu_arena_alloc_t {arena}, shape);
         if (!make_batch_status) return false;
-        if (!decode_images(jpeg, pool, tape.view(), drawn, {&representation, 1}, batch.images.span(),
+        if (!decode_images(jpeg, pool.get(), tape.view(), drawn, {&representation, 1}, batch.images.span(),
                            batch.image_shapes.span(), batch.segment_offsets.span(), batch.segment_lengths.span(),
                            batch.segment_modality.span(), batch.dropped.span(), stream))
             return false;
@@ -1003,9 +1008,10 @@ static case_result_t test_video_decode(sz::string_view_t label, st::basic_vector
         return {};
     util::stack_array<util::u64_t, 1> drawn;
     [[maybe_unused]] util::status_t const pushed = drawn.push_back(0);
-    util::expected_t decoded = decode_videos(
-        nvdec, pool, tape.view(), drawn.view(), representations.view(), batch.videos.span(), batch.video_shapes.span(),
-        batch.segment_offsets.span(), batch.segment_lengths.span(), batch.segment_modality.span(), stream);
+    util::expected_t decoded = decode_videos(nvdec, pool.get(), tape.view(), drawn.view(), representations.view(),
+                                             batch.videos.span(), batch.video_shapes.span(),
+                                             batch.segment_offsets.span(), batch.segment_lengths.span(),
+                                             batch.segment_modality.span(), stream);
     expect_true(static_cast<bool>(decoded), "[{}] decode_videos should succeed: {}", label,
                 util::to_string(decoded.status_));
     if (!decoded) return {};
@@ -1088,11 +1094,11 @@ static case_result_t test_multimodal_packet_routes(util::gpu_arena_t& arena, uti
     [[maybe_unused]] util::status_t const pushed_audio = audio_drawn.push_back(0);
     audio_batch_shape_t const audio_representation {chunk, 16000u};
     std::span<audio_batch_shape_t const> const audio_reps {&audio_representation, 1};
-    if (!expect_true(
-            decode_audios(pool, audio_tape.view(), audio_drawn.view(), audio_reps, audio_batch.audio_samples.span(),
-                          audio_batch.segment_offsets.span(), audio_batch.segment_lengths.span(),
-                          audio_batch.segment_modality.span(), audio_batch.dropped.span(), stream),
-            "multimodal: audio decode failed"))
+    if (!expect_true(decode_audios(pool.get(), audio_tape.view(), audio_drawn.view(), audio_reps,
+                                   audio_batch.audio_samples.span(), audio_batch.segment_offsets.span(),
+                                   audio_batch.segment_lengths.span(), audio_batch.segment_modality.span(),
+                                   audio_batch.dropped.span(), stream),
+                     "multimodal: audio decode failed"))
         return {};
 
     // Decode the blob into an image-only batch → its real segment
@@ -1118,7 +1124,7 @@ static case_result_t test_multimodal_packet_routes(util::gpu_arena_t& arena, uti
     [[maybe_unused]] util::status_t const pushed_image = image_drawn.push_back(0);
     image_batch_shape_t const image_representation {patch, 4u};
     std::span<image_batch_shape_t const> const image_reps {&image_representation, 1};
-    if (!expect_true(decode_images(jpeg, pool, image_tape.view(), image_drawn.view(), image_reps,
+    if (!expect_true(decode_images(jpeg, pool.get(), image_tape.view(), image_drawn.view(), image_reps,
                                    image_batch.images.span(), image_batch.image_shapes.span(),
                                    image_batch.segment_offsets.span(), image_batch.segment_lengths.span(),
                                    image_batch.segment_modality.span(), image_batch.dropped.span(), stream),
@@ -1249,8 +1255,8 @@ static void test_paired_fill_replays_after_back_to_back_fills(ut::mixture_entry_
     shape.image.channels = channels;
     paired_loader_parquet_config_t config;
     config.anchor = entry.anchor.view(), config.positive = entry.positive.view();
-    auto [loader, make_loader_status] = paired_loader_parquet_t::make(session, entry.glob.view(), 42u, pool, config,
-                                                                      modality_t::image_k, shape);
+    auto [loader, make_loader_status] = paired_loader_parquet_t::make(session, entry.glob.view(), 42u, pool.get(),
+                                                                      config, modality_t::image_k, shape);
     if (!expect_true(make_loader_status, "[{}] the paired loader should make: {}", name,
                      make_loader_status.description_))
         return;
@@ -1402,11 +1408,9 @@ int main(int argc, char** argv) {
     if (!expect_true(make_arena_status, "gpu arena make: {}", util::to_string(make_arena_status.status_)))
         return finish_test_run();
     fu::topology_t topology;
-    fu::pool_t pool;
-    if (!expect_true(!fu::failed(topology.harvest()) &&
-                         util::spawn_pool(pool, topology, 4, fu::caller_inclusive_k, fu_capabilities_all_k),
-                     "the CPU decode pool should spawn"))
-        return finish_test_run();
+    if (!expect_true(!fu::failed(topology.harvest()), "topology discovery failed")) return finish_test_run();
+    auto [pool, pool_status] = util::spawn_pool<fu::pool_t>(topology, 4, fu::caller_inclusive_k);
+    if (!expect_true(pool_status, "the CPU decode pool should spawn")) return finish_test_run();
 
     // Tier C — the coordinate oracle, no external media.
     run_test_case("test_fill_coords_routes_every_modality", test_fill_coords_routes_every_modality, arena, stream);

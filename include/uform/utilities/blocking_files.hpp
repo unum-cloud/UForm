@@ -16,7 +16,7 @@
 #include <cstddef> // `std::size_t`
 #include <cstdio>  // `std::rename`, `std::remove`
 #include <cstdlib> // `std::malloc`, `std::free` - the copy WASI maps a file into
-#include <cstring> // `std::memcpy`
+#include <cstring> // `std::memcpy`, `std::memchr`
 
 #include <span>    // `std::span` - the buffer a path is terminated in
 #include <utility> // `std::exchange`, `std::swap`, `std::move`
@@ -87,7 +87,7 @@ using path_character_t = wchar_t;
  *  calls would cut short there, one that is not UTF-8, or one the buffer will not hold. */
 [[nodiscard]] inline expected_t terminate_path_(sz::string_view_t path,
                                                 std::span<path_character_t, path_capacity_k> terminated) noexcept {
-    if (path.size() >= terminated.size() || path.contains('\0'))
+    if (path.size() >= terminated.size() || std::memchr(path.data(), '\0', path.size()))
         return expected_t::fail(status_code_t::invalid_argument_k, "the path holds a NUL or outgrows {} bytes: {}",
                                 path_capacity_k, path);
     int const length = path.empty() ? 0
@@ -204,7 +204,7 @@ using path_character_t = char;
  *  short there, or one the buffer will not hold. */
 [[nodiscard]] inline expected_t terminate_path_(sz::string_view_t path,
                                                 std::span<path_character_t, path_capacity_k> terminated) noexcept {
-    if (path.size() >= terminated.size() || path.contains('\0'))
+    if (path.size() >= terminated.size() || std::memchr(path.data(), '\0', path.size()))
         return expected_t::fail(status_code_t::invalid_argument_k, "the path holds a NUL or outgrows {} bytes: {}",
                                 path_capacity_k, path);
     std::memcpy(terminated.data(), path.data(), path.size());

@@ -11,7 +11,7 @@ Every verb is a batch, and every output whose length the call decides lands in a
 ## Installation
 
 ```sh
-cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D UFORM_BUILD_SHARED=ON && cmake --build build_release && cmake --install build_release
+cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D UFORM_BUILD_LIBRARIES=ON && cmake --build build_release && cmake --install build_release
 ```
 
 The install carries the C and C++ headers, both libraries, and a CMake package whose `uform::cpp` target names the SDK headers, the C headers of `uform::abi` beneath them, and the archive `uform::static`:

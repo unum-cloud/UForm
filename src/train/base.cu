@@ -35,6 +35,8 @@
 
 #include <cuda.h> // `cuMemcpyHtoDAsync`, `cuMemcpyDtoHAsync`, `cuStreamSynchronize`, `cuMemsetD8`
 
+#include <stringzilla/compare.hpp> // `sz::starts_with`, `sz::ends_with`
+
 #include "uform/train/base.cuh"
 
 namespace ue = unum::uform::encoder;
@@ -206,7 +208,7 @@ struct grid_factor_t {
 /** Whether @p matrix projects back into the residual stream: each block's attention
  *  and MLP output. */
 [[nodiscard]] static bool writes_residual_(util::differentiable_weights_t const& matrix) noexcept {
-    return matrix.name.view().ends_with(".out") || matrix.name.view().ends_with(".down");
+    return sz::ends_with(matrix.name, ".out") || sz::ends_with(matrix.name, ".down");
 }
 
 multimodal_batch_shape_t ut::batch_capacity(multimodal_batch_shape_t shape, std::size_t rows,
@@ -382,7 +384,7 @@ util::expected_t ut::load_weights(util::checkpoint_to_load_t const& checkpoint,
                                           matrix.name);
         nk::tensor_view<nk_bf16_t, 2> const saved = checkpoint[name_text.view()];
         // A base trained without the decoder or the token head warm-starts a run adding either.
-        bool const optional = matrix.name.view() == "masked_tokens" || matrix.name.view().starts_with("token_head.");
+        bool const optional = matrix.name.view() == "masked_tokens" || sz::starts_with(matrix.name, "token_head.");
         if (saved.empty() && optional) {
             if (util::expected_t seeded = seed_matrix_(list, weight_index, residual_writers, stream); !seeded)
                 return seeded;

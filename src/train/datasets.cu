@@ -13,6 +13,9 @@
 
 #include <yyjson.h> // the mixture JSON — exceptions-free C
 
+#include <stringzilla/compare.hpp> // `sz::ends_with`
+#include <stringzilla/find.hpp>    // `sz::contains`
+
 #include "uform/train/datasets.hpp"
 
 namespace ue = unum::uform::encoder;
@@ -149,7 +152,7 @@ using namespace unum::uform::train;
 
 util::expected<mixture_t> mixture_t::read(sz::string_view_t path) noexcept {
     using result_t = util::expected<mixture_t>;
-    if (path.contains('\0'))
+    if (sz::contains(path, '\0'))
         return result_t::fail(util::status_code_t::invalid_argument_k, "The mixture path holds a NUL byte");
     sz::string_t terminated;
     if (sz::failed(terminated.assign(path)))
@@ -317,7 +320,7 @@ void mixture_sampler_t::reweigh_(util::u32_t epoch, void (*report)(sz::string_vi
 }
 
 util::expected_t dataset_source_t::open(dataset_source_t& placed, trainer_config_t& config,
-                                        gpu_direct_storage_session_t& session, mixture_t mixture, fu::pool_t& pool,
+                                        gpu_direct_storage_session_t& session, mixture_t mixture, fu_pool_t pool,
                                         std::size_t batches_per_fill) noexcept {
     multimodal_batch_shape_t const& shape = config.batch;
     placed.mixture_ = std::move(mixture);
@@ -333,17 +336,17 @@ util::expected_t dataset_source_t::open(dataset_source_t& placed, trainer_config
     for (mixture_entry_t const& entry : entries) {
         sz::string_view_t const glob = entry.glob.view();
         util::expected_t made;
-        if (!entry.state.empty() && glob.ends_with(".parquet"))
+        if (!entry.state.empty() && sz::ends_with(glob, ".parquet"))
             made = adopt(choices_loader_parquet_t::make(
                 session, glob, config.seed, {entry.state.view(), entry.choices.view(), entry.targets.view()}));
         else if (!entry.state.empty())
             made = util::expected_t::fail(util::status_code_t::invalid_argument_k,
                                           "{} holds no Parquet shards of choices", glob);
-        else if (!pairs && glob.ends_with(".parquet"))
+        else if (!pairs && sz::ends_with(glob, ".parquet"))
             made = adopt(tokens_loader_parquet_t::make(session, glob, config.seed));
-        else if (!pairs && glob.ends_with(".jsonl"))
+        else if (!pairs && sz::ends_with(glob, ".jsonl"))
             made = adopt(tokens_loader_jsonl_t::make(session, glob, config.seed));
-        else if (!pairs && (glob.ends_with(".csv") || glob.ends_with(".txt")))
+        else if (!pairs && (sz::ends_with(glob, ".csv") || sz::ends_with(glob, ".txt")))
             made = adopt(tokens_loader_csv_t::make(session, glob, config.seed));
         else if (!pairs)
             made = util::expected_t::fail(util::status_code_t::invalid_argument_k,
@@ -529,7 +532,7 @@ util::expected_t dataset_source_t::fill_member_(trainer_t& trainer, std::size_t 
         // A `.txt` shard is one document per line: a headerless table of one column, as no line
         // holds a tab.
         tokens_base_loader_csv_config_t text {dataset.text.view()};
-        if (dataset.glob.view().ends_with(".txt")) text.delimiter = '\t', text.header = csv_header_t::positional_k;
+        if (sz::ends_with(dataset.glob, ".txt")) text.delimiter = '\t', text.header = csv_header_t::positional_k;
         filled = csv->fill(stream, text, gpu_index, step, batches);
     }
     else if (auto* choices = std::get_if<choices_loader_parquet_t>(&loaders_[entry]))

@@ -101,13 +101,13 @@ One verb per input form, each spelled as in C:
 
 - `text_encode(texts)` takes UTF-8 texts, a byte per token, since models are tokenizer-free.
 - `image_encode(files)` takes JPEG, PNG or WebP files.
-- `image_encode_pixels(pixels)` takes C-contiguous `[height, width, 3]` `uint8` buffers.
+- `image_encode_pixels(pixels)` takes C-contiguous uint8 buffers of shape `[height, width, 3]`.
 - `video_encode(files)` takes MP4 or WebM clips.
 - `audio_encode(files)` takes WAV, FLAC, MP3 or Opus recordings.
 - `audio_encode_samples(samples, sample_rate)` takes 1-D `float32` buffers.
 
 A batch is a sequence of separate objects, `str` or bytes-like for texts and bytes-like for files, gathered into one tape with one copy.
-A `(data, offsets)` tuple of buffers, the data and `count + 1` `size_t` offsets, is read in place as a tape without a copy, and both buffers must stay alive and unchanged until the call is final:
+A `(data, offsets)` tuple of buffers, the data and `count + 1` offsets of the size_t type, is read in place as a tape without a copy, and both buffers must stay alive and unchanged until the call is final:
 
 ```python
 data = b"first documentthe second"

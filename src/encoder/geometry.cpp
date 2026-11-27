@@ -11,6 +11,8 @@
 #include <limits>       // `std::numeric_limits`
 #include <system_error> // `std::errc`
 
+#include <stringzilla/find.hpp> // `sz::partition`
+
 #include "uform/encoder/entries.hpp" // `rope_angles_t`
 #include "uform/encoder/geometry.hpp"
 
@@ -51,7 +53,7 @@ template <typename value_type_>
     std::size_t const count = values.size();
     std::size_t parsed = 0;
     for (sz::string_view_t separator = ","; parsed != count && !separator.empty(); ++parsed) {
-        auto [item, match, after] = remaining.partition(',');
+        auto [item, match, after] = sz::partition(remaining, ',');
         if (!parse_(item, values[parsed]))
             return expected_t::fail(status_code_t::invalid_argument_k, "the {} key holds an unparsable {}", key, item);
         separator = match, remaining = after;

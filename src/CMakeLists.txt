@@ -335,8 +335,15 @@ function (uform_variants modality_ residency_ backend_)
     )
     target_compile_definitions(${library_} PRIVATE ${uform_cpu_gates_} ${uform_gpu_gates_})
     target_link_libraries(
-        ${library_} PRIVATE numkong::static forkunion::cpp stringzilla::static smashtable::header yyjson
-                            $<BUILD_INTERFACE:forkunion::cpu_capabilities_compiled>
+        ${library_}
+        PRIVATE numkong::types
+                numkong::static
+                forkunion::cpp
+                stringzilla::types
+                stringzilla::static
+                smashtable::header
+                yyjson
+                $<BUILD_INTERFACE:forkunion::cpu_capabilities_compiled>
     )
     target_compile_features(${library_} PRIVATE cxx_std_23)
     set_target_properties(${library_} PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
@@ -370,7 +377,8 @@ if (UFORM_CUDA_ARCH)
         CODES ${uform_encoder_nvidia_codes_}
     )
     target_link_libraries(
-        uform_encoder_nvidia_device PRIVATE numkong::static forkunion::header stringzilla::static smashtable::header
+        uform_encoder_nvidia_device PRIVATE numkong::types numkong::static forkunion::header stringzilla::types
+                                            stringzilla::static smashtable::header
     )
     target_compile_options(uform_encoder_nvidia_device PRIVATE --expt-relaxed-constexpr)
 endif ()
@@ -407,7 +415,7 @@ if (NOT UFORM_BUILD_TRAIN)
     target_sources(uform_host PRIVATE train_absent.cpp)
 endif ()
 target_link_libraries(
-    uform_host PUBLIC numkong::static forkunion::cpp stringzilla::static smashtable::header yyjson
+    uform_host PUBLIC numkong::types numkong::static forkunion::cpp stringzilla::cpp smashtable::header yyjson
 )
 # Every unit naming a class's waiter or atomic reference reads ForkUnion's probe verdicts rather than its own flags, so
 # the class units and the dispatch unit name the same rungs, and the dispatch unit admits them at run time.
@@ -496,6 +504,7 @@ if (UFORM_BUILD_TRAIN)
         train/introspect.cu
         utilities/multimem_collectives.cu
         utilities/infiniband_collectives.cu
+        utilities/mesh.cpp
         train/multimodal_masking.cu
         utilities/safetensors_format.cpp
         encoder/multimodal_batch.cu
@@ -514,8 +523,9 @@ if (UFORM_BUILD_TRAIN)
     )
     target_link_libraries(
         uform_train
-        PUBLIC numkong::static
-               stringzilla::static
+        PUBLIC numkong::types
+               numkong::static
+               stringzilla::cpp
                forkunion::cpp
                smashtable::header
                yyjson

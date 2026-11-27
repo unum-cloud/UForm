@@ -18,7 +18,7 @@
 
 #include "uform/encoder/ram_kits.hpp"     // the host entries
 #include "uform/encoder/tower.hpp"        // `tower_weights_t`, `pack_weights`, `encode_steps`
-#include "uform/utilities/ram_device.hpp" // `fu::pool_t`, the threads every step splits across
+#include "uform/utilities/ram_device.hpp" // `status_from_`, `fu::dispatched_status`
 
 namespace unum::uform::encoder {
 
@@ -64,18 +64,18 @@ struct ram_placer_t {
     }
 };
 
-/** The steps of @c encode_steps over host memory, split across a pool's threads, through the kits
- *  a CPU class picked; a step's first failure latches through @p atomic_ref_template_ . The host
- *  entries are @c inline @c static templates over the element-wise kit, so no two class units
- *  share a copy. */
+/** The steps of @c encode_steps over host memory, split across the threads of a @p pool_type_ ,
+ *  through the kits a CPU class picked; a step's first failure latches through
+ *  @p atomic_ref_template_ . The host entries are @c inline @c static templates over the
+ *  element-wise kit, so no two class units share a copy. */
 template <typename products_kit_type_, typename attention_kit_type_, typename elementwise_kit_type_,
-          template <typename> class atomic_ref_template_>
+          template <typename> class atomic_ref_template_, typename pool_type_>
 struct ram_steps {
     using products_kit_t = products_kit_type_;
     using attention_kit_t = attention_kit_type_;
     using elementwise_kit_t = elementwise_kit_type_;
 
-    fu::pool_t& pool;
+    pool_type_& pool;
     entries_rows_t rows;
 
     [[nodiscard]] nk_stream_t stream() const noexcept { return nullptr; }
@@ -92,11 +92,12 @@ struct ram_steps {
     [[nodiscard]] expected_t each(std::size_t tasks, sz::string_view_t what, body_type_ const& body) noexcept {
         std::size_t const width = rows.workers.extent(1);
         nk_status_t failure = nk_success_k;
-        fu::status_t const status = pool.for_n(tasks, [&](std::size_t task, std::size_t thread) noexcept {
-            nk_status_t const step = body(task, f32r1_span_t {rows.workers.row(thread).data(), width});
-            if (step != nk_success_k)
-                atomic_ref_template_<nk_status_t> {failure}.store(step, std::memory_order_relaxed);
-        });
+        fu::status_t const status = fu::dispatched_status(
+            pool.for_n(tasks, [&](std::size_t task, std::size_t thread) noexcept {
+                nk_status_t const step = body(task, f32r1_span_t {rows.workers.row(thread).data(), width});
+                if (step != nk_success_k)
+                    atomic_ref_template_<nk_status_t> {failure}.store(step, std::memory_order_relaxed);
+            }));
         if (expected_t refused = dispatched(status, what); !refused) return refused;
         return checked(failure, what); // `for_n` joined every worker
     }
@@ -199,7 +200,6 @@ struct ram_steps {
 template <typename products_kit_type_, typename attention_kit_type_, typename elementwise_kit_type_,
           template <typename> class atomic_ref_template_>
 struct ram_tower {
-    using steps_t = ram_steps<products_kit_type_, attention_kit_type_, elementwise_kit_type_, atomic_ref_template_>;
 
     /**
      *  @brief Pack every weight of @p checkpoint into NumKong's aligned heap, in @p precision for
@@ -235,10 +235,12 @@ struct ram_tower {
     }
 
     /** Encode @p batch in host memory on @p pool 's threads. */
+    template <typename pool_type_>
     [[nodiscard]] expected_t encode(multimodal_batch_view_t batch, outputs_t outputs, bytes_span_t scratch,
-                                    fu::pool_t& pool) const noexcept {
+                                    pool_type_& pool) const noexcept {
         scratch_cursor_t cursor {scratch};
-        steps_t steps {pool, reserve_entries(cursor, weights_.geometry, pool.threads_count())};
+        ram_steps<products_kit_type_, attention_kit_type_, elementwise_kit_type_, atomic_ref_template_, pool_type_>
+            steps {pool, reserve_entries(cursor, weights_.geometry, pool.threads_count())};
         if (scratch.size() < cursor.used)
             return expected_t::fail(util::status_code_t::out_of_memory_k,
                                     "the scratch holds {} bytes, the entries need {}", scratch.size(), cursor.used);

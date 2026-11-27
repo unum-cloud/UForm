@@ -71,7 +71,6 @@
 
 #include <utility>  // `std::exchange`
 #include <span>     // `std::span` — the DMA ring ranges inside the wire PODs
-#include <charconv> // `std::from_chars` — coordinate payload parsing
 #include <chrono>   // `std::chrono::steady_clock` — the completion-poll deadline
 
 #include <cuda.h>      // `cuMemGetHandleForAddressRange`, `cuMemHostRegister`, `cuMemHostGetDevicePointer`
@@ -147,55 +146,15 @@ struct infiniband_coordinates_t {
     }
 
     /** Parse the payload @ref to_text produced; @c false when any field is missing or malformed. */
-    [[nodiscard]] static bool from_text(sz::string_view_t payload, infiniband_coordinates_t& coordinates) noexcept {
-        auto parse_number = [](sz::string_view_t token, auto& value) noexcept {
-            std::from_chars_result const result = std::from_chars(token.data(), token.data() + token.size(), value);
-            return result.ec == std::errc {} && result.ptr == token.data() + token.size();
-        };
-        sz::byteset_t const whitespaces = sz::whitespaces_set();
-        bool lid_parsed = false, qpn_parsed = false, psn_parsed = false, rkey_parsed = false, addr_parsed = false,
-             gid_parsed = false;
-        for (sz::string_view_t line : payload.split(sz::newlines_set())) {
-            auto [key, match, value] = line.partition(' ');
-            value = value.strip(whitespaces);
-            if (key == "lid") lid_parsed = parse_number(value, coordinates.local_identifier);
-            else if (key == "qpn") qpn_parsed = parse_number(value, coordinates.queue_pair_number);
-            else if (key == "psn") psn_parsed = parse_number(value, coordinates.packet_sequence_number);
-            else if (key == "rkey") rkey_parsed = parse_number(value, coordinates.remote_key);
-            else if (key == "addr") addr_parsed = parse_number(value, coordinates.buffer_address);
-            else if (key == "gid") {
-                gid_parsed = value.size() == 2 * sizeof(coordinates.global_identifier);
-                for (std::size_t byte_index = 0; gid_parsed && byte_index != sizeof(coordinates.global_identifier);
-                     ++byte_index) {
-                    char const* pair = value.data() + 2 * byte_index;
-                    std::from_chars_result const result = std::from_chars(
-                        pair, pair + 2, coordinates.global_identifier[byte_index], 16);
-                    gid_parsed = result.ec == std::errc {} && result.ptr == pair + 2;
-                }
-            }
-        }
-        return lid_parsed && qpn_parsed && psn_parsed && rkey_parsed && addr_parsed && gid_parsed;
-    }
+    [[nodiscard]] static bool from_text(sz::string_view_t payload, infiniband_coordinates_t& coordinates) noexcept;
 };
 
 /** Publish this rank's @p local coordinates under @p key and await + parse the @p peer_host_domain
  *  's payload under the same key — one QP handshake over the mesh's filesystem rendezvous. */
-[[nodiscard]] inline expected_t exchange_infiniband_coordinates(mesh_topology_t const& topology, sz::string_view_t key,
-                                                                infiniband_coordinates_t const& local,
-                                                                u32_t peer_host_domain, infiniband_coordinates_t& peer,
-                                                                f64_t timeout_seconds) noexcept {
-    sz::string_t local_text;
-    if (!local.to_text(local_text))
-        return expected_t::fail(status_code_t::out_of_memory_k, "coordinate payload assembly failed (key={})", key);
-    if (expected_t published = topology.publish_text(key, local_text.view()); !published) return published;
-    sz::string_t peer_text;
-    if (expected_t awaited = topology.await_text(peer_host_domain, key, peer_text, timeout_seconds); !awaited)
-        return awaited;
-    if (!infiniband_coordinates_t::from_text(peer_text.view(), peer))
-        return expected_t::fail(status_code_t::io_k, "malformed coordinates from host_domain {} (key={}): \"{}\"",
-                                peer_host_domain, key, peer_text);
-    return {};
-}
+[[nodiscard]] expected_t exchange_infiniband_coordinates(mesh_topology_t const& topology, sz::string_view_t key,
+                                                         infiniband_coordinates_t const& local, u32_t peer_host_domain,
+                                                         infiniband_coordinates_t& peer,
+                                                         f64_t timeout_seconds) noexcept;
 
 /** The pointer-and-scalar handles a kernel needs to post one work-queue entry and ring the
  *  doorbell — a trivially-copyable POD passed by value; the owning @c infiniband_queue_mapping_t

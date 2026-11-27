@@ -53,6 +53,7 @@
 #include <yyjson.h>     // `yyjson_read_file`
 
 #include <forkunion/atomics.hpp>           // `fu::standard_atomic_ref` - the scoring threads
+#include <forkunion/forkunion.hpp>         // `fu::pool_t`, `fu::topology_t`
 #include <numkong/capabilities.h>          // `nk_capabilities_enabled_cpu`
 #include <numkong/dots.h>                  // `nk_dots_pack_f32_best`, `nk_dots_packed_f32_best`
 #include <smashtable/basic_hash_table.hpp> // `hash_map` — COCO image IDs to their files
@@ -62,9 +63,9 @@
 #include "uform/model.h"
 #include "uform/types.h"
 
+#include "uform/utilities/ram_device.hpp"         // `spawn_pool`
 #include "uform/utilities/safetensors_format.hpp" // `checkpoint_to_load_t`, `checkpoint_to_save_t` — the calibrated copy
 #include "uform/utilities/types.hpp"              // `divide_round_up`
-#include "uform/utilities/ram_device.hpp"         // `spawn_pool`, `fu::topology_t`
 
 #include "arguments.hpp" // `flag_t`, `parse_or_exit`, `stop_requested`, `verb_phase_t`
 
@@ -476,10 +477,9 @@ static constexpr std::size_t score_block_rows_k = 64;
     if (nk_capabilities_enabled_cpu(&capabilities) != nk_success_k) return false;
     fu::topology_t topology;
     if (fu::failed(topology.harvest())) return false;
-    fu::pool_t pool;
-    if (!util::spawn_pool(pool, topology, encoder.threads ? encoder.threads : topology.logical_cores_count(),
-                          fu::caller_inclusive_k, fu_capabilities_all_k))
-        return false;
+    auto [pool, pool_status] = util::spawn_pool<fu::pool_t>(
+        topology, encoder.threads ? encoder.threads : topology.logical_cores_count(), fu::caller_inclusive_k);
+    if (!pool_status) return false;
     std::size_t text_hits[3] = {}, media_hits[3] = {};
     if (!count_hits_(pool, capabilities, captions, media, encoder.dimensions, owner_offsets.data(), split.owners.data(),
                      text_hits) ||

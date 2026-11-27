@@ -8,7 +8,7 @@ Only the C ABI is versioned, so these headers change with the code that instanti
 
 - `utilities/`, in `unum::uform::utilities`:
   - `types.hpp`: statuses, `expected`, the scalar and tensor aliases, byte spans and tapes, and the keyed hasher.
-  - `ram_device.hpp`: `spawn_pool`, which fills ForkUnion's `fu::pool_t` over its `fu::topology_t`, the one way host threads are spawned.
+  - `ram_device.hpp`: `for_n` over ForkUnion's C handle `fu_pool_t`, running on the calling thread when the handle is empty; `spawn_pool`, the one way host threads are spawned, is a template there whose ForkUnion calls instantiate only in units that include ForkUnion's SDK.
   - `array.hpp`: fixed-capacity arrays with inline storage, for tables of one entry per GPU.
   - `safetensors_format.hpp`: reading and writing safetensors checkpoints through NumKong views.
   - `vram_nvidia_device.hpp`, `vram_nvidia_memory.hpp` and `vram_nvidia_schedule.cuh`: the CUDA driver's entry points and owning streams, the single-GPU allocators, and graphs captured once and replayed.

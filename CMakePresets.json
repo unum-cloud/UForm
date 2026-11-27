@@ -67,7 +67,7 @@
       "description": "Unoptimized host code with full DWARF, every host library, tool and suite.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "UFORM_BUILD_SHARED": "ON",
+        "UFORM_BUILD_LIBRARIES": "ON",
         "UFORM_BUILD_TEST": "ON",
         "UFORM_BUILD_TOOLS": "ON"
       }
@@ -85,7 +85,7 @@
         "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O0 -g0 -DNDEBUG",
         "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O0 -g0 -DNDEBUG",
         "CMAKE_CUDA_FLAGS_RELWITHDEBINFO": "-O0 -Xcicc -O1 -Xptxas -O0 -DNDEBUG",
-        "UFORM_BUILD_SHARED": "ON",
+        "UFORM_BUILD_LIBRARIES": "ON",
         "UFORM_BUILD_TEST": "ON",
         "UFORM_BUILD_TOOLS": "ON",
         "UFORM_WERROR": "ON"
@@ -102,7 +102,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_CUDA_FLAGS_RELWITHDEBINFO": "-O2 -g -lineinfo -DNDEBUG",
-        "UFORM_BUILD_SHARED": "ON",
+        "UFORM_BUILD_LIBRARIES": "ON",
         "UFORM_BUILD_TEST": "ON",
         "UFORM_BUILD_TOOLS": "ON"
       }
@@ -120,7 +120,7 @@
         "CMAKE_C_FLAGS": "-ffile-prefix-map=${sourceDir}=.",
         "CMAKE_CXX_FLAGS": "-ffile-prefix-map=${sourceDir}=.",
         "CMAKE_CUDA_FLAGS": "-Xcompiler=-ffile-prefix-map=${sourceDir}=.",
-        "UFORM_BUILD_SHARED": "ON",
+        "UFORM_BUILD_LIBRARIES": "ON",
         "UFORM_BUILD_TEST": "ON",
         "UFORM_BUILD_TOOLS": "ON"
       }
@@ -138,7 +138,7 @@
         "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O3 -g -DNDEBUG",
         "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O3 -g -DNDEBUG",
         "UFORM_BUILD_BENCH": "ON",
-        "UFORM_BUILD_SHARED": "ON"
+        "UFORM_BUILD_LIBRARIES": "ON"
       }
     },
     {
@@ -152,7 +152,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "UFORM_BUILD_SANITIZERS": "thread",
-        "UFORM_BUILD_SHARED": "ON",
+        "UFORM_BUILD_LIBRARIES": "ON",
         "UFORM_BUILD_TEST": "ON"
       }
     },
@@ -195,7 +195,7 @@
         "CMAKE_C_FLAGS": "-ffile-prefix-map=${sourceDir}=.",
         "CMAKE_CXX_FLAGS": "-ffile-prefix-map=${sourceDir}=.",
         "CMAKE_CUDA_FLAGS": "-Xcompiler=-ffile-prefix-map=${sourceDir}=.",
-        "UFORM_BUILD_SHARED": "ON"
+        "UFORM_BUILD_LIBRARIES": "ON"
       }
     },
     {
@@ -212,7 +212,7 @@
       "inherits": "library",
       "displayName": "Stub Library - the C headers over a library that reports every verb unsupported",
       "cacheVariables": {
-        "UFORM_BUILD_SHARED": "OFF",
+        "UFORM_BUILD_LIBRARIES": "OFF",
         "UFORM_BUILD_STUB": "ON"
       }
     },
@@ -392,7 +392,7 @@
       "description": "One machine: its CPU floor, every kernel-library capability spelled as 1 or 0, and its one GPU code.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "UFORM_BUILD_SHARED": "ON",
+        "UFORM_BUILD_LIBRARIES": "ON",
         "UFORM_BUILD_TRAIN": "ON",
         "UFORM_BUILD_TEST": "OFF",
         "UFORM_BUILD_BENCH": "OFF",
@@ -423,11 +423,11 @@
         "STRINGZILLA_TARGET_HASWELL": "1",
         "STRINGZILLA_TARGET_SKYLAKE": "1",
         "STRINGZILLA_TARGET_ICELAKE": "1",
-        "FORKUNION_TARGET_X86_PAUSE": "1",
-        "FORKUNION_TARGET_X86_TPAUSE": "1",
-        "FORKUNION_TARGET_X86_CLDEMOTE": "1",
-        "FORKUNION_TARGET_X86_CMPCCXADD": "0",
-        "FORKUNION_TARGET_X86_RAOINT": "0"
+        "FORKUNION_TARGET_X8664_PAUSE": "1",
+        "FORKUNION_TARGET_X8664_TPAUSE": "1",
+        "FORKUNION_TARGET_X8664_CLDEMOTE": "1",
+        "FORKUNION_TARGET_X8664_CMPCCXADD": "0",
+        "FORKUNION_TARGET_X8664_RAOINT": "0"
       }
     },
     {
@@ -454,11 +454,11 @@
         "STRINGZILLA_TARGET_HASWELL": "1",
         "STRINGZILLA_TARGET_SKYLAKE": "1",
         "STRINGZILLA_TARGET_ICELAKE": "1",
-        "FORKUNION_TARGET_X86_PAUSE": "1",
-        "FORKUNION_TARGET_X86_TPAUSE": "1",
-        "FORKUNION_TARGET_X86_CLDEMOTE": "1",
-        "FORKUNION_TARGET_X86_CMPCCXADD": "0",
-        "FORKUNION_TARGET_X86_RAOINT": "0"
+        "FORKUNION_TARGET_X8664_PAUSE": "1",
+        "FORKUNION_TARGET_X8664_TPAUSE": "1",
+        "FORKUNION_TARGET_X8664_CLDEMOTE": "1",
+        "FORKUNION_TARGET_X8664_CMPCCXADD": "0",
+        "FORKUNION_TARGET_X8664_RAOINT": "0"
       }
     },
     {
@@ -559,11 +559,11 @@
         "STRINGZILLA_TARGET_HASWELL": "1",
         "STRINGZILLA_TARGET_SKYLAKE": "1",
         "STRINGZILLA_TARGET_ICELAKE": "1",
-        "FORKUNION_TARGET_X86_PAUSE": "1",
-        "FORKUNION_TARGET_X86_TPAUSE": "0",
-        "FORKUNION_TARGET_X86_CLDEMOTE": "1",
-        "FORKUNION_TARGET_X86_CMPCCXADD": "0",
-        "FORKUNION_TARGET_X86_RAOINT": "0"
+        "FORKUNION_TARGET_X8664_PAUSE": "1",
+        "FORKUNION_TARGET_X8664_TPAUSE": "0",
+        "FORKUNION_TARGET_X8664_CLDEMOTE": "1",
+        "FORKUNION_TARGET_X8664_CMPCCXADD": "0",
+        "FORKUNION_TARGET_X8664_RAOINT": "0"
       }
     }
   ],

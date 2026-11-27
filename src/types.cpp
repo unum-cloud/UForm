@@ -350,11 +350,11 @@ UFORM_EXPORT void uform_executor_for_ram(uform_executor_for_ram_t* arguments) {
     // Deferred calls run on the pool's own threads, the caller only coordinating
     std::size_t const threads = arguments->threads ? arguments->threads
                                                    : fu::default_threads_count(cores_of(topology, memory_domains));
-    if (util::expected_t spawned = util::spawn_pool(executor->threads, topology, threads, fu::caller_exclusive_k,
-                                                    forkunion_allowed_of(ceiling),
-                                                    arguments->ram.memory_domains_count == 1 ? memory_domains[0] : -1);
-        !spawned)
-        return propagate_error(spawned.status_, outcome, "Failed to spawn the threads"), void();
+    auto [pool, pool_status] = util::spawn_pool<fu::pool_t>(
+        topology, threads, fu::caller_exclusive_k, forkunion_allowed_of(ceiling),
+        arguments->ram.memory_domains_count == 1 ? memory_domains[0] : util::no_memory_domain_k);
+    if (!pool_status) return propagate_error(pool_status.status_, outcome, "Failed to spawn the threads"), void();
+    executor->threads = std::move(pool);
     *arguments->executor = executor.release();
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
@@ -403,10 +403,10 @@ UFORM_EXPORT void uform_executor_for_vram(uform_executor_for_vram_t* arguments) 
     if (!adopt_memory_domains(memory_domains, arguments->ram, topology, outcome)) return;
     // The caller is decoder 0: it stages, feeds the devices and waits, so calls finish on return
     std::size_t const decoders = fu::default_threads_count(cores_of(topology, memory_domains));
-    if (util::expected_t spawned = util::spawn_pool(executor->threads, topology, decoders, fu::caller_inclusive_k,
-                                                    forkunion_allowed_of(ceiling));
-        !spawned)
-        return propagate_error(spawned.status_, outcome, "Failed to spawn the decoders"), void();
+    auto [pool, pool_status] = util::spawn_pool<fu::pool_t>(topology, decoders, fu::caller_inclusive_k,
+                                                            forkunion_allowed_of(ceiling));
+    if (!pool_status) return propagate_error(pool_status.status_, outcome, "Failed to spawn the decoders"), void();
+    executor->threads = std::move(pool);
     // Last, as it adopts the caller's streams only once every fallible step is behind
     std::size_t scratch_limit = arguments->scratch_limit;
     std::span<void* const> const streams {arguments->streams, arguments->streams ? listed.size() : 0};

@@ -55,7 +55,7 @@ backend = { name = "pixi-build-cmake", version = "0.*" }
 [package.build.config]
 compilers = ["c", "cxx"]
 # Static dependencies, so the shared engine carries yyjson and the rest rather than naming libraries nothing ships.
-extra-args = ["-DUFORM_BUILD_SHARED=1", "-DBUILD_SHARED_LIBS=OFF"]
+extra-args = ["-DUFORM_BUILD_LIBRARIES=1", "-DBUILD_SHARED_LIBS=OFF"]
 
 # The host decoders the verbs over files call, whose run exports follow the library into the environment.
 [package.host-dependencies]

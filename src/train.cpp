@@ -16,6 +16,8 @@
 #include <cuda.h>      // `cuMemcpyHtoD`
 #include <cuda_fp16.h> // `__float2half` - embeddings landing as Float16
 
+#include <stringzilla/find.hpp> // `sz::contains`
+
 #include "uform/train/trainer.hpp"
 
 #include "lib.hpp"
@@ -202,7 +204,7 @@ static constexpr failure_messages_t save_failures_k {
 }
 
 /** Whether @p path holds a NUL byte, which no path can and a C string would cut it short at. */
-[[nodiscard]] static bool holds_nul(uform_bytes_view_t path) noexcept { return text_of(path).contains('\0'); }
+[[nodiscard]] static bool holds_nul(uform_bytes_view_t path) noexcept { return sz::contains(text_of(path), '\0'); }
 
 /** Publish a training @p failure with the message of @p messages naming its status, or, when
  *  the device failed, with the first fault a GPU of @p mesh recorded before it trapped; a null

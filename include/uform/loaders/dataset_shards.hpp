@@ -29,6 +29,8 @@
 #include <memory> // `std::unique_ptr` — the pimpl owning the cuDF table
 #include <span>   // `std::span`
 
+#include <stringzilla/strings.hpp> // `sz::strings_view_t`
+
 #include "uform/utilities/vram_nvidia_schedule.cuh" // `executor_stream_t`
 #include "uform/utilities/types.hpp"        // `expected`, `status_t`, the scalar aliases, `b8r1_view_t`, `sz::string_t`
 #include "uform/loaders/direct_storage.hpp" // `gpu_direct_storage_session_t` — the reader's GDS precondition

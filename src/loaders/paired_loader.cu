@@ -18,6 +18,8 @@
 
 #include <cuda.h> // `cuStreamSynchronize`
 
+#include <stringzilla/hash.hpp> // `sz::hash`
+
 #include "uform/loaders/paired_loader.cuh"
 
 namespace ue = unum::uform::encoder;
@@ -152,7 +154,7 @@ struct elements_t {
 }
 
 util::expected<paired_loader_parquet_t> paired_loader_parquet_t::make(
-    gpu_direct_storage_session_t& session, sz::string_view_t path_or_glob, util::u64_t seed, fu::pool_t& pool,
+    gpu_direct_storage_session_t& session, sz::string_view_t path_or_glob, util::u64_t seed, fu_pool_t pool,
     paired_loader_parquet_config_t config, modality_t modality, multimodal_batch_shape_t const& shape) noexcept {
     using result_t = util::expected<paired_loader_parquet_t>;
     if (modality != modality_t::text_k && !shape.contains(modality))
@@ -163,7 +165,7 @@ util::expected<paired_loader_parquet_t> paired_loader_parquet_t::make(
 
     paired_loader_parquet_t loader;
     loader.storage_ = &session;
-    loader.pool_ = &pool;
+    loader.pool_ = pool;
     loader.seed_ = seed;
     loader.modality_ = modality;
     loader.shape_ = shape;
@@ -199,7 +201,7 @@ util::expected<paired_loader_parquet_t> paired_loader_parquet_t::make(
         }
         if (st::failed(loader.group_starts_.push_back(std::size_t {first_row})) ||
             st::failed(loader.shard_starts_.push_back(loader.group_starts_.size())) ||
-            st::failed(loader.shard_keys_.push_back(static_cast<util::u64_t>(path.hash()))))
+            st::failed(loader.shard_keys_.push_back(sz::hash(path))))
             return result_t::fail(util::status_code_t::out_of_memory_k, "No room for the shard table");
     }
     if (loader.rows() == 0)
@@ -393,8 +395,7 @@ util::expected_t paired_loader_parquet_t::fill_(util::executor_stream_t& gpu_str
         sz::string_view_t const sample_key = key_.empty() ? sz::string_view_t {}
                                                           : sz::string_view_t {key_bytes.data() + key_offsets[row],
                                                                                key_offsets[row + 1] - key_offsets[row]};
-        keys[found] =
-            (key_.empty() ? hash(shard_keys_[shard], local_row) : static_cast<util::u64_t>(sample_key.hash())) | 1u;
+        keys[found] = (key_.empty() ? hash(shard_keys_[shard], local_row) : sz::hash(sample_key)) | 1u;
         ++found;
     }
     if (found != total_pairs)
@@ -575,7 +576,7 @@ util::expected_t paired_loader_parquet_t::fill(util::executor_stream_t& gpu_stre
                      util::u64r1_view_t drawn, segment_shapes_span_t shapes, util::u32r1_span_t offsets,
                      util::u32r1_span_t lengths, modality_span_t modalities) noexcept {
                      pixel_patches_span_t const pixels = loaded.images[nk::range(row_begin, row_end), nk::slice];
-                     return decode_images(decoder, *pool_, tape, drawn, {&shape_.image, 1}, pixels, shapes, offsets,
+                     return decode_images(decoder, pool_, tape, drawn, {&shape_.image, 1}, pixels, shapes, offsets,
                                           lengths, modalities, loaded.dropped.span(), gpu_stream);
                  });
 }
@@ -593,7 +594,7 @@ util::expected_t paired_loader_parquet_t::fill(util::executor_stream_t& gpu_stre
                      util::u64r1_view_t drawn, segment_shapes_span_t shapes, util::u32r1_span_t offsets,
                      util::u32r1_span_t lengths, modality_span_t modalities) noexcept {
                      pixel_tubes_span_t const tubes = loaded.videos[nk::range(row_begin, row_end), nk::slice];
-                     return decode_videos(decoder, *pool_, tape, drawn, {&video, 1}, tubes, shapes, offsets, lengths,
+                     return decode_videos(decoder, pool_, tape, drawn, {&video, 1}, tubes, shapes, offsets, lengths,
                                           modalities, gpu_stream);
                  });
 }
@@ -611,7 +612,7 @@ util::expected_t paired_loader_parquet_t::fill(util::executor_stream_t& gpu_stre
             util::u64r1_view_t drawn, segment_shapes_span_t, util::u32r1_span_t offsets, util::u32r1_span_t lengths,
             modality_span_t modalities) noexcept {
             audio_samples_span_t const samples = loaded.audio_samples[nk::range(row_begin, row_end), nk::slice];
-            return decode_audios(*pool_, tape, drawn, {&shape_.audio, 1}, samples, offsets, lengths, modalities,
+            return decode_audios(pool_, tape, drawn, {&shape_.audio, 1}, samples, offsets, lengths, modalities,
                                  loaded.dropped.span(), gpu_stream);
         });
 }

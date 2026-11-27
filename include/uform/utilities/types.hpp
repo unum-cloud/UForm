@@ -27,7 +27,7 @@
 
 #include <forkunion/types.hpp>         // `ashvardanian::forkunion`, which `fu` names
 #include <numkong/tensor.hpp>          // `nk::tensor_span`, `nk::tensor_view` — the rank-tagged views and spans
-#include <stringzilla/stringzilla.hpp> // `sz::string_t` — the exception-free diagnostics carrier
+#include <stringzilla/string.hpp>      // `sz::string_t` — the exception-free diagnostics carrier
 #include <smashtable/basic_vector.hpp> // `st::basic_vector` — the exception-free growable array
 
 #include "uform/types.h" // `uform_status_t`, whose values `status_code_t` takes

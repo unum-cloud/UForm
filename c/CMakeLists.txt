@@ -7,26 +7,37 @@
 # referenced, which is the entire C interface. For the same reason the archive carries its dependencies' objects, so
 # no consumer hunts yyjson, NumKong or StringZilla archives out of the dependency tree to link one of ours.
 include(GNUInstallDirs)
-# Without `UFORM_BUILD_SHARED`, the libraries build only for the targets that link them
-if (NOT UFORM_BUILD_SHARED)
+# Without `UFORM_BUILD_LIBRARIES`, the libraries build only for the targets that link them
+if (NOT UFORM_BUILD_LIBRARIES)
     set(uform_library_exclusion_ EXCLUDE_FROM_ALL)
 endif ()
-add_library(uform_shared SHARED ${uform_library_exclusion_})
-add_library(uform::shared ALIAS uform_shared)
-# The encoder's variants follow `uform_host`, so the baseline's copy of an inline function they share comes first.
-target_link_libraries(uform_shared PRIVATE uform_host ${uform_encoder_variants_})
-# A consumer of the shared library imports its symbols on Windows, where the archive needs no such marking.
-target_compile_definitions(uform_shared INTERFACE UFORM_SHARED=1)
-# The archives it links, NumKong's, ForkUnion's and yyjson's among them, were compiled with default visibility, and the
-# standard library headers declare their templates visible, so only the linker can keep those symbols in.
-if (APPLE)
-    target_link_options(uform_shared PRIVATE "LINKER:-exported_symbol,_uform_*")
-elseif (CMAKE_SYSTEM_NAME MATCHES "^(Linux|Android|FreeBSD)$")
-    file(WRITE "${PROJECT_BINARY_DIR}/uform_shared.map" "{\n  global: uform_*;\n  local: *;\n};\n")
-    target_link_options(uform_shared PRIVATE "LINKER:--version-script=${PROJECT_BINARY_DIR}/uform_shared.map")
+# WASI SDK's `libc++.a` is not position-independent, so WASI builds the static flavor alone.
+if (CMAKE_SYSTEM_NAME STREQUAL "WASI")
+    set(uform_libraries_ uform_static)
+else ()
+    add_library(uform_shared SHARED ${uform_library_exclusion_})
+    add_library(uform::shared ALIAS uform_shared)
+    set_target_properties(uform_shared PROPERTIES EXPORT_NAME shared)
+    # The encoder's variants follow `uform_host`, so the baseline's copy of an inline function they share comes first.
+    target_link_libraries(uform_shared PRIVATE uform_host ${uform_encoder_variants_})
+    target_link_libraries(uform_shared PUBLIC uform_abi)
+    if (TARGET uform_nvidia_train)
+        target_link_libraries(uform_shared PRIVATE uform_nvidia_train uform::train)
+    endif ()
+    # A consumer of the shared library imports its symbols on Windows, where the archive needs no such marking.
+    target_compile_definitions(uform_shared INTERFACE UFORM_SHARED=1)
+    # The archives it links, NumKong's, ForkUnion's and yyjson's among them, were compiled with default visibility, and
+    # the standard library headers declare their templates visible, so only the linker can keep those symbols in.
+    if (APPLE)
+        target_link_options(uform_shared PRIVATE "LINKER:-exported_symbol,_uform_*")
+    elseif (CMAKE_SYSTEM_NAME MATCHES "^(Linux|Android|FreeBSD)$")
+        file(WRITE "${PROJECT_BINARY_DIR}/uform_shared.map" "{\n  global: uform_*;\n  local: *;\n};\n")
+        target_link_options(uform_shared PRIVATE "LINKER:--version-script=${PROJECT_BINARY_DIR}/uform_shared.map")
+    endif ()
+    # `SOVERSION` carries the major alone, the only break the C ABI admits.
+    set_target_properties(uform_shared PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
+    set(uform_libraries_ uform_static uform_shared)
 endif ()
-# `SOVERSION` carries the major alone, the only break the C ABI admits.
-set_target_properties(uform_shared PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
 set(uform_variant_objects_)
 foreach (library_ IN LISTS uform_encoder_variants_)
     list(APPEND uform_variant_objects_ $<TARGET_OBJECTS:${library_}>)
@@ -45,7 +56,6 @@ add_library(uform::static ALIAS uform_static)
 add_library(uform_abi INTERFACE)
 add_library(uform::abi ALIAS uform_abi)
 set_target_properties(uform_static PROPERTIES EXPORT_NAME static)
-set_target_properties(uform_shared PROPERTIES EXPORT_NAME shared)
 set_target_properties(uform_abi PROPERTIES EXPORT_NAME abi)
 # MSVC reads BOM-less UTF-8 in the system code page, so consumers of these Unicode-commented headers need `/utf-8`.
 target_compile_options(
@@ -64,7 +74,6 @@ target_include_directories(
 )
 target_link_libraries(uform_header INTERFACE uform_abi)
 target_compile_features(uform_header INTERFACE cxx_std_23)
-target_link_libraries(uform_shared PUBLIC uform_abi)
 target_link_libraries(uform_static PUBLIC uform_abi)
 # The system codecs the host decoders call stay shared libraries, which an archive can only name to its consumers.
 if (UFORM_WITH_CODECS)
@@ -117,12 +126,11 @@ endif ()
 # The training verbs join both flavors with UFORM_BUILD_TRAIN, and the archive names the training stack to its
 # consumers.
 if (TARGET uform_nvidia_train)
-    target_link_libraries(uform_shared PRIVATE uform_nvidia_train uform::train)
     target_sources(uform_static PRIVATE $<TARGET_OBJECTS:uform_nvidia_train>)
     target_link_libraries(uform_static INTERFACE $<BUILD_INTERFACE:uform::train>)
 endif ()
 set_target_properties(
-    uform_shared uform_static
+    ${uform_libraries_}
     PROPERTIES LINKER_LANGUAGE CXX
                C_VISIBILITY_PRESET hidden
                CXX_VISIBILITY_PRESET hidden
@@ -161,3 +169,4 @@ if (TARGET uform_encoder_vram_nvidia_variants AND TARGET uform_tiny_checkpoint)
     add_test(NAME uform_test_vram COMMAND uform_test_vram "${PROJECT_BINARY_DIR}/tiny.safetensors")
     set_tests_properties(uform_test_vram PROPERTIES FIXTURES_REQUIRED uform_tiny_checkpoint)
 endif ()
+return(PROPAGATE uform_libraries_)

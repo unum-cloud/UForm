@@ -35,6 +35,9 @@
 #include <cuda/stream_ref>        // `cuda::stream_ref` — the stream every cuDF and RMM call takes
 #include <rmm/device_buffer.hpp>  // `rmm::device_buffer` — the gathered tar members
 
+#include <stringzilla/compare.hpp> // `sz::starts_with`, `sz::remove_suffix`
+#include <stringzilla/find.hpp>    // `sz::split_characters`, `sz::find_first_of`, `sz::contains`
+
 #include "uform/utilities/vram_nvidia_memory.hpp" // `device_address` — the tar gather's copy endpoints
 #include "uform/utilities/types.hpp"              // `st::basic_vector` — the owned per-column table
 #include "uform/loaders/dataset_shards.hpp"
@@ -202,7 +205,7 @@ inline constexpr char tar_length_column_k[] = "tar_byte_length";
 /** The tar beside the Parquet sidecar at @p path : the same stem with a @c .tar suffix. */
 [[nodiscard]] static bool tar_path_of_(sz::string_view_t path, sz::string_t& tar) noexcept {
     sz::string_view_t const sidecar_suffix {".parquet"};
-    if (path.ends_with(sidecar_suffix)) path.remove_suffix(sidecar_suffix.size());
+    path = sz::remove_suffix(path, sidecar_suffix);
     return util::format_into(tar, "{}.tar", path);
 }
 
@@ -445,7 +448,7 @@ util::expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t
         return result_t::fail(util::status_code_t::invalid_argument_k, "{} row-group lists for {} shards",
                               row_groups.size(), paths.size());
     for (sz::string_view_t path : paths)
-        if (path.contains('\0'))
+        if (sz::contains(path, '\0'))
             return result_t::fail(util::status_code_t::invalid_argument_k, "A shard path holds a NUL byte");
     try {
         std::vector<std::string> path_texts; // vendor-boundary: cuDF's source_info takes std::strings
@@ -914,13 +917,13 @@ util::expected<st::basic_vector<sz::string_t>> ul::expand_glob(sz::string_view_t
     // A forked branch that lacks a later component simply contributes nothing; only a wholly
     // empty match fails.
     st::basic_vector<sz::string_view_t> components;
-    for (sz::string_view_t component : path_or_glob.split(sz::byteset_t {"/", 1}))
+    for (sz::string_view_t component : sz::split_characters(path_or_glob, sz::byteset_t {"/", 1}))
         if (!component.empty() && st::failed(components.push_back(std::move(component))))
             return result_t::fail(util::status_code_t::out_of_memory_k, "No room for the glob component table");
     if (components.size() == 0)
         return result_t::fail(util::status_code_t::invalid_argument_k, "no files match {}", path_or_glob);
 
-    bool const absolute = path_or_glob.starts_with(sz::string_view_t {"/", 1});
+    bool const absolute = sz::starts_with(path_or_glob, '/');
     st::basic_vector<sz::string_t> prefixes;
     {
         sz::string_t seed_prefix;
@@ -934,7 +937,7 @@ util::expected<st::basic_vector<sz::string_t>> ul::expand_glob(sz::string_view_t
     for (std::size_t level = 0; level != components.size(); ++level) {
         sz::string_view_t const component = components[level];
         bool const last = level + 1 == components.size();
-        bool const patterned = component.find_first_of(wildcards) != sz::string_view_t::npos;
+        bool const patterned = sz::find_first_of(component, wildcards) != sz::string_view_t::npos;
         bool const recursive = component == sz::string_view_t {"**", 2};
         if (recursive && last)
             return result_t::fail(util::status_code_t::invalid_argument_k, "{} ends in **, not in a file pattern",

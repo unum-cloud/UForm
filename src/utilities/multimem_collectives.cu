@@ -8,6 +8,8 @@
  */
 #include <charconv> // `std::from_chars` — fabric-handle hex parsing
 
+#include <stringzilla/find.hpp> // `sz::split_characters`
+
 #include "uform/utilities/multimem_collectives.cuh"
 
 namespace util = unum::uform::utilities;
@@ -106,7 +108,7 @@ static util::expected_t grant_local_access_(CUdeviceptr slice, std::size_t bytes
                                                          sz::string_view_t peer_text, util::u32_t peer_host,
                                                          util::u32_t member_base, util::u32_t gpus_per_host) noexcept {
     util::u32_t adopted_count = 0;
-    for (sz::string_view_t token : peer_text.split(sz::whitespaces_set())) {
+    for (sz::string_view_t token : sz::split_characters(peer_text, sz::whitespaces_set())) {
         if (token.empty()) continue;
         if (adopted_count >= gpus_per_host)
             return util::expected_t::fail(util::status_code_t::io_k, "host_domain {} published too many slice handles",
@@ -465,7 +467,7 @@ util::expected<util::multimem_domain_t> util::multimem_domain_t::make(util::mesh
                 return result_t::fail(std::move(awaited));
             CUmemFabricHandle fabric {};
             bool parsed = false;
-            for (sz::string_view_t token : mc_text.view().split(sz::whitespaces_set())) {
+            for (sz::string_view_t token : sz::split_characters(mc_text.view(), sz::whitespaces_set())) {
                 if (token.empty()) continue;
                 parsed = parse_fabric_handle_(token, fabric);
                 break;

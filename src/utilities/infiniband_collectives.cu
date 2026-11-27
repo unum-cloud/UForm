@@ -10,7 +10,11 @@
 #include <cstdlib> // `::realpath` — the PCIe hierarchy above a device
 #include <cstring> // `std::memcpy`, `std::memcmp`
 
+#include <charconv> // `std::from_chars` — coordinate payload parsing
+
 #include <cuda.h> // `cuMemGetHandleForAddressRange`, `cuMemsetD8`, `cuMemcpyHtoD`
+
+#include <stringzilla/find.hpp> // `sz::split_characters`, `sz::partition`, `sz::strip`
 
 #include "uform/utilities/infiniband_collectives.cuh" // the declarations these bodies define
 
@@ -22,6 +26,55 @@
 #endif
 
 namespace util = unum::uform::utilities;
+
+bool util::infiniband_coordinates_t::from_text(sz::string_view_t payload,
+                                               util::infiniband_coordinates_t& coordinates) noexcept {
+    auto parse_number = [](sz::string_view_t token, auto& value) noexcept {
+        std::from_chars_result const result = std::from_chars(token.data(), token.data() + token.size(), value);
+        return result.ec == std::errc {} && result.ptr == token.data() + token.size();
+    };
+    sz::byteset_t const whitespaces = sz::whitespaces_set();
+    bool lid_parsed = false, qpn_parsed = false, psn_parsed = false, rkey_parsed = false, addr_parsed = false,
+         gid_parsed = false;
+    for (sz::string_view_t line : sz::split_characters(payload, sz::newlines_set())) {
+        auto [key, match, value] = sz::partition(line, ' ');
+        value = sz::strip(value, whitespaces);
+        if (key == "lid") lid_parsed = parse_number(value, coordinates.local_identifier);
+        else if (key == "qpn") qpn_parsed = parse_number(value, coordinates.queue_pair_number);
+        else if (key == "psn") psn_parsed = parse_number(value, coordinates.packet_sequence_number);
+        else if (key == "rkey") rkey_parsed = parse_number(value, coordinates.remote_key);
+        else if (key == "addr") addr_parsed = parse_number(value, coordinates.buffer_address);
+        else if (key == "gid") {
+            gid_parsed = value.size() == 2 * sizeof(coordinates.global_identifier);
+            for (std::size_t byte_index = 0; gid_parsed && byte_index != sizeof(coordinates.global_identifier);
+                 ++byte_index) {
+                char const* pair = value.data() + 2 * byte_index;
+                std::from_chars_result const result = std::from_chars(pair, pair + 2,
+                                                                      coordinates.global_identifier[byte_index], 16);
+                gid_parsed = result.ec == std::errc {} && result.ptr == pair + 2;
+            }
+        }
+    }
+    return lid_parsed && qpn_parsed && psn_parsed && rkey_parsed && addr_parsed && gid_parsed;
+}
+
+util::expected_t util::exchange_infiniband_coordinates(util::mesh_topology_t const& topology, sz::string_view_t key,
+                                                       util::infiniband_coordinates_t const& local,
+                                                       util::u32_t peer_host_domain,
+                                                       util::infiniband_coordinates_t& peer,
+                                                       util::f64_t timeout_seconds) noexcept {
+    sz::string_t local_text;
+    if (!local.to_text(local_text))
+        return expected_t::fail(status_code_t::out_of_memory_k, "coordinate payload assembly failed (key={})", key);
+    if (expected_t published = topology.publish_text(key, local_text.view()); !published) return published;
+    sz::string_t peer_text;
+    if (expected_t awaited = topology.await_text(peer_host_domain, key, peer_text, timeout_seconds); !awaited)
+        return awaited;
+    if (!infiniband_coordinates_t::from_text(peer_text.view(), peer))
+        return expected_t::fail(status_code_t::io_k, "malformed coordinates from host_domain {} (key={}): \"{}\"",
+                                peer_host_domain, key, peer_text);
+    return {};
+}
 
 #if UFORM_WITH_INFINIBAND
 

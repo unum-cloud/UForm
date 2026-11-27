@@ -12,6 +12,8 @@
 
 #include <yyjson.h> // the safetensors JSON header — exceptions-free C
 
+#include <stringzilla/hash.hpp> // `sz::hash`
+
 #include "uform/utilities/safetensors_format.hpp"
 namespace sz = ashvardanian::stringzilla;
 namespace st = ashvardanian::smashtable;
@@ -208,7 +210,7 @@ util::expected_t util::checkpoint_to_save_t::insert_(sz::string_view_t name, uti
         return util::expected_t::fail(util::status_code_t::invalid_argument_k,
                                       "{} would start at byte {}, unaligned for {}", name, payload_.size(),
                                       dtype_name_(dtype));
-    util::u64_t const key = static_cast<util::u64_t>(name.hash());
+    util::u64_t const key = sz::hash(name);
     if (auto const found = index_.find(key); found != index_.end()) {
         if (entries_[found.value()].name.view() == name)
             return util::expected_t::fail(util::status_code_t::invalid_argument_k, "duplicate entry: {}", name);
@@ -345,7 +347,7 @@ util::expected<util::checkpoint_to_load_t> util::checkpoint_to_load_t::view(util
         return loaded_t::fail(std::move(parsed));
     for (std::size_t position = 0; position != loaded.entries_.size(); ++position) {
         sz::string_view_t const name = loaded.entries_[position].name.view();
-        util::u64_t const key = static_cast<util::u64_t>(name.hash());
+        util::u64_t const key = sz::hash(name);
         if (auto const found = loaded.index_.find(key); found != loaded.index_.end())
             return loaded_t::fail(util::status_code_t::invalid_argument_k, "{} and {} share a name hash",
                                   loaded.entries_[found.value()].name.view(), name);
@@ -359,7 +361,7 @@ util::expected<util::checkpoint_to_load_t> util::checkpoint_to_load_t::view(util
 
 util::checkpoint_entry_t const* util::checkpoint_to_load_t::find_(sz::string_view_t name,
                                                                   util::checkpoint_dtype_t dtype) const noexcept {
-    auto const found = index_.find(static_cast<util::u64_t>(name.hash()));
+    auto const found = index_.find(sz::hash(name));
     if (found == index_.end()) return nullptr;
     util::checkpoint_entry_t const& entry = entries_[found.value()];
     return entry.name.view() == name && entry.dtype == dtype ? &entry : nullptr;

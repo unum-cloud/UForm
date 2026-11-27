@@ -2,10 +2,10 @@
  *  @file include/uform/utilities/ram_device.hpp
  *  @author Ash Vardanian
  *  @date October 27, 2026
- *  @brief Host topology and thread spawning, over ForkUnion's C ABI and its @c fu::pool_t .
+ *  @brief Host memory domains, pool dispatch and statuses, over ForkUnion's C ABI.
  *
- *  Engines, loaders, tools and tests dispatch on a @c fu::pool_t that @ref spawn_pool fills, or on
- *  an empty one, which runs every dispatch on the calling thread.
+ *  Engines, loaders, tools and tests dispatch on a ForkUnion pool the library spawns, or on an
+ *  empty one, which runs every dispatch on the calling thread.
  */
 #pragma once
 
@@ -15,9 +15,9 @@
 #include <limits>      // `std::numeric_limits` - an allocation's count overflowing
 #include <new>         // `std::align_val_t`, `std::nothrow` - host chunks
 #include <span>        // `std::span` - the chunks an owner frees
-#include <type_traits> // `std::is_trivially_copyable_v` - what an allocation holds
+#include <type_traits> // `std::is_trivially_copyable_v`, `std::remove_reference_t`
 
-#include <forkunion/forkunion.hpp> // `fu::pool_t`, `fu::topology_t`, `fu::default_threads_count`
+#include <forkunion/types.hpp> // `fu::status_t`, `fu::dispatched_status`
 
 #include "uform/utilities/types.hpp" // `status_t`, `expected`, `bytes_span_t`
 
@@ -37,13 +37,53 @@ constexpr status_code_t status_from_(fu_status_t status) noexcept {
     }
 }
 
-/** Translates a failure of a @c fu::pool_t dispatch, which spells the same codes. */
+/** Translates a failure of a pool dispatch, which spells the same codes. */
 constexpr status_code_t status_from_(fu::status_t status) noexcept {
     return status_from_(static_cast<fu_status_t>(status));
 }
 
+/** Runs @p task on each of @p n similar-cost tasks across @p pool , blocking until all finish; an
+ *  empty pool runs them on the calling thread. */
+template <typename task_type_>
+fu::status_t for_n(fu_pool_t pool, std::size_t n, task_type_&& task) noexcept {
+    using task_t = std::remove_reference_t<task_type_>;
+    if (!pool) {
+        for (std::size_t index = 0; index != n; ++index) task(index, std::size_t {0});
+        return fu::status_t::success_k;
+    }
+    auto const run = [](fu_lambda_context_t context, std::size_t index, std::size_t thread, std::size_t) noexcept {
+        (*static_cast<task_t*>(context))(index, thread);
+    };
+    return static_cast<fu::status_t>(fu_pool_for_n(pool, n, run, static_cast<void*>(&task)));
+}
+
 /** The memory domain naming none, where an allocation takes the plain heap. */
 inline constexpr fu_memory_domain_id_t no_memory_domain_k = -1;
+
+/** The label the threads of every UForm pool have in the OS. */
+inline constexpr char const pool_name_k[] = "uform";
+
+/**
+ *  @brief Spawns @p threads threads of a @p threads_type_ pool across the compute domains of
+ *      @p topology , or only those local to @p memory_domain unless it is @ref no_memory_domain_k .
+ *  @param[in] exclusivity Whether the caller is one of the @p threads or only coordinates them.
+ *
+ *  Uses only the ForkUnion facilities @p allowed names; a build without OS threads, such as
+ *  WebAssembly's, runs one thread on the caller and refuses more as unsupported.
+ */
+template <typename threads_type_, typename topology_type_>
+[[nodiscard]] expected<threads_type_> spawn_pool(topology_type_ const& topology, std::size_t threads,
+                                                 fu::caller_exclusivity_t exclusivity,
+                                                 fu_capabilities_t allowed = fu_capabilities_all_k,
+                                                 fu_memory_domain_id_t memory_domain = no_memory_domain_k) noexcept {
+    threads_type_ pool;
+    fu::status_t const status = memory_domain < 0 ? pool.spawn(topology, threads, exclusivity, allowed, pool_name_k)
+                                                  : pool.spawn_near(topology, memory_domain, threads, exclusivity,
+                                                                    allowed, pool_name_k);
+    if (fu::failed(status))
+        return expected<threads_type_>::fail(status_from_(status), "spawning {} threads failed", threads);
+    return pool;
+}
 
 /** The memory domain nearest the PCI function at @p bus_id, or @c no_memory_domain_k where the
  *  topology names none. */
@@ -73,26 +113,6 @@ enum class pinned_origin_t : u32_t {
     /** Placed on a memory domain, then registered with the GPU runtime. */
     memory_domain_k,
 };
-
-/** The label the threads of every UForm pool have in the OS. */
-inline constexpr char const pool_name_k[] = "uform";
-
-/**
- *  @brief Spawns @p threads threads into @p pool across the compute domains of @p topology , or
- *      only those local to @p memory_domain unless it is @ref no_memory_domain_k , using only the
- *      ForkUnion facilities @p allowed names; a build without OS threads, such as WebAssembly's,
- *      runs one thread on the caller and refuses more as unsupported.
- *  @param[in] exclusivity Whether the caller is one of the @p threads or only coordinates them.
- */
-[[nodiscard]] inline expected_t spawn_pool(fu::pool_t& pool, fu::topology_t const& topology, std::size_t threads,
-                                           fu::caller_exclusivity_t exclusivity, fu_capabilities_t allowed,
-                                           fu_memory_domain_id_t memory_domain = no_memory_domain_k) noexcept {
-    fu::status_t const status = memory_domain < 0 ? pool.spawn(topology, threads, exclusivity, allowed, pool_name_k)
-                                                  : pool.spawn_near(topology, memory_domain, threads, exclusivity,
-                                                                    allowed, pool_name_k);
-    if (fu::failed(status)) return expected_t::fail(status_from_(status), "spawning {} threads failed", threads);
-    return {};
-}
 
 #pragma endregion Executor
 

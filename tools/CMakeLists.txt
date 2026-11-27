@@ -10,6 +10,7 @@ target_link_libraries(
     uform_eval
     PRIVATE uform::static
             uform::train
+            numkong::types
             numkong::static
             forkunion::cpp
             smashtable::header
@@ -30,7 +31,7 @@ if (UFORM_BUILD_TEST)
     target_compile_features(uform_test_tools PRIVATE cxx_std_23)
     foreach (tool_ IN ITEMS base eval grow)
         add_test(NAME uform_test_tools_${tool_} COMMAND uform_test_tools -- ${CMAKE_CROSSCOMPILING_EMULATOR}
-                                                         $<TARGET_FILE:uform_${tool_}>
+                                                        $<TARGET_FILE:uform_${tool_}>
         )
         set_tests_properties(uform_test_tools_${tool_} PROPERTIES LABELS cuda)
     endforeach ()

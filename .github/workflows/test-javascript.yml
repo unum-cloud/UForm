@@ -61,7 +61,7 @@ jobs:
       - name: Build the WASM Module over the Stub
         run: |
           cmake --preset wasm32_emscripten -B build_wasm32_emscripten_stub \
-            -D UFORM_BUILD_SHARED=OFF -D UFORM_BUILD_STUB=ON -D UFORM_BUILD_NODE=ON
+            -D UFORM_BUILD_LIBRARIES=OFF -D UFORM_BUILD_STUB=ON -D UFORM_BUILD_NODE=ON
           cmake --build build_wasm32_emscripten_stub --target uform_wasm
       - name: Build JavaScript
         run: |

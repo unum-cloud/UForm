@@ -94,7 +94,7 @@ set(UFORM_METAL_ARCH
     CACHE STRING "Apple GPU family the residency serves: empty for none, all, or one of apple7, apple9 and apple10"
 )
 option(UFORM_BUILD_TRAIN "Add the NVIDIA trainer, the mesh and the loaders, which link the CUDA libraries" OFF)
-option(UFORM_BUILD_SHARED "Compile uform_static and uform_shared in the default build and install them" OFF)
+option(UFORM_BUILD_LIBRARIES "Compile uform_static and uform_shared in the default build and install them" OFF)
 option(UFORM_BUILD_STUB "Build uform_static_stub and uform_shared_stub" OFF)
 option(UFORM_BUILD_PYTHON "Build the CPython extension, set by scikit-build" OFF)
 option(UFORM_BUILD_NODE "Build the Node addon, set by cmake-js" OFF)
@@ -300,8 +300,8 @@ endif ()
 
 # The C headers and the header-only engine always install, and the libraries only where the default build compiles
 # them, with the C++ SDK that links the archive.
-if (UFORM_BUILD_SHARED)
-    set(uform_install_sdk_targets_ uform_abi uform_header uform_cpp uform_static uform_shared)
+if (UFORM_BUILD_LIBRARIES)
+    set(uform_install_sdk_targets_ uform_abi uform_header uform_cpp ${uform_libraries_})
 else ()
     set(uform_install_sdk_targets_ uform_abi uform_header)
 endif ()

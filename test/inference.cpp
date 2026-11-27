@@ -549,10 +549,8 @@ int main(int argc, char** argv) {
 
     fu::topology_t topology;
     if (!expect_true(!fu::failed(topology.harvest()), "topology discovery failed")) return finish_test_run();
-    fu::pool_t pool;
-    if (util::expected_t spawned = util::spawn_pool(pool, topology, 4, fu::caller_inclusive_k, fu_capabilities_all_k);
-        !expect_true(spawned, "pool: {}", spawned.description_))
-        return finish_test_run();
+    auto [pool, pool_status] = util::spawn_pool<fu::pool_t>(topology, 4, fu::caller_inclusive_k);
+    if (!expect_true(pool_status, "the pool should spawn")) return finish_test_run();
 
     encoder_verbs<vendored_residency_t::ram_k> const& reference =
         *encoder_class_tables<vendored_residency_t::ram_k, cpu_ladder_floor_k>::find();

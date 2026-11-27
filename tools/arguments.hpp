@@ -47,7 +47,7 @@
 
 #include <fmt/format.h>
 
-#include <stringzilla/stringzilla.hpp> // `sz::string_t`
+#include <stringzilla/string.hpp> // `sz::string_t`
 
 #include "uform/uform.h" // the enumerators flags name and their spellings
 

@@ -3,7 +3,7 @@
 include(CMakeFindDependencyMacro)
 find_dependency(Threads)
 # The archive links the codecs it decodes with.
-if (@UFORM_WITH_CODECS@ AND @UFORM_BUILD_SHARED@)
+if (@UFORM_WITH_CODECS@ AND @UFORM_BUILD_LIBRARIES@)
     find_dependency(PNG)
 endif ()
 include("${CMAKE_CURRENT_LIST_DIR}/uformTargets.cmake")

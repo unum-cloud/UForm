@@ -41,7 +41,7 @@
 #include <numkong/trigonometry.h> // `nk_trig_sin_f32_*`, `nk_trig_cos_f32_*`
 
 #include "uform/encoder/entries.hpp"      // `segment_layout_t`, `rope_grids_t`, `e4m3_range_k`
-#include "uform/utilities/ram_device.hpp" // `fu::pool_t`, the threads the integer entries split across
+#include "uform/utilities/ram_device.hpp" // `fu::dispatched_status`, the pools the integer entries split across
 
 namespace unum::uform::encoder {
 
@@ -935,17 +935,18 @@ struct elementwise_ladder {
 
 /** Rows @c [t,:] of @p rows for each text segment's cells, copied from @c table[token] ; other rows
  *  stay as they are. Token IDs are trusted: every ID is below the vocabulary the load proved. */
+template <typename pool_type_>
 [[nodiscard]] inline static fu::status_t gather_bytes(segment_layout_t const& layout,
                                                       nk::tensor_view<token_id_t, 1> grid_tokens, bf16r2_view_t table,
-                                                      bf16r2_span_t rows, fu::pool_t& pool) noexcept {
+                                                      bf16r2_span_t rows, pool_type_& pool) noexcept {
     std::size_t const row_bytes = rows.extent(1) * sizeof(nk_bf16_t);
-    return pool.for_n(layout.lengths.extent(0), [&](std::size_t segment, std::size_t) noexcept {
+    return fu::dispatched_status(pool.for_n(layout.lengths.extent(0), [&](std::size_t segment, std::size_t) noexcept {
         if (layout.modality[segment] != modality_t::text_k) return;
         for (u32_t cell = 0; cell != layout.lengths[segment]; ++cell) {
             std::size_t const token = grid_tokens[layout.grid_offsets[segment] + cell];
             std::memcpy(rows.row(layout.packed_offsets[segment] + cell).data(), table.row(token).data(), row_bytes);
         }
-    });
+    }));
 }
 
 /** The gain and bias rows of @p affine @b [2,spatial·channels] , channels innermost, that turn a
@@ -1001,12 +1002,13 @@ template <typename elementwise_kit_type_>
 
 /** Every packed row's @c (t,h,w) into @p coords @b [rows,3] : text and audio @c (k,0,0) , image
  *  @c (0,k/cols,k%cols) , video @c (group·tube_frames·frame_stride,r,c) , PAD rows untouched. */
+template <typename pool_type_>
 [[nodiscard]] inline static fu::status_t fill_coords(segment_layout_t const& layout,
                                                      nk::tensor_view<u16_t, 2> image_shapes,
                                                      nk::tensor_view<u16_t, 2> video_shapes, u32_t tube_frames,
                                                      u32_t frame_stride, i16r2_span_t coords,
-                                                     fu::pool_t& pool) noexcept {
-    return pool.for_n(layout.lengths.extent(0), [&](std::size_t segment, std::size_t) noexcept {
+                                                     pool_type_& pool) noexcept {
+    return fu::dispatched_status(pool.for_n(layout.lengths.extent(0), [&](std::size_t segment, std::size_t) noexcept {
         modality_t const modality = layout.modality[segment];
         for (u32_t cell = 0; cell != layout.lengths[segment]; ++cell) {
             u32_t temporal = 0, height = 0, width = 0;
@@ -1034,7 +1036,7 @@ template <typename elementwise_kit_type_>
             coords[row, 1] = static_cast<i16_t>(height);
             coords[row, 2] = static_cast<i16_t>(width);
         }
-    });
+    }));
 }
 
 /** Rotate row @p row 's @p heads head vectors from column @p role_offset in place: the NeoX

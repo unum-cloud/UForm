@@ -40,6 +40,8 @@
 #include <cuda.h>       // `cuInit`, `cuDeviceGetCount`
 #include <fmt/format.h> // `fmt::println`
 
+#include <forkunion/forkunion.hpp> // `fu::pool_t`, `fu::topology_t` - the decode threads
+
 #include "uform/train/datasets.hpp" // `mixture_t`, `dataset_source_t`, and the trainer
 
 #include "train/numerics.hpp" // `gpu_numerics_of`
@@ -150,11 +152,11 @@ using namespace unum::uform::train;
     if (fu::failed(topology.harvest())) return fail_out_("Topology discovery failed");
     std::size_t const allowed_cores = topology.logical_cores_count();
     fu::pool_t decoders; // empty, so the calling thread decodes, unless a mixture pairs media
-    if (mixture.pairs() || held_out_mixture.pairs())
-        if (expected_t spawned = spawn_pool(decoders, topology, allowed_cores, fu::caller_inclusive_k,
-                                            fu_capabilities_all_k);
-            !spawned)
-            return fail_out_(spawned.description_.view());
+    if (mixture.pairs() || held_out_mixture.pairs()) {
+        auto [spawned, spawn_status] = spawn_pool<fu::pool_t>(topology, allowed_cores, fu::caller_inclusive_k);
+        if (!spawn_status) return fail_out_("Spawning the decode threads failed");
+        decoders = std::move(spawned);
+    }
     std::size_t const spawned_threads = decoders.threads_count();
 
     // The loaders open before the trainer, so the envelope leaves room for their reservoirs.
@@ -163,7 +165,7 @@ using namespace unum::uform::train;
     if (!make_status) return fail_out_(make_status.description_.view());
     dataset_source_t datasets, held_out;
     if (!config.mixture.empty())
-        if (expected_t opened = dataset_source_t::open(datasets, config, storage, std::move(mixture), decoders,
+        if (expected_t opened = dataset_source_t::open(datasets, config, storage, std::move(mixture), decoders.get(),
                                                        config.batches_per_fill);
             !opened)
             return fail_out_(opened.description_.view());
@@ -171,8 +173,8 @@ using namespace unum::uform::train;
         // Each source charges its own reservoir, so the envelope makes room for both.
         std::size_t const training_fixed = config.reservoir_fixed_bytes, training_row = config.reservoir_row_bytes;
         // Every evaluation refills, so each scores fresh entries rather than a fill 16 evals old.
-        if (expected_t opened = dataset_source_t::open(held_out, config, storage, std::move(held_out_mixture), decoders,
-                                                       1);
+        if (expected_t opened = dataset_source_t::open(held_out, config, storage, std::move(held_out_mixture),
+                                                       decoders.get(), 1);
             !opened)
             return fail_out_(opened.description_.view());
         config.reservoir_fixed_bytes += training_fixed, config.reservoir_row_bytes += training_row;

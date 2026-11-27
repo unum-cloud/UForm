@@ -1101,7 +1101,7 @@ struct engine_cursor_t {
     return {};
 }
 
-util::expected_t nvdec_session_t::decode_into(fu::pool_t& pool, column_view_t clips,
+util::expected_t nvdec_session_t::decode_into(fu_pool_t pool, column_view_t clips,
                                               std::span<video_batch_shape_t const> representations,
                                               pixel_tubes_span_t videos, video_shape_span_t video_shapes,
                                               util::u32r1_span_t segment_offsets, util::u32r1_span_t segment_lengths,
@@ -1151,8 +1151,8 @@ util::expected_t nvdec_session_t::decode_into(fu::pool_t& pool, column_view_t cl
                                       "demux result table allocation failed ({} clips)", clip_count);
     demuxed_t* const demuxed_data = demuxed.data();
     column_view_t const clips_tape = clips;
-    fu::status_t const dispatched = pool.for_n(
-        clip_count, [demuxed_data, clips_tape](std::size_t clip_index, std::size_t) noexcept {
+    fu::status_t const dispatched = util::for_n(
+        pool, clip_count, [demuxed_data, clips_tape](std::size_t clip_index, std::size_t) noexcept {
             auto [clip, status] = um::demux_video(clips_tape[clip_index]);
             if (status) demuxed_data[clip_index] = std::move(clip);
         });
@@ -1212,7 +1212,7 @@ util::expected_t nvdec_session_t::decode_into(fu::pool_t& pool, column_view_t cl
 
 #pragma region Decode Orchestrator and Dataset Loader
 
-util::expected_t ul::decode_videos(nvdec_session_t& nvdec, fu::pool_t& pool, column_view_t tape,
+util::expected_t ul::decode_videos(nvdec_session_t& nvdec, fu_pool_t pool, column_view_t tape,
                                    util::u64r1_view_t drawn_rows, std::span<video_batch_shape_t const> representations,
                                    pixel_tubes_span_t videos, video_shape_span_t video_shapes,
                                    util::u32r1_span_t segment_offsets, util::u32r1_span_t segment_lengths,
@@ -1252,7 +1252,7 @@ util::expected_t ul::decode_videos(nvdec_session_t& nvdec, fu::pool_t& pool, col
 
 util::expected<video_loader_parquet_t> video_loader_parquet_t::make(gpu_direct_storage_session_t& session,
                                                                     sz::string_view_t path_or_glob, util::u64_t seed,
-                                                                    fu::pool_t& pool,
+                                                                    fu_pool_t pool,
                                                                     video_batch_shape_t video) noexcept {
     using result_t = util::expected<video_loader_parquet_t>;
     auto [paths, status] = expand_glob(path_or_glob);
@@ -1260,7 +1260,7 @@ util::expected<video_loader_parquet_t> video_loader_parquet_t::make(gpu_direct_s
 
     video_loader_parquet_t loader;
     loader.storage_ = &session;
-    loader.pool_ = &pool;
+    loader.pool_ = pool;
     loader.seed_ = seed;
     loader.video_ = video;
 
@@ -1360,7 +1360,7 @@ util::expected_t video_loader_parquet_t::fill(util::executor_stream_t& gpu_strea
                                           "batch {} does not match the lead batch geometry", batch);
         // The whole [rows,columns,…] grid is the scatter target now — segments land across its
         // rows, not one per row.
-        if (util::expected_t decoded = decode_videos(decoder, *pool_, tape, batch_records[batch, nk::slice],
+        if (util::expected_t decoded = decode_videos(decoder, pool_, tape, batch_records[batch, nk::slice],
                                                      representations, loaded.videos.span(), loaded.video_shapes.span(),
                                                      loaded.segment_offsets.span(), loaded.segment_lengths.span(),
                                                      loaded.segment_modality.span(), gpu_stream);
